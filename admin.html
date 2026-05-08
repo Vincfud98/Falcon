@@ -23119,17 +23119,36 @@
     return `Erro em bancas: ${msg}`;
   }
   async function loadPlatformAccess(){
-    const { data, error } = await supabase
-      .from('platform_access')
-      .select('*')
-      .order('created_at', { ascending: false });
-    if(error){
-      console.warn('platform_access:', error.message);
-      platformAccessCache = [];
-      showMsg('globalMessagePortaria', explainPlatformAccessError(error));
-      return;
+    // Modo MOCK: UbiqueStore é a fonte (funciona sem backend)
+    if(window.UbiqueStore){
+      platformAccessCache = UbiqueStore.platform_access.list()
+        .sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
     }
-    platformAccessCache = data || [];
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { data, error } = await supabase
+          .from('platform_access')
+          .select('*')
+          .order('created_at', { ascending: false });
+        if(!error && Array.isArray(data) && data.length > 0){
+          platformAccessCache = data;
+        }
+      }catch(_){}
+    }
+  }
+
+  // Subscreve a mudanças no platform_access (cross-tab sync)
+  if(window.UbiqueStore && !window._ubqPortariaSubBound){
+    window._ubqPortariaSubBound = true;
+    UbiqueStore.subscribe(({ type }) => {
+      if(!type) return;
+      if(type === 'sync' || type.indexOf('platform_access') === 0 || type === 'reset'){
+        platformAccessCache = UbiqueStore.platform_access.list()
+          .sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
+        if(typeof renderPortariaTable === 'function' &&
+           document.getElementById('portariaTable')) renderPortariaTable();
+      }
+    });
   }
   async function loadImagesLibrary(){
     const { data, error } = await supabase
@@ -40230,12 +40249,16 @@
     const label = newStatus === 'suspended' ? 'Suspender' : 'Ativar';
     if(!confirm(`${label} o acesso de "${r.email}"?`)) return;
 
-    const { error } = await supabase
-      .from('platform_access')
-      .update({ status: newStatus })
-      .eq('id', id);
-
-    if(error){ alert(explainPlatformAccessError(error)); return; }
+    if(window.UbiqueStore){
+      UbiqueStore.platform_access.update(id, { status: newStatus });
+    }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { error } = await supabase
+          .from('platform_access').update({ status: newStatus }).eq('id', id);
+        if(error) console.warn('[platform_access.status] Supabase:', error.message);
+      }catch(_){}
+    }
     await loadPlatformAccess();
     renderPortariaTable();
     showMsg('globalMessagePortaria',
@@ -40288,18 +40311,13 @@
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Excluindo…';
 
-    const { error } = await supabase
-      .from('platform_access')
-      .delete()
-      .eq('id', portariaDeleteTargetId);
+    if(window.UbiqueStore){ UbiqueStore.platform_access.remove(portariaDeleteTargetId); }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await supabase.from('platform_access').delete().eq('id', portariaDeleteTargetId); }catch(_){}
+    }
 
     confirmBtn.disabled = false;
     confirmBtn.textContent = 'Excluir conta';
-
-    if(error){
-      showMsg('portariaDeleteModalMessage', `Erro: ${error.message}`);
-      return;
-    }
 
     await loadPlatformAccess();
     renderPortariaTable();
@@ -40416,16 +40434,28 @@
       subject_ids: accessType === 'custom' ? subjectIds : null,
     };
 
-    let error;
-    if(editingPortariaId){
-      ({ error } = await supabase.from('platform_access').update(payload).eq('id', editingPortariaId));
-    } else {
-      ({ error } = await supabase.from('platform_access').insert(payload));
+    // 1. UbiqueStore (sempre — espelha imediatamente no aluno)
+    if(window.UbiqueStore){
+      if(editingPortariaId){
+        UbiqueStore.platform_access.update(editingPortariaId, payload);
+      } else {
+        UbiqueStore.platform_access.add(Object.assign({}, payload, {
+          created_at: new Date().toISOString(),
+        }));
+      }
+    }
+    // 2. Supabase (best-effort)
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        if(editingPortariaId){
+          await supabase.from('platform_access').update(payload).eq('id', editingPortariaId);
+        } else {
+          await supabase.from('platform_access').insert(payload);
+        }
+      }catch(_){}
     }
 
     saveBtn.disabled = false;
-    if(error){ showMsg('portariaModalMessage', explainPlatformAccessError(error)); return; }
-
     await loadPlatformAccess();
     renderPortariaTable();
     closePortariaModal();
@@ -40439,9 +40469,10 @@
     const r = platformAccessCache.find(x => String(x.id) === String(editingPortariaId));
     if(!confirm(`Remover acesso de "${r?.email}"?\n\nO usuário será bloqueado no próximo login.`)) return;
 
-    const { error } = await supabase.from('platform_access').delete().eq('id', editingPortariaId);
-    if(error){ showMsg('portariaModalMessage', explainPlatformAccessError(error)); return; }
-
+    if(window.UbiqueStore){ UbiqueStore.platform_access.remove(editingPortariaId); }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await supabase.from('platform_access').delete().eq('id', editingPortariaId); }catch(_){}
+    }
     await loadPlatformAccess();
     renderPortariaTable();
     closePortariaModal();

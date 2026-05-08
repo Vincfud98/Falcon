@@ -115,6 +115,7 @@
     units: [],
     unit_blocks: [],     // blocos de aprendizagem dentro de cada unidade
     unit_downloads: [],  // PDFs / arquivos anexos a unidades
+    platform_access: [], // Portaria — e-mails autorizados a acessar o aluno
     // Versionamento da estrutura — incrementado em alterações de schema
     _meta: { version: 1, lastSync: Date.now() }
   };
@@ -269,6 +270,7 @@
     units:          makeCRUD('units',          'number'),
     unit_blocks:    makeCRUD('unit_blocks',    'number'),
     unit_downloads: makeCRUD('unit_downloads', 'number'),
+    platform_access: makeCRUD('platform_access', 'number'),
 
     /**
      * Subscribe to all changes.
