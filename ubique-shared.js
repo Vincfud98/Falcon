@@ -7,11 +7,12 @@
 (function(global){
   'use strict';
 
-  const STORE_KEY = 'ubique.store.v2';   // bump → reseed automático
+  const STORE_KEY = 'ubique.store.v3';   // bump → reseed automático (v3: + unit_sections)
   const CHANNEL_NAME = 'ubique-store';
 
   // Limpa a versão antiga (v1) se existir, evita conflito de dados parciais
   try{ localStorage.removeItem('ubique.store.v1'); }catch(_){}
+  try{ localStorage.removeItem('ubique.store.v2'); }catch(_){}
 
   // ── SEED — dados mock iniciais (vêm do index.html original).
   // Usados apenas na primeira vez que o store é carregado.
@@ -113,7 +114,12 @@
     modules: [],
     chapters: [],
     units: [],
-    unit_blocks: [],     // blocos de aprendizagem dentro de cada unidade
+    unit_sections: [
+      // Seções iniciais para a unidade mockada "A Chegada" (id=1)
+      { id: 1, unit_id: 1, title: 'O Atlântico', position: 0 },
+      { id: 2, unit_id: 1, title: 'O encontro', position: 1 },
+    ],
+    unit_blocks: [],     // blocos de aprendizagem dentro de cada unidade (campo section_id, nullable)
     unit_downloads: [],  // PDFs / arquivos anexos a unidades
     platform_access: [], // Portaria — e-mails autorizados a acessar o aluno
     // ── EDITAL ──
@@ -302,6 +308,7 @@
     chapters:       makeCRUD('chapters',       'number'),
     units:          makeCRUD('units',          'number'),
     unit_blocks:    makeCRUD('unit_blocks',    'number'),
+    unit_sections:  makeCRUD('unit_sections',  'number'),
     unit_downloads: makeCRUD('unit_downloads', 'number'),
     platform_access: makeCRUD('platform_access', 'number'),
     editais:           makeCRUD('editais',           'number'),

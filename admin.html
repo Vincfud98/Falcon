@@ -40359,7 +40359,10 @@
   // ═══════════════════════════════════════════════════════════
 
   let ueCurrentUnitId = null;
-  let ueBlocksCache = [];
+  let _ueCurrentSectionId = null;
+  let ueSectionsCache = [];
+  let ueBlocksCache = [];          // SOMENTE blocos da seção atual
+  let ueAllBlocksCache = [];       // todos os blocos da unidade (todas as seções)
   let ueDownloadsCache = [];
   let ueDragSrcIndex = null;
   let ueDeleteTargetBlockId = null;
@@ -40378,20 +40381,34 @@
   // ── Open / Close ──────────────────────────────────────────
   async function openUnitEditor(unitId){
     ueCurrentUnitId = unitId;
+    _ueCurrentSectionId = null;
+    ueSectionsCache = [];
     ueBlocksCache = [];
+    ueAllBlocksCache = [];
     ueDownloadsCache = [];
     document.getElementById('unitEditorModal').classList.add('active');
     ueRenderSidebar();
     ueRenderBlockTypeButtons();
     document.getElementById('ueBlocksList').innerHTML = '<div class="loading">Carregando blocos…</div>';
-    await Promise.all([ ueLoadBlocks(), ueLoadDownloads() ]);
+    await Promise.all([ ueLoadSections(), ueLoadBlocks(), ueLoadDownloads() ]);
+    // garante seção atual
+    if(!ueSectionsCache.length){
+      // cria automaticamente uma seção inicial caso a unidade não tenha nenhuma
+      const sec = ueSectionAdd('Seção 1');
+      if(sec) ueSectionsCache = [sec];
+    }
+    _ueCurrentSectionId = ueSectionsCache[0] ? ueSectionsCache[0].id : null;
+    ueRefreshBlocksForCurrentSection();
+    ueRenderSectionsNav();
     ueRenderBlocks();
     ueRenderDownloads();
+    ueUpdateCurrentSectionLabel();
   }
 
   function closeUnitEditor(){
     document.getElementById('unitEditorModal').classList.remove('active');
     ueCurrentUnitId = null;
+    _ueCurrentSectionId = null;
   }
 
   // Expõe TODAS as funções chamadas via onclick HTML pra escopo global
@@ -40408,6 +40425,21 @@
   window.ueSaveBlock = function(b){ ueSaveBlock(b); };
   window.ueOpenDeleteBlock = function(b){ ueOpenDeleteBlock(b); };
   window.ueConfirmDeleteBlock = function(){ ueConfirmDeleteBlock(); };
+  window.ueAddSection = function(){ ueAddSection(); };
+  window.ueSelectSection = function(id){ ueSelectSection(id); };
+  window.ueScrollToBlock = function(id){ ueScrollToBlock(id); };
+  window.ueRenameSection = function(id){ ueRenameSection(id); };
+  window.ueRenameCurrentSection = function(){
+    if(_ueCurrentSectionId != null) ueRenameSection(_ueCurrentSectionId);
+  };
+  window.ueDeleteSection = function(id){ ueDeleteSection(id); };
+  window.ueDeleteCurrentSection = function(){
+    if(_ueCurrentSectionId != null) ueDeleteSection(_ueCurrentSectionId);
+  };
+  window.ueMoveSection = function(id, dir){ ueMoveSection(id, dir); };
+  window.ueOpenImportJSON = function(){ ueOpenImportJSON(); };
+  window.ueImportJSONPreview = function(){ ueImportJSONPreview(); };
+  window.ueImportJSONConfirm = function(){ ueImportJSONConfirm(); };
 
   // ── Sidebar render ────────────────────────────────────────
   function ueRenderSidebar(){
@@ -40574,10 +40606,195 @@
   }
   window.ueDeleteDownload = ueDeleteDownload;
 
+  // ── Sections ──────────────────────────────────────────────
+  async function ueLoadSections(){
+    if(window.UbiqueStore){
+      ueSectionsCache = UbiqueStore.unit_sections.list()
+        .filter(s => s.unit_id === ueCurrentUnitId)
+        .sort((a,b) => (a.position||0) - (b.position||0));
+    }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { data, error } = await conteudo().from('unit_sections')
+          .select('*').eq('unit_id', ueCurrentUnitId).order('position').order('id');
+        if(!error && Array.isArray(data) && data.length > 0) ueSectionsCache = data;
+      }catch(_){}
+    }
+  }
+
+  function ueSectionAdd(title){
+    const payload = {
+      unit_id: ueCurrentUnitId,
+      title: title || 'Seção',
+      position: ueSectionsCache.length,
+    };
+    if(window.UbiqueStore){
+      const data = UbiqueStore.unit_sections.add(payload);
+      return data;
+    }
+    return null;
+  }
+
+  async function ueAddSection(){
+    const name = prompt('Nome da nova seção:', 'Nova seção');
+    if(!name) return;
+    const sec = ueSectionAdd(name.trim());
+    if(!sec){ alert('Falha ao criar seção.'); return; }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await conteudo().from('unit_sections').insert(sec); }catch(_){}
+    }
+    ueSectionsCache.push(sec);
+    _ueCurrentSectionId = sec.id;
+    ueRefreshBlocksForCurrentSection();
+    ueRenderSectionsNav();
+    ueRenderBlocks();
+    ueUpdateCurrentSectionLabel();
+  }
+
+  async function ueRenameSection(id){
+    const sec = ueSectionsCache.find(s => s.id === id);
+    if(!sec) return;
+    const name = prompt('Renomear seção:', sec.title || '');
+    if(name == null) return;
+    const trimmed = (name || '').trim();
+    if(!trimmed) return;
+    if(window.UbiqueStore){ UbiqueStore.unit_sections.update(id, { title: trimmed }); }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await conteudo().from('unit_sections').update({ title: trimmed }).eq('id', id); }catch(_){}
+    }
+    sec.title = trimmed;
+    ueRenderSectionsNav();
+    ueUpdateCurrentSectionLabel();
+  }
+
+  async function ueDeleteSection(id){
+    const sec = ueSectionsCache.find(s => s.id === id);
+    if(!sec) return;
+    const blocksInSec = ueAllBlocksCache.filter(b => b.section_id === id);
+    const msg = blocksInSec.length
+      ? 'Apagar seção "' + (sec.title||'') + '"?\nIsso removerá ' + blocksInSec.length + ' bloco(s) dela.'
+      : 'Apagar seção "' + (sec.title||'') + '"?';
+    if(!confirm(msg)) return;
+    // remove blocos da seção
+    blocksInSec.forEach(b => {
+      if(window.UbiqueStore) UbiqueStore.unit_blocks.remove(b.id);
+    });
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await conteudo().from('unit_blocks').delete().eq('section_id', id); }catch(_){}
+    }
+    if(window.UbiqueStore){ UbiqueStore.unit_sections.remove(id); }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await conteudo().from('unit_sections').delete().eq('id', id); }catch(_){}
+    }
+    ueSectionsCache = ueSectionsCache.filter(s => s.id !== id);
+    ueAllBlocksCache = ueAllBlocksCache.filter(b => b.section_id !== id);
+    if(_ueCurrentSectionId === id){
+      _ueCurrentSectionId = ueSectionsCache[0] ? ueSectionsCache[0].id : null;
+    }
+    ueRefreshBlocksForCurrentSection();
+    ueRenderSectionsNav();
+    ueRenderBlocks();
+    ueUpdateCurrentSectionLabel();
+  }
+
+  async function ueMoveSection(id, dir){
+    const idx = ueSectionsCache.findIndex(s => s.id === id);
+    if(idx < 0) return;
+    const newIdx = idx + (dir === 'up' ? -1 : 1);
+    if(newIdx < 0 || newIdx >= ueSectionsCache.length) return;
+    const arr = ueSectionsCache.slice();
+    const [m] = arr.splice(idx, 1);
+    arr.splice(newIdx, 0, m);
+    ueSectionsCache = arr;
+    arr.forEach((s, i) => {
+      s.position = i;
+      if(window.UbiqueStore) UbiqueStore.unit_sections.update(s.id, { position: i });
+    });
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        await Promise.all(arr.map((s, i) => conteudo().from('unit_sections').update({ position: i }).eq('id', s.id)));
+      }catch(_){}
+    }
+    ueRenderSectionsNav();
+  }
+
+  function ueSelectSection(id){
+    if(_ueCurrentSectionId === id) return;
+    _ueCurrentSectionId = id;
+    ueRefreshBlocksForCurrentSection();
+    ueRenderSectionsNav();
+    ueRenderBlocks();
+    ueUpdateCurrentSectionLabel();
+  }
+
+  function ueScrollToBlock(id){
+    const card = document.querySelector('[data-block-id="' + id + '"]');
+    if(!card) return;
+    card.scrollIntoView({ behavior:'smooth', block:'center' });
+    // flash highlight
+    const orig = card.style.boxShadow;
+    card.style.boxShadow = '0 0 0 2px var(--accent)';
+    setTimeout(() => { card.style.boxShadow = orig; }, 900);
+  }
+
+  function ueUpdateCurrentSectionLabel(){
+    const el = document.getElementById('ueCurrentSectionLabel');
+    if(!el) return;
+    const sec = ueSectionsCache.find(s => s.id === _ueCurrentSectionId);
+    el.textContent = sec ? sec.title : 'Seção';
+    const tgt = document.getElementById('ueImportJSONTargetSection');
+    if(tgt) tgt.textContent = sec ? sec.title : '—';
+  }
+
+  function ueRenderSectionsNav(){
+    const el = document.getElementById('ueSectionsNav');
+    if(!el) return;
+    if(!ueSectionsCache.length){
+      el.innerHTML = '<p class="card-body" style="margin:0;color:var(--text-mute);font-style:italic;font-size:.8rem">Nenhuma seção.</p>';
+      return;
+    }
+    el.innerHTML = ueSectionsCache.map(function(s, idx){
+      const isActive = s.id === _ueCurrentSectionId;
+      const blocks = ueAllBlocksCache
+        .filter(b => b.section_id === s.id)
+        .sort((a,b) => (a.position||0) - (b.position||0));
+      const blocksHTML = blocks.length
+        ? blocks.map(function(b){
+            const def = UE_BLOCK_TYPES.find(t => t.type === b.type) || { icon:'📦' };
+            const t = (b.title || '(sem título)');
+            const onClick = isActive
+              ? 'ueScrollToBlock(' + b.id + ')'
+              : "ueSelectSection(" + s.id + "); setTimeout(function(){ ueScrollToBlock(" + b.id + "); }, 50)";
+            return '<button type="button" onclick="' + onClick + '" style="all:unset;cursor:pointer;display:flex;align-items:center;gap:.4rem;padding:.25rem .4rem;border-radius:var(--radius);font-family:var(--sans);font-size:.74rem;color:var(--text-dim);line-height:1.3" onmouseover="this.style.background=\'var(--accent-xlo)\';this.style.color=\'var(--text)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--text-dim)\'">' +
+              '<span style="opacity:.7">' + def.icon + '</span>' +
+              '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">' + esc(t) + '</span>' +
+              '</button>';
+          }).join('')
+        : '<p style="margin:.2rem 0 0 .5rem;color:var(--text-mute);font-size:.72rem;font-style:italic">sem blocos</p>';
+
+      return '<div style="border-left:2px solid ' + (isActive ? 'var(--accent)' : 'var(--accent-border-soft)') + ';padding-left:.55rem;display:flex;flex-direction:column;gap:.25rem">' +
+        '<div style="display:flex;align-items:center;gap:.3rem">' +
+          '<button type="button" onclick="ueSelectSection(' + s.id + ')" style="all:unset;cursor:pointer;flex:1;font-family:var(--serif);font-size:.92rem;color:' + (isActive ? 'var(--text)' : 'var(--text-dim)') + ';font-weight:' + (isActive ? '600' : '400') + ';line-height:1.25">' +
+            esc(s.title || '(sem título)') +
+          '</button>' +
+          '<button class="btn btn-ghost btn-sm" style="padding:.1rem .3rem;font-size:.7rem" title="Mover para cima" ' + (idx === 0 ? 'disabled' : '') + ' onclick="ueMoveSection(' + s.id + ',\'up\')">▲</button>' +
+          '<button class="btn btn-ghost btn-sm" style="padding:.1rem .3rem;font-size:.7rem" title="Mover para baixo" ' + (idx === ueSectionsCache.length-1 ? 'disabled' : '') + ' onclick="ueMoveSection(' + s.id + ',\'down\')">▼</button>' +
+        '</div>' +
+        '<div style="display:flex;flex-direction:column;gap:.05rem;margin-left:.2rem">' + blocksHTML + '</div>' +
+      '</div>';
+    }).join('');
+  }
+
   // ── Blocks ────────────────────────────────────────────────
+  function ueRefreshBlocksForCurrentSection(){
+    ueBlocksCache = ueAllBlocksCache
+      .filter(b => b.section_id === _ueCurrentSectionId)
+      .sort((a,b) => (a.position||0) - (b.position||0));
+  }
+
   async function ueLoadBlocks(){
     if(window.UbiqueStore){
-      ueBlocksCache = UbiqueStore.unit_blocks.list()
+      ueAllBlocksCache = UbiqueStore.unit_blocks.list()
         .filter(b => b.unit_id === ueCurrentUnitId)
         .sort((a,b) => (a.position||0) - (b.position||0));
     }
@@ -40585,8 +40802,17 @@
       try{
         const { data, error } = await conteudo().from('unit_blocks')
           .select('*').eq('unit_id', ueCurrentUnitId).order('position').order('id');
-        if(!error && Array.isArray(data) && data.length > 0) ueBlocksCache = data;
+        if(!error && Array.isArray(data) && data.length > 0) ueAllBlocksCache = data;
       }catch(_){}
+    }
+    // backward-compat: blocos sem section_id → atribui à primeira seção
+    const orphan = ueAllBlocksCache.filter(b => b.section_id == null);
+    if(orphan.length && ueSectionsCache.length){
+      const targetId = ueSectionsCache[0].id;
+      orphan.forEach(b => {
+        b.section_id = targetId;
+        if(window.UbiqueStore) UbiqueStore.unit_blocks.update(b.id, { section_id: targetId });
+      });
     }
   }
 
@@ -40599,8 +40825,12 @@
 
   function ueRenderBlocks(){
     const el = document.getElementById('ueBlocksList');
+    if(!_ueCurrentSectionId){
+      el.innerHTML = '<div class="card" style="text-align:center;padding:3rem 1rem"><p class="card-body" style="font-style:italic;color:var(--text-mute);margin:0">Selecione uma seção no índice à esquerda.<br><span style="font-size:.8rem">Ou clique em <strong>+ Nova seção</strong> para criar uma.</span></p></div>';
+      return;
+    }
     if(!ueBlocksCache.length){
-      el.innerHTML = '<div class="card" style="text-align:center;padding:3rem 1rem"><p class="card-body" style="font-style:italic;color:var(--text-mute);margin:0">Nenhum bloco ainda.<br><span style="font-size:.8rem">Use os botões acima para adicionar conteúdo.</span></p></div>';
+      el.innerHTML = '<div class="card" style="text-align:center;padding:3rem 1rem"><p class="card-body" style="font-style:italic;color:var(--text-mute);margin:0">Nenhum bloco nesta seção ainda.<br><span style="font-size:.8rem">Use os botões acima para adicionar conteúdo.</span></p></div>';
       return;
     }
     el.innerHTML = ueBlocksCache.map(function(b, i){ return ueBlockHTML(b, i); }).join('');
@@ -40721,8 +40951,12 @@
       if(window.UbiqueStore){
         reordered.forEach(function(b, idx){
           UbiqueStore.unit_blocks.update(b.id, { position: idx });
+          b.position = idx;
+          const all = ueAllBlocksCache.find(function(x){ return x.id === b.id; });
+          if(all) all.position = idx;
         });
       }
+      ueRenderSectionsNav();
       // Supabase opcional
       if(window.UBIQUE_USE_SUPABASE){
         try{
@@ -40735,8 +40969,13 @@
   }
 
   async function ueAddBlock(type){
+    if(!_ueCurrentSectionId){
+      alert('Crie ou selecione uma seção antes de adicionar blocos.');
+      return;
+    }
     const payload = {
       unit_id: ueCurrentUnitId,
+      section_id: _ueCurrentSectionId,
       type: type,
       title: '',
       position: ueBlocksCache.length,
@@ -40756,8 +40995,10 @@
       }catch(_){}
     }
     if(!data){ alert('Falha ao criar bloco.'); return; }
+    ueAllBlocksCache.push(data);
     ueBlocksCache.push(data);
     ueRenderBlocks();
+    ueRenderSectionsNav();
     const newCard = document.querySelector('[data-block-id="' + data.id + '"]');
     if(newCard) newCard.scrollIntoView({ behavior:'smooth', block:'center' });
   }
@@ -40796,8 +41037,12 @@
       }catch(_){}
     }
     Object.assign(b, updates);
+    // mantém ueAllBlocksCache em sincronia
+    const allIdx = ueAllBlocksCache.findIndex(function(x){ return x.id === bid; });
+    if(allIdx >= 0) Object.assign(ueAllBlocksCache[allIdx], updates);
     const headerTitle = document.querySelector('[data-block-id="' + bid + '"] .card-title');
     if(headerTitle) headerTitle.textContent = title || '(sem título)';
+    ueRenderSectionsNav();
   }
 
   function ueOpenDeleteBlock(bid){
@@ -40820,9 +41065,105 @@
       try{ await conteudo().from('unit_blocks').delete().eq('id', ueDeleteTargetBlockId); }catch(_){}
     }
     document.getElementById('ueDeleteBlockModal').classList.remove('active');
-    ueBlocksCache = ueBlocksCache.filter(function(b){ return b.id !== ueDeleteTargetBlockId; });
+    ueAllBlocksCache = ueAllBlocksCache.filter(function(b){ return b.id !== ueDeleteTargetBlockId; });
+    ueBlocksCache    = ueBlocksCache.filter(function(b){ return b.id !== ueDeleteTargetBlockId; });
     ueDeleteTargetBlockId = null;
     ueRenderBlocks();
+    ueRenderSectionsNav();
+  }
+
+  // ── Import JSON blocks ────────────────────────────────────
+  function ueOpenImportJSON(){
+    if(!_ueCurrentSectionId){
+      alert('Selecione uma seção antes de importar blocos.');
+      return;
+    }
+    document.getElementById('ueImportJSONText').value = '';
+    clearMsg('ueImportJSONMsg');
+    ueUpdateCurrentSectionLabel();
+    document.getElementById('ueImportJSONModal').classList.add('active');
+  }
+
+  function ueImportJSONParse(){
+    const txt = (document.getElementById('ueImportJSONText').value || '').trim();
+    if(!txt){
+      showMsg('ueImportJSONMsg','Cole o JSON antes de continuar.');
+      return null;
+    }
+    let parsed;
+    try{ parsed = JSON.parse(txt); }
+    catch(e){
+      showMsg('ueImportJSONMsg','JSON inválido: ' + e.message);
+      return null;
+    }
+    if(!Array.isArray(parsed)){
+      showMsg('ueImportJSONMsg','O JSON deve ser um array de blocos.');
+      return null;
+    }
+    const allowed = UE_BLOCK_TYPES.map(function(t){ return t.type; });
+    for(let i = 0; i < parsed.length; i++){
+      const b = parsed[i];
+      if(!b || typeof b !== 'object'){
+        showMsg('ueImportJSONMsg','Item #' + (i+1) + ' não é um objeto.');
+        return null;
+      }
+      if(!b.type || allowed.indexOf(b.type) < 0){
+        showMsg('ueImportJSONMsg','Item #' + (i+1) + ': "type" inválido (' + esc(String(b.type||'')) + '). Tipos: ' + allowed.join(', ') + '.');
+        return null;
+      }
+    }
+    return parsed;
+  }
+
+  function ueImportJSONPreview(){
+    const items = ueImportJSONParse();
+    if(!items) return;
+    const counts = {};
+    items.forEach(function(b){ counts[b.type] = (counts[b.type]||0)+1; });
+    const summary = Object.keys(counts).map(function(k){ return k + ': ' + counts[k]; }).join(' · ');
+    showMsg('ueImportJSONMsg','✓ ' + items.length + ' bloco(s) prontos para importar — ' + summary, 'success');
+  }
+
+  async function ueImportJSONConfirm(){
+    const items = ueImportJSONParse();
+    if(!items) return;
+    if(!_ueCurrentSectionId){
+      showMsg('ueImportJSONMsg','Nenhuma seção selecionada.');
+      return;
+    }
+    let imported = 0;
+    const startPos = ueBlocksCache.length;
+    for(let i = 0; i < items.length; i++){
+      const raw = items[i];
+      const payload = {
+        unit_id: ueCurrentUnitId,
+        section_id: _ueCurrentSectionId,
+        type: raw.type,
+        title: raw.title || '',
+        content: (raw.content && typeof raw.content === 'object') ? raw.content : {},
+        status: raw.status === 'published' ? 'published' : 'draft',
+        position: startPos + i,
+      };
+      let data = null;
+      if(window.UbiqueStore){ data = UbiqueStore.unit_blocks.add(payload); }
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          const res = await conteudo().from('unit_blocks').insert(payload).select().single();
+          if(!res.error && res.data) data = res.data;
+        }catch(_){}
+      }
+      if(data){
+        ueAllBlocksCache.push(data);
+        ueBlocksCache.push(data);
+        imported++;
+      }
+    }
+    showMsg('ueImportJSONMsg','✓ ' + imported + ' bloco(s) importados.', 'success');
+    ueRenderBlocks();
+    ueRenderSectionsNav();
+    setTimeout(function(){
+      document.getElementById('ueImportJSONModal').classList.remove('active');
+    }, 700);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -41195,7 +41536,7 @@
       </div>
     </header>
 
-    <div style="display:grid;grid-template-columns:280px 1fr;flex:1;overflow:hidden">
+    <div style="display:grid;grid-template-columns:260px 240px 1fr;flex:1;overflow:hidden">
 
       <!-- LEFT SIDEBAR: unit meta + downloads -->
       <aside style="border-right:1px solid var(--accent-border-soft);overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:1rem">
@@ -41225,10 +41566,22 @@
         </div>
       </aside>
 
+      <!-- MIDDLE SIDEBAR: section / block index -->
+      <aside style="border-right:1px solid var(--accent-border-soft);overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.75rem;background:var(--bg-elev)">
+        <div class="sub-h" style="margin:0"><span class="sub-h-text">Índice</span><span class="sub-h-rule"></span></div>
+        <button class="btn btn-ghost btn-sm" style="width:100%;justify-content:center" onclick="ueAddSection()">+ Nova seção</button>
+        <div id="ueSectionsNav" style="display:flex;flex-direction:column;gap:.6rem"></div>
+      </aside>
+
       <!-- MAIN: blocks editor -->
       <main style="display:flex;flex-direction:column;overflow:hidden;background:var(--bg)">
-        <div style="padding:1rem 1.25rem;border-bottom:1px solid var(--accent-border-soft);flex-shrink:0">
-          <div class="sub-h" style="margin-bottom:.6rem"><span class="sub-h-text">Blocos de aprendizagem</span><span class="sub-h-rule"></span></div>
+        <div style="padding:1rem 1.25rem;border-bottom:1px solid var(--accent-border-soft);flex-shrink:0;display:flex;flex-direction:column;gap:.6rem">
+          <div style="display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">
+            <div class="sub-h" style="margin:0;flex:1;min-width:0"><span class="sub-h-text" id="ueCurrentSectionLabel">Seção</span><span class="sub-h-rule"></span></div>
+            <button class="btn btn-ghost btn-sm" onclick="ueRenameCurrentSection()" title="Renomear seção">✎ renomear</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="ueDeleteCurrentSection()" title="Apagar seção">🗑 apagar</button>
+            <button class="btn btn-ghost btn-sm" onclick="ueOpenImportJSON()" title="Importar JSON">⇪ Importar JSON</button>
+          </div>
           <div id="ueBlockTypeBtns" style="display:flex;gap:.4rem;flex-wrap:wrap"></div>
         </div>
         <div id="ueBlocksList" style="flex:1;overflow-y:auto;padding:1rem 1.25rem;display:flex;flex-direction:column;gap:.6rem"></div>
@@ -41279,6 +41632,43 @@
       <div class="modal-actions">
         <button class="btn btn-ghost" onclick="document.getElementById('ueDeleteBlockModal').classList.remove('active')">Cancelar</button>
         <button class="btn btn-danger" onclick="ueConfirmDeleteBlock()">Apagar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Import JSON blocks modal -->
+<div class="modal-backdrop" id="ueImportJSONModal">
+  <div class="modal" style="max-width:680px;max-height:90vh;display:flex;flex-direction:column">
+    <div class="modal-header">
+      <div><span class="s-label">Blocos · importar</span><h2>Importar blocos via JSON</h2></div>
+      <button class="modal-close" onclick="document.getElementById('ueImportJSONModal').classList.remove('active')">×</button>
+    </div>
+    <div class="modal-body" style="overflow-y:auto;display:flex;flex-direction:column;gap:.85rem">
+      <p class="s-body" style="margin:0;color:var(--text-dim);font-size:.85rem">
+        Cole um <strong>array JSON</strong> de blocos. Cada bloco será criado na seção atualmente selecionada
+        (<span id="ueImportJSONTargetSection" style="color:var(--accent);font-family:var(--mono)">—</span>).
+      </p>
+      <div class="field" style="margin:0">
+        <label for="ueImportJSONText">Conteúdo JSON</label>
+        <textarea class="field-input" id="ueImportJSONText" rows="10" style="font-family:var(--mono);font-size:.8rem" placeholder='[ { "type": "text", "title": "...", "content": { "html": "<p>...</p>" } } ]'></textarea>
+      </div>
+      <details style="background:var(--bg-elev);border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.6rem .8rem">
+        <summary style="cursor:pointer;font-family:var(--mono);font-size:.75rem;color:var(--text-mute);letter-spacing:.04em">Ver schema esperado</summary>
+        <pre class="s-body" style="margin:.6rem 0 0;color:var(--text-dim);font-family:var(--mono);font-size:.74rem;white-space:pre-wrap;line-height:1.5">[
+  { "type": "text",  "title": "Introdução", "content": { "html": "&lt;p&gt;...&lt;/p&gt;", "audio_url": "" } },
+  { "type": "video", "title": "Aula 1",     "content": { "video_url": "https://...", "description": "..." } },
+  { "type": "quote", "title": "",           "content": { "text": "...", "author": "...", "source": "..." } }
+]
+Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.</pre>
+      </details>
+      <div id="ueImportJSONMsg" class="form-msg"></div>
+    </div>
+    <div class="modal-footer">
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="document.getElementById('ueImportJSONModal').classList.remove('active')">Cancelar</button>
+        <button class="btn btn-ghost" onclick="ueImportJSONPreview()">Pré-visualizar</button>
+        <button class="btn" onclick="ueImportJSONConfirm()">Importar</button>
       </div>
     </div>
   </div>
