@@ -7,12 +7,13 @@
 (function(global){
   'use strict';
 
-  const STORE_KEY = 'ubique.store.v3';   // bump → reseed automático (v3: + unit_sections)
+  const STORE_KEY = 'ubique.store.v4';   // bump → reseed automático (v4: hierarquia mockada embutida)
   const CHANNEL_NAME = 'ubique-store';
 
-  // Limpa a versão antiga (v1) se existir, evita conflito de dados parciais
+  // Limpa as versões antigas pra evitar dados parciais
   try{ localStorage.removeItem('ubique.store.v1'); }catch(_){}
   try{ localStorage.removeItem('ubique.store.v2'); }catch(_){}
+  try{ localStorage.removeItem('ubique.store.v3'); }catch(_){}
 
   // ── SEED — dados mock iniciais (vêm do index.html original).
   // Usados apenas na primeira vez que o store é carregado.
@@ -112,12 +113,94 @@
       { id: 'tg_cacd', slug: 'cacd', label: 'CACD', description: 'Concurso de Admissão à Carreira de Diplomata' },
     ],
     modules: [],
-    chapters: [],
-    units: [],
+    // ── HIERARQUIA MOCKADA (História do Brasil) ──
+    // Embutida aqui para que QUALQUER página (admin ou aluno) tenha
+    // a estrutura disponível desde o primeiro boot, sem depender
+    // de window.COURSE no index.html.
+    modules: [
+      { id: 1, subject_id: 1, title: 'Brasil Colônia', number: 'I',
+        subtitle: '1500–1822',
+        description: 'Das primeiras expedições até a independência: administração, economia e sociedade colonial.',
+        cover_url: 'https://images.unsplash.com/photo-1518709268805-4e9042af2176?w=1200&q=80',
+        status: 'published', position: 0, _origMockId: 'm1' },
+      { id: 2, subject_id: 1, title: 'Brasil Império', number: 'II',
+        subtitle: '1822–1889',
+        description: 'Da independência à Proclamação da República, passando pelo Primeiro e Segundo Reinados.',
+        cover_url: 'https://images.unsplash.com/photo-1564506276493-0b2bee2b9b8e?w=1200&q=80',
+        status: 'published', position: 1, _origMockId: 'm2' },
+    ],
+    chapters: [
+      { id: 1, module_id: 1, title: 'Descobrimento e início da colonização', number: '1',
+        description: 'Primeiras expedições, encontros culturais e o estabelecimento do governo-geral.',
+        status: 'published', position: 0, _origMockId: 'c1' },
+      { id: 2, module_id: 1, title: 'Economia colonial', number: '2',
+        description: 'Açúcar, mineração, escravidão e o pacto colonial.',
+        status: 'published', position: 1, _origMockId: 'c2' },
+      { id: 3, module_id: 2, title: 'Primeiro Reinado e Regência', number: '1',
+        description: 'D. Pedro I, abdicação e o período regencial.',
+        status: 'published', position: 0, _origMockId: 'c3' },
+      { id: 4, module_id: 2, title: 'Segundo Reinado', number: '2',
+        description: 'D. Pedro II, café, ferrovias e o fim da escravidão.',
+        status: 'published', position: 1, _origMockId: 'c4' },
+    ],
+    units: [
+      // Brasil Colônia · Descobrimento
+      { id: 1, chapter_id: 1, title: 'A Chegada', number: '01',
+        subtitle: '1500 — Cabral e o primeiro contato',
+        description: 'A expedição de Pedro Álvares Cabral, a Carta de Caminha e o encontro com os povos originários.',
+        cover_url: 'https://images.unsplash.com/photo-1533174072545-7a4b6ad7a6c3?w=800&q=80',
+        duration_min: 45, status: 'published', position: 0, _origMockId: 'u1' },
+      { id: 2, chapter_id: 1, title: 'Capitanias e Governo-Geral', number: '02',
+        subtitle: '1534-1549 — organização administrativa',
+        description: 'Capitanias hereditárias, Tomé de Sousa e a centralização administrativa.',
+        cover_url: 'https://images.unsplash.com/photo-1588417889551-3a3e3d6f0a82?w=800&q=80',
+        duration_min: 40, status: 'published', position: 1, _origMockId: 'u2' },
+      // Brasil Colônia · Economia
+      { id: 3, chapter_id: 2, title: 'O Açúcar', number: '03',
+        subtitle: '1550-1650 — o primeiro ciclo econômico',
+        description: 'Engenhos, plantation, mão-de-obra escravizada e o Nordeste açucareiro.',
+        cover_url: 'https://images.unsplash.com/photo-1610348725531-843dff563e2c?w=800&q=80',
+        duration_min: 50, status: 'published', position: 0, _origMockId: 'u3' },
+      { id: 4, chapter_id: 2, title: 'A Mineração', number: '04',
+        subtitle: '1693-1789 — ouro, diamantes e Inconfidência',
+        description: 'Bandeirantes, Minas Gerais, vilas auríferas e a Inconfidência Mineira.',
+        cover_url: 'https://images.unsplash.com/photo-1602080858428-57174f9431cf?w=800&q=80',
+        duration_min: 45, status: 'published', position: 1, _origMockId: 'u4' },
+      // Brasil Império · Primeiro Reinado
+      { id: 5, chapter_id: 3, title: 'Independência e Primeiro Reinado', number: '01',
+        subtitle: '1822-1831 — D. Pedro I e a construção do Estado',
+        description: 'Grito do Ipiranga, Constituição de 1824, Confederação do Equador e abdicação.',
+        cover_url: 'https://images.unsplash.com/photo-1604782206219-3b9576575203?w=800&q=80',
+        duration_min: 48, status: 'published', position: 0, _origMockId: 'u5' },
+      { id: 6, chapter_id: 3, title: 'O Período Regencial', number: '02',
+        subtitle: '1831-1840 — disputas e revoltas provinciais',
+        description: 'Cabanagem, Sabinada, Balaiada, Farroupilha — o Brasil sem rei.',
+        cover_url: 'https://images.unsplash.com/photo-1570215171323-4ec328f3f5fa?w=800&q=80',
+        duration_min: 42, status: 'published', position: 1, _origMockId: 'u6' },
+      // Brasil Império · Segundo Reinado
+      { id: 7, chapter_id: 4, title: 'Café e Modernização', number: '03',
+        subtitle: '1840-1870 — economia cafeeira e ferrovias',
+        description: 'Vale do Paraíba, Oeste Paulista, infraestrutura e migração.',
+        cover_url: 'https://images.unsplash.com/photo-1442550528053-c431ecb55509?w=800&q=80',
+        duration_min: 45, status: 'published', position: 0, _origMockId: 'u7' },
+      { id: 8, chapter_id: 4, title: 'Abolição e Queda do Império', number: '04',
+        subtitle: '1850-1889 — Lei Áurea e Proclamação da República',
+        description: 'Leis abolicionistas, Guerra do Paraguai, questão religiosa e republicana.',
+        cover_url: 'https://images.unsplash.com/photo-1583416750470-965b2707b355?w=800&q=80',
+        duration_min: 50, status: 'published', position: 1, _origMockId: 'u8' },
+    ],
     unit_sections: [
-      // Seções iniciais para a unidade mockada "A Chegada" (id=1)
+      // A Chegada (id=1) — duas seções pedagógicas
       { id: 1, unit_id: 1, title: 'O Atlântico', position: 0 },
       { id: 2, unit_id: 1, title: 'O encontro', position: 1 },
+      // Outras unidades — uma seção default cada
+      { id: 3, unit_id: 2, title: 'Seção 1', position: 0 },
+      { id: 4, unit_id: 3, title: 'Seção 1', position: 0 },
+      { id: 5, unit_id: 4, title: 'Seção 1', position: 0 },
+      { id: 6, unit_id: 5, title: 'Seção 1', position: 0 },
+      { id: 7, unit_id: 6, title: 'Seção 1', position: 0 },
+      { id: 8, unit_id: 7, title: 'Seção 1', position: 0 },
+      { id: 9, unit_id: 8, title: 'Seção 1', position: 0 },
     ],
     unit_blocks: [],     // blocos de aprendizagem dentro de cada unidade (campo section_id, nullable)
     unit_downloads: [],  // PDFs / arquivos anexos a unidades
