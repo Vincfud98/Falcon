@@ -116,6 +116,39 @@
     unit_blocks: [],     // blocos de aprendizagem dentro de cada unidade
     unit_downloads: [],  // PDFs / arquivos anexos a unidades
     platform_access: [], // Portaria — e-mails autorizados a acessar o aluno
+    // ── EDITAL ──
+    editais: [
+      { id: 1, name: 'CACD 2026', year: 2026, slug: 'cacd-2026',
+        description: 'Concurso de Admissão à Carreira de Diplomata — edital 2026',
+        status: 'published', created_at: new Date().toISOString() }
+    ],
+    edital_topics: [
+      // 1 — Política Internacional
+      { id:1, edital_id:1, parent_id:null, code:'1', title:'Política Internacional',
+        description:'Teorias, atores e dinâmicas das relações internacionais', position:0 },
+      { id:2, edital_id:1, parent_id:1, code:'1.1', title:'Teorias de RI',
+        description:'Realismo, liberalismo, construtivismo', position:0 },
+      { id:3, edital_id:1, parent_id:2, code:'1.1.1', title:'Realismo clássico',
+        description:'Hans Morgenthau e o conceito de poder', position:0 },
+      { id:4, edital_id:1, parent_id:2, code:'1.1.2', title:'Liberalismo institucional',
+        description:'Keohane, Nye e a interdependência complexa', position:1 },
+      { id:5, edital_id:1, parent_id:1, code:'1.2', title:'Política Externa Brasileira',
+        description:'PEB do Império aos dias atuais', position:1 },
+      // 2 — História do Brasil
+      { id:6, edital_id:1, parent_id:null, code:'2', title:'História do Brasil',
+        description:'Da colonização ao período republicano', position:1 },
+      { id:7, edital_id:1, parent_id:6, code:'2.1', title:'Brasil Colônia',
+        description:'1500–1822', position:0 },
+      { id:8, edital_id:1, parent_id:6, code:'2.2', title:'Brasil Império',
+        description:'1822–1889', position:1 },
+    ],
+    edital_topic_units: [
+      // exemplo de vinculação: tópico 2.1 → unidade A Chegada (id 1)
+      { id:1, topic_id:7, unit_id:1 },
+    ],
+    edital_progress: [
+      // por usuário; vazio inicialmente
+    ],
     // Versionamento da estrutura — incrementado em alterações de schema
     _meta: { version: 1, lastSync: Date.now() }
   };
@@ -271,6 +304,10 @@
     unit_blocks:    makeCRUD('unit_blocks',    'number'),
     unit_downloads: makeCRUD('unit_downloads', 'number'),
     platform_access: makeCRUD('platform_access', 'number'),
+    editais:           makeCRUD('editais',           'number'),
+    edital_topics:     makeCRUD('edital_topics',     'number'),
+    edital_topic_units: makeCRUD('edital_topic_units','number'),
+    edital_progress:   makeCRUD('edital_progress',   'number'),
 
     /**
      * Subscribe to all changes.
