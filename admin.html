@@ -40531,10 +40531,21 @@
   }
 
   async function ueUnitPatch(patch){
-    const { error } = await conteudo().from('units').update(patch).eq('id', ueCurrentUnitId);
-    if(error){ console.warn('unit patch:', error.message); return; }
+    // 1. UbiqueStore (fonte primária no modo mock)
+    if(window.UbiqueStore){
+      UbiqueStore.units.update(ueCurrentUnitId, patch);
+    }
+    // 2. Supabase (best-effort)
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { error } = await conteudo().from('units').update(patch).eq('id', ueCurrentUnitId);
+        if(error) console.warn('unit patch:', error.message);
+      }catch(_){}
+    }
+    // Atualiza cache local + UI
     const idx = unitsCache.findIndex(u => u.id === ueCurrentUnitId);
     if(idx >= 0) Object.assign(unitsCache[idx], patch);
+    else if(window.UbiqueStore){ unitsCache = UbiqueStore.units.list(); }
     ueRenderSidebar();
     renderCurriculumTree();
   }
@@ -40562,10 +40573,18 @@
 
   // ── Downloads ─────────────────────────────────────────────
   async function ueLoadDownloads(){
-    const { data, error } = await conteudo().from('unit_downloads')
-      .select('*').eq('unit_id', ueCurrentUnitId).order('position').order('id');
-    if(error){ console.warn('unit_downloads:', error.message); ueDownloadsCache = []; return; }
-    ueDownloadsCache = data || [];
+    if(window.UbiqueStore){
+      ueDownloadsCache = UbiqueStore.unit_downloads.list()
+        .filter(d => d.unit_id === ueCurrentUnitId)
+        .sort((a,b) => (a.position||0) - (b.position||0));
+    }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { data, error } = await conteudo().from('unit_downloads')
+          .select('*').eq('unit_id', ueCurrentUnitId).order('position').order('id');
+        if(!error && Array.isArray(data) && data.length > 0) ueDownloadsCache = data;
+      }catch(_){}
+    }
   }
 
   function ueRenderDownloads(){
@@ -40591,28 +40610,43 @@
     if(!url) return;
     const kind = prompt('Tipo (pdf / slides / audio / zip):', 'pdf') || 'pdf';
     const size = prompt('Tamanho (ex: 2.4 MB):', '') || null;
-    const { error } = await conteudo().from('unit_downloads').insert({
+    const payload = {
       unit_id: ueCurrentUnitId, label, url, kind, size_label: size,
       position: ueDownloadsCache.length,
-    });
-    if(error){ alert(error.message); return; }
+    };
+    if(window.UbiqueStore){ UbiqueStore.unit_downloads.add(payload); }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await conteudo().from('unit_downloads').insert(payload); }catch(_){}
+    }
     await ueLoadDownloads();
     ueRenderDownloads();
   }
 
   async function ueDeleteDownload(id){
     if(!confirm('Remover este arquivo?')) return;
-    await conteudo().from('unit_downloads').delete().eq('id', id);
+    if(window.UbiqueStore){ UbiqueStore.unit_downloads.remove(id); }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await conteudo().from('unit_downloads').delete().eq('id', id); }catch(_){}
+    }
     await ueLoadDownloads();
     ueRenderDownloads();
   }
+  window.ueDeleteDownload = ueDeleteDownload;
 
   // ── Blocks ────────────────────────────────────────────────
   async function ueLoadBlocks(){
-    const { data, error } = await conteudo().from('unit_blocks')
-      .select('*').eq('unit_id', ueCurrentUnitId).order('position').order('id');
-    if(error){ console.warn('unit_blocks:', error.message); ueBlocksCache = []; return; }
-    ueBlocksCache = data || [];
+    if(window.UbiqueStore){
+      ueBlocksCache = UbiqueStore.unit_blocks.list()
+        .filter(b => b.unit_id === ueCurrentUnitId)
+        .sort((a,b) => (a.position||0) - (b.position||0));
+    }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { data, error } = await conteudo().from('unit_blocks')
+          .select('*').eq('unit_id', ueCurrentUnitId).order('position').order('id');
+        if(!error && Array.isArray(data) && data.length > 0) ueBlocksCache = data;
+      }catch(_){}
+    }
   }
 
   function ueRenderBlockTypeButtons(){
@@ -40739,22 +40773,45 @@
       reordered.splice(destIndex, 0, moved);
       ueBlocksCache = reordered;
       ueRenderBlocks();
-      await Promise.all(reordered.map(function(b, idx){
-        return conteudo().from('unit_blocks').update({ position: idx }).eq('id', b.id);
-      }));
+      // Persiste novas posições — UbiqueStore (modo mock)
+      if(window.UbiqueStore){
+        reordered.forEach(function(b, idx){
+          UbiqueStore.unit_blocks.update(b.id, { position: idx });
+        });
+      }
+      // Supabase opcional
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          await Promise.all(reordered.map(function(b, idx){
+            return conteudo().from('unit_blocks').update({ position: idx }).eq('id', b.id);
+          }));
+        }catch(_){}
+      }
     });
   }
 
   async function ueAddBlock(type){
-    const { data, error } = await conteudo().from('unit_blocks').insert({
+    const payload = {
       unit_id: ueCurrentUnitId,
       type: type,
       title: '',
       position: ueBlocksCache.length,
       content: {},
       status: 'draft',
-    }).select().single();
-    if(error){ alert(error.message); return; }
+    };
+    let data = null;
+    // 1. UbiqueStore (sempre)
+    if(window.UbiqueStore){
+      data = UbiqueStore.unit_blocks.add(payload);
+    }
+    // 2. Supabase opcional
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const res = await conteudo().from('unit_blocks').insert(payload).select().single();
+        if(!res.error && res.data) data = res.data;
+      }catch(_){}
+    }
+    if(!data){ alert('Falha ao criar bloco.'); return; }
     ueBlocksCache.push(data);
     ueRenderBlocks();
     const newCard = document.querySelector('[data-block-id="' + data.id + '"]');
@@ -40784,10 +40841,17 @@
       const el = document.getElementById('ue-bf-' + key + '-' + bid);
       if(el) content[key] = el.value;
     });
-    const { error } = await conteudo().from('unit_blocks')
-      .update({ title: title, status: status, content: content }).eq('id', bid);
-    if(error){ alert(error.message); return; }
-    Object.assign(b, { title: title, status: status, content: content });
+    const updates = { title: title, status: status, content: content };
+    if(window.UbiqueStore){
+      UbiqueStore.unit_blocks.update(bid, updates);
+    }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { error } = await conteudo().from('unit_blocks').update(updates).eq('id', bid);
+        if(error) console.warn('[unit_blocks.save] Supabase:', error.message);
+      }catch(_){}
+    }
+    Object.assign(b, updates);
     const headerTitle = document.querySelector('[data-block-id="' + bid + '"] .ue-block-title');
     if(headerTitle) headerTitle.textContent = title || '(sem título)';
   }
@@ -40805,8 +40869,12 @@
       showMsg('ueDeleteBlockMsg','Frase incorreta.');
       return;
     }
-    const { error } = await conteudo().from('unit_blocks').delete().eq('id', ueDeleteTargetBlockId);
-    if(error){ showMsg('ueDeleteBlockMsg', error.message); return; }
+    if(window.UbiqueStore){
+      UbiqueStore.unit_blocks.remove(ueDeleteTargetBlockId);
+    }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ await conteudo().from('unit_blocks').delete().eq('id', ueDeleteTargetBlockId); }catch(_){}
+    }
     document.getElementById('ueDeleteBlockModal').classList.remove('active');
     ueBlocksCache = ueBlocksCache.filter(function(b){ return b.id !== ueDeleteTargetBlockId; });
     ueDeleteTargetBlockId = null;

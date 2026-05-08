@@ -113,6 +113,8 @@
     modules: [],
     chapters: [],
     units: [],
+    unit_blocks: [],     // blocos de aprendizagem dentro de cada unidade
+    unit_downloads: [],  // PDFs / arquivos anexos a unidades
     // Versionamento da estrutura — incrementado em alterações de schema
     _meta: { version: 1, lastSync: Date.now() }
   };
@@ -259,12 +261,14 @@
 
   // ── PUBLIC API ──
   const Store = {
-    subjects:  makeCRUD('subjects',  'number'),
-    topics:    makeCRUD('topics',    'string'),
-    tags:      makeCRUD('tags',      'string'),
-    modules:   makeCRUD('modules',   'number'),
-    chapters:  makeCRUD('chapters',  'number'),
-    units:     makeCRUD('units',     'number'),
+    subjects:       makeCRUD('subjects',       'number'),
+    topics:         makeCRUD('topics',         'string'),
+    tags:           makeCRUD('tags',           'string'),
+    modules:        makeCRUD('modules',        'number'),
+    chapters:       makeCRUD('chapters',       'number'),
+    units:          makeCRUD('units',          'number'),
+    unit_blocks:    makeCRUD('unit_blocks',    'number'),
+    unit_downloads: makeCRUD('unit_downloads', 'number'),
 
     /**
      * Subscribe to all changes.
