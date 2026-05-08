@@ -121,6 +121,9 @@
     ],
     unit_blocks: [],     // blocos de aprendizagem dentro de cada unidade (campo section_id, nullable)
     unit_downloads: [],  // PDFs / arquivos anexos a unidades
+    questions: [],              // pool de questões objetivas
+    question_groups: [],        // agrupamento (group 15 / 2023 prova)
+    essays: [],                 // pool de discursivas
     platform_access: [], // Portaria — e-mails autorizados a acessar o aluno
     // ── EDITAL ──
     editais: [
@@ -310,6 +313,9 @@
     unit_blocks:    makeCRUD('unit_blocks',    'number'),
     unit_sections:  makeCRUD('unit_sections',  'number'),
     unit_downloads: makeCRUD('unit_downloads', 'number'),
+    questions:       makeCRUD('questions',       'number'),
+    question_groups: makeCRUD('question_groups', 'number'),
+    essays:          makeCRUD('essays',          'number'),
     platform_access: makeCRUD('platform_access', 'number'),
     editais:           makeCRUD('editais',           'number'),
     edital_topics:     makeCRUD('edital_topics',     'number'),
