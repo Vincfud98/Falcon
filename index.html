@@ -9,9 +9,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=12"></script>
+<script src="ubique-shared.js?v=13"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=12"></script>
+<script src="learning-blocks-render.js?v=13"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -6299,13 +6299,84 @@ window.COURSES = [
   })();
 
   /**
+   * MIGRATION (idempotente) — completa schema rico em unit_blocks já
+   * semeados em versões antigas do app, sem APAGAR nada.
+   *
+   * Problema: seeds antigos salvavam apenas alguns campos em `content`
+   * (audio_url, html) e perdiam os ricos (paragraphs, fragments, slides,
+   * items, events, points, cards, comments, references, etc.). O seed
+   * novo (com spread `...rest`) só roda se unit_blocks está vazio —
+   * então blocos legacy nunca foram atualizados.
+   *
+   * Estratégia: pra cada unit_block com _origMockId, encontra o bloco
+   * original em window.COURSE pelo id e COMPLETA os campos de content
+   * que estão vazios no store. NÃO sobrescreve nada que já tenha valor
+   * (preserva edições do usuário).
+   */
+  (function migrateMissingMockContentOnce(){
+    try{
+      if(!window.UbiqueStore || !window.COURSE) return;
+
+      // Índice flat de todos os blocos do mock por id original.
+      const mockBlocksById = {};
+      (window.COURSE.modules || []).forEach(function(m){
+        (m.chapters || []).forEach(function(c){
+          (c.units || []).forEach(function(u){
+            (u.groups || []).forEach(function(g){
+              (g.blocks || []).forEach(function(b){
+                if(b && b.id) mockBlocksById[b.id] = b;
+              });
+            });
+          });
+        });
+      });
+
+      let migrated = 0;
+      UbiqueStore.unit_blocks.list().forEach(function(sb){
+        const mock = sb && sb._origMockId ? mockBlocksById[sb._origMockId] : null;
+        if(!mock) return;
+        // Campos meta do mock — ficam de fora do content.
+        const { id, type, title, description, topics, tags, ...mockRest } = mock;
+        const sbContent = sb.content || {};
+        const newContent = Object.assign({}, sbContent);
+        let changed = false;
+
+        Object.keys(mockRest).forEach(function(key){
+          const mockVal = mockRest[key];
+          if(mockVal == null) return;
+          const cur = sbContent[key];
+          const isEmpty =
+            cur == null ||
+            (typeof cur === 'string' && cur === '') ||
+            (Array.isArray(cur) && cur.length === 0) ||
+            (typeof cur === 'object' && !Array.isArray(cur) && Object.keys(cur).length === 0);
+          if(isEmpty){
+            newContent[key] = mockVal;
+            changed = true;
+          }
+        });
+
+        if(changed){
+          UbiqueStore.unit_blocks.update(sb.id, { content: newContent });
+          migrated++;
+        }
+      });
+
+      if(migrated > 0){
+        console.log('[migrate-blocks] completed rich schema for ' + migrated + ' legacy unit_blocks (no destructive changes)');
+      }
+    }catch(e){
+      console.warn('[migrate-blocks] error:', e);
+    }
+  })();
+
+  /**
    * Y3a — Semeia a biblioteca de verbetes a partir dos fragments embutidos
    * em blocos do tipo `text`. Roda só uma vez (quando verbetes está vazio).
    */
   (function seedVerbetesFromMockBlocks(){
     try{
       if(!window.UbiqueStore) return;
-      if(UbiqueStore.verbetes.list().length > 0) return;
 
       const slug = function(s){
         return String(s||'').toLowerCase()
@@ -6313,7 +6384,13 @@ window.COURSES = [
           .replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
       };
 
-      const seen = new Set();
+      // IDEMPOTENTE: indexa verbetes existentes por id e por term normalizado.
+      // Adiciona apenas os que ainda não existem — NUNCA sobrescreve
+      // verbetes editados pelo usuário.
+      const existing = UbiqueStore.verbetes.list() || [];
+      const existingIds   = new Set(existing.map(function(v){ return v.id; }));
+      const existingTerms = new Set(existing.map(function(v){ return slug(v.term); }));
+
       let count = 0;
       (UbiqueStore.unit_blocks.list() || []).forEach(function(b){
         if(b.type !== 'text') return;
@@ -6323,8 +6400,10 @@ window.COURSES = [
           frags.forEach(function(f){
             if(!f || !f.text) return;
             const id = f.id && String(f.id).indexOf('v_') === 0 ? f.id : ('v_' + slug(f.text));
-            if(seen.has(id)) return;
-            seen.add(id);
+            if(existingIds.has(id)) return;
+            if(existingTerms.has(slug(f.text))) return;
+            existingIds.add(id);
+            existingTerms.add(slug(f.text));
             UbiqueStore.verbetes.add({
               id: id,
               term: f.text,
@@ -6344,7 +6423,7 @@ window.COURSES = [
           });
         });
       });
-      if(count > 0) console.log('[seed] verbetes:', count, 'cadastrados a partir dos fragments.');
+      if(count > 0) console.log('[seed verbetes] +' + count + ' novos verbetes cadastrados (não-destrutivo).');
     }catch(e){ console.warn('[seed verbetes] erro:', e); }
   })();
 
