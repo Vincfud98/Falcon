@@ -132,19 +132,116 @@
         '</div>';
       }
       case 'quiz': {
-        const count = parseInt(c.count, 10) || 0;
-        return '<div style="display:flex;flex-direction:column;align-items:flex-start;gap:.8rem;padding:1rem 1.2rem;background:var(--bg-elev);border-radius:var(--radius)">' +
-          '<span class="s-label" style="color:var(--accent)">Quiz</span>' +
-          '<p class="card-body" style="margin:0">' + (count ? count + ' questões' : 'Quiz preparado para esta unidade.') + '</p>' +
-          '<button class="btn">Iniciar quiz</button>' +
+        // Tipo LEGADO — substituído por objective_questions
+        return '<p class="s-body" style="color:var(--text-mute);font-style:italic;margin:0">⚠ Tipo legado: este bloco foi reformulado como <strong>Questões objetivas</strong>. Apague e crie um novo do tipo "Questões objetivas".</p>';
+      }
+      case 'objective_questions': {
+        const groups = Array.isArray(c.groups) ? c.groups : [];
+        if(!groups.length) return '<p class="s-body" style="font-style:italic;color:var(--text-mute);margin:0">Nenhum grupo de questões. Use "+ Grupo" no editor.</p>';
+        return '<div style="display:flex;flex-direction:column;gap:1.2rem">' +
+          groups.map(function(g){
+            const qs = Array.isArray(g.questions) ? g.questions : [];
+            const head = g.title
+              ? '<div style="border-bottom:1px solid var(--accent-border-soft);padding-bottom:.4rem;margin-bottom:.6rem">' +
+                  '<h4 style="font-family:var(--serif);color:var(--accent);font-size:1.05rem;margin:0">' + e(g.title) + '</h4>' +
+                  (g.description ? '<p style="font-size:.78rem;color:var(--text-mute);margin:.2rem 0 0">' + e(g.description) + '</p>' : '') +
+                '</div>'
+              : '';
+            const questions = qs.map(function(q){
+              const tags = Array.isArray(q.tags) ? q.tags : [];
+              const tagsHTML =
+                (q.reference ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(q.reference) + '</span>' : '') +
+                (q.difficulty ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--bg-elev);border:1px solid var(--accent-border-soft);color:var(--text-mute);text-transform:capitalize">' + e(q.difficulty) + '</span>' : '') +
+                tags.map(function(t){ return '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(t) + '</span>'; }).join('');
+              let body = '';
+              if(q.type === 'multiple_choice'){
+                const opts = Array.isArray(q.options) ? q.options : [];
+                body = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-top:.5rem">' +
+                  opts.map(function(o){
+                    const mark = o.correct ? '<span style="color:#4caf50;font-weight:600">✓</span>' : '<span style="color:var(--text-mute)">·</span>';
+                    return '<div style="display:grid;grid-template-columns:auto 28px 1fr;gap:.4rem;align-items:start;padding:.35rem .55rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid ' + (o.correct ? '#4caf50' : 'var(--accent-border-soft)') + '">' +
+                      mark +
+                      '<span style="font-family:var(--mono);color:var(--accent);font-weight:600">' + e(o.label||'') + '</span>' +
+                      '<span style="font-family:var(--sans);font-size:.85rem;color:var(--text)">' + e(o.text||'') + '</span>' +
+                    '</div>';
+                  }).join('') +
+                '</div>';
+              } else {
+                const correctTxt = q.correct === true ? 'Certo' : (q.correct === false ? 'Errado' : '?');
+                const correctColor = q.correct === true ? '#4caf50' : '#e57373';
+                body = '<div style="display:flex;gap:.5rem;margin-top:.5rem">' +
+                  '<div style="flex:1;padding:.4rem .7rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid var(--accent-border-soft);text-align:center;font-family:var(--mono);font-size:.85rem;color:var(--text-mute)">C — Certo</div>' +
+                  '<div style="flex:1;padding:.4rem .7rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid var(--accent-border-soft);text-align:center;font-family:var(--mono);font-size:.85rem;color:var(--text-mute)">E — Errado</div>' +
+                '</div>' +
+                '<div style="margin-top:.3rem;font-family:var(--mono);font-size:.7rem;color:' + correctColor + '"><strong>Gabarito:</strong> ' + correctTxt + '</div>';
+              }
+              const comment = q.comment
+                ? '<div style="margin-top:.5rem;padding:.45rem .7rem;background:var(--bg-elev);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0">' +
+                    '<span style="font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;color:var(--accent);text-transform:uppercase">Comentário</span>' +
+                    '<div style="font-family:var(--serif);font-size:.85rem;color:var(--text-dim);margin-top:.2rem;line-height:1.55">' + e(q.comment) + '</div>' +
+                  '</div>'
+                : '';
+              return '<article style="background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.8rem 1rem;margin-bottom:.55rem">' +
+                (tagsHTML ? '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.5rem">' + tagsHTML + '</div>' : '') +
+                '<div style="font-family:var(--serif);font-size:.95rem;line-height:1.6;color:var(--text)">' + e(q.statement || '') + '</div>' +
+                body + comment +
+              '</article>';
+            }).join('');
+            return '<section>' + head + questions +
+              (qs.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.75rem;margin:0">Sem questões neste grupo.</p>' : '') +
+            '</section>';
+          }).join('') +
         '</div>';
       }
       case 'essay': {
-        return '<blockquote style="border-left:3px solid var(--accent);padding:.4rem 1rem;font-family:var(--serif);font-style:italic;color:var(--text);margin:0 0 1rem;font-size:1rem;line-height:1.6">' +
-          e(c.prompt || 'Enunciado não definido.') +
-        '</blockquote>' +
-        '<textarea class="field-input" rows="6" placeholder="Sua resposta..." style="width:100%"></textarea>' +
-        '<div style="margin-top:.8rem"><button class="btn">Enviar para correção</button></div>';
+        const items = Array.isArray(c.items) ? c.items : [];
+        if(!items.length){
+          // Fallback pra schema super legado com c.prompt simples
+          if(c.prompt){
+            return '<blockquote style="border-left:3px solid var(--accent);padding:.4rem 1rem;font-family:var(--serif);font-style:italic;color:var(--text);margin:0 0 1rem;font-size:1rem;line-height:1.6">' +
+              e(c.prompt) + '</blockquote>' +
+              '<textarea class="field-input" rows="6" placeholder="Sua resposta..." style="width:100%"></textarea>';
+          }
+          return '<p class="s-body" style="font-style:italic;color:var(--text-mute);margin:0">Nenhuma discursiva. Use "+ Discursiva" no editor.</p>';
+        }
+        return items.map(function(it, i){
+          const tags = Array.isArray(it.tags) ? it.tags : [];
+          const tagsHTML = (it.reference || tags.length)
+            ? '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.55rem">' +
+                (it.reference ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(it.reference) + '</span>' : '') +
+                tags.map(function(t){ return '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(t) + '</span>'; }).join('') +
+              '</div>'
+            : '';
+          const criteria = Array.isArray(it.criteria) ? it.criteria : [];
+          const criteriaHTML = criteria.length
+            ? '<details style="margin-top:.7rem;border-top:1px solid var(--accent-border-soft);padding-top:.55rem">' +
+                '<summary style="cursor:pointer;font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;color:var(--accent);text-transform:uppercase">Ver critérios (' + criteria.length + ')</summary>' +
+                '<div style="margin-top:.5rem;display:flex;flex-direction:column;gap:.4rem">' +
+                  criteria.map(function(cr){
+                    return '<div style="padding:.45rem .7rem;background:var(--bg-elev);border-radius:var(--radius);border-left:3px solid var(--accent)">' +
+                      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.2rem">' +
+                        '<strong style="font-family:var(--sans);font-size:.82rem;color:var(--accent)">' + e(cr.label||'') + '</strong>' +
+                        (cr.maxScore ? '<span style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute)">' + e(cr.maxScore) + ' pts</span>' : '') +
+                      '</div>' +
+                      '<div style="font-family:var(--sans);font-size:.78rem;color:var(--text-dim);line-height:1.5">' + e(cr.description||'') + '</div>' +
+                    '</div>';
+                  }).join('') +
+                '</div>' +
+              '</details>'
+            : '';
+          return '<article style="background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius-lg);padding:1rem 1.2rem;margin-bottom:.8rem">' +
+            tagsHTML +
+            '<blockquote style="border-left:3px solid var(--accent);padding:.4rem 1rem;font-family:var(--serif);font-style:italic;color:var(--text);margin:0 0 .8rem;font-size:.98rem;line-height:1.6">' +
+              e(it.statement || it.command || '') +
+            '</blockquote>' +
+            '<textarea class="field-input" rows="5" placeholder="Sua resposta..." maxlength="' + (it.maxLength || 3000) + '" style="width:100%;font-size:.9rem"></textarea>' +
+            '<div style="margin-top:.6rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">' +
+              '<button class="btn btn-ghost btn-sm">Enviar para correção por IA</button>' +
+              '<span style="font-family:var(--mono);font-size:.65rem;color:var(--text-mute);margin-left:auto">Máx: ' + (it.maxLength || 3000) + ' caracteres</span>' +
+            '</div>' +
+            criteriaHTML +
+          '</article>';
+        }).join('');
       }
       case 'discussion': {
         return '<p class="s-body" style="margin-bottom:1rem">' + e(c.prompt || 'Compartilhe sua reflexão sobre esta unidade.') + '</p>' +
