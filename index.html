@@ -9,9 +9,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=11"></script>
+<script src="ubique-shared.js?v=12"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=11"></script>
+<script src="learning-blocks-render.js?v=12"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -10760,6 +10760,107 @@ function _findStoreUnitForMock(mockUnitId){
   return all.find(function(u){ return u._origMockId === mockUnitId || String(u.id) === String(mockUnitId); }) || null;
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * Y2 — Hidrata um unit_block do store de volta para o formato legacy mock
+ * (id, type, title, ...content) e enriquece fragments a partir da biblioteca
+ * UbiqueStore.verbetes (lookup por fragment.id). Fragment local sobrescreve
+ * o verbete caso ambos existam — assim edições inline no bloco vencem.
+ * ───────────────────────────────────────────────────────────────────────── */
+function _hydrateStoreBlock(sb, verbetesById){
+  const content = sb.content || {};
+  let paragraphs = content.paragraphs;
+  if(paragraphs && verbetesById){
+    paragraphs = paragraphs.map(function(p){
+      if(!p || !p.fragments) return p;
+      return Object.assign({}, p, {
+        fragments: p.fragments.map(function(f){
+          if(!f) return f;
+          const v = f.id ? verbetesById[f.id] : null;
+          if(v){
+            // Verbete da biblioteca como base; campos locais (incluindo
+            // images/related específicos do bloco) sobrescrevem.
+            return Object.assign({}, v, f);
+          }
+          return f;
+        })
+      });
+    });
+  }
+  return Object.assign(
+    {
+      id:          sb._origMockId || sb.id,
+      type:        sb.type,
+      title:       sb.title || '',
+      description: sb.description || '',
+      topics:      sb.topics || [],
+      tags:        sb.tags || []
+    },
+    content,
+    paragraphs ? { paragraphs } : {}
+  );
+}
+
+/* Reconstrói o array `groups` no formato legacy (groups[].blocks[]) a partir
+ * das unit_sections + unit_blocks do store. Retorna null se o store não tem
+ * dados para a unidade — chamadores caem no mock legacy. */
+function _groupsFromStore(storeUnitId){
+  if(!window.UbiqueStore) return null;
+  const sections = (UbiqueStore.unit_sections.list() || [])
+    .filter(function(s){ return s.unit_id === storeUnitId; })
+    .sort(function(a,b){ return (a.position||0) - (b.position||0); });
+  const allBlocks = (UbiqueStore.unit_blocks.list() || [])
+    .filter(function(b){ return b.unit_id === storeUnitId; });
+  if(!sections.length && !allBlocks.length) return null;
+
+  // Pré-indexa verbetes uma vez para enriquecer fragments dos parágrafos.
+  const verbList = (UbiqueStore.verbetes && UbiqueStore.verbetes.list) ? UbiqueStore.verbetes.list() : [];
+  const verbetesById = {};
+  verbList.forEach(function(v){ if(v && v.id) verbetesById[v.id] = v; });
+
+  // Blocos sem section_id ainda aparecem (em uma "seção" sintética).
+  const orphanBlocks = allBlocks.filter(function(b){
+    return !b.section_id || !sections.some(function(s){ return s.id === b.section_id; });
+  });
+  const groups = sections.map(function(sec){
+    const blocks = allBlocks
+      .filter(function(b){ return b.section_id === sec.id; })
+      .sort(function(a,b){ return (a.position||0) - (b.position||0); })
+      .map(function(b){ return _hydrateStoreBlock(b, verbetesById); });
+    return {
+      id: sec._origMockId || ('g-' + sec.id),
+      title: sec.title || 'Seção',
+      blocks: blocks
+    };
+  });
+  if(orphanBlocks.length){
+    groups.push({
+      id: 'g-unassigned',
+      title: 'Sem seção',
+      blocks: orphanBlocks
+        .sort(function(a,b){ return (a.position||0) - (b.position||0); })
+        .map(function(b){ return _hydrateStoreBlock(b, verbetesById); })
+    });
+  }
+  return groups;
+}
+
+/* Devolve uma cópia rasa da unidade mock com `groups` substituído pelos dados
+ * do store, quando disponíveis. Se o store ainda não tem dados pra unidade
+ * (caso de mocks novos antes do seed), retorna a unidade original.
+ *
+ * Esse é o ponto único de override do Y2: a partir daqui o renderer legacy
+ * roda inalterado, com toda a riqueza (sidebar, gallery flutuante, fragmentos
+ * com tooltip, breadcrumbs, blockquotes, listas, hover-figures, etc.). */
+function _unitWithStoreOverride(unit){
+  if(!unit) return unit;
+  if(!window.UbiqueStore) return unit;
+  const storeUnit = _findStoreUnitForMock(unit.id);
+  if(!storeUnit) return unit;
+  const groups = _groupsFromStore(storeUnit.id);
+  if(!groups || !groups.length) return unit;
+  return Object.assign({}, unit, { groups: groups });
+}
+
 /* Render a unit entirely from UbiqueStore (sections + blocks). */
 Renderers.unitFromStore = function(storeUnitId, mockUnit, m, chapter){
   const sections = (UbiqueStore.unit_sections.list() || [])
@@ -10824,29 +10925,12 @@ if(typeof window !== 'undefined' && !window._slideCarouselBound){
 Renderers.unit = function(route){
   const found = Util.findUnit(route.params.moduleId, route.params.unitId);
   if(!found) return `<div class="empty"><div class="empty-title">Unidade não encontrada</div></div>`;
-  const { module:m, chapter, unit } = found;
-
-  // RENDERER LEGACY (rico): se o mock original tem groups[].blocks[],
-  // SEMPRE usa o caminho legacy — ele tem sidebar interna, gallery
-  // flutuante, fragmentos com hover, layout de figuras, etc.
-  // O store é usado apenas para unidades NOVAS criadas no admin do zero
-  // (sem groups no mock). Edições no admin de unidades mockadas ainda
-  // são visíveis na aba de blocks do admin, mas a renderização rica
-  // do aluno permanece via mock — refazer o legacy lendo do store é
-  // refactor grande pra próxima rodada.
-  const hasLegacyContent = (unit.groups || []).some(function(g){
-    return (g.blocks || []).length > 0;
-  });
-  if(!hasLegacyContent && window.UbiqueStore){
-    const storeUnit = _findStoreUnitForMock(unit.id);
-    if(storeUnit){
-      const hasStoreBlocks = (UbiqueStore.unit_blocks.list() || [])
-        .some(function(b){ return b.unit_id === storeUnit.id; });
-      if(hasStoreBlocks){
-        return Renderers.unitFromStore(storeUnit.id, unit, m, chapter);
-      }
-    }
-  }
+  const { module:m, chapter } = found;
+  // Y2 — substitui unit.groups[].blocks[] pelos dados de UbiqueStore.unit_sections
+  // + UbiqueStore.unit_blocks (hidratados de volta ao formato legacy). Toda a
+  // renderização rica abaixo continua intacta. Fallback para o mock se o store
+  // ainda não tem dados pra unidade (mocks novos antes do seed).
+  const unit = _unitWithStoreOverride(found.unit);
 
   // Determine active group (section)
   const groups = unit.groups||[];
@@ -10963,7 +11047,10 @@ Renderers.unit = function(route){
 Renderers.unit.mount = function(stageEl, route){
   const found = Util.findUnit(route.params.moduleId, route.params.unitId);
   if(!found) return;
-  const { module:m, chapter, unit } = found;
+  const { module:m, chapter } = found;
+  // Y2 — mesmo override do render(); garante que o mount lê o mesmo conjunto
+  // de groups/blocks que foi renderizado.
+  const unit = _unitWithStoreOverride(found.unit);
   Store.markUnitView(unit.id);
 
   const blockStage = stageEl.querySelector('#blockStage');
