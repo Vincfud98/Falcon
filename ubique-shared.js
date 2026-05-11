@@ -7,13 +7,14 @@
 (function(global){
   'use strict';
 
-  const STORE_KEY = 'ubique.store.v4';   // bump → reseed automático (v4: hierarquia mockada embutida)
+  const STORE_KEY = 'ubique.store.v5';   // bump → reseed automático (v5: blocos preservam 100% do mock em content)
   const CHANNEL_NAME = 'ubique-store';
 
   // Limpa as versões antigas pra evitar dados parciais
   try{ localStorage.removeItem('ubique.store.v1'); }catch(_){}
   try{ localStorage.removeItem('ubique.store.v2'); }catch(_){}
   try{ localStorage.removeItem('ubique.store.v3'); }catch(_){}
+  try{ localStorage.removeItem('ubique.store.v4'); }catch(_){}
 
   // ── SEED — dados mock iniciais (vêm do index.html original).
   // Usados apenas na primeira vez que o store é carregado.
