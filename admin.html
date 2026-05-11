@@ -11986,9 +11986,9 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=14"></script>
+<script src="ubique-shared.js?v=15"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=14"></script>
+<script src="learning-blocks-render.js?v=15"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -40955,6 +40955,12 @@
   // Lê os campos do form, reconstrói um "block virtual" e re-renderiza
   // a coluna direita com o mesmo `LearningBlocks.render` da área do aluno.
   // Mantém o cabeçalho `Pré-visualização` no topo.
+  // ─────────────────────────────────────────────────────────────────────
+  // uePreviewRefresh — alinhado ao novo ueSaveBlock (não destrutivo).
+  // Mesma estratégia: parte de b.content (que já está atualizado em tempo
+  // real pelos handlers list-editor), mescla simple inputs encontrados
+  // dinamicamente no DOM, e re-renderiza o preview via LearningBlocks.render.
+  // ─────────────────────────────────────────────────────────────────────
   function uePreviewRefresh(bid){
     const b = ueBlocksCache.find(function(x){ return x.id === bid; });
     if(!b) return;
@@ -40963,46 +40969,23 @@
     const title    = titleEl  ? titleEl.value  : (b.title  || '');
     const status   = statusEl ? statusEl.value : (b.status || 'draft');
 
-    // Mapeia o conjunto de chaves que cada `type` usa em `content`.
-    const contentKeys = {
-      text:       ['html','audio_url'],
-      video:      ['video_url','description'],
-      quiz:       ['count'],
-      essay:      ['prompt'],
-      discussion: ['prompt'],
-      keypoints:  ['points'],
-      flashcards: ['cards'],
-      references: ['items'],
-      integrated: ['html'],
-      biography:  ['people'],
-      citations:  ['quotes'],
-      timeline:   ['events'],
-      tables:     ['tables'],
-      glossary:   ['entries'],
-      gallery:    ['images'],
-      quote:      ['text','author','source'],
-      image:      ['url','caption']
-    };
-    // Quais chaves devem ser parseadas como JSON (array) em vez de string.
-    const jsonFields = new Set([
-      'points','items','people','quotes','events','tables','entries','images','cards'
-    ]);
-
-    // ── CRÍTICO: parte do conteúdo EXISTENTE (com paragraphs, fragments,
-    // slides etc. do schema rico) e SÓ SOBRESCREVE as chaves que o
-    // form simples conhece. Sem isso, digitar no título reseta tudo
-    // pra um content {html:'', audio_url:''} e o preview fica vazio.
     const content = Object.assign({}, b.content || {});
-    (contentKeys[b.type] || []).forEach(function(key){
-      const el = document.getElementById('ue-bf-' + key + '-' + bid);
-      if(!el) return;
-      if(jsonFields.has(key)){
-        try{ content[key] = JSON.parse(el.value || '[]'); }
-        catch(_){ content[key] = (b.content && b.content[key]) || []; }
-      } else {
-        content[key] = el.value;
-      }
-    });
+    const card = document.querySelector('[data-block-card][data-block-id="' + bid + '"]');
+    if(card){
+      const prefix = 'ue-bf-';
+      const suffix = '-' + bid;
+      card.querySelectorAll('input[id^="' + prefix + '"], textarea[id^="' + prefix + '"], select[id^="' + prefix + '"]').forEach(function(el){
+        if(!el.id || !el.id.endsWith(suffix)) return;
+        const key = el.id.substring(prefix.length, el.id.length - suffix.length);
+        if(key === 'title' || key === 'status' || key === 'raw') return;
+        if(el.type === 'number'){
+          const n = parseFloat(el.value);
+          content[key] = isNaN(n) ? (el.value || '') : n;
+        } else {
+          content[key] = el.value;
+        }
+      });
+    }
 
     const virt = { id: b.id, type: b.type, title: title, content: content, status: status };
     const previewEl = document.getElementById('ue-preview-' + bid);
@@ -41026,10 +41009,17 @@
   }
 
   function _ueSaveStructured(bid){
-    // Persiste o content modificado no UbiqueStore e atualiza preview
+    // Persiste o content modificado no UbiqueStore, sincroniza o JSON cru
+    // visível na textarea, e atualiza o preview ao vivo.
     const b = _ueGetBlock(bid);
     if(!b || !window.UbiqueStore) return;
     UbiqueStore.unit_blocks.update(bid, { content: b.content });
+    // Espelha o estado em ueAllBlocksCache (usado por ueLoadBlocks/reabertura)
+    const allIdx = ueAllBlocksCache.findIndex(function(x){ return x.id === bid; });
+    if(allIdx >= 0) ueAllBlocksCache[allIdx].content = b.content;
+    // Reflete na textarea do JSON cru — fica em sincronia com o editor visual
+    const rawTa = document.getElementById('ue-bf-raw-' + bid);
+    if(rawTa) rawTa.value = JSON.stringify(b.content || {}, null, 2);
     if(typeof uePreviewRefresh === 'function') uePreviewRefresh(bid);
   }
 
@@ -41106,6 +41096,25 @@
     const f = (p.fragments || [])[fIdx]; if(!f) return;
     f[field] = value;
     _ueSaveStructured(bid);
+  };
+
+  // Botão "💾 Salvar parágrafos" — gatilho explícito que aciona o save
+  // completo (incluindo título + áudio + status + content rico). Feedback
+  // visual via flash do botão.
+  window.ueSavePersistText = function(bid){
+    const btn = event && event.currentTarget;
+    try{ ueSaveBlock(bid); }catch(e){ console.warn('[ueSavePersistText]', e); }
+    if(btn){
+      const origText = btn.textContent;
+      btn.textContent = '✓ Salvo';
+      btn.style.background = 'var(--accent)';
+      btn.style.color = 'var(--bg)';
+      setTimeout(function(){
+        btn.textContent = origText;
+        btn.style.background = 'var(--accent-lo)';
+        btn.style.color = 'var(--accent)';
+      }, 1200);
+    }
   };
 
   // Abre o modal Y3a (Verbetes) para editar o fragment COMPLETO
@@ -41569,6 +41578,14 @@
                 : paragraphs.map(function(p, pIdx){ return renderParagraphEditor(p, pIdx); }).join('')
               ),
             '</div>',
+          '</div>',
+          // Botão dedicado de salvar — força persistência completa (título +
+          // áudio + parágrafos + fragments) e sincroniza JSON cru. Os edits
+          // já são persistidos em tempo real via _ueSaveStructured, mas esse
+          // botão dá confirmação visual e é simétrico ao "💾 Salvar JSON".
+          '<div style="margin-top:.8rem;padding-top:.6rem;border-top:1px solid var(--accent-border-soft);display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">',
+            '<button class="btn btn-ghost btn-sm" onclick="ueSavePersistText(' + bid + ')" style="background:var(--accent-lo);border-color:var(--accent-border);color:var(--accent);font-weight:500">💾 Salvar parágrafos</button>',
+            '<span class="s-body" style="font-size:.68rem;color:var(--text-mute);margin:0">Salva título + áudio + parágrafos + fragments e atualiza o JSON cru</span>',
           '</div>'
         ].join('');
       }
@@ -42065,45 +42082,55 @@
     if(newCard) newCard.scrollIntoView({ behavior:'smooth', block:'center' });
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // ueSaveBlock — versão NÃO-DESTRUTIVA.
+  //
+  // BUG antigo: a versão anterior reconstruía content = {} do zero, usando
+  // um mapa hardcoded de contentKeys por tipo (text → ['html','audio_url']).
+  // Isso APAGAVA paragraphs/fragments/items/concepts/entries (todo o rich
+  // schema editado via list-editors Y3b/Y3c/Y3d) toda vez que o usuário
+  // clicava em "SALVAR" no header do bloco. Também usava nomes de chave
+  // antigos (people/quotes/events/tables/entries/cards/points) que não
+  // batiam mais com o schema canônico do Y3.
+  //
+  // Versão nova: parte de b.content em memória (que já tem TODOS os campos
+  // ricos editados em tempo real via _ueSaveStructured) e SÓ mescla os
+  // inputs simples ue-bf-{key}-{bid} que existirem no DOM do card. Sem
+  // mapa hardcoded — varre dinamicamente.
+  // ─────────────────────────────────────────────────────────────────────
   async function ueSaveBlock(bid){
     const b = ueBlocksCache.find(function(x){ return x.id === bid; });
     if(!b) return;
-    const titleEl = document.getElementById('ue-bf-title-' + bid);
+    const titleEl  = document.getElementById('ue-bf-title-'  + bid);
     const statusEl = document.getElementById('ue-bf-status-' + bid);
-    const title = titleEl ? titleEl.value.trim() : '';
-    const status = statusEl ? statusEl.value : 'draft';
-    const content = {};
-    const contentKeys = {
-      text:       ['html','audio_url'],
-      video:      ['video_url','description'],
-      quiz:       ['count'],
-      essay:      ['prompt'],
-      discussion: ['prompt'],
-      keypoints:  ['points'],
-      flashcards: ['cards'],
-      references: ['items'],
-      integrated: ['html'],
-      biography:  ['people'],
-      citations:  ['quotes'],
-      timeline:   ['events'],
-      tables:     ['tables'],
-      glossary:   ['entries'],
-      gallery:    ['images'],
-      quote:      ['text','author','source'],  // legacy compatibility
-      image:      ['url','caption'],
-    };
-    const jsonFields = new Set(['points','items','people','quotes','events','tables','entries','images','cards']);
-    const keys = contentKeys[b.type] || [];
-    keys.forEach(function(key){
-      const el = document.getElementById('ue-bf-' + key + '-' + bid);
-      if(!el) return;
-      if(jsonFields.has(key)){
-        try{ content[key] = JSON.parse(el.value || '[]'); }
-        catch(_){ content[key] = el.value; /* keep raw if invalid */ }
-      } else {
-        content[key] = el.value;
-      }
-    });
+    const title  = titleEl  ? titleEl.value.trim() : (b.title || '');
+    const status = statusEl ? statusEl.value      : (b.status || 'draft');
+
+    // PRESERVA tudo que está em b.content (paragraphs, items, concepts,
+    // entries, columns/rows, fragments etc.) — esses já estão atualizados
+    // em tempo real pelos handlers ueListUpdate / ueUpdateParagraph / etc.
+    const content = Object.assign({}, b.content || {});
+
+    // Varre dinamicamente todos os inputs simples (ue-bf-{key}-{bid}) que
+    // existem no DOM do card deste bloco e mescla em content.
+    const card = document.querySelector('[data-block-card][data-block-id="' + bid + '"]');
+    if(card){
+      const prefix = 'ue-bf-';
+      const suffix = '-' + bid;
+      card.querySelectorAll('input[id^="' + prefix + '"], textarea[id^="' + prefix + '"], select[id^="' + prefix + '"]').forEach(function(el){
+        if(!el.id || !el.id.endsWith(suffix)) return;
+        const key = el.id.substring(prefix.length, el.id.length - suffix.length);
+        // title/status são salvos separados; raw é o JSON cru (botão próprio)
+        if(key === 'title' || key === 'status' || key === 'raw') return;
+        if(el.type === 'number'){
+          const n = parseFloat(el.value);
+          content[key] = isNaN(n) ? (el.value || '') : n;
+        } else {
+          content[key] = el.value;
+        }
+      });
+    }
+
     const updates = { title: title, status: status, content: content };
     if(window.UbiqueStore){
       UbiqueStore.unit_blocks.update(bid, updates);
@@ -42120,6 +42147,9 @@
     if(allIdx >= 0) Object.assign(ueAllBlocksCache[allIdx], updates);
     const headerTitle = document.querySelector('[data-block-id="' + bid + '"] .card-title');
     if(headerTitle) headerTitle.textContent = title || '(sem título)';
+    // Atualiza a textarea do JSON cru pra refletir o estado salvo
+    const rawTa = document.getElementById('ue-bf-raw-' + bid);
+    if(rawTa) rawTa.value = JSON.stringify(content, null, 2);
     ueRenderSectionsNav();
   }
 
