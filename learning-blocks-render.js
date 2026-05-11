@@ -89,6 +89,32 @@
     const c = block.content || {};
     switch(block.type){
       case 'text': {
+        // Schema rico (do mock original): paragraphs[] com fragments,
+        // descrições, títulos que viram anchors.
+        if(Array.isArray(c.paragraphs) && c.paragraphs.length){
+          const body = c.paragraphs.map(function(p){
+            // Render fragments inline: marca termos com border-bottom dotted
+            // e tooltip via title=" ...definição..." (versão básica;
+            // tooltip rico com galeria fica pro renderer aluno completo no Y2)
+            let html = p.content || '';
+            (p.fragments || []).forEach(function(f){
+              if(!f || !f.text) return;
+              // Substitui a primeira ocorrência por <span> com dotted underline
+              const safeText = e(f.text);
+              const def = e(f.definition || '');
+              const pattern = new RegExp('(' + f.text.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&') + ')(?![^<]*>)','i');
+              html = html.replace(pattern,
+                '<span style="border-bottom:1px dotted var(--accent);cursor:help" title="' + def + '">$1</span>'
+              );
+            });
+            const titleAnchor = p.title
+              ? '<h3 id="p-' + e(p.id||'') + '" style="font-family:var(--serif);font-weight:400;font-size:1.4rem;color:var(--accent);margin:1.6rem 0 .6rem;letter-spacing:.005em">' + e(p.title) + '</h3>'
+              : '';
+            return titleAnchor + html;
+          }).join('');
+          return '<div style="font-family:var(--serif);line-height:1.85;font-size:1.05rem;color:var(--text);max-width:680px">' + body + '</div>';
+        }
+        // Fallback: schema simples {html}
         return '<div style="font-family:var(--serif);line-height:1.85;font-size:1.05rem;color:var(--text);max-width:680px">' +
           (c.html || '<p style="color:var(--text-mute);font-style:italic">Sem conteúdo.</p>') + '</div>';
       }
