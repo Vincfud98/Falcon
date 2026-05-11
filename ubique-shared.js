@@ -7,7 +7,7 @@
 (function(global){
   'use strict';
 
-  const STORE_KEY = 'ubique.store.v5';   // bump → reseed automático (v5: blocos preservam 100% do mock em content)
+  const STORE_KEY = 'ubique.store.v6';   // bump → reseed automático (v6: adiciona entidade verbetes)
   const CHANNEL_NAME = 'ubique-store';
 
   // Limpa as versões antigas pra evitar dados parciais
@@ -15,6 +15,7 @@
   try{ localStorage.removeItem('ubique.store.v2'); }catch(_){}
   try{ localStorage.removeItem('ubique.store.v3'); }catch(_){}
   try{ localStorage.removeItem('ubique.store.v4'); }catch(_){}
+  try{ localStorage.removeItem('ubique.store.v5'); }catch(_){}
 
   // ── SEED — dados mock iniciais (vêm do index.html original).
   // Usados apenas na primeira vez que o store é carregado.
@@ -242,6 +243,7 @@
     edital_progress: [
       // por usuário; vazio inicialmente
     ],
+    verbetes: [],
     // Versionamento da estrutura — incrementado em alterações de schema
     _meta: { version: 1, lastSync: Date.now() }
   };
@@ -405,6 +407,7 @@
     edital_topics:     makeCRUD('edital_topics',     'number'),
     edital_topic_units: makeCRUD('edital_topic_units','number'),
     edital_progress:   makeCRUD('edital_progress',   'number'),
+    verbetes:          makeCRUD('verbetes',          'string'),
 
     /**
      * Subscribe to all changes.
