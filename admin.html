@@ -11986,9 +11986,9 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=10"></script>
+<script src="ubique-shared.js?v=11"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=10"></script>
+<script src="learning-blocks-render.js?v=11"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -41011,6 +41011,136 @@
   }
   window.uePreviewRefresh = uePreviewRefresh;
 
+  // ── Y3b — Edição estruturada de paragraphs/fragments do bloco TEXT ──
+  // Manipula `b.content.paragraphs[]` e `paragraphs[i].fragments[]` em
+  // memória (ueBlocksCache), persistindo cada mutação no UbiqueStore.
+  // O `<details>` JSON cru continua intacto — esta camada apenas o
+  // mantém em sincronia ao gravar.
+  function _ueGetBlock(bid){
+    return ueBlocksCache.find(function(x){ return x.id === bid; });
+  }
+
+  function _ueSaveStructured(bid){
+    // Persiste o content modificado no UbiqueStore e atualiza preview
+    const b = _ueGetBlock(bid);
+    if(!b || !window.UbiqueStore) return;
+    UbiqueStore.unit_blocks.update(bid, { content: b.content });
+    if(typeof uePreviewRefresh === 'function') uePreviewRefresh(bid);
+  }
+
+  // Re-renderiza apenas o bloco afetado, preservando os demais.
+  function _ueRerenderBlockBody(bid){
+    const b = _ueGetBlock(bid); if(!b) return;
+    // Mais simples e seguro: re-renderiza todos os blocos. Mantém o
+    // ueBlocksCache em sincronia com o DOM e o JSON cru atualizado.
+    if(typeof ueRenderBlocks === 'function') ueRenderBlocks();
+  }
+
+  window.ueAddParagraph = function(bid){
+    const b = _ueGetBlock(bid); if(!b) return;
+    if(!b.content) b.content = {};
+    if(!Array.isArray(b.content.paragraphs)) b.content.paragraphs = [];
+    const newIdx = b.content.paragraphs.length + 1;
+    b.content.paragraphs.push({
+      id: 'p' + newIdx,
+      title: null,
+      content: '<p></p>',
+      description: '',
+      fragments: []
+    });
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  };
+
+  window.ueRemoveParagraph = function(bid, pIdx){
+    if(!confirm('Apagar este parágrafo?')) return;
+    const b = _ueGetBlock(bid); if(!b || !b.content || !Array.isArray(b.content.paragraphs)) return;
+    b.content.paragraphs.splice(pIdx, 1);
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  };
+
+  window.ueUpdateParagraph = function(bid, pIdx, field, value){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const p = (b.content.paragraphs || [])[pIdx]; if(!p) return;
+    p[field] = (field === 'title' && !value) ? null : value;
+    _ueSaveStructured(bid);
+  };
+
+  window.ueAddFragment = function(bid, pIdx){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const p = (b.content.paragraphs || [])[pIdx]; if(!p) return;
+    if(!Array.isArray(p.fragments)) p.fragments = [];
+    const nextN = p.fragments.length + 1;
+    p.fragments.push({
+      id: 'f-novo' + nextN,
+      text: '',
+      definition: '',
+      images: null,
+      link: null,
+      relatedTerms: null,
+      topics: null,
+      tags: null
+    });
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  };
+
+  window.ueRemoveFragment = function(bid, pIdx, fIdx){
+    if(!confirm('Apagar este fragment?')) return;
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const p = (b.content.paragraphs || [])[pIdx]; if(!p || !Array.isArray(p.fragments)) return;
+    p.fragments.splice(fIdx, 1);
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  };
+
+  window.ueUpdateFragment = function(bid, pIdx, fIdx, field, value){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const p = (b.content.paragraphs || [])[pIdx]; if(!p) return;
+    const f = (p.fragments || [])[fIdx]; if(!f) return;
+    f[field] = value;
+    _ueSaveStructured(bid);
+  };
+
+  // Abre o modal Y3a (Verbetes) para editar o fragment COMPLETO
+  // (definition, images, link, relatedTerms). Detecta se o fragment
+  // já existe na biblioteca de verbetes — se sim, abre lá; senão,
+  // cria novo com termo/definição pré-preenchidos.
+  window.ueOpenFragmentEditor = function(bid, pIdx, fIdx){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const p = (b.content.paragraphs || [])[pIdx]; if(!p) return;
+    const f = (p.fragments || [])[fIdx]; if(!f) return;
+
+    const allVerbetes = (window.UbiqueStore && UbiqueStore.verbetes && UbiqueStore.verbetes.list && UbiqueStore.verbetes.list()) || [];
+    function slugify(s){
+      return (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+    }
+    let vb = null;
+    if(f.id){
+      const vId = f.id.indexOf('v_') === 0 ? f.id : ('v_' + slugify(f.text || ''));
+      vb = allVerbetes.find(function(v){ return v.id === f.id || v.id === vId; });
+    }
+    if(!vb && f.text){
+      const slug = slugify(f.text);
+      vb = allVerbetes.find(function(v){ return v.term === f.text || v.id === 'v_' + slug; });
+    }
+
+    if(vb && typeof window.openVerbeteModal === 'function'){
+      window.openVerbeteModal(vb.id);
+    } else if(typeof window.openVerbeteModal === 'function'){
+      window.openVerbeteModal(null);
+      setTimeout(function(){
+        const termEl = document.getElementById('vbTerm');
+        const defEl  = document.getElementById('vbDefinition');
+        if(termEl) termEl.value = f.text || '';
+        if(defEl && f.definition) defEl.value = '<p>' + f.definition + '</p>';
+      }, 80);
+    } else {
+      alert('Abra a aba Verbetes para editar este termo em profundidade.');
+    }
+  };
+
   // ── Y1 — Salvar conteúdo cru (JSON) ─────────────────────────────────
   // Permite ao admin substituir o `content` inteiro do bloco por um JSON
   // arbitrário. Útil enquanto os editores type-específicos não cobrem
@@ -41059,9 +41189,84 @@
       return '<div class="field" style="margin:0"><label' + (forId ? ' for="' + forId + '"' : '') + '>' + label + '</label>' + ctrl + '</div>';
     }
     switch(type){
-      case 'text': return '' +
-        row('Conteúdo (HTML)', t('html','<p>Texto da aula...</p>'), 'ue-bf-html-'+bid) +
-        row('Áudio narrado (URL)', v('audio_url','https://...'), 'ue-bf-audio_url-'+bid);
+      case 'text': {
+        // === Editor visual rico do bloco TEXTO (Y3b) ===
+        // Estrutura: áudio → parágrafos editáveis (cada um com título
+        // opcional, descrição interna, conteúdo HTML, lista de fragments).
+        // Cada fragment seleciona/edita um verbete da biblioteca Y3a.
+        // PRESERVAÇÃO: o JSON cru lá embaixo continua existindo intacto.
+        const paragraphs = Array.isArray(content.paragraphs) ? content.paragraphs : [];
+        const audioUrl   = content.audio_url || '';
+
+        // Helper para cada parágrafo
+        function renderParagraphEditor(p, pIdx){
+          const pid   = p.id || ('p' + (pIdx + 1));
+          const frags = Array.isArray(p.fragments) ? p.fragments : [];
+          const fragsHTML = frags.map(function(f, fIdx){
+            const imgsCount = (f.images || []).length;
+            const relCount  = (f.relatedTerms || []).length;
+            return [
+              '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:.4rem;align-items:start;padding:.45rem .55rem;background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius);margin-bottom:.35rem">',
+                '<input class="field-input" value="' + esc(f.text || '') + '" placeholder="termo no texto (ex: Pedro Álvares Cabral)" oninput="ueUpdateFragment(' + bid + ',' + pIdx + ',' + fIdx + ',\'text\',this.value)" style="font-size:.78rem">',
+                '<input class="field-input" value="' + esc(f.id || '') + '" placeholder="id (ex: f-cabral)" oninput="ueUpdateFragment(' + bid + ',' + pIdx + ',' + fIdx + ',\'id\',this.value)" style="font-size:.78rem;font-family:var(--mono)">',
+                '<div style="display:flex;gap:.2rem;align-items:center;flex-shrink:0">',
+                  '<button class="btn btn-ghost btn-sm" onclick="ueOpenFragmentEditor(' + bid + ',' + pIdx + ',' + fIdx + ')" title="Editar verbete completo" style="padding:.2rem .4rem;font-size:.7rem">📖</button>',
+                  (imgsCount ? '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)" title="' + imgsCount + ' imagens">🖼' + imgsCount + '</span>' : ''),
+                  (relCount  ? '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)" title="' + relCount + ' relacionados">🔗' + relCount + '</span>' : ''),
+                  '<button class="btn btn-ghost btn-sm" onclick="ueRemoveFragment(' + bid + ',' + pIdx + ',' + fIdx + ')" style="color:var(--red);padding:.2rem .4rem;font-size:.7rem">×</button>',
+                '</div>',
+              '</div>'
+            ].join('');
+          }).join('');
+
+          return [
+            '<div style="border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.7rem .8rem;background:var(--bg-elev);margin-bottom:.6rem">',
+              '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">',
+                '<span class="card-label" style="background:var(--accent-lo);padding:.1rem .4rem;border-radius:var(--radius);border:1px solid var(--accent-border);font-size:.6rem">¶ ' + (pIdx + 1) + '</span>',
+                '<input class="field-input" value="' + esc(p.id || pid) + '" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'id\',this.value)" placeholder="id (p1, p2...)" style="font-family:var(--mono);font-size:.7rem;max-width:80px">',
+                '<input class="field-input" value="' + esc(p.title || '') + '" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'title\',this.value)" placeholder="Título (vira anchor na sidebar) — opcional" style="flex:1;font-size:.85rem">',
+                '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.2rem .5rem" onclick="ueRemoveParagraph(' + bid + ',' + pIdx + ')">apagar ¶</button>',
+              '</div>',
+              '<div class="field" style="margin:0 0 .5rem">',
+                '<label style="font-size:.6rem">Descrição interna (resumo do parágrafo, não renderiza)</label>',
+                '<input class="field-input" value="' + esc(p.description || '') + '" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'description\',this.value)" placeholder="ex: Parágrafo de abertura — situa a expedição..." style="font-size:.82rem">',
+              '</div>',
+              '<div class="field" style="margin:0 0 .5rem">',
+                '<label style="font-size:.6rem">Conteúdo HTML</label>',
+                '<textarea class="field-input" rows="5" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'content\',this.value)" placeholder="<p>Em <strong>9 de março de 1500</strong>...</p>" style="font-family:var(--mono);font-size:.78rem;line-height:1.5">' + esc(p.content || '') + '</textarea>',
+              '</div>',
+              '<div style="margin-top:.6rem;border-top:1px solid var(--accent-border-soft);padding-top:.5rem">',
+                '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem">',
+                  '<span class="s-subtitle" style="font-size:.6rem">Fragments (termos com tooltip e verbete)</span>',
+                  '<button class="btn btn-ghost btn-sm" onclick="ueAddFragment(' + bid + ',' + pIdx + ')" style="padding:.2rem .5rem;font-size:.7rem">+ fragment</button>',
+                '</div>',
+                (fragsHTML || '<p class="s-body" style="font-size:.72rem;font-style:italic;color:var(--text-mute);margin:0">Nenhum fragment. Clique em "+ fragment" para adicionar um termo com tooltip.</p>'),
+              '</div>',
+            '</div>'
+          ].join('');
+        }
+
+        return [
+          // Áudio narrado
+          '<div class="field" style="margin:0">',
+            '<label for="ue-bf-audio_url-' + bid + '">URL do áudio narrado (opcional)</label>',
+            '<input class="field-input" id="ue-bf-audio_url-' + bid + '" value="' + esc(audioUrl) + '" placeholder="https://..." oninput="uePreviewRefresh(' + bid + ')">',
+          '</div>',
+          // Editor de parágrafos
+          '<div style="margin-top:.6rem">',
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem">',
+              '<span class="s-subtitle" style="font-size:.65rem">Parágrafos do bloco</span>',
+              '<button class="btn btn-ghost btn-sm" onclick="ueAddParagraph(' + bid + ')" style="padding:.25rem .6rem">+ Parágrafo</button>',
+            '</div>',
+            '<div id="ue-text-paragraphs-' + bid + '">',
+              (paragraphs.length === 0
+                ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem;margin:0">Nenhum parágrafo ainda. Clique em "+ Parágrafo" para começar.</p>'
+                : paragraphs.map(function(p, pIdx){ return renderParagraphEditor(p, pIdx); }).join('')
+              ),
+            '</div>',
+          '</div>'
+        ].join('');
+      }
       case 'video': return '' +
         row('URL do vídeo', v('video_url','https://...'), 'ue-bf-video_url-'+bid) +
         row('Descrição', t('description','Descrição do vídeo...'), 'ue-bf-description-'+bid);
