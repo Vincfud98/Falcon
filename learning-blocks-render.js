@@ -51,20 +51,79 @@
     return [];
   }
 
-  function _lbEmbedVideo(url){
-    if(!url) return '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-mute);font-family:var(--mono);font-size:.8rem">Sem vídeo</div>';
-    const u = String(url);
-    // YouTube
-    let m = u.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([\w-]{6,})/);
-    if(m){
-      return '<iframe src="https://www.youtube.com/embed/' + attrHtml(m[1]) + '" style="width:100%;height:100%;border:0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>';
+  // Detecta o tipo de fonte de vídeo a partir de uma string que pode ser:
+  // - HTML <iframe …> cru (cole&cola)
+  // - URL do YouTube (watch, youtu.be, embed, shorts)
+  // - URL do Vimeo
+  // - URL do Google Drive (file/d/ID/view ou similar)
+  // - URL do Loom
+  // - URL direta de MP4/WebM/Ogg
+  // - Qualquer outro link http(s) → tenta usar como iframe
+  // Retorna { kind, embed? , url?, html? } ou null se vazio.
+  function _lbDetectVideo(input){
+    if(!input) return null;
+    const s = String(input).trim();
+    if(!s) return null;
+
+    // 1) <iframe> cru → extrai o src (ou usa o HTML inteiro como fallback)
+    if(/<iframe[\s\S]*<\/iframe>/i.test(s) || /^<iframe[\s\S]*\/?>$/i.test(s)){
+      const m = s.match(/src=["']([^"']+)["']/i);
+      if(m) return { kind:'iframe', embed: m[1] };
+      return { kind:'iframe-raw', html: s };
     }
-    // Vimeo
-    m = u.match(/vimeo\.com\/(\d+)/);
-    if(m){
-      return '<iframe src="https://player.vimeo.com/video/' + attrHtml(m[1]) + '" style="width:100%;height:100%;border:0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>';
+
+    // 2) YouTube
+    const ytPatterns = [
+      /youtube\.com\/watch\?(?:[^"'\s&]*&)*v=([\w-]{6,})/,
+      /youtu\.be\/([\w-]{6,})/,
+      /youtube\.com\/embed\/([\w-]{6,})/,
+      /youtube\.com\/shorts\/([\w-]{6,})/,
+      /youtube-nocookie\.com\/embed\/([\w-]{6,})/
+    ];
+    for(let i = 0; i < ytPatterns.length; i++){
+      const m = s.match(ytPatterns[i]);
+      if(m) return { kind:'youtube', embed: 'https://www.youtube.com/embed/' + m[1] };
     }
-    return '<video controls src="' + attrHtml(u) + '" style="width:100%;height:100%;background:#000"></video>';
+
+    // 3) Vimeo
+    const vm = s.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+    if(vm) return { kind:'vimeo', embed: 'https://player.vimeo.com/video/' + vm[1] };
+
+    // 4) Google Drive — preview embedável
+    const gd = s.match(/drive\.google\.com\/file\/d\/([^/?#]+)/);
+    if(gd) return { kind:'gdrive', embed: 'https://drive.google.com/file/d/' + gd[1] + '/preview' };
+
+    // 5) Loom
+    const lm = s.match(/loom\.com\/(?:share|embed)\/([^?/#]+)/);
+    if(lm) return { kind:'loom', embed: 'https://www.loom.com/embed/' + lm[1] };
+
+    // 6) MP4/WebM/Ogg direto
+    if(/\.(mp4|webm|ogv|ogg|m4v|mov)(\?.*)?$/i.test(s)){
+      return { kind:'video', url: s };
+    }
+
+    // 7) URL genérica — tenta usar como iframe direto
+    if(/^https?:\/\//i.test(s)){
+      return { kind:'iframe', embed: s };
+    }
+
+    return null;
+  }
+
+  // Renderiza o player a partir do detect (ou fallback "Sem vídeo")
+  function _lbEmbedVideo(input){
+    const info = _lbDetectVideo(input);
+    if(!info){
+      return '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-mute);font-family:var(--mono);font-size:.8rem">Sem vídeo</div>';
+    }
+    if(info.kind === 'video'){
+      return '<video controls preload="metadata" playsinline src="' + attrHtml(info.url) + '" style="width:100%;height:100%;background:#000"></video>';
+    }
+    if(info.kind === 'iframe-raw'){
+      return info.html;
+    }
+    const allow = 'autoplay; fullscreen; picture-in-picture; encrypted-media; accelerometer; gyroscope';
+    return '<iframe src="' + attrHtml(info.embed) + '" style="width:100%;height:100%;border:0" allow="' + allow + '" allowfullscreen loading="lazy"></iframe>';
   }
 
   /* ─────────── carrossel reutilizável ─────────── */
@@ -119,17 +178,36 @@
           (c.html || '<p style="color:var(--text-mute);font-style:italic">Sem conteúdo.</p>') + '</div>';
       }
       case 'video': {
-        const player = _lbEmbedVideo(c.video_url);
-        const transcript = c.transcript_url
-          ? '<a class="btn btn-ghost btn-sm" href="' + attrHtml(c.transcript_url) + '" target="_blank" rel="noopener" style="margin-top:.8rem;display:inline-flex">⬇ Transcrição</a>'
+        // Schema canônico (Y3): c.url (URL ou <iframe>) + c.presenter + c.description + c.transcription_url
+        // Legacy: c.video_url, c.transcript_url, c.videoFormat, c.duration — convertidos automaticamente.
+        const rawUrl   = c.url || c.video_url || '';
+        const transUrl = c.transcription_url || c.transcript_url || '';
+        const player   = _lbEmbedVideo(rawUrl);
+
+        const titleHtml = block.title ? '<h4 style="font-family:var(--serif);font-size:1.1rem;color:var(--text);margin:0 0 .4rem">' + e(block.title) + '</h4>' : '';
+        const descHtml  = c.description
+          ? '<p style="font-family:var(--sans);font-size:.85rem;color:var(--text-dim);line-height:1.65;margin:0">' + e(c.description) + '</p>'
+          : '<p style="color:var(--text-mute);font-style:italic;font-size:.78rem;margin:0">Sem descrição.</p>';
+        const presenter = c.presenter
+          ? '<div style="margin-top:.7rem;font-family:var(--mono);font-size:.65rem;letter-spacing:.06em;color:var(--text-mute);text-transform:uppercase">apresentado por</div>' +
+            '<div style="font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--text)">' + e(c.presenter) + '</div>'
           : '';
-        return '<div style="display:grid;grid-template-columns:2fr 1fr;gap:1.5rem;align-items:start">' +
-          '<div style="aspect-ratio:16/9;background:var(--bg-elev);border-radius:var(--radius-lg);overflow:hidden">' + player + '</div>' +
-          '<div>' +
-            (c.description ? '<p class="card-body" style="font-size:.9rem;line-height:1.6">' + e(c.description) + '</p>' : '<p class="card-body" style="color:var(--text-mute);font-style:italic;font-size:.85rem">Sem descrição.</p>') +
-            transcript +
-          '</div>' +
-        '</div>';
+        const transHtml = transUrl
+          ? '<a href="' + attrHtml(transUrl) + '" target="_blank" rel="noopener" download style="display:inline-flex;align-items:center;gap:.4rem;margin-top:.7rem;font-family:var(--serif);font-style:italic;color:var(--accent);text-decoration:none;font-size:.82rem">⬇ Baixar transcrição</a>'
+          : '';
+
+        const blockTags = Array.isArray(block.tags) ? block.tags : [];
+        const tagsHtml = blockTags.length
+          ? '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:1rem;padding-top:.6rem;border-top:1px solid var(--accent-border-soft)">' +
+              blockTags.map(function(t){
+                return '<span style="font-family:var(--mono);font-size:.6rem;padding:.15rem .55rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border);letter-spacing:.04em">' + e(t) + '</span>';
+              }).join('') +
+            '</div>'
+          : '';
+        return '<div style="display:grid;grid-template-columns:1.1fr 1fr;gap:1.5rem;align-items:start">' +
+          '<div style="position:relative;aspect-ratio:16/9;background:var(--bg-elev);border:1px solid var(--accent-border-soft);border-radius:var(--radius);overflow:hidden">' + player + '</div>' +
+          '<div>' + titleHtml + descHtml + presenter + transHtml + '</div>' +
+        '</div>' + tagsHtml;
       }
       case 'quiz': {
         // Tipo LEGADO — substituído por objective_questions
@@ -487,6 +565,7 @@
     label:               LearningBlockTypeLabel,
     parseList:           _lbParseList,
     embedVideo:          _lbEmbedVideo,
+    detectVideo:         _lbDetectVideo,
     renderSlideCarousel: renderSlideCarousel
   };
 

@@ -7698,6 +7698,22 @@
   /* Unit Editor — block drag states (only behavioral styles) */
   #unitEditorModal [data-block-card].dragging{ opacity:.4; }
   #unitEditorModal [data-block-card].drag-over{ border-color:var(--accent); }
+
+  /* Tags-field reutilizável (chips + autocomplete) */
+  .ue-tag-chip{
+    display:inline-flex;align-items:center;gap:.3rem;
+    padding:.2rem .55rem;border-radius:999px;
+    background:var(--accent-lo);border:1px solid var(--accent-border);
+    color:var(--accent);font-family:var(--mono);font-size:.65rem;
+    letter-spacing:.04em;
+  }
+  .ue-tag-chip-x{
+    background:transparent;border:0;color:inherit;cursor:pointer;
+    padding:0;line-height:1;font-size:1rem;opacity:.7;
+  }
+  .ue-tag-chip-x:hover{opacity:1;color:var(--red)}
+  .ue-tag-sugg-item:hover{background:var(--accent-lo)}
+  .ue-tag-sugg-item:last-child{border-bottom:0}
   /* Status badge on publish button */
   #uePublishBtn.published{ background:var(--green-lo);color:var(--green);border-color:var(--green) }
   #ueDepublishBtn{ display:none; }
@@ -11986,9 +12002,9 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=21"></script>
+<script src="ubique-shared.js?v=22"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=21"></script>
+<script src="learning-blocks-render.js?v=22"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -41039,7 +41055,7 @@
       });
     }
 
-    const virt = { id: b.id, type: b.type, title: title, content: content, status: status };
+    const virt = { id: b.id, type: b.type, title: title, content: content, status: status, tags: b.tags || [], topics: b.topics || [] };
     const previewEl = document.getElementById('ue-preview-' + bid);
     if(!previewEl) return;
     const inner = (window.LearningBlocks && window.LearningBlocks.render)
@@ -41285,6 +41301,146 @@
     } else {
       alert('Abra a aba Verbetes para editar este termo em profundidade.');
     }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Componente de TAGS com autocomplete (reutilizável)
+  //
+  // Edita `block.tags[]` (campo no nível raiz do unit_block — não em content).
+  // Sugere tags existentes em UbiqueStore.tags conforme o usuário digita.
+  // Cria nova tag se o user pressionar Enter sem selecionar uma existente.
+  //
+  // HTML: ueTagsFieldHTML(bid, currentTags) — retorna a marcação inicial
+  // JS:   ueTagAdd(bid, tagName) / ueTagRemove(bid, idx)
+  // ─────────────────────────────────────────────────────────────────────
+  function ueTagsFieldHTML(bid, currentTags){
+    const tags = Array.isArray(currentTags) ? currentTags : [];
+    const chips = tags.map(function(t, i){
+      return '<span class="ue-tag-chip" data-tag-idx="' + i + '">' +
+        esc(t) +
+        '<button type="button" class="ue-tag-chip-x" onclick="ueTagRemove(' + bid + ',' + i + ')" title="Remover">×</button>' +
+      '</span>';
+    }).join('');
+    return '<div class="ue-tags-field" id="ue-tags-field-' + bid + '" style="display:flex;flex-direction:column;gap:.35rem">' +
+        '<div class="ue-tag-chips" id="ue-tag-chips-' + bid + '" style="display:flex;flex-wrap:wrap;gap:.3rem;min-height:1.5rem">' + chips + '</div>' +
+        '<div style="position:relative">' +
+          '<input class="field-input ue-tag-input" id="ue-tag-input-' + bid + '" placeholder="Digite e pressione Enter (ou clique numa sugestão)" autocomplete="off" ' +
+              'oninput="ueTagInputChanged(' + bid + ', this.value)" ' +
+              'onkeydown="ueTagInputKeydown(event, ' + bid + ')" ' +
+              'onblur="ueTagInputBlur(' + bid + ')" ' +
+              'style="font-size:.78rem">' +
+          '<div class="ue-tag-suggestions" id="ue-tag-sugg-' + bid + '" style="display:none;position:absolute;left:0;right:0;top:100%;margin-top:.2rem;background:var(--bg-card);border:1px solid var(--accent-border);border-radius:var(--radius);box-shadow:0 4px 16px rgba(0,0,0,.4);z-index:50;max-height:180px;overflow-y:auto"></div>' +
+        '</div>' +
+    '</div>';
+  }
+  window.ueTagsFieldHTML = ueTagsFieldHTML;
+
+  function _ueGetAllTags(){
+    if(!(window.UbiqueStore && UbiqueStore.tags && UbiqueStore.tags.list)) return [];
+    return (UbiqueStore.tags.list() || []).map(function(t){ return t.name || t.id || ''; }).filter(Boolean);
+  }
+
+  function _ueRefreshTagChips(bid){
+    const b = _ueGetBlock(bid); if(!b) return;
+    const tags = Array.isArray(b.tags) ? b.tags : [];
+    const wrap = document.getElementById('ue-tag-chips-' + bid);
+    if(!wrap) return;
+    wrap.innerHTML = tags.map(function(t, i){
+      return '<span class="ue-tag-chip" data-tag-idx="' + i + '">' +
+        esc(t) +
+        '<button type="button" class="ue-tag-chip-x" onclick="ueTagRemove(' + bid + ',' + i + ')" title="Remover">×</button>' +
+      '</span>';
+    }).join('');
+  }
+
+  window.ueTagAdd = function(bid, tagName){
+    const name = String(tagName || '').trim();
+    if(!name) return;
+    const b = _ueGetBlock(bid); if(!b) return;
+    if(!Array.isArray(b.tags)) b.tags = [];
+    if(b.tags.some(function(t){ return String(t).toLowerCase() === name.toLowerCase(); })) return;
+    b.tags.push(name);
+    // Salva no store (campo root, não content)
+    if(window.UbiqueStore) UbiqueStore.unit_blocks.update(bid, { tags: b.tags });
+    // Espelha em ueAllBlocksCache
+    const allIdx = ueAllBlocksCache.findIndex(function(x){ return x.id === bid; });
+    if(allIdx >= 0) ueAllBlocksCache[allIdx].tags = b.tags;
+    // Cria a tag em UbiqueStore.tags se não existir (para virar sugestão pros próximos blocos)
+    if(window.UbiqueStore && UbiqueStore.tags){
+      const exists = UbiqueStore.tags.list().some(function(t){ return (t.name || t.id) === name; });
+      if(!exists) UbiqueStore.tags.add({ name: name, id: name.toLowerCase().replace(/\s+/g, '-') });
+    }
+    _ueRefreshTagChips(bid);
+    const input = document.getElementById('ue-tag-input-' + bid);
+    if(input){ input.value = ''; ueTagInputChanged(bid, ''); }
+    if(typeof uePreviewRefresh === 'function') uePreviewRefresh(bid);
+  };
+
+  window.ueTagRemove = function(bid, idx){
+    const b = _ueGetBlock(bid); if(!b || !Array.isArray(b.tags)) return;
+    b.tags.splice(idx, 1);
+    if(window.UbiqueStore) UbiqueStore.unit_blocks.update(bid, { tags: b.tags });
+    const allIdx = ueAllBlocksCache.findIndex(function(x){ return x.id === bid; });
+    if(allIdx >= 0) ueAllBlocksCache[allIdx].tags = b.tags;
+    _ueRefreshTagChips(bid);
+    if(typeof uePreviewRefresh === 'function') uePreviewRefresh(bid);
+  };
+
+  window.ueTagInputChanged = function(bid, value){
+    const v = String(value || '').trim().toLowerCase();
+    const sugg = document.getElementById('ue-tag-sugg-' + bid);
+    if(!sugg) return;
+    const b = _ueGetBlock(bid);
+    const currentLower = b && Array.isArray(b.tags) ? b.tags.map(function(t){ return String(t).toLowerCase(); }) : [];
+    let candidates = _ueGetAllTags()
+      .filter(function(name){
+        return currentLower.indexOf(name.toLowerCase()) < 0
+            && (!v || name.toLowerCase().indexOf(v) >= 0);
+      })
+      .slice(0, 8);
+    if(v && candidates.indexOf(value.trim()) < 0 && _ueGetAllTags().indexOf(value.trim()) < 0){
+      // Mostra também a opção de criar nova tag
+      candidates = [{ __new: true, name: value.trim() }].concat(candidates.map(function(n){ return { name: n }; }));
+    } else {
+      candidates = candidates.map(function(n){ return { name: n }; });
+    }
+    if(!candidates.length){ sugg.style.display = 'none'; sugg.innerHTML = ''; return; }
+    sugg.innerHTML = candidates.map(function(c){
+      const isNew = c.__new;
+      const label = isNew ? ('+ criar "' + c.name + '"') : c.name;
+      return '<div class="ue-tag-sugg-item" data-tag-name="' + esc(c.name) + '" onmousedown="event.preventDefault();ueTagAdd(' + bid + ', this.getAttribute(\'data-tag-name\'))" style="padding:.45rem .7rem;font-size:.78rem;cursor:pointer;border-bottom:1px solid var(--accent-border-soft);color:' + (isNew ? 'var(--accent)' : 'var(--text)') + ';font-style:' + (isNew ? 'italic' : 'normal') + '">' + esc(label) + '</div>';
+    }).join('');
+    sugg.style.display = '';
+  };
+
+  window.ueTagInputKeydown = function(e, bid){
+    if(e.key === 'Enter' || e.key === ','){
+      e.preventDefault();
+      const input = document.getElementById('ue-tag-input-' + bid);
+      if(input && input.value.trim()){
+        ueTagAdd(bid, input.value.trim());
+      }
+    } else if(e.key === 'Escape'){
+      const sugg = document.getElementById('ue-tag-sugg-' + bid);
+      if(sugg){ sugg.style.display = 'none'; sugg.innerHTML = ''; }
+    } else if(e.key === 'Backspace'){
+      // Backspace com input vazio remove a última tag
+      const input = document.getElementById('ue-tag-input-' + bid);
+      if(input && !input.value){
+        const b = _ueGetBlock(bid);
+        if(b && Array.isArray(b.tags) && b.tags.length){
+          ueTagRemove(bid, b.tags.length - 1);
+        }
+      }
+    }
+  };
+
+  window.ueTagInputBlur = function(bid){
+    // Esconde sugestões com pequeno delay pra permitir o click via mousedown
+    setTimeout(function(){
+      const sugg = document.getElementById('ue-tag-sugg-' + bid);
+      if(sugg){ sugg.style.display = 'none'; sugg.innerHTML = ''; }
+    }, 150);
   };
 
   // ─────────────────────────────────────────────────────────────────────
@@ -41923,18 +42079,42 @@
           '</div>'
         ].join('');
       }
-      // ───────── VIDEO ─────────
+      // ───────── VIDEO (Y3) ─────────
+      // Schema simplificado: 1 campo único pra URL ou <iframe> cru.
+      // Auto-detecta YouTube / Vimeo / Drive / Loom / MP4 via
+      // LearningBlocks.detectVideo. Sem campos de formato/duração.
       case 'video': {
+        const url = content.url || content.video_url || '';
+        const trans = content.transcription_url || content.transcript_url || '';
+        const detected = (window.LearningBlocks && window.LearningBlocks.detectVideo)
+          ? window.LearningBlocks.detectVideo(url) : null;
+        const detectedLabel = detected
+          ? '<span style="font-family:var(--mono);font-size:.62rem;color:var(--accent);background:var(--accent-lo);padding:.1rem .45rem;border-radius:999px;border:1px solid var(--accent-border)">' + esc(detected.kind) + ' ✓</span>'
+          : (url ? '<span style="font-family:var(--mono);font-size:.62rem;color:var(--red);background:rgba(229,115,115,.12);padding:.1rem .45rem;border-radius:999px;border:1px solid rgba(229,115,115,.4)">não reconhecido</span>' : '');
+
+        const b = _ueGetBlock(bid);
+        const currentTags = b && Array.isArray(b.tags) ? b.tags : [];
+
         return [
-          row('URL do vídeo', v('url','https://... ou ID do YouTube'), 'ue-bf-url-'+bid),
-          row('Apresentador', v('presenter','Nome de quem apresenta'), 'ue-bf-presenter-'+bid),
-          row('Duração', v('duration','MM:SS ou HH:MM'), 'ue-bf-duration-'+bid),
-          row('Formato', '<select class="field-input" id="ue-bf-videoFormat-' + bid + '"' + oninput + '>' +
-            ['', 'mp4', 'youtube', 'vimeo', 'embed'].map(function(o){
-              return '<option value="' + o + '"' + ((content.videoFormat||'') === o ? ' selected' : '') + '>' + (o || 'auto') + '</option>';
-            }).join('') + '</select>', 'ue-bf-videoFormat-'+bid),
-          row('URL da transcrição', v('transcription_url','https://...'), 'ue-bf-transcription_url-'+bid),
-          row('Descrição', t('description','Descrição do vídeo...'), 'ue-bf-description-'+bid)
+          // URL ou iframe
+          '<div class="field" style="margin:0"><label for="ue-bf-url-' + bid + '" style="display:flex;align-items:center;gap:.5rem">URL do vídeo ou código &lt;iframe&gt; ' + detectedLabel + '</label>' +
+            '<textarea class="field-input" id="ue-bf-url-' + bid + '" rows="2" placeholder="https://www.youtube.com/watch?v=... ou https://vimeo.com/... ou <iframe …></iframe>"' + oninput + ' style="font-family:var(--mono);font-size:.78rem">' + esc(url) + '</textarea>' +
+            '<span class="s-body" style="font-size:.65rem;color:var(--text-mute);display:block;margin-top:.2rem">Aceita: YouTube, Vimeo, Google Drive, Loom, MP4 direto, ou <code>&lt;iframe&gt;</code> de qualquer player.</span>' +
+          '</div>',
+
+          // Apresentador (professor)
+          row('Professor / Apresentador (opcional)', v('presenter','Nome de quem apresenta'), 'ue-bf-presenter-'+bid),
+
+          // Descrição (opcional)
+          row('Descrição (opcional)', t('description','Resumo curto do vídeo, contexto, objetivos…'), 'ue-bf-description-'+bid),
+
+          // Transcrição PDF (URL)
+          row('URL da transcrição (PDF — opcional)', v('transcription_url','https://...'), 'ue-bf-transcription_url-'+bid),
+
+          // Tags com autocomplete
+          '<div class="field" style="margin:0"><label>Tags</label>' +
+            ueTagsFieldHTML(bid, currentTags) +
+          '</div>'
         ].join('');
       }
 
@@ -42576,6 +42756,8 @@
     }
 
     const updates = { title: title, status: status, content: content };
+    // Y3: tags vivem em b.tags (root do bloco) — preserva ao salvar
+    if(Array.isArray(b.tags)) updates.tags = b.tags;
     if(window.UbiqueStore){
       UbiqueStore.unit_blocks.update(bid, updates);
     }
