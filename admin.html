@@ -12036,9 +12036,9 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=30"></script>
+<script src="ubique-shared.js?v=31"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=30"></script>
+<script src="learning-blocks-render.js?v=31"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -41164,6 +41164,89 @@
     _ueSaveStructured(bid);
   };
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Y3 — Auto-detect de verbetes em parágrafos do bloco text
+  //
+  // Quando o admin termina de digitar/colar o `content` HTML de um
+  // parágrafo (no blur), procura por menções a verbetes existentes
+  // (UbiqueStore.verbetes) e adiciona automaticamente como fragments
+  // do parágrafo. Evita duplicar — só adiciona se o fragment ainda não
+  // está no parágrafo.
+  //
+  // Conecta o verbete pelo `id` (que é estável) — visualmente o fragment
+  // mostra que veio do banco e o admin pode remover só desse parágrafo
+  // (sem apagar o verbete da plataforma).
+  // ─────────────────────────────────────────────────────────────────────
+  function _normalizeForMatch(s){
+    return String(s || '').toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .trim();
+  }
+
+  window.ueAutoDetectVerbetes = function(bid, pIdx){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const p = (b.content.paragraphs || [])[pIdx]; if(!p) return;
+    if(!window.UbiqueStore || !UbiqueStore.verbetes) return;
+
+    const verbetes = UbiqueStore.verbetes.list() || [];
+    if(!verbetes.length) return;
+
+    // Extrai texto puro do HTML do parágrafo
+    const plainText = String(p.content || '').replace(/<[^>]+>/g, ' ');
+    const plainLower = _normalizeForMatch(plainText);
+    if(!plainLower) return;
+
+    // Indexa fragments existentes (por id E por slug do term, pra evitar dup)
+    if(!Array.isArray(p.fragments)) p.fragments = [];
+    const existingIds = new Set(p.fragments.map(function(f){ return f && f.id; }));
+    const existingTexts = new Set(p.fragments.map(function(f){
+      return f && f.text ? _normalizeForMatch(f.text) : null;
+    }).filter(Boolean));
+
+    let added = 0;
+    const matchedTerms = [];
+
+    verbetes.forEach(function(v){
+      if(!v || !v.term) return;
+      // Skip se já está no parágrafo (por id ou por texto)
+      if(existingIds.has(v.id)) return;
+      if(existingTexts.has(_normalizeForMatch(v.term))) return;
+      // Procura ocorrência (case/diacritic insensitive)
+      const termNorm = _normalizeForMatch(v.term);
+      if(!termNorm) return;
+      // Boundary check: precisa estar como palavra (não dentro de outra palavra)
+      const escaped = termNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const rx = new RegExp('(^|[^\\p{L}])' + escaped + '(?=[^\\p{L}]|$)', 'u');
+      if(rx.test(plainLower)){
+        // Encontra a forma EXATA no texto original (com diacríticos/casing)
+        // pra preservar a renderização
+        let displayText = v.term;
+        const fullLowerOriginal = plainText.toLowerCase();
+        const termLowerOriginal = v.term.toLowerCase();
+        const idx = fullLowerOriginal.indexOf(termLowerOriginal);
+        if(idx >= 0) displayText = plainText.substring(idx, idx + v.term.length);
+
+        p.fragments.push({
+          id: v.id,
+          text: displayText,
+          _auto: true   // marca como auto-detectado (renderiza com badge "auto")
+        });
+        existingIds.add(v.id);
+        existingTexts.add(termNorm);
+        added++;
+        matchedTerms.push(displayText);
+      }
+    });
+
+    if(added > 0){
+      _ueSaveStructured(bid);
+      _ueRerenderBlockBody(bid);
+      if(typeof window.ueToast === 'function'){
+        window.ueToast(added + ' verbete' + (added > 1 ? 's' : '') + ' conectado' + (added > 1 ? 's' : '') + ' automaticamente: ' + matchedTerms.slice(0, 3).join(', ') + (matchedTerms.length > 3 ? '…' : ''), 'success');
+      }
+    }
+  };
+
   window.ueAddFragment = function(bid, pIdx){
     const b = _ueGetBlock(bid); if(!b || !b.content) return;
     const p = (b.content.paragraphs || [])[pIdx]; if(!p) return;
@@ -42664,17 +42747,30 @@
           const pid   = p.id || ('p' + (pIdx + 1));
           const frags = Array.isArray(p.fragments) ? p.fragments : [];
           const fragsHTML = frags.map(function(f, fIdx){
-            const imgsCount = (f.images || []).length;
-            const relCount  = (f.relatedTerms || []).length;
+            // Y3 — enriquece com dados do verbete (se houver) pra mostrar contagens
+            // mesmo em fragments auto-detectados (que só têm id+text no bloco).
+            let vbData = null;
+            if(f && f.id && window.UbiqueStore && UbiqueStore.verbetes){
+              vbData = UbiqueStore.verbetes.get(f.id) || null;
+            }
+            const effImgs = (f.images && f.images.length) ? f.images : (vbData && vbData.images || []);
+            const effRel  = (f.relatedTerms && f.relatedTerms.length) ? f.relatedTerms : (vbData && vbData.related_term_ids || []);
+            const imgsCount = (effImgs || []).length;
+            const relCount  = (effRel || []).length;
+            // Badge "auto" se o fragment foi conectado automaticamente via match no banco de verbetes.
+            const autoBadge = f._auto
+              ? '<span style="font-family:var(--mono);font-size:.55rem;padding:.05rem .35rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border);letter-spacing:.04em" title="Conectado automaticamente do banco de verbetes">auto</span>'
+              : '';
             return [
-              '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:.4rem;align-items:start;padding:.45rem .55rem;background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius);margin-bottom:.35rem">',
+              '<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:.4rem;align-items:start;padding:.45rem .55rem;background:var(--bg-card);border:1px solid ' + (f._auto ? 'var(--accent-border)' : 'var(--accent-border-soft)') + ';border-radius:var(--radius);margin-bottom:.35rem">',
                 '<input class="field-input" value="' + esc(f.text || '') + '" placeholder="termo no texto (ex: Pedro Álvares Cabral)" oninput="ueUpdateFragment(' + bid + ',' + pIdx + ',' + fIdx + ',\'text\',this.value)" style="font-size:.78rem">',
                 '<input class="field-input" value="' + esc(f.id || '') + '" placeholder="id (ex: f-cabral)" oninput="ueUpdateFragment(' + bid + ',' + pIdx + ',' + fIdx + ',\'id\',this.value)" style="font-size:.78rem;font-family:var(--mono)">',
                 '<div style="display:flex;gap:.2rem;align-items:center;flex-shrink:0">',
+                  autoBadge,
                   '<button class="btn btn-ghost btn-sm" onclick="ueOpenFragmentEditor(' + bid + ',' + pIdx + ',' + fIdx + ')" title="Editar verbete completo" style="padding:.2rem .4rem;font-size:.7rem">📖</button>',
                   (imgsCount ? '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)" title="' + imgsCount + ' imagens">🖼' + imgsCount + '</span>' : ''),
                   (relCount  ? '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)" title="' + relCount + ' relacionados">🔗' + relCount + '</span>' : ''),
-                  '<button class="btn btn-ghost btn-sm" onclick="ueRemoveFragment(' + bid + ',' + pIdx + ',' + fIdx + ')" style="color:var(--red);padding:.2rem .4rem;font-size:.7rem">×</button>',
+                  '<button class="btn btn-ghost btn-sm" onclick="ueRemoveFragment(' + bid + ',' + pIdx + ',' + fIdx + ')" style="color:var(--red);padding:.2rem .4rem;font-size:.7rem" title="' + (f._auto ? 'Remover deste parágrafo (mantém no banco de verbetes)' : 'Remover fragment') + '">×</button>',
                 '</div>',
               '</div>'
             ].join('');
@@ -42694,7 +42790,7 @@
               '</div>',
               '<div class="field" style="margin:0 0 .5rem">',
                 '<label style="font-size:.6rem">Conteúdo HTML</label>',
-                '<textarea class="field-input" rows="5" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'content\',this.value)" placeholder="<p>Em <strong>9 de março de 1500</strong>...</p>" style="font-family:var(--mono);font-size:.78rem;line-height:1.5">' + esc(p.content || '') + '</textarea>',
+                '<textarea class="field-input" rows="5" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'content\',this.value)" onchange="ueAutoDetectVerbetes(' + bid + ',' + pIdx + ')" placeholder="<p>Em <strong>9 de março de 1500</strong>...</p>" style="font-family:var(--mono);font-size:.78rem;line-height:1.5">' + esc(p.content || '') + '</textarea>',
               '</div>',
               '<div style="margin-top:.6rem;border-top:1px solid var(--accent-border-soft);padding-top:.5rem">',
                 '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem">',
