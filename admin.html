@@ -12002,9 +12002,9 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=24"></script>
+<script src="ubique-shared.js?v=25"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=24"></script>
+<script src="learning-blocks-render.js?v=25"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -41901,6 +41901,271 @@
   };
 
   // ─────────────────────────────────────────────────────────────────────
+  // Y3 Fase C — Importador JSON INLINE (substitui o modal antigo qiOpen)
+  //
+  // Aceita schemas:
+  //   1. Schema canônico Y3 (preferido):
+  //      { groups: [{ id, title, description, origin, reference_text,
+  //                   reference_image, questions: [...] }],
+  //        ungrouped: [...] }
+  //   2. Array flat de questões no topo: [{ ...questão }]
+  //      → auto-agrupado por origin (questões com mesmo grupo na mesma
+  //      prova ficam juntas; sem grupo vão pra ungrouped)
+  //   3. Schema legado (compatibilidade com o importer antigo):
+  //      raw_id → origin
+  //      modality → type
+  //      context → reference_text
+  //      image_url → reference_image
+  //      answer_correct → correct
+  //
+  // Após importar, MERGE com conteúdo existente (não substitui):
+  //   - Se já existe um grupo com mesma origem do grupo, as questões vão
+  //     pra dentro dele
+  //   - Senão, cria um grupo novo
+  //   - Questões sem grupo vão pra content.ungrouped[]
+  // ─────────────────────────────────────────────────────────────────────
+
+  // Converte questão de schema legado pro novo (mantém retrocompat)
+  function _ueOqNormalizeImportedQuestion(raw){
+    if(!raw || typeof raw !== 'object') return null;
+    const q = {};
+    // Tipo
+    const modality = raw.type || raw.modality || 'true_false';
+    q.type = (modality === 'multiple_choice') ? 'multiple_choice' : 'true_false';
+    // Origin (raw_id antigo OU origin novo)
+    let originSrc = raw.origin || raw.raw_id || '';
+    originSrc = String(originSrc).trim();
+    // Se veio sem colchetes/sem #, tenta normalizar
+    if(originSrc && !/^\s*\[/.test(originSrc) && !/^\s*#/.test(originSrc)){
+      // ex: "15-2/2023" → "[#15-2/2023]"
+      if(/^\s*(?:\d+-)?\d+\/\d+\s*$/.test(originSrc)){
+        originSrc = '[#' + originSrc.trim() + ']';
+      }
+    } else if(originSrc && /^\s*#/.test(originSrc)){
+      // ex: "#15-2/2023" → "[#15-2/2023]"
+      originSrc = '[' + originSrc.trim() + ']';
+    }
+    q.origin = originSrc;
+    // Reference (context/image_url legado)
+    q.reference_text  = raw.reference_text  || raw.context   || raw.support_text || '';
+    q.reference_image = raw.reference_image || raw.image_url || raw.image        || '';
+    // Statement
+    q.statement = raw.statement || raw.prompt || '';
+    // Gabarito
+    if(q.type === 'true_false'){
+      if(typeof raw.correct === 'boolean')          q.correct = raw.correct;
+      else if(typeof raw.answer_correct === 'boolean') q.correct = raw.answer_correct;
+      else if(raw.correct === 'true' || raw.correct === 'C' || raw.correct === 'Certo')  q.correct = true;
+      else if(raw.correct === 'false'|| raw.correct === 'E' || raw.correct === 'Errado') q.correct = false;
+      else q.correct = true;
+    } else {
+      const opts = Array.isArray(raw.options) ? raw.options : [];
+      q.options = opts.map(function(o, i){
+        return {
+          label:   String(o.label || String.fromCharCode(65 + i)),
+          text:    String(o.text || o.value || ''),
+          correct: !!o.correct
+        };
+      });
+      // Garante pelo menos uma opção correta (se não tiver, marca a primeira)
+      if(!q.options.some(function(o){ return o.correct; }) && q.options.length){
+        q.options[0].correct = true;
+      }
+    }
+    // Comentário do gabarito
+    q.comment = raw.comment || raw.comments || raw.recommendation || '';
+    // Tags
+    q.tags = Array.isArray(raw.tags) ? raw.tags.map(function(t){ return String(t).trim(); }).filter(Boolean) : [];
+    // Stats (mockadas — preserva se vieram)
+    q.stats = raw.stats && typeof raw.stats === 'object'
+      ? raw.stats
+      : { correct_pct: 0, wrong_pct: 0, guess_pct: 0 };
+    // ID interno
+    q.id = raw.id || ('q-' + Date.now() + '-' + Math.floor(Math.random() * 9000));
+    return q;
+  }
+
+  // Normaliza um grupo importado (top-level groups[]) → schema interno
+  function _ueOqNormalizeImportedGroup(raw){
+    if(!raw || typeof raw !== 'object') return null;
+    const g = {
+      id:              raw.id || ('g-' + Date.now() + '-' + Math.floor(Math.random() * 9000)),
+      title:           raw.title || raw.enunciado || '',
+      description:     raw.description || '',
+      origin:          raw.origin || raw.raw_id || '',
+      reference_text:  raw.reference_text  || (raw.reference && raw.reference.text && raw.reference.text.body) || '',
+      reference_image: raw.reference_image || (raw.reference && raw.reference.media && raw.reference.media.url) || '',
+      questions:       []
+    };
+    // Normaliza origin com colchetes se faltar
+    if(g.origin && !/^\s*\[/.test(g.origin) && /^\s*#?\s*\d/.test(g.origin)){
+      g.origin = '[' + g.origin.replace(/^\s*#?\s*/, '#').trim() + ']';
+    }
+    const rawQs = Array.isArray(raw.questions) ? raw.questions
+                 : Array.isArray(raw.items)    ? raw.items
+                 : [];
+    g.questions = rawQs.map(_ueOqNormalizeImportedQuestion).filter(Boolean);
+    return g;
+  }
+
+  // Analisa o JSON e retorna { groups: [...], ungrouped: [...] } já no schema interno.
+  // Aceita 3 formatos de entrada (ver comentário acima).
+  function _ueOqParseImportJSON(jsonString){
+    let parsed;
+    try{ parsed = JSON.parse(jsonString); }
+    catch(e){ throw new Error('JSON inválido: ' + e.message); }
+    const result = { groups: [], ungrouped: [] };
+    // Caso 1: schema canônico { groups: [...], ungrouped: [...] }
+    if(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && (Array.isArray(parsed.groups) || Array.isArray(parsed.ungrouped))){
+      if(Array.isArray(parsed.groups)){
+        result.groups = parsed.groups.map(_ueOqNormalizeImportedGroup).filter(Boolean);
+      }
+      if(Array.isArray(parsed.ungrouped)){
+        result.ungrouped = parsed.ungrouped.map(_ueOqNormalizeImportedQuestion).filter(Boolean);
+      }
+      return result;
+    }
+    // Caso 2: array flat de questões → auto-agrupa por groupOrigin
+    let flatQuestions = null;
+    if(Array.isArray(parsed)){
+      flatQuestions = parsed;
+    } else if(parsed && Array.isArray(parsed.questions)){
+      flatQuestions = parsed.questions;
+    }
+    if(flatQuestions){
+      const LB = window.LearningBlocks || {};
+      const groupBuckets = {};   // groupOrigin → { origin, questions:[] }
+      flatQuestions.map(_ueOqNormalizeImportedQuestion).filter(Boolean).forEach(function(q){
+        const parsedOrigin = LB.parseQuestionOrigin ? LB.parseQuestionOrigin(q.origin) : null;
+        const groupOrigin  = parsedOrigin && LB.deriveGroupOrigin ? LB.deriveGroupOrigin(parsedOrigin) : null;
+        if(groupOrigin){
+          if(!groupBuckets[groupOrigin]){
+            groupBuckets[groupOrigin] = {
+              id: 'g-import-' + Date.now() + '-' + Object.keys(groupBuckets).length,
+              title: '',
+              description: '',
+              origin: groupOrigin,
+              reference_text: '',
+              reference_image: '',
+              questions: []
+            };
+          }
+          groupBuckets[groupOrigin].questions.push(q);
+        } else {
+          result.ungrouped.push(q);
+        }
+      });
+      result.groups = Object.keys(groupBuckets).map(function(k){ return groupBuckets[k]; });
+      return result;
+    }
+    throw new Error('JSON precisa ter "groups":[...], "ungrouped":[...] OU ser um array de questões.');
+  }
+
+  // Mescla resultado parseado no content do bloco
+  function _ueOqMergeImported(bid, importedResult){
+    const b = _ueGetBlock(bid); if(!b) return 0;
+    if(!b.content) b.content = {};
+    if(!Array.isArray(b.content.groups))    b.content.groups    = [];
+    if(!Array.isArray(b.content.ungrouped)) b.content.ungrouped = [];
+
+    let totalAdded = 0;
+
+    // Mescla cada grupo importado
+    importedResult.groups.forEach(function(impGroup){
+      // Procura grupo existente com mesma origem
+      let target = null;
+      if(impGroup.origin){
+        target = b.content.groups.find(function(g){
+          return g.origin && g.origin.trim() === impGroup.origin.trim();
+        });
+      }
+      if(target){
+        // Mescla campos vazios do alvo com o importado (não sobrescreve)
+        if(!target.title           && impGroup.title)           target.title = impGroup.title;
+        if(!target.description     && impGroup.description)     target.description = impGroup.description;
+        if(!target.reference_text  && impGroup.reference_text)  target.reference_text = impGroup.reference_text;
+        if(!target.reference_image && impGroup.reference_image) target.reference_image = impGroup.reference_image;
+        if(!Array.isArray(target.questions)) target.questions = [];
+        impGroup.questions.forEach(function(q){ target.questions.push(q); totalAdded++; });
+      } else {
+        // Cria grupo novo
+        if(!impGroup.title) impGroup.title = impGroup.origin || 'Grupo importado';
+        b.content.groups.push(impGroup);
+        totalAdded += impGroup.questions.length;
+      }
+    });
+
+    // Mescla ungrouped
+    importedResult.ungrouped.forEach(function(q){
+      b.content.ungrouped.push(q);
+      totalAdded++;
+    });
+
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+    return totalAdded;
+  }
+
+  // Toggle do painel de importação inline
+  window.ueOqImportToggle = function(bid){
+    const panel = document.getElementById('ue-oq-import-' + bid);
+    if(!panel) return;
+    const isHidden = panel.style.display === 'none' || !panel.style.display;
+    panel.style.display = isHidden ? 'block' : 'none';
+    if(isHidden){
+      const ta = document.getElementById('ue-oq-import-json-' + bid);
+      if(ta) setTimeout(function(){ ta.focus(); }, 50);
+    }
+  };
+
+  // Pré-visualiza o JSON (sem persistir): conta grupos/questões
+  window.ueOqImportPreview = function(bid){
+    const ta = document.getElementById('ue-oq-import-json-' + bid);
+    const out = document.getElementById('ue-oq-import-result-' + bid);
+    if(!ta || !out) return;
+    out.style.display = 'block';
+    try{
+      const parsed = _ueOqParseImportJSON(ta.value);
+      const totalGroups = parsed.groups.length;
+      const totalQinGroups = parsed.groups.reduce(function(s, g){ return s + g.questions.length; }, 0);
+      const totalUng = parsed.ungrouped.length;
+      out.style.borderColor = 'var(--accent)';
+      out.style.color = 'var(--text)';
+      out.innerHTML = '<strong style="color:var(--accent)">✓ JSON válido.</strong><br>' +
+        '<span style="font-size:.78rem">Pronto pra importar: <strong>' + totalGroups + '</strong> grupo' + (totalGroups !== 1 ? 's' : '') +
+        ' com <strong>' + totalQinGroups + '</strong> questão' + (totalQinGroups !== 1 ? 'ões' : '') +
+        ' + <strong>' + totalUng + '</strong> avulsa' + (totalUng !== 1 ? 's' : '') + '.</span>';
+    }catch(e){
+      out.style.borderColor = 'var(--red)';
+      out.style.color = 'var(--red)';
+      out.innerHTML = '<strong>⚠ ' + esc(e.message) + '</strong>';
+    }
+  };
+
+  // Importa de fato (mescla no content)
+  window.ueOqImportApply = function(bid){
+    const ta = document.getElementById('ue-oq-import-json-' + bid);
+    if(!ta) return;
+    let parsed;
+    try{ parsed = _ueOqParseImportJSON(ta.value); }
+    catch(e){
+      if(typeof window.ueToast === 'function') window.ueToast(e.message, 'error');
+      else alert(e.message);
+      return;
+    }
+    const totalAdded = _ueOqMergeImported(bid, parsed);
+    if(typeof window.ueToast === 'function'){
+      window.ueToast(totalAdded + ' questão' + (totalAdded !== 1 ? 'ões' : '') + ' importada' + (totalAdded !== 1 ? 's' : '') + ' no bloco', 'success');
+    }
+    // Fecha o painel e limpa a textarea
+    const panel = document.getElementById('ue-oq-import-' + bid);
+    if(panel) panel.style.display = 'none';
+    ta.value = '';
+    const out = document.getElementById('ue-oq-import-result-' + bid);
+    if(out){ out.style.display = 'none'; out.innerHTML = ''; }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
   // ueOqOpenImporter — abre o modal "Importar questões" e injeta um
   // contexto que faz as questões importadas serem adicionadas DIRETO no
   // content.groups do bloco em vez de criar registros em UbiqueStore.questions.
@@ -42370,14 +42635,40 @@
           ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem;margin:1rem 0;text-align:center">Nenhum grupo nem questão avulsa ainda. Comece criando um grupo ou adicionando uma questão avulsa.</p>'
           : '';
 
+        // Painel inline de importação JSON (toggle via ueOqImportToggle)
+        const importPanelHTML =
+          '<div id="ue-oq-import-' + bid + '" style="display:none;border:1px solid var(--accent-border);border-radius:var(--radius);padding:.8rem 1rem;background:var(--bg-card);margin-bottom:.8rem">' +
+            '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem">' +
+              '<span class="card-label" style="background:var(--accent-lo);color:var(--accent);padding:.15rem .55rem;border-radius:999px;font-size:.65rem;border:1px solid var(--accent-border)">📥 Importar JSON</span>' +
+              '<span class="s-body" style="font-size:.7rem;color:var(--text-mute);flex:1">Cole o JSON, pré-visualize e importe.</span>' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueOqImportToggle(' + bid + ')" style="padding:.15rem .5rem;font-size:.7rem" title="Fechar painel">✕</button>' +
+            '</div>' +
+            '<textarea class="field-input" id="ue-oq-import-json-' + bid + '" rows="10" placeholder=\'{ "groups": [ { "origin": "[#15/2023]", "title": "Tordesilhas e Capitanias", "reference_text": "<p>...</p>", "questions": [ { "type": "true_false", "origin": "[#15-2/2023]", "statement": "<p>...</p>", "correct": true, "comment": "<p>...</p>", "tags": ["café"] } ] } ], "ungrouped": [] }\' style="font-family:var(--mono);font-size:.74rem;line-height:1.45;width:100%"></textarea>' +
+            '<details style="margin-top:.4rem">' +
+              '<summary style="cursor:pointer;font-family:var(--mono);font-size:.65rem;letter-spacing:.06em;text-transform:uppercase;color:var(--text-mute)">Formatos aceitos</summary>' +
+              '<div class="s-body" style="font-size:.72rem;color:var(--text-dim);line-height:1.6;margin-top:.4rem">' +
+                '<p style="margin:0 0 .3rem"><strong>1. Schema canônico:</strong> <code>{ groups: [{ origin, title, description, reference_text, reference_image, questions: [...] }], ungrouped: [...] }</code></p>' +
+                '<p style="margin:0 0 .3rem"><strong>2. Array flat:</strong> <code>[{ origin: "[#15-2/2023]", type: "true_false", statement: "...", correct: true, ... }]</code> — auto-agrupa pelo <code>origin</code> (mesmo grupo numa mesma prova ficam juntas).</p>' +
+                '<p style="margin:0"><strong>3. Schema legado:</strong> aceita <code>raw_id, modality, context, image_url, answer_correct</code> (convertidos automaticamente).</p>' +
+              '</div>' +
+            '</details>' +
+            '<div id="ue-oq-import-result-' + bid + '" style="display:none;margin-top:.5rem;padding:.5rem .7rem;border-left:3px solid var(--accent);background:var(--bg-elev);border-radius:var(--radius);font-size:.78rem;line-height:1.5"></div>' +
+            '<div style="display:flex;gap:.5rem;margin-top:.6rem;justify-content:flex-end;flex-wrap:wrap">' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueOqImportPreview(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem">Pré-visualizar</button>' +
+              '<button class="btn btn-sm" onclick="ueOqImportApply(' + bid + ')" style="padding:.3rem .8rem;font-size:.78rem;background:var(--accent);color:var(--bg);border:0;font-weight:500;border-radius:var(--radius);cursor:pointer">Importar</button>' +
+            '</div>' +
+          '</div>';
+
         return '<div style="margin-top:.4rem">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">' +
             '<span class="s-subtitle" style="font-size:.65rem">Grupos e questões avulsas</span>' +
             '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueOqImportToggle(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem">📥 Importar JSON</button>' +
               '<button class="btn btn-ghost btn-sm" onclick="ueOqGroupAdd(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem">+ Grupo</button>' +
               '<button class="btn btn-ghost btn-sm" onclick="ueOqQuestionAdd(' + bid + ',-1,\'true_false\')" style="padding:.3rem .7rem;font-size:.78rem">+ Questão avulsa</button>' +
             '</div>' +
           '</div>' +
+          importPanelHTML +
           groupsHTML + ungroupedHTML + empty +
         '</div>';
       }
