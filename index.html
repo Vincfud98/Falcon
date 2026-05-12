@@ -9,9 +9,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=29"></script>
+<script src="ubique-shared.js?v=30"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=29"></script>
+<script src="learning-blocks-render.js?v=30"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -6644,6 +6644,122 @@ window.COURSES = [
   })();
 
   /**
+   * Y3 Fase G — Migração das questões INLINE pro banco canônico
+   * (UbiqueStore.questions). Idempotente: só toca em questões que ainda
+   * NÃO têm bank_id.
+   *
+   * Pra cada questão inline em unit_blocks[i].content.groups[].questions[]
+   * e content.ungrouped[]:
+   *   1. Calcula bank_id determinístico (cacd-14-1-2014) ou gera ubique-xxx
+   *   2. Se já existe entrada no banco com esse id → não duplica
+   *   3. Senão, cria a entrada no banco com os campos da questão inline
+   *   4. Substitui a questão inline pela referência { bank_id }
+   *   5. Registra a aparição em appears_in
+   *
+   * Edge cases:
+   * - Duas questões inline com mesmo origin em blocos diferentes → ambas
+   *   apontam pro MESMO bank_id (deduplicação automática). A primeira a
+   *   ser migrada "vence" e define o conteúdo no banco; as seguintes só
+   *   viram refs.
+   */
+  (function migrateInlineQuestionsToBankOnce(){
+    try{
+      if(!window.UbiqueStore || !window.QuestionBank || !window.LearningBlocks) return;
+      const LB = window.LearningBlocks;
+
+      let createdInBank = 0;
+      let migratedInline = 0;
+
+      function migrateQuestion(q, ctx){
+        if(!q || typeof q !== 'object') return q;
+        // Já tem bank_id? Nada a fazer
+        if(q.bank_id){
+          // Garante que está registrada em appears_in
+          QuestionBank.registerUsage(q.bank_id, ctx.unit_id, ctx.block_id, ctx.group_id, ctx.position);
+          return q;
+        }
+        // Calcula bank_id
+        let bankId = null;
+        if(q.source_type === 'past_exam' && q.origin){
+          bankId = LB.questionBankIdFromOrigin(q.origin);
+        }
+        if(!bankId){
+          bankId = LB.generateUbiqueQuestionId();
+        }
+        // Cria entrada no banco se ainda não existir
+        if(!UbiqueStore.questions.get(bankId)){
+          QuestionBank.createOrGet({
+            id: bankId,
+            origin: q.origin || '',
+            source_type: q.source_type || (q.origin ? 'past_exam' : 'ubique'),
+            type: q.type || 'true_false',
+            reference_text: q.reference_text || '',
+            reference_image: q.reference_image || '',
+            statement: q.statement || '',
+            correct: q.correct,
+            options: Array.isArray(q.options) ? q.options.map(function(o){
+              return { label: o.label, text: o.text, correct: !!o.correct };
+            }) : undefined,
+            comment: q.comment || '',
+            tags: Array.isArray(q.tags) ? q.tags.slice() : [],
+            stats: q.stats || undefined
+          });
+          createdInBank++;
+        }
+        // Registra aparição
+        QuestionBank.registerUsage(bankId, ctx.unit_id, ctx.block_id, ctx.group_id, ctx.position);
+        // Substitui inline por ref
+        migratedInline++;
+        return { bank_id: bankId };
+      }
+
+      UbiqueStore.unit_blocks.list().forEach(function(b){
+        if(!b || b.type !== 'objective_questions' || !b.content) return;
+        let blockChanged = false;
+
+        if(Array.isArray(b.content.groups)){
+          b.content.groups.forEach(function(g){
+            if(!Array.isArray(g.questions)) return;
+            g.questions = g.questions.map(function(q, qIdx){
+              const newQ = migrateQuestion(q, {
+                unit_id: b.unit_id,
+                block_id: b.id,
+                group_id: g.id,
+                position: qIdx
+              });
+              if(newQ !== q) blockChanged = true;
+              return newQ;
+            });
+          });
+        }
+
+        if(Array.isArray(b.content.ungrouped)){
+          b.content.ungrouped = b.content.ungrouped.map(function(q, qIdx){
+            const newQ = migrateQuestion(q, {
+              unit_id: b.unit_id,
+              block_id: b.id,
+              group_id: null,
+              position: qIdx
+            });
+            if(newQ !== q) blockChanged = true;
+            return newQ;
+          });
+        }
+
+        if(blockChanged){
+          UbiqueStore.unit_blocks.update(b.id, { content: b.content });
+        }
+      });
+
+      if(createdInBank > 0 || migratedInline > 0){
+        console.log('[migrate-qb] ' + createdInBank + ' questão(ões) adicionada(s) ao banco; ' + migratedInline + ' refs (inline → bank_id) — Fase G');
+      }
+    }catch(e){
+      console.warn('[migrate-qb] error:', e);
+    }
+  })();
+
+  /**
    * Y3a — Semeia a biblioteca de verbetes a partir dos fragments embutidos
    * em blocos do tipo `text`. Roda só uma vez (quando verbetes está vazio).
    */
@@ -7563,9 +7679,26 @@ const Store = (function(){
       _persist(); _emit();
     },
     updateQuizAnswer(unitId, blockId, itemId, payload){
-      _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
-      _state.quizAnswers[unitId][blockId] = _state.quizAnswers[unitId][blockId] || {};
-      _state.quizAnswers[unitId][blockId][itemId] = Object.assign({ answeredAt:Date.now() }, payload);
+      // Y3 Fase I — Stats compartilhadas por bank_id.
+      // Se itemId for um bank_id (questão no banco), grava em
+      // _state.quizAnswersByBankId[itemId] — compartilhado entre TODAS as
+      // unidades onde a questão aparece. Mantém _state.quizAnswers[unitId]
+      // como cache local pra retrocompat com renderers que esperam o
+      // formato antigo.
+      const isBankId = typeof itemId === 'string' &&
+        (itemId.startsWith('ubique-') || /^[a-z]+-\d/.test(itemId));
+      if(isBankId){
+        _state.quizAnswersByBankId = _state.quizAnswersByBankId || {};
+        _state.quizAnswersByBankId[itemId] = Object.assign({ answeredAt: Date.now() }, payload);
+        // Cache local também (pra olhar sem precisar de bank_id)
+        _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
+        _state.quizAnswers[unitId][blockId] = _state.quizAnswers[unitId][blockId] || {};
+        _state.quizAnswers[unitId][blockId][itemId] = _state.quizAnswersByBankId[itemId];
+      } else {
+        _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
+        _state.quizAnswers[unitId][blockId] = _state.quizAnswers[unitId][blockId] || {};
+        _state.quizAnswers[unitId][blockId][itemId] = Object.assign({ answeredAt: Date.now() }, payload);
+      }
       _persist(); _emit();
     },
     updateEssay(unitId, blockId, itemId, payload){
@@ -7670,6 +7803,14 @@ const Store = (function(){
       return !!(_state.bookmarks[unitId] && _state.bookmarks[unitId][blockId]);
     },
     getQuizAnswer(unitId, blockId, itemId){
+      // Y3 Fase I — Lookup primeiro no índice global por bank_id
+      // (compartilhado entre unidades). Se não achar lá, fallback no índice
+      // legado por (unitId, blockId, itemId).
+      const isBankId = typeof itemId === 'string' &&
+        (itemId.startsWith('ubique-') || /^[a-z]+-\d/.test(itemId));
+      if(isBankId && _state.quizAnswersByBankId && _state.quizAnswersByBankId[itemId]){
+        return _state.quizAnswersByBankId[itemId];
+      }
       return (((_state.quizAnswers[unitId]||{})[blockId]||{})[itemId]) || null;
     },
     getEssayAnswer(unitId, blockId, itemId){
@@ -8571,9 +8712,22 @@ function quizItemKeyIndex(item, norm){
 // reference_image, statement, correct, options:[{label,text,correct}],
 // comment, tags, stats }) para o formato esperado pelo renderer legacy
 // ({ id, assertion, options:[strings], key, comments, reference,
-// reference_text, reference_image, origin, tags, stats }).
+// reference_text, reference_image, origin, tags, stats, bank_id }).
 function _convertQuestionToItem(q){
   if(!q || typeof q !== 'object') return null;
+  // Y3 Fase H — Se for ref pro banco, resolve via QuestionBank
+  if(q.bank_id && window.QuestionBank){
+    const banked = window.QuestionBank.getById(q.bank_id);
+    if(banked){
+      // Resolve recursivamente o registro do banco; preserva bank_id pro renderer
+      const resolved = _convertQuestionToItem(banked);
+      if(resolved){
+        resolved.bank_id = q.bank_id;
+        resolved.id = q.bank_id;  // usa bank_id como id estável pra stats
+      }
+      return resolved;
+    }
+  }
   // Se já tem assertion (formato antigo) só copia + adiciona campos novos
   if(q.assertion && !q.statement){
     if(!q.origin && q.reference) q.origin = q.reference;
@@ -11377,6 +11531,204 @@ function _legacy_renderLearningBlock_DELETED(block){
     '<div>' + renderLearningBlockBody(block) + '</div>' +
   '</article>';
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Y3 — Banco de Questões (Fase G) — API de alto nível sobre
+ * UbiqueStore.questions. Garante DEDUPLICAÇÃO por bank_id derivado
+ * do origin (ou ubique-<rand> pra questões Ubique sem ID de prova).
+ *
+ * Schema de cada entrada do banco:
+ *   {
+ *     id: string,         // bank_id canônico (chave única do CRUD)
+ *     origin: string,     // ex.: '[#14-1/2014]' (vazio se ubique sem id)
+ *     source_type: 'past_exam' | 'ubique',
+ *     type: 'true_false' | 'multiple_choice',
+ *     reference_text: string,  // HTML
+ *     reference_image: string, // URL
+ *     statement: string,       // HTML
+ *     correct?: boolean,       // se true_false
+ *     options?: [{label,text,correct}],  // se multiple_choice
+ *     comment: string,         // HTML (gabarito comentado)
+ *     tags: string[],          // tags personalizadas (extra: tag auto deriva do origin)
+ *     appears_in: [{unit_id, block_id, group_id?, position}],  // lookup reverso
+ *     created_at, updated_at
+ *   }
+ * ───────────────────────────────────────────────────────────────────────── */
+
+// makeCRUD do UbiqueStore.questions usa idType='number'. Quero string custom.
+// Pra resolver, vou passar id explícito ao chamar add(). O makeCRUD aceita.
+
+const QuestionBank = {
+  // Procura por id canônico
+  getById(bankId){
+    if(!bankId || !window.UbiqueStore) return null;
+    return UbiqueStore.questions.get(bankId);
+  },
+  // Procura por origin (busca linear — banco mock costuma ser pequeno)
+  findByOrigin(origin){
+    if(!origin || !window.UbiqueStore) return null;
+    const LB = window.LearningBlocks;
+    const bankId = LB && LB.questionBankIdFromOrigin ? LB.questionBankIdFromOrigin(origin) : null;
+    if(bankId) return UbiqueStore.questions.get(bankId);
+    // Fallback: varre lista
+    return UbiqueStore.questions.list().find(function(q){
+      return q && q.origin === origin;
+    }) || null;
+  },
+  // Cria nova entrada vazia (ou retorna existente se já tem com mesmo origin)
+  // Retorna o id canônico (string).
+  createOrGet(initialData){
+    if(!window.UbiqueStore) return null;
+    const data = initialData || {};
+    const LB = window.LearningBlocks;
+
+    let bankId = null;
+    if(data.source_type === 'past_exam' && data.origin){
+      bankId = LB && LB.questionBankIdFromOrigin ? LB.questionBankIdFromOrigin(data.origin) : null;
+    }
+    if(!bankId){
+      // Ubique ou sem origin → id aleatório
+      bankId = (LB && LB.generateUbiqueQuestionId) ? LB.generateUbiqueQuestionId() : ('ubique-' + Date.now());
+    }
+
+    const existing = UbiqueStore.questions.get(bankId);
+    if(existing) return bankId;
+
+    const now = new Date().toISOString();
+    const entry = Object.assign({
+      id: bankId,
+      origin: data.origin || '',
+      source_type: data.source_type || (data.origin ? 'past_exam' : 'ubique'),
+      type: data.type || 'true_false',
+      reference_text: data.reference_text || '',
+      reference_image: data.reference_image || '',
+      statement: data.statement || '',
+      comment: data.comment || '',
+      tags: Array.isArray(data.tags) ? data.tags.slice() : [],
+      appears_in: [],
+      stats: { correct_pct: 0, wrong_pct: 0, guess_pct: 0, total_answers: 0 },
+      created_at: now,
+      updated_at: now
+    }, data);
+    entry.id = bankId;  // garante que o id final é o canônico
+    if(entry.type === 'true_false'){
+      entry.correct = (typeof entry.correct === 'boolean') ? entry.correct : true;
+      delete entry.options;
+    } else {
+      if(!Array.isArray(entry.options) || !entry.options.length){
+        entry.options = [
+          { label:'A', text:'', correct:false },
+          { label:'B', text:'', correct:false },
+          { label:'C', text:'', correct:false },
+          { label:'D', text:'', correct:false }
+        ];
+      }
+      delete entry.correct;
+    }
+    UbiqueStore.questions.add(entry);
+    return bankId;
+  },
+  // Atualiza um campo (ou patch parcial) no banco
+  update(bankId, patch){
+    if(!bankId || !window.UbiqueStore) return null;
+    const cur = UbiqueStore.questions.get(bankId);
+    if(!cur) return null;
+    const patched = Object.assign({}, cur, patch || {}, {
+      id: bankId, // não permite trocar id via patch
+      updated_at: new Date().toISOString()
+    });
+    // Se origin mudou E source_type continua past_exam, recalcula bank_id
+    const LB = window.LearningBlocks;
+    if(patch && 'origin' in patch && patched.source_type === 'past_exam'){
+      const newBankId = LB && LB.questionBankIdFromOrigin ? LB.questionBankIdFromOrigin(patched.origin) : null;
+      if(newBankId && newBankId !== bankId){
+        // Migra: remove o antigo, cria com novo id. Atualiza appears_in nos blocos.
+        const existingTarget = UbiqueStore.questions.get(newBankId);
+        if(existingTarget){
+          // Conflito: já existe entrada com esse novo bank_id. Não migra — apenas
+          // mantém os campos no antigo (origin patch). Caller deve preferir merge.
+          UbiqueStore.questions.update(bankId, { origin: patched.origin, updated_at: patched.updated_at });
+          return bankId;
+        }
+        const cloned = Object.assign({}, patched, { id: newBankId });
+        UbiqueStore.questions.remove(bankId);
+        UbiqueStore.questions.add(cloned);
+        // Atualiza refs em todos os unit_blocks
+        QuestionBank._migrateBankIdInBlocks(bankId, newBankId);
+        return newBankId;
+      }
+    }
+    UbiqueStore.questions.update(bankId, patched);
+    return bankId;
+  },
+  // Remove entrada do banco (apaga TODA aparição? — sim, é destrutivo)
+  remove(bankId){
+    if(!bankId || !window.UbiqueStore) return false;
+    return UbiqueStore.questions.remove(bankId);
+  },
+  // Lista tudo
+  list(){
+    if(!window.UbiqueStore) return [];
+    return UbiqueStore.questions.list();
+  },
+  // Registra que essa questão aparece em (unit_id, block_id, group_id, position).
+  // Idempotente: não duplica entradas em appears_in.
+  registerUsage(bankId, unitId, blockId, groupId, position){
+    if(!bankId || !window.UbiqueStore) return;
+    const cur = UbiqueStore.questions.get(bankId);
+    if(!cur) return;
+    const usage = { unit_id: unitId, block_id: blockId, group_id: groupId || null, position: position || 0 };
+    const arr = Array.isArray(cur.appears_in) ? cur.appears_in.slice() : [];
+    const exists = arr.some(function(u){
+      return u.unit_id === usage.unit_id && u.block_id === usage.block_id && (u.group_id || null) === usage.group_id;
+    });
+    if(!exists){
+      arr.push(usage);
+      UbiqueStore.questions.update(bankId, { appears_in: arr });
+    }
+  },
+  // Remove a aparição da questão num bloco específico
+  unregisterUsage(bankId, blockId, groupId){
+    if(!bankId || !window.UbiqueStore) return;
+    const cur = UbiqueStore.questions.get(bankId);
+    if(!cur) return;
+    const arr = (cur.appears_in || []).filter(function(u){
+      return !(u.block_id === blockId && (u.group_id || null) === (groupId || null));
+    });
+    UbiqueStore.questions.update(bankId, { appears_in: arr });
+  },
+  // Conta em quantas unidades distintas a questão aparece
+  countUnits(bankId){
+    if(!bankId || !window.UbiqueStore) return 0;
+    const cur = UbiqueStore.questions.get(bankId);
+    if(!cur || !Array.isArray(cur.appears_in)) return 0;
+    const units = new Set();
+    cur.appears_in.forEach(function(u){ if(u && u.unit_id != null) units.add(u.unit_id); });
+    return units.size;
+  },
+  // Helper interno: troca bank_id antigo por novo em todos os unit_blocks
+  _migrateBankIdInBlocks(oldId, newId){
+    if(!window.UbiqueStore) return;
+    UbiqueStore.unit_blocks.list().forEach(function(b){
+      if(!b || !b.content) return;
+      let changed = false;
+      const updateArr = function(arr){
+        if(!Array.isArray(arr)) return;
+        arr.forEach(function(q){
+          if(q && q.bank_id === oldId){ q.bank_id = newId; changed = true; }
+        });
+      };
+      if(Array.isArray(b.content.groups)){
+        b.content.groups.forEach(function(g){ updateArr(g.questions); });
+      }
+      updateArr(b.content.ungrouped);
+      if(changed){
+        UbiqueStore.unit_blocks.update(b.id, { content: b.content });
+      }
+    });
+  }
+};
+window.QuestionBank = QuestionBank;
 
 /* Locate the corresponding UbiqueStore unit for a legacy mock unit (or vice versa).
  * Aceita três formas de id:

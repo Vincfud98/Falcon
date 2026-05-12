@@ -125,6 +125,38 @@
   }
 
   // ─────────────────────────────────────────────────────────────────────
+  // Y3 — Banco de Questões (Fase G): id canônico
+  //
+  // Cada questão tem um ID único no banco (UbiqueStore.questions). Esse
+  // id é determinístico a partir do origin (pra questões de provas
+  // anteriores) ou aleatório (pra Ubique).
+  //
+  //   '[#14-1/2014]'      → 'cacd-14-1-2014'
+  //   '[#150/2025]'       → 'cacd-150-2025'
+  //   '[pf:#10-3/2024]'   → 'pf-10-3-2024'
+  //   '[ubique:#1/2025]'  → 'ubique-1-2025'
+  //   ubique sem origin   → 'ubique-<rand 8 chars>'
+  //
+  // Função pura — não toca no store, só calcula a string.
+  // ─────────────────────────────────────────────────────────────────────
+  function _lbQuestionBankIdFromOrigin(origin){
+    if(!origin) return null;
+    const parsed = _lbParseQuestionOrigin(origin);
+    if(!parsed) return null;
+    const exam = (parsed.exam || 'CACD').toLowerCase();
+    const groupPart = parsed.hasGroup ? (parsed.group + '-') : '';
+    return exam + '-' + groupPart + parsed.position + '-' + parsed.year;
+  }
+
+  // Gera id aleatório pra questão Ubique sem origin manual
+  function _lbGenerateUbiqueQuestionId(){
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let s = '';
+    for(let i = 0; i < 10; i++) s += chars[Math.floor(Math.random() * chars.length)];
+    return 'ubique-' + s;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
   // Y3 Fase E — Sanitização HTML rica (DOM-based, com whitelist explícita)
   //
   // Pra textareas das questões objetivas / discursivas (texto de referência,
@@ -920,11 +952,13 @@
     detectVideo:         _lbDetectVideo,
     renderSlideCarousel: renderSlideCarousel,
     // Y3 — Questões objetivas
-    parseQuestionOrigin: _lbParseQuestionOrigin,
-    originToTag:         _lbOriginToTag,
-    deriveGroupOrigin:   _lbDeriveGroupOrigin,
-    sanitizeRichHTML:    _lbSanitizeRichHTML,
-    sanitizeInlineHTML:  _lbSanitizeInlineHTML
+    parseQuestionOrigin:      _lbParseQuestionOrigin,
+    originToTag:              _lbOriginToTag,
+    deriveGroupOrigin:        _lbDeriveGroupOrigin,
+    sanitizeRichHTML:         _lbSanitizeRichHTML,
+    sanitizeInlineHTML:       _lbSanitizeInlineHTML,
+    questionBankIdFromOrigin: _lbQuestionBankIdFromOrigin,
+    generateUbiqueQuestionId: _lbGenerateUbiqueQuestionId
   };
 
 })(typeof window !== 'undefined' ? window : this);
