@@ -312,62 +312,100 @@
         return '<p class="s-body" style="color:var(--text-mute);font-style:italic;margin:0">⚠ Tipo legado: este bloco foi reformulado como <strong>Questões objetivas</strong>. Apague e crie um novo do tipo "Questões objetivas".</p>';
       }
       case 'objective_questions': {
+        // Schema Y3: c.groups[].questions[] + c.ungrouped[]
         const groups = Array.isArray(c.groups) ? c.groups : [];
-        if(!groups.length) return '<p class="s-body" style="font-style:italic;color:var(--text-mute);margin:0">Nenhum grupo de questões. Use "+ Grupo" no editor.</p>';
-        return '<div style="display:flex;flex-direction:column;gap:1.2rem">' +
-          groups.map(function(g){
-            const qs = Array.isArray(g.questions) ? g.questions : [];
-            const head = g.title
-              ? '<div style="border-bottom:1px solid var(--accent-border-soft);padding-bottom:.4rem;margin-bottom:.6rem">' +
-                  '<h4 style="font-family:var(--serif);color:var(--accent);font-size:1.05rem;margin:0">' + e(g.title) + '</h4>' +
-                  (g.description ? '<p style="font-size:.78rem;color:var(--text-mute);margin:.2rem 0 0">' + e(g.description) + '</p>' : '') +
-                '</div>'
-              : '';
-            const questions = qs.map(function(q){
-              const tags = Array.isArray(q.tags) ? q.tags : [];
-              const tagsHTML =
-                (q.reference ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(q.reference) + '</span>' : '') +
-                (q.difficulty ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--bg-elev);border:1px solid var(--accent-border-soft);color:var(--text-mute);text-transform:capitalize">' + e(q.difficulty) + '</span>' : '') +
-                tags.map(function(t){ return '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(t) + '</span>'; }).join('');
-              let body = '';
-              if(q.type === 'multiple_choice'){
-                const opts = Array.isArray(q.options) ? q.options : [];
-                body = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-top:.5rem">' +
-                  opts.map(function(o){
-                    const mark = o.correct ? '<span style="color:#4caf50;font-weight:600">✓</span>' : '<span style="color:var(--text-mute)">·</span>';
-                    return '<div style="display:grid;grid-template-columns:auto 28px 1fr;gap:.4rem;align-items:start;padding:.35rem .55rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid ' + (o.correct ? '#4caf50' : 'var(--accent-border-soft)') + '">' +
-                      mark +
-                      '<span style="font-family:var(--mono);color:var(--accent);font-weight:600">' + e(o.label||'') + '</span>' +
-                      '<span style="font-family:var(--sans);font-size:.85rem;color:var(--text)">' + e(o.text||'') + '</span>' +
-                    '</div>';
-                  }).join('') +
+        const ungrouped = Array.isArray(c.ungrouped) ? c.ungrouped : [];
+        if(!groups.length && !ungrouped.length){
+          return '<p class="s-body" style="font-style:italic;color:var(--text-mute);margin:0">Nenhum grupo nem questão avulsa. Use "+ Grupo" ou "+ Questão avulsa" no editor.</p>';
+        }
+        const sanitize = _lbSanitizeRichHTML;
+
+        function _renderRefBlock(refText, refImg){
+          if(!refText && !refImg) return '';
+          let html = '<div style="padding:.7rem .9rem;border-left:2px solid var(--accent);background:var(--bg-elev);border-radius:0 var(--radius) var(--radius) 0;margin-bottom:.6rem">';
+          if(refText) html += '<div style="font-family:var(--serif);font-size:.92rem;line-height:1.7;color:var(--text-dim)">' + sanitize(refText) + '</div>';
+          if(refImg) html += '<img src="' + attrHtml(refImg) + '" alt="" style="max-width:100%;margin-top:.5rem;border-radius:var(--radius)">';
+          html += '</div>';
+          return html;
+        }
+
+        function _renderQuestion(q, ctxLabel){
+          const tags = Array.isArray(q.tags) ? q.tags : [];
+          const parsedOrigin = _lbParseQuestionOrigin(q.origin);
+          const autoTag = _lbOriginToTag(parsedOrigin);
+          const tagsHTML =
+            (autoTag
+              ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)" title="' + attrHtml(q.origin || '') + '">' + e(autoTag) + '</span>'
+              : (q.reference ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(q.reference) + '</span>' : '')) +
+            tags.map(function(t){ return '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--bg-elev);border:1px solid var(--accent-border-soft);color:var(--text-mute)">' + e(t) + '</span>'; }).join('');
+
+          let body = '';
+          if(q.type === 'multiple_choice'){
+            const opts = Array.isArray(q.options) ? q.options : [];
+            body = '<div style="display:flex;flex-direction:column;gap:.3rem;margin-top:.5rem">' +
+              opts.map(function(o){
+                const mark = o.correct ? '<span style="color:#4caf50;font-weight:600">✓</span>' : '<span style="color:var(--text-mute)">·</span>';
+                return '<div style="display:grid;grid-template-columns:auto 28px 1fr;gap:.4rem;align-items:start;padding:.35rem .55rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid ' + (o.correct ? '#4caf50' : 'var(--accent-border-soft)') + '">' +
+                  mark +
+                  '<span style="font-family:var(--mono);color:var(--accent);font-weight:600">' + e(o.label||'') + '</span>' +
+                  '<span style="font-family:var(--sans);font-size:.85rem;color:var(--text)">' + sanitize(String(o.text||'')) + '</span>' +
                 '</div>';
-              } else {
-                const correctTxt = q.correct === true ? 'Certo' : (q.correct === false ? 'Errado' : '?');
-                const correctColor = q.correct === true ? '#4caf50' : '#e57373';
-                body = '<div style="display:flex;gap:.5rem;margin-top:.5rem">' +
-                  '<div style="flex:1;padding:.4rem .7rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid var(--accent-border-soft);text-align:center;font-family:var(--mono);font-size:.85rem;color:var(--text-mute)">C — Certo</div>' +
-                  '<div style="flex:1;padding:.4rem .7rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid var(--accent-border-soft);text-align:center;font-family:var(--mono);font-size:.85rem;color:var(--text-mute)">E — Errado</div>' +
-                '</div>' +
-                '<div style="margin-top:.3rem;font-family:var(--mono);font-size:.7rem;color:' + correctColor + '"><strong>Gabarito:</strong> ' + correctTxt + '</div>';
-              }
-              const comment = q.comment
-                ? '<div style="margin-top:.5rem;padding:.45rem .7rem;background:var(--bg-elev);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0">' +
-                    '<span style="font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;color:var(--accent);text-transform:uppercase">Comentário</span>' +
-                    '<div style="font-family:var(--serif);font-size:.85rem;color:var(--text-dim);margin-top:.2rem;line-height:1.55">' + e(q.comment) + '</div>' +
-                  '</div>'
-                : '';
-              return '<article style="background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.8rem 1rem;margin-bottom:.55rem">' +
-                (tagsHTML ? '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.5rem">' + tagsHTML + '</div>' : '') +
-                '<div style="font-family:var(--serif);font-size:.95rem;line-height:1.6;color:var(--text)">' + e(q.statement || '') + '</div>' +
-                body + comment +
-              '</article>';
-            }).join('');
-            return '<section>' + head + questions +
-              (qs.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.75rem;margin:0">Sem questões neste grupo.</p>' : '') +
-            '</section>';
-          }).join('') +
-        '</div>';
+              }).join('') +
+            '</div>';
+          } else {
+            const correctTxt = q.correct === true ? 'Certo' : (q.correct === false ? 'Errado' : '?');
+            const correctColor = q.correct === true ? '#4caf50' : '#e57373';
+            body = '<div style="display:flex;gap:.5rem;margin-top:.5rem">' +
+              '<div style="flex:1;padding:.4rem .7rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid var(--accent-border-soft);text-align:center;font-family:var(--mono);font-size:.85rem;color:var(--text-mute)">C — Certo</div>' +
+              '<div style="flex:1;padding:.4rem .7rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid var(--accent-border-soft);text-align:center;font-family:var(--mono);font-size:.85rem;color:var(--text-mute)">E — Errado</div>' +
+            '</div>' +
+            '<div style="margin-top:.3rem;font-family:var(--mono);font-size:.7rem;color:' + correctColor + '"><strong>Gabarito:</strong> ' + correctTxt + '</div>';
+          }
+          const refIndividual = _renderRefBlock(q.reference_text, q.reference_image);
+          const comment = q.comment
+            ? '<div style="margin-top:.5rem;padding:.45rem .7rem;background:var(--bg-elev);border-left:3px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0">' +
+                '<span style="font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;color:var(--accent);text-transform:uppercase">Gabarito comentado</span>' +
+                '<div style="font-family:var(--serif);font-size:.85rem;color:var(--text-dim);margin-top:.2rem;line-height:1.6">' + sanitize(String(q.comment)) + '</div>' +
+              '</div>'
+            : '';
+          const ctxBadge = ctxLabel ? '<span style="font-family:var(--mono);font-size:.55rem;padding:.1rem .35rem;border-radius:2px;background:var(--bg);color:var(--text-mute);border:1px solid var(--accent-border-soft);margin-right:.3rem">' + e(ctxLabel) + '</span>' : '';
+          return '<article style="background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.8rem 1rem;margin-bottom:.55rem">' +
+            (tagsHTML ? '<div style="display:flex;gap:.3rem;flex-wrap:wrap;align-items:center;margin-bottom:.5rem">' + ctxBadge + tagsHTML + '</div>' : (ctxBadge ? '<div style="margin-bottom:.5rem">' + ctxBadge + '</div>' : '')) +
+            refIndividual +
+            '<div style="font-family:var(--serif);font-size:.95rem;line-height:1.65;color:var(--text)">' + sanitize(String(q.statement || '')) + '</div>' +
+            body + comment +
+          '</article>';
+        }
+
+        const groupsHTML = groups.map(function(g, gi){
+          const qs = Array.isArray(g.questions) ? g.questions : [];
+          const parsedGOrigin = _lbParseQuestionOrigin(g.origin);
+          const autoGTag = _lbOriginToTag(parsedGOrigin);
+          const gTagBadge = autoGTag
+            ? '<span style="font-family:var(--mono);font-size:.62rem;padding:.15rem .55rem;border-radius:999px;background:var(--accent);color:var(--bg);font-weight:500;letter-spacing:.04em;margin-left:.4rem" title="' + attrHtml(g.origin || '') + '">' + e(autoGTag) + '</span>'
+            : '';
+          const head =
+            '<div style="border-bottom:1px solid var(--accent-border-soft);padding-bottom:.45rem;margin-bottom:.7rem;display:flex;align-items:center;gap:.3rem;flex-wrap:wrap">' +
+              '<h4 style="font-family:var(--serif);color:var(--accent);font-size:1.1rem;margin:0">' + e(g.title || ('Grupo ' + (gi + 1))) + '</h4>' +
+              gTagBadge +
+              (g.description ? '<p style="font-size:.78rem;color:var(--text-mute);margin:.3rem 0 0;width:100%">' + e(g.description) + '</p>' : '') +
+            '</div>';
+          return '<section>' + head + _renderRefBlock(g.reference_text, g.reference_image) +
+            qs.map(function(q){ return _renderQuestion(q, null); }).join('') +
+            (qs.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.75rem;margin:0">Sem questões neste grupo.</p>' : '') +
+          '</section>';
+        }).join('');
+
+        const ungroupedHTML = ungrouped.length
+          ? '<section>' +
+              '<div style="padding-bottom:.4rem;margin-bottom:.5rem;border-bottom:1px dashed var(--accent-border-soft)">' +
+                '<span style="font-family:var(--mono);font-size:.62rem;letter-spacing:.08em;color:var(--text-mute);text-transform:uppercase">Avulsas</span>' +
+              '</div>' +
+              ungrouped.map(function(q){ return _renderQuestion(q, null); }).join('') +
+            '</section>'
+          : '';
+
+        return '<div style="display:flex;flex-direction:column;gap:1.2rem">' + groupsHTML + ungroupedHTML + '</div>';
       }
       case 'essay': {
         const items = Array.isArray(c.items) ? c.items : [];
