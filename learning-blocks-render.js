@@ -125,28 +125,236 @@
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // Y3 — Sanitização "rich" pra textareas das questões (texto de referência,
-  // enunciado, gabarito comentado). Aceita inline + bloco (p/ul/ol/li/blockquote/
-  // h1-h6/hr/img/table…) e remove script/style/event handlers/protocolos
-  // perigosos. Não escapa entidades já válidas.
+  // Y3 Fase E — Sanitização HTML rica (DOM-based, com whitelist explícita)
+  //
+  // Pra textareas das questões objetivas / discursivas (texto de referência,
+  // enunciado, gabarito comentado, alternativas) e para qualquer outro
+  // conteúdo de origem editorial. Aceita formatação rica:
+  //   - INLINE: b, strong, i, em, u, s, code, kbd, sub, sup, small, mark, abbr,
+  //             q, br, span, a (com href validado)
+  //   - BLOCO:  p, div, section, article, ul, ol, li, dl, dt, dd, blockquote,
+  //             pre, h1-h6, hr, figure, figcaption, table+filhos, time
+  //   - MÍDIA:  img (com src validado, aceita data:image/...)
+  //
+  // BLOQUEIA: script, style, iframe, object, embed, link, meta, base, form,
+  // input, button, select, textarea — tudo que pode injetar JS ou capturar
+  // dados. Event handlers (onclick/onerror/...) são removidos.
+  // Protocolos perigosos (javascript:, vbscript:, data: exceto data:image/
+  // em <img src>) são neutralizados.
+  // Links externos ganham rel="noopener nofollow" e target="_blank" auto.
+  //
+  // Implementação via DOMParser → walker recursivo → reserializa innerHTML.
+  // Muito mais robusta que regex (não dá pra escapar com tricks tipo
+  // <scr<script>ipt> ou inline events com whitespace creative).
+  //
+  // Fallback Node/SSR: se DOMParser não existir, faz regex bruto como antes.
   // ─────────────────────────────────────────────────────────────────────
+
+  // Tags permitidas (lowercase)
+  const _LB_SAN_TAGS = (function(){
+    const list = [
+      // inline
+      'b','strong','i','em','u','s','strike','del','ins',
+      'code','kbd','samp','var','sub','sup','small','mark','abbr','q','cite',
+      'br','span','a','time',
+      // bloco
+      'p','div','section','article','header','footer','aside','main',
+      'ul','ol','li','dl','dt','dd',
+      'blockquote','pre',
+      'h1','h2','h3','h4','h5','h6',
+      'hr',
+      'figure','figcaption',
+      // mídia
+      'img',
+      // tabela
+      'table','thead','tbody','tfoot','tr','td','th','caption','colgroup','col'
+    ];
+    const s = {};
+    for(let i = 0; i < list.length; i++) s[list[i]] = true;
+    return s;
+  })();
+
+  // Atributos permitidos globalmente (qualquer tag)
+  const _LB_SAN_GLOBAL_ATTRS = (function(){
+    const list = ['class','title','lang','dir','id','data-id'];
+    const s = {};
+    for(let i = 0; i < list.length; i++) s[list[i]] = true;
+    return s;
+  })();
+
+  // Atributos permitidos por tag específica
+  const _LB_SAN_TAG_ATTRS = {
+    'a':       ['href','target','rel','name'],
+    'img':     ['src','alt','width','height','loading','referrerpolicy'],
+    'td':      ['colspan','rowspan','align','valign','headers'],
+    'th':      ['colspan','rowspan','align','valign','scope','headers'],
+    'tr':      ['align','valign'],
+    'col':     ['span','align','width'],
+    'colgroup':['span','align','width'],
+    'table':   ['border','cellpadding','cellspacing','summary'],
+    'time':    ['datetime'],
+    'abbr':    ['title'],
+    'ol':      ['start','reversed','type'],
+    'q':       ['cite'],
+    'blockquote': ['cite']
+  };
+
+  // Valida URL — retorna a URL limpa ou null
+  function _lbSanUrl(raw, allowDataImage){
+    if(raw == null) return null;
+    const u = String(raw).trim();
+    if(!u) return null;
+    // Anchor interno
+    if(/^#/.test(u)) return u;
+    // Relativos (path/?query)
+    if(/^\/[^/]/.test(u) || /^\.{1,2}\//.test(u)) return u;
+    // Protocolos seguros
+    if(/^(https?:|mailto:|tel:|ftp:)/i.test(u)) return u;
+    // data:image/ — só permitido em <img src>
+    if(allowDataImage && /^data:image\/(png|jpe?g|gif|webp|svg\+xml|bmp);/i.test(u)) return u;
+    return null;
+  }
+
+  // Walker recursivo. Recebe um Element, devolve a string HTML sanitizada.
+  function _lbSanWalk(el, doc){
+    const children = Array.from(el.childNodes);
+    children.forEach(function(child){
+      if(child.nodeType === 3){ /* text node */ return; }
+      if(child.nodeType !== 1){ /* comment / CDATA — remove */ child.remove(); return; }
+
+      const tag = child.tagName.toLowerCase();
+      if(!_LB_SAN_TAGS[tag]){
+        // Tag não permitida — substitui pelo conteúdo de texto (preserva textos
+        // legítimos quando admin colou algo com tag estranha por engano)
+        const txt = doc.createTextNode(child.textContent || '');
+        el.replaceChild(txt, child);
+        return;
+      }
+
+      // Limpa atributos não permitidos
+      const attrs = Array.from(child.attributes);
+      attrs.forEach(function(attr){
+        const name = attr.name.toLowerCase();
+        // Event handlers — sempre fora
+        if(name.indexOf('on') === 0){ child.removeAttribute(attr.name); return; }
+        // 'style' — bloqueado (pode conter url(javascript:…))
+        if(name === 'style'){ child.removeAttribute(attr.name); return; }
+        const isAllowed = _LB_SAN_GLOBAL_ATTRS[name]
+                       || (_LB_SAN_TAG_ATTRS[tag] && _LB_SAN_TAG_ATTRS[tag].indexOf(name) >= 0);
+        if(!isAllowed){ child.removeAttribute(attr.name); return; }
+        // Sanitiza href e src
+        if(name === 'href' || name === 'src'){
+          const allowData = (tag === 'img' && name === 'src');
+          const clean = _lbSanUrl(attr.value, allowData);
+          if(clean == null) child.removeAttribute(attr.name);
+          else child.setAttribute(name, clean);
+        }
+      });
+
+      // <a> externo → adiciona target="_blank" rel="noopener nofollow"
+      if(tag === 'a' && child.hasAttribute('href')){
+        const href = child.getAttribute('href');
+        if(/^https?:/i.test(href)){
+          if(!child.hasAttribute('target')) child.setAttribute('target', '_blank');
+          child.setAttribute('rel', 'noopener nofollow');
+        }
+      }
+      // <img> sem alt → adiciona alt vazio (boa prática)
+      if(tag === 'img' && !child.hasAttribute('alt')){
+        child.setAttribute('alt', '');
+      }
+
+      // Recurse
+      _lbSanWalk(child, doc);
+    });
+  }
+
+  // Sanitizador rich (com fallback regex pra SSR)
   function _lbSanitizeRichHTML(html){
     if(!html) return '';
-    let s = String(html);
-    // Remove blocos completos perigosos
-    s = s.replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, '');
-    s = s.replace(/<\s*style[^>]*>[\s\S]*?<\s*\/\s*style\s*>/gi, '');
-    s = s.replace(/<\s*iframe[^>]*>[\s\S]*?<\s*\/\s*iframe\s*>/gi, '');
-    // Remove event handlers (onclick, onerror, etc.)
-    s = s.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '');
-    s = s.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
-    s = s.replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
-    // Bloqueia protocolos perigosos em href/src — exceto data:image/ (útil pra capas locais)
-    s = s.replace(/(href|src)\s*=\s*"javascript:[^"]*"/gi, '$1="#"');
-    s = s.replace(/(href|src)\s*=\s*'javascript:[^']*'/gi, "$1='#'");
-    s = s.replace(/(href|src)\s*=\s*"data:(?!image\/)[^"]*"/gi, '$1="#"');
-    s = s.replace(/(href|src)\s*=\s*'data:(?!image\/)[^']*'/gi, "$1='#'");
-    return s;
+    const s = String(html);
+    if(typeof DOMParser === 'undefined'){
+      // Fallback regex (SSR/Node) — menos seguro mas funcional
+      let r = s;
+      r = r.replace(/<\s*(script|style|iframe|object|embed|form|input|button|select|textarea|link|meta|base)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
+      r = r.replace(/<\s*(script|style|iframe|object|embed|form|input|button|select|textarea|link|meta|base)[^>]*\/?>/gi, '');
+      r = r.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '');
+      r = r.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
+      r = r.replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
+      r = r.replace(/\sstyle\s*=\s*"[^"]*"/gi, '');
+      r = r.replace(/\sstyle\s*=\s*'[^']*'/gi, '');
+      r = r.replace(/(href|src)\s*=\s*"javascript:[^"]*"/gi, '$1="#"');
+      r = r.replace(/(href|src)\s*=\s*'javascript:[^']*'/gi, "$1='#'");
+      r = r.replace(/(href|src)\s*=\s*"data:(?!image\/)[^"]*"/gi, '$1="#"');
+      r = r.replace(/(href|src)\s*=\s*'data:(?!image\/)[^']*'/gi, "$1='#'");
+      return r;
+    }
+    try{
+      const doc = new DOMParser().parseFromString('<div id="lb-san-root">' + s + '</div>', 'text/html');
+      const root = doc.getElementById('lb-san-root');
+      if(!root) return '';
+      _lbSanWalk(root, doc);
+      return root.innerHTML;
+    }catch(_e){
+      return '';
+    }
+  }
+
+  // Variante INLINE (mais restrita) — pra tooltips e cartões de fragmento.
+  // Whitelist: só tags inline (não-bloco), sem img/table.
+  const _LB_SAN_INLINE_TAGS = {
+    'b':1,'strong':1,'i':1,'em':1,'u':1,'s':1,'code':1,'kbd':1,'sub':1,'sup':1,
+    'small':1,'mark':1,'abbr':1,'q':1,'cite':1,'br':1,'span':1,'a':1,'time':1,'samp':1,'var':1
+  };
+  function _lbSanitizeInlineHTML(html){
+    if(!html) return '';
+    if(typeof DOMParser === 'undefined') return _lbSanitizeRichHTML(html);
+    const s = String(html);
+    try{
+      const doc = new DOMParser().parseFromString('<div id="lb-san-root">' + s + '</div>', 'text/html');
+      const root = doc.getElementById('lb-san-root');
+      if(!root) return '';
+      // Walker idêntico mas com tags whitelist menor
+      (function walkInline(el){
+        const children = Array.from(el.childNodes);
+        children.forEach(function(child){
+          if(child.nodeType === 3) return;
+          if(child.nodeType !== 1){ child.remove(); return; }
+          const tag = child.tagName.toLowerCase();
+          if(!_LB_SAN_INLINE_TAGS[tag]){
+            const txt = doc.createTextNode(child.textContent || '');
+            el.replaceChild(txt, child);
+            return;
+          }
+          // Reaproveita atributos do walker rich (mesmas regras)
+          const attrs = Array.from(child.attributes);
+          attrs.forEach(function(attr){
+            const name = attr.name.toLowerCase();
+            if(name.indexOf('on') === 0){ child.removeAttribute(attr.name); return; }
+            if(name === 'style'){ child.removeAttribute(attr.name); return; }
+            const isAllowed = _LB_SAN_GLOBAL_ATTRS[name]
+                           || (_LB_SAN_TAG_ATTRS[tag] && _LB_SAN_TAG_ATTRS[tag].indexOf(name) >= 0);
+            if(!isAllowed){ child.removeAttribute(attr.name); return; }
+            if(name === 'href' || name === 'src'){
+              const clean = _lbSanUrl(attr.value, false);
+              if(clean == null) child.removeAttribute(attr.name);
+              else child.setAttribute(name, clean);
+            }
+          });
+          if(tag === 'a' && child.hasAttribute('href')){
+            const href = child.getAttribute('href');
+            if(/^https?:/i.test(href)){
+              if(!child.hasAttribute('target')) child.setAttribute('target', '_blank');
+              child.setAttribute('rel', 'noopener nofollow');
+            }
+          }
+          walkInline(child);
+        });
+      })(root);
+      return root.innerHTML;
+    }catch(_e){
+      return '';
+    }
   }
 
   // Detecta o tipo de fonte de vídeo a partir de uma string que pode ser:
@@ -707,7 +915,8 @@
     parseQuestionOrigin: _lbParseQuestionOrigin,
     originToTag:         _lbOriginToTag,
     deriveGroupOrigin:   _lbDeriveGroupOrigin,
-    sanitizeRichHTML:    _lbSanitizeRichHTML
+    sanitizeRichHTML:    _lbSanitizeRichHTML,
+    sanitizeInlineHTML:  _lbSanitizeInlineHTML
   };
 
 })(typeof window !== 'undefined' ? window : this);
