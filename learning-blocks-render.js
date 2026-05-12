@@ -656,52 +656,146 @@
         return '<div style="display:flex;flex-direction:column;gap:1.2rem">' + groupsHTML + ungroupedHTML + '</div>';
       }
       case 'essay': {
+        // Y3 Fase M — preview admin do bloco de discursivas
+        // Resolve refs { bank_id } no EssayBank; sanitiza TODO HTML
+        // (statement, references.body, criteria.description/modelAnswer,
+        // officialAnswer, modelAnswers.body).
+        const sanitize = _lbSanitizeRichHTML;
         const items = Array.isArray(c.items) ? c.items : [];
         if(!items.length){
-          // Fallback pra schema super legado com c.prompt simples
           if(c.prompt){
             return '<blockquote style="border-left:3px solid var(--accent);padding:.4rem 1rem;font-family:var(--serif);font-style:italic;color:var(--text);margin:0 0 1rem;font-size:1rem;line-height:1.6">' +
-              e(c.prompt) + '</blockquote>' +
+              sanitize(String(c.prompt)) + '</blockquote>' +
               '<textarea class="field-input" rows="6" placeholder="Sua resposta..." style="width:100%"></textarea>';
           }
           return '<p class="s-body" style="font-style:italic;color:var(--text-mute);margin:0">Nenhuma discursiva. Use "+ Discursiva" no editor.</p>';
         }
-        return items.map(function(it, i){
+
+        function _resolveItem(rawItem){
+          if(rawItem && rawItem.bank_id && global.EssayBank){
+            return global.EssayBank.getById(rawItem.bank_id) || rawItem;
+          }
+          return rawItem;
+        }
+
+        return items.map(function(rawIt, i){
+          const it = _resolveItem(rawIt) || {};
           const tags = Array.isArray(it.tags) ? it.tags : [];
-          const tagsHTML = (it.reference || tags.length)
+
+          // Badge de origem (auto-derivada do origin OU "Ubique")
+          let originBadge = '';
+          if(it.source_type === 'ubique'){
+            originBadge = '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--bg-elev);color:var(--text-mute);border:1px solid var(--accent-border-soft);font-style:italic">Ubique</span>';
+          } else {
+            const parsedOrigin = _lbParseQuestionOrigin(it.origin);
+            const autoTag = _lbOriginToTag(parsedOrigin);
+            if(autoTag){
+              originBadge = '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)" title="' + attrHtml(it.origin || '') + '">' + e(autoTag) + '</span>';
+            } else if(it.reference){
+              originBadge = '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(it.reference) + '</span>';
+            }
+          }
+          const tagsHTML = (originBadge || tags.length)
             ? '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.55rem">' +
-                (it.reference ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(it.reference) + '</span>' : '') +
-                tags.map(function(t){ return '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(t) + '</span>'; }).join('') +
+                originBadge +
+                tags.map(function(t){ return '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--bg-elev);color:var(--text-mute);border:1px solid var(--accent-border-soft)">' + e(t) + '</span>'; }).join('') +
               '</div>'
             : '';
-          const criteria = Array.isArray(it.criteria) ? it.criteria : [];
-          const criteriaHTML = criteria.length
-            ? '<details style="margin-top:.7rem;border-top:1px solid var(--accent-border-soft);padding-top:.55rem">' +
-                '<summary style="cursor:pointer;font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;color:var(--accent);text-transform:uppercase">Ver critérios (' + criteria.length + ')</summary>' +
-                '<div style="margin-top:.5rem;display:flex;flex-direction:column;gap:.4rem">' +
-                  criteria.map(function(cr){
-                    return '<div style="padding:.45rem .7rem;background:var(--bg-elev);border-radius:var(--radius);border-left:3px solid var(--accent)">' +
-                      '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.2rem">' +
-                        '<strong style="font-family:var(--sans);font-size:.82rem;color:var(--accent)">' + e(cr.label||'') + '</strong>' +
-                        (cr.maxScore ? '<span style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute)">' + e(cr.maxScore) + ' pts</span>' : '') +
-                      '</div>' +
-                      '<div style="font-family:var(--sans);font-size:.78rem;color:var(--text-dim);line-height:1.5">' + e(cr.description||'') + '</div>' +
-                    '</div>';
-                  }).join('') +
-                '</div>' +
-              '</details>'
+
+          // Textos de referência (ANTES do enunciado) — HTML sanitizado
+          const refs = Array.isArray(it.references) ? it.references : [];
+          const refsHTML = refs.length
+            ? '<div style="display:flex;flex-direction:column;gap:.5rem;margin-bottom:.8rem">' +
+                refs.map(function(r){
+                  return '<div style="padding:.6rem .8rem;background:var(--bg-elev);border-left:2px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0">' +
+                    (r.label  ? '<div style="font-family:var(--mono);font-size:.6rem;color:var(--accent);letter-spacing:.08em;text-transform:uppercase;margin-bottom:.2rem">' + e(r.label) + '</div>' : '') +
+                    (r.title  ? '<div style="font-family:var(--serif);font-size:.85rem;color:var(--text);margin-bottom:.25rem">' + e(r.title) + '</div>' : '') +
+                    (r.body   ? '<div style="font-family:var(--serif);font-size:.82rem;line-height:1.65;color:var(--text-dim);font-style:italic">' + sanitize(String(r.body)) + '</div>' : '') +
+                    (r.image  ? '<img src="' + attrHtml(r.image) + '" alt="" style="max-width:140px;margin-top:.4rem;border-radius:var(--radius)">' : '') +
+                  '</div>';
+                }).join('') +
+              '</div>'
             : '';
+
+          // Enunciado em HTML (sanitizado, NÃO escapado)
+          const statementHTML = sanitize(String(it.statement || it.command || ''));
+
+          // Extensão em linhas (campo novo) — fallback pra maxLength legado
+          const linesText = it.maxLines || it.maxLength;
+          const linesHint = linesText
+            ? '<span style="font-family:var(--mono);font-size:.65rem;color:var(--text-mute);margin-left:auto">Extensão: até ' + e(linesText) + ' linhas</span>'
+            : '';
+
+          // GABARITO — 3 abas conforme visibilidade
+          const criteria = Array.isArray(it.criteria) ? it.criteria : [];
+          const showCrit = it.show_criteria !== false && criteria.length > 0;
+          const showOfficial = it.show_official_answer !== false && (it.officialAnswer || it.modelAnswer);
+          const showModels = it.show_model_answers !== false && Array.isArray(it.modelAnswers) && it.modelAnswers.length > 0;
+          const anyGab = showCrit || showOfficial || showModels;
+
+          let gabaritoHTML = '';
+          if(anyGab){
+            const tabs = [];
+            if(showCrit) tabs.push({ key: 'criteria', label: 'Critérios de correção' });
+            if(showOfficial) tabs.push({ key: 'official', label: 'Padrão de Resposta' });
+            if(showModels) tabs.push({ key: 'models', label: 'Resposta Modelo' });
+
+            const tabsBar = '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.6rem;border-bottom:1px solid var(--accent-border-soft);padding-bottom:.4rem">' +
+              tabs.map(function(t, ti){
+                return '<span style="padding:.25rem .55rem;border-radius:2px;font-family:var(--mono);font-size:.6rem;letter-spacing:.06em;text-transform:uppercase;' +
+                  (ti === 0 ? 'background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)' : 'border:1px solid var(--accent-border-soft);color:var(--text-mute)') +
+                  '">' + e(t.label) + '</span>';
+              }).join('') +
+            '</div>';
+
+            // Conteúdo SÓ da primeira aba (preview é estático — sem clique)
+            let firstPaneHTML = '';
+            const firstKey = tabs[0] && tabs[0].key;
+            if(firstKey === 'criteria'){
+              firstPaneHTML = criteria.map(function(cr){
+                return '<div style="padding:.5rem .7rem;background:var(--bg-elev);border-left:2px solid var(--accent);margin-bottom:.4rem;border-radius:0 var(--radius) var(--radius) 0">' +
+                  '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:.25rem">' +
+                    '<strong style="font-family:var(--sans);font-size:.78rem;color:var(--accent);letter-spacing:.04em;text-transform:uppercase">' + e(cr.label||'') + '</strong>' +
+                    (cr.maxScore ? '<span style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute)">' + e(cr.maxScore) + ' pts</span>' : '') +
+                  '</div>' +
+                  (cr.description ? '<div style="font-family:var(--serif);font-size:.82rem;color:var(--text);line-height:1.6">' + sanitize(String(cr.description)) + '</div>' : '') +
+                  (cr.modelAnswer ? '<div style="margin-top:.4rem;padding-top:.4rem;border-top:1px dashed var(--accent-border-soft);font-family:var(--serif);font-size:.78rem;color:var(--text-dim);font-style:italic;line-height:1.6">' + sanitize(String(cr.modelAnswer)) + '</div>' : '') +
+                '</div>';
+              }).join('');
+            } else if(firstKey === 'official'){
+              const officialText = it.officialAnswer || it.modelAnswer || '';
+              firstPaneHTML = '<div style="padding:.5rem .7rem;background:var(--bg-elev);border-left:2px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0;font-family:var(--serif);font-size:.85rem;color:var(--text);line-height:1.65">' + sanitize(String(officialText)) + '</div>';
+            } else if(firstKey === 'models'){
+              firstPaneHTML = it.modelAnswers.map(function(m, mi){
+                return '<div style="padding:.5rem .7rem;background:var(--bg-elev);border-left:2px solid var(--accent);margin-bottom:.4rem;border-radius:0 var(--radius) var(--radius) 0">' +
+                  '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:.25rem">' +
+                    '<strong style="font-family:var(--sans);font-size:.78rem;color:var(--accent)">' + e(m.title || ('Modelo ' + String.fromCharCode(65 + mi))) + '</strong>' +
+                    (m.score ? '<span style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute)">' + e(m.score) + '</span>' : '') +
+                  '</div>' +
+                  (m.author ? '<div style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute);margin-bottom:.3rem;font-style:italic">' + e(m.author) + '</div>' : '') +
+                  (m.body ? '<div style="font-family:var(--serif);font-size:.82rem;color:var(--text);line-height:1.65">' + sanitize(String(m.body)) + '</div>' : '') +
+                '</div>';
+              }).join('');
+            }
+
+            gabaritoHTML = '<details style="margin-top:.7rem;border-top:1px solid var(--accent-border-soft);padding-top:.55rem">' +
+                '<summary style="cursor:pointer;font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;color:var(--accent);text-transform:uppercase">📋 Gabarito (' + tabs.length + ' aba' + (tabs.length > 1 ? 's' : '') + ')</summary>' +
+                '<div style="margin-top:.5rem">' + tabsBar + firstPaneHTML + '</div>' +
+              '</details>';
+          }
+
           return '<article style="background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius-lg);padding:1rem 1.2rem;margin-bottom:.8rem">' +
             tagsHTML +
-            '<blockquote style="border-left:3px solid var(--accent);padding:.4rem 1rem;font-family:var(--serif);font-style:italic;color:var(--text);margin:0 0 .8rem;font-size:.98rem;line-height:1.6">' +
-              e(it.statement || it.command || '') +
-            '</blockquote>' +
-            '<textarea class="field-input" rows="5" placeholder="Sua resposta..." maxlength="' + (it.maxLength || 3000) + '" style="width:100%;font-size:.9rem"></textarea>' +
+            refsHTML +
+            '<div style="font-family:var(--serif);font-size:.95rem;color:var(--text);line-height:1.65;margin:0 0 .8rem;padding:.5rem .9rem;border-left:3px solid var(--accent);background:var(--bg-elev);border-radius:0 var(--radius) var(--radius) 0">' +
+              statementHTML +
+            '</div>' +
+            '<textarea class="field-input" rows="5" placeholder="Sua resposta..." style="width:100%;font-size:.9rem"></textarea>' +
             '<div style="margin-top:.6rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">' +
               '<button class="btn btn-ghost btn-sm">Enviar para correção por IA</button>' +
-              '<span style="font-family:var(--mono);font-size:.65rem;color:var(--text-mute);margin-left:auto">Máx: ' + (it.maxLength || 3000) + ' caracteres</span>' +
+              linesHint +
             '</div>' +
-            criteriaHTML +
+            gabaritoHTML +
           '</article>';
         }).join('');
       }
