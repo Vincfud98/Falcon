@@ -9,9 +9,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=19"></script>
+<script src="ubique-shared.js?v=20"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=19"></script>
+<script src="learning-blocks-render.js?v=20"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -10914,25 +10914,85 @@ function _findStoreUnitForMock(mockUnitId){
 /* ─────────────────────────────────────────────────────────────────────────
  * Y2 — Hidrata um unit_block do store de volta para o formato legacy mock
  * (id, type, title, ...content) e enriquece fragments a partir da biblioteca
- * UbiqueStore.verbetes (lookup por fragment.id). Fragment local sobrescreve
- * o verbete caso ambos existam — assim edições inline no bloco vencem.
+ * UbiqueStore.verbetes.
+ *
+ * MERGE INTELIGENTE de fragment + verbete:
+ *   - fragment local (f) tem prioridade APENAS quando o campo está preenchido
+ *   - schema do verbete usa { term, definition, images, link, related_term_ids,
+ *     topics, tags } enquanto o renderer aluno espera { text, definition,
+ *     images, link, relatedTerms, topics, tags } — fazemos o mapeamento aqui
+ *   - definition do verbete vem com <p>...</p> (HTML do textarea rich do admin)
+ *     — limpamos pra texto puro porque o renderer usa .textContent
+ *   - lookup do verbete: por f.id direto OU por 'v_' + slug(f.text) (compat
+ *     com fragments antigos que ainda usam id arbitrário como 'f-cabral')
  * ───────────────────────────────────────────────────────────────────────── */
-function _hydrateStoreBlock(sb, verbetesById){
+function _slugifyTerm(s){
+  return String(s || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function _stripParaTags(html){
+  return String(html || '')
+    .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+    .replace(/<\/?p[^>]*>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .trim();
+}
+
+function _mergeFragmentWithVerbete(f, v){
+  if(!v) return f;
+  const merged = Object.assign({}, f);
+  // text ← f.text || v.term
+  if(!merged.text || !String(merged.text).trim()){
+    merged.text = v.term || v.text || '';
+  }
+  // definition ← f.definition || v.definition (sem <p>…</p>)
+  if(!merged.definition || !String(merged.definition).trim()){
+    merged.definition = _stripParaTags(v.definition || '');
+  } else {
+    merged.definition = _stripParaTags(merged.definition);
+  }
+  // images: usa do verbete se fragment não tem (preserva campos esperados)
+  if(!Array.isArray(merged.images) || merged.images.length === 0){
+    merged.images = Array.isArray(v.images)
+      ? v.images.map(function(im){ return { url: im.url || '', name: im.name || im.title || '', description: im.description || im.caption || '' }; })
+      : [];
+  }
+  // relatedTerms ← f.relatedTerms || v.related_term_ids
+  if(!Array.isArray(merged.relatedTerms) || merged.relatedTerms.length === 0){
+    merged.relatedTerms = Array.isArray(v.related_term_ids) ? v.related_term_ids.slice() : [];
+  }
+  // link
+  if(!merged.link){
+    merged.link = v.link || null;
+  }
+  // topics, tags
+  if(!Array.isArray(merged.topics) || merged.topics.length === 0){
+    merged.topics = Array.isArray(v.topics) ? v.topics.slice() : (merged.topics || null);
+  }
+  if(!Array.isArray(merged.tags) || merged.tags.length === 0){
+    merged.tags = Array.isArray(v.tags) ? v.tags.slice() : (merged.tags || null);
+  }
+  return merged;
+}
+
+function _hydrateStoreBlock(sb, verbeteIndex){
   const content = sb.content || {};
   let paragraphs = content.paragraphs;
-  if(paragraphs && verbetesById){
+  if(paragraphs && verbeteIndex){
     paragraphs = paragraphs.map(function(p){
       if(!p || !p.fragments) return p;
       return Object.assign({}, p, {
         fragments: p.fragments.map(function(f){
           if(!f) return f;
-          const v = f.id ? verbetesById[f.id] : null;
-          if(v){
-            // Verbete da biblioteca como base; campos locais (incluindo
-            // images/related específicos do bloco) sobrescrevem.
-            return Object.assign({}, v, f);
+          // Lookup do verbete por id direto OU por slug(text)
+          let v = null;
+          if(f.id && verbeteIndex.byId[f.id])         v = verbeteIndex.byId[f.id];
+          if(!v && f.text && verbeteIndex.bySlug[_slugifyTerm(f.text)]){
+            v = verbeteIndex.bySlug[_slugifyTerm(f.text)];
           }
-          return f;
+          return _mergeFragmentWithVerbete(f, v);
         })
       });
     });
@@ -10963,10 +11023,15 @@ function _groupsFromStore(storeUnitId){
     .filter(function(b){ return b.unit_id === storeUnitId; });
   if(!sections.length && !allBlocks.length) return null;
 
-  // Pré-indexa verbetes uma vez para enriquecer fragments dos parágrafos.
+  // Pré-indexa verbetes uma vez (por id E por slug do term) para enriquecer
+  // os fragments dos parágrafos sem precisar varrer a lista a cada fragment.
   const verbList = (UbiqueStore.verbetes && UbiqueStore.verbetes.list) ? UbiqueStore.verbetes.list() : [];
-  const verbetesById = {};
-  verbList.forEach(function(v){ if(v && v.id) verbetesById[v.id] = v; });
+  const verbeteIndex = { byId: {}, bySlug: {} };
+  verbList.forEach(function(v){
+    if(!v) return;
+    if(v.id) verbeteIndex.byId[v.id] = v;
+    if(v.term) verbeteIndex.bySlug[_slugifyTerm(v.term)] = v;
+  });
 
   // Blocos sem section_id ainda aparecem (em uma "seção" sintética).
   const orphanBlocks = allBlocks.filter(function(b){
@@ -10976,7 +11041,7 @@ function _groupsFromStore(storeUnitId){
     const blocks = allBlocks
       .filter(function(b){ return b.section_id === sec.id; })
       .sort(function(a,b){ return (a.position||0) - (b.position||0); })
-      .map(function(b){ return _hydrateStoreBlock(b, verbetesById); });
+      .map(function(b){ return _hydrateStoreBlock(b, verbeteIndex); });
     return {
       id: sec._origMockId || ('g-' + sec.id),
       title: sec.title || 'Seção',
@@ -10989,7 +11054,7 @@ function _groupsFromStore(storeUnitId){
       title: 'Sem seção',
       blocks: orphanBlocks
         .sort(function(a,b){ return (a.position||0) - (b.position||0); })
-        .map(function(b){ return _hydrateStoreBlock(b, verbetesById); })
+        .map(function(b){ return _hydrateStoreBlock(b, verbeteIndex); })
     });
   }
   return groups;
