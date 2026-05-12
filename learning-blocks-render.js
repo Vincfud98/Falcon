@@ -51,6 +51,104 @@
     return [];
   }
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Y3 — Parser de "origem" de questão (LB Questões Objetivas)
+  //
+  // Aceita variantes do código:
+  //   [#15-2/2023]   → grupo 15, posição 2 (na frota), ano 2023
+  //   #15-2/2023     → idem, sem colchetes
+  //   [#150/2025]    → questão 150 do ano 2025 (sem agrupamento)
+  //   #150/2025      → idem
+  //   [cacd:#15-2/2023] → idem com prefixo de concurso (default: CACD)
+  //   [ubique:#1/2025]  → questão Ubique (sem tag "CACD …")
+  //
+  // Retorna { exam, year, group, position, raw, hasGroup } ou null se não bater.
+  //   exam     — 'CACD' por padrão; pode vir minúsculo no prefixo (ubique, pf, etc.)
+  //   year     — number (ex.: 2023)
+  //   group    — number | null  (15 se tinha "15-", null se não tinha)
+  //   position — number  (posição da questão na sequência)
+  //   raw      — string original (preservada pra reprovação)
+  //   hasGroup — boolean conveniência
+  //
+  // NÃO LANÇA erro — retorna null pra qualquer entrada inválida.
+  // ─────────────────────────────────────────────────────────────────────
+  function _lbParseQuestionOrigin(input){
+    if(input == null) return null;
+    const s = String(input).trim();
+    if(!s) return null;
+    // Regex: [exam:]?#?G?-N/YYYY com colchetes opcionais
+    //  Grupos:
+    //   1 = prefixo de concurso (opcional)
+    //   2 = número do grupo (opcional)
+    //   3 = número da questão
+    //   4 = ano (4 dígitos)
+    const m = s.match(/^\s*\[?\s*(?:([A-Za-z]+)\s*:\s*)?#?\s*(?:(\d+)\s*-\s*)?(\d+)\s*\/\s*(\d{4})\s*\]?\s*$/);
+    if(!m) return null;
+    const rawExam = m[1] ? String(m[1]) : '';
+    const exam = rawExam ? rawExam.toUpperCase() : 'CACD';
+    const group = m[2] ? parseInt(m[2], 10) : null;
+    const position = parseInt(m[3], 10);
+    const year = parseInt(m[4], 10);
+    if(isNaN(position) || isNaN(year)) return null;
+    return {
+      exam: exam,
+      year: year,
+      group: group,
+      position: position,
+      raw: s,
+      hasGroup: group != null
+    };
+  }
+
+  // Gera a tag automática a partir do origin parseado.
+  //   { exam:'CACD', year:2023 } → 'CACD 2023'
+  //   { exam:'UBIQUE', year:2025 } → 'Ubique'
+  //   null / sem year → null (sem tag automática)
+  function _lbOriginToTag(parsed){
+    if(!parsed || !parsed.exam) return null;
+    if(parsed.exam === 'UBIQUE') return 'Ubique';
+    if(!parsed.year) return parsed.exam;
+    return parsed.exam + ' ' + parsed.year;
+  }
+
+  // Deriva o "origin do grupo" a partir do origin de uma questão.
+  //   '#15-2/2023' → '#15/2023'  (mesmo grupo, sem a posição)
+  //   '#150/2025'  → null         (questão avulsa — não tem grupo)
+  // Útil pra auto-agrupar na importação JSON: questões com mesmo
+  // groupOrigin caem no mesmo grupo.
+  function _lbDeriveGroupOrigin(parsed){
+    if(!parsed || !parsed.hasGroup) return null;
+    const examPrefix = (parsed.exam && parsed.exam !== 'CACD')
+      ? (parsed.exam.toLowerCase() + ':')
+      : '';
+    return '[' + examPrefix + '#' + parsed.group + '/' + parsed.year + ']';
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Y3 — Sanitização "rich" pra textareas das questões (texto de referência,
+  // enunciado, gabarito comentado). Aceita inline + bloco (p/ul/ol/li/blockquote/
+  // h1-h6/hr/img/table…) e remove script/style/event handlers/protocolos
+  // perigosos. Não escapa entidades já válidas.
+  // ─────────────────────────────────────────────────────────────────────
+  function _lbSanitizeRichHTML(html){
+    if(!html) return '';
+    let s = String(html);
+    // Remove blocos completos perigosos
+    s = s.replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, '');
+    s = s.replace(/<\s*style[^>]*>[\s\S]*?<\s*\/\s*style\s*>/gi, '');
+    s = s.replace(/<\s*iframe[^>]*>[\s\S]*?<\s*\/\s*iframe\s*>/gi, '');
+    // Remove event handlers (onclick, onerror, etc.)
+    s = s.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '');
+    s = s.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
+    s = s.replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '');
+    // Bloqueia protocolos perigosos em href/src — exceto data:image/ (útil pra capas locais)
+    s = s.replace(/(href|src)\s*=\s*"javascript:[^"]*"/gi, '$1="#"');
+    s = s.replace(/(href|src)\s*=\s*'javascript:[^']*'/gi, "$1='#'");
+    s = s.replace(/(href|src)\s*=\s*"data:(?!image\/)[^"]*"/gi, '$1="#"');
+    s = s.replace(/(href|src)\s*=\s*'data:(?!image\/)[^']*'/gi, "$1='#'");
+    return s;
+  }
+
   // Detecta o tipo de fonte de vídeo a partir de uma string que pode ser:
   // - HTML <iframe …> cru (cole&cola)
   // - URL do YouTube (watch, youtu.be, embed, shorts)
@@ -566,7 +664,12 @@
     parseList:           _lbParseList,
     embedVideo:          _lbEmbedVideo,
     detectVideo:         _lbDetectVideo,
-    renderSlideCarousel: renderSlideCarousel
+    renderSlideCarousel: renderSlideCarousel,
+    // Y3 — Questões objetivas
+    parseQuestionOrigin: _lbParseQuestionOrigin,
+    originToTag:         _lbOriginToTag,
+    deriveGroupOrigin:   _lbDeriveGroupOrigin,
+    sanitizeRichHTML:    _lbSanitizeRichHTML
   };
 
 })(typeof window !== 'undefined' ? window : this);
