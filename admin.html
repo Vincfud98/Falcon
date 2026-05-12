@@ -12002,9 +12002,9 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=28"></script>
+<script src="ubique-shared.js?v=29"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=28"></script>
+<script src="learning-blocks-render.js?v=29"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -41678,18 +41678,19 @@
   function _ueOqGroup(b, gIdx){ return _ueOqGroups(b)[gIdx]; }
   function _ueOqQuestion(b, gIdx, qIdx){ const g = _ueOqGroup(b, gIdx); return g && Array.isArray(g.questions) ? g.questions[qIdx] : null; }
 
-  // Helper interno: cria uma questão default no schema NOVO (Y3 Fase B).
+  // Helper interno: cria uma questão default no schema NOVO (Y3 Fase B+).
   function _ueOqCreateQuestion(type, idPrefix, position){
     const safeType = type === 'multiple_choice' ? 'multiple_choice' : 'true_false';
     const q = {
       id: idPrefix + '-q' + position,
       type: safeType,
-      origin: '',              // ID da prova ([#15-2/2023]) ou vazio (Ubique)
-      reference_text: '',      // HTML opcional individual
-      reference_image: '',     // URL opcional individual
-      statement: '',           // HTML — enunciado
-      comment: '',             // HTML — gabarito comentado
-      tags: [],                // tags personalizadas (a auto deriva do origin)
+      source_type: 'past_exam', // 'past_exam' | 'ubique' — define se mostra o campo ID
+      origin: '',               // ID da prova ([#15-2/2023]) — só usado se past_exam
+      reference_text: '',       // HTML opcional individual
+      reference_image: '',      // URL opcional individual
+      statement: '',            // HTML — enunciado
+      comment: '',              // HTML — gabarito comentado
+      tags: [],                 // tags personalizadas (a auto deriva do origin)
       stats: { correct_pct: 0, wrong_pct: 0, guess_pct: 0 }
     };
     if(safeType === 'true_false'){
@@ -41704,6 +41705,38 @@
     }
     return q;
   }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Y3 — Update INCREMENTAL do badge derivado do origin
+  //
+  // Sem este helper, atualizar o campo `origin` chamava _ueRerenderBlockBody
+  // que recria todo o DOM do bloco → cursor saía do input a cada tecla.
+  // Agora cada badge tem um <span id="..."> com slot fixo, e atualizamos
+  // só o innerHTML dele.
+  // ─────────────────────────────────────────────────────────────────────
+  function _ueOqRenderOriginInnerHTML(origin, isGroup){
+    if(!origin) return '';
+    const LB = window.LearningBlocks;
+    const parsed = (LB && LB.parseQuestionOrigin) ? LB.parseQuestionOrigin(origin) : null;
+    if(parsed){
+      const tag = (LB.originToTag ? LB.originToTag(parsed) : '') || '';
+      if(isGroup){
+        return '<span class="card-label" style="background:var(--accent);color:var(--bg);border:1px solid var(--accent);padding:.15rem .55rem;border-radius:999px;font-size:.65rem;font-family:var(--mono);font-weight:600" title="' + esc(origin) + '">' + esc(tag) + '</span>';
+      }
+      return '<span class="card-label" style="background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border);padding:.1rem .45rem;border-radius:999px;font-size:.62rem;font-family:var(--mono);letter-spacing:.04em" title="' + esc(origin) + '">' + esc(tag) + '</span>';
+    }
+    return '<span class="card-label" style="background:rgba(229,115,115,.12);color:var(--red);border:1px solid rgba(229,115,115,.4);padding:.1rem .45rem;border-radius:999px;font-size:.62rem;font-family:var(--mono)" title="ID não reconhecido — esperado: [#G-N/YYYY] ou [#N/YYYY]">⚠ ID inválido</span>';
+  }
+
+  window.ueOqUpdateGroupOriginBadge = function(bid, gIdx, origin){
+    const slot = document.getElementById('ue-oq-group-badge-' + bid + '-' + gIdx);
+    if(slot) slot.innerHTML = _ueOqRenderOriginInnerHTML(origin, true);
+  };
+
+  window.ueOqUpdateQuestionOriginBadge = function(bid, gIdx, qIdx, origin){
+    const slot = document.getElementById('ue-oq-question-badge-' + bid + '-' + gIdx + '-' + qIdx);
+    if(slot) slot.innerHTML = _ueOqRenderOriginInnerHTML(origin, false);
+  };
 
   // Acessor "unificado" pro array de questões — funciona tanto pra grupos
   // (gIdx >= 0) quanto pra questões avulsas (gIdx === -1 → content.ungrouped).
@@ -41751,8 +41784,9 @@
     const g = _ueOqGroup(b, gIdx); if(!g) return;
     g[field] = value;
     _ueSaveStructured(bid);
-    // Se atualizou origin, re-render só pra atualizar a tag derivada
-    if(field === 'origin') _ueRerenderBlockBody(bid);
+    // Y3 — fix bug do cursor: atualiza só o badge no DOM, sem re-render
+    // do bloco inteiro (que perderia foco do input).
+    if(field === 'origin') ueOqUpdateGroupOriginBadge(bid, gIdx, value);
   };
 
   window.ueOqGroupMove = function(bid, gIdx, dir){
@@ -41816,12 +41850,21 @@
       }
       _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
       return;
+    } else if(field === 'source_type'){
+      // Mudou tipo de fonte (past_exam ↔ ubique). Re-render é OK aqui porque
+      // o foco está num <select>, não num input/textarea que o user esteja
+      // digitando ao vivo. E precisamos esconder/mostrar o campo ID.
+      q.source_type = (value === 'ubique') ? 'ubique' : 'past_exam';
+      // Limpa o origin se virou ubique
+      if(q.source_type === 'ubique') q.origin = '';
+      _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
+      return;
     } else {
       q[field] = value;
     }
     _ueSaveStructured(bid);
-    // Se atualizou origin, re-render só pra atualizar a tag derivada
-    if(field === 'origin') _ueRerenderBlockBody(bid);
+    // Y3 — fix bug do cursor: atualiza só o badge no DOM, sem re-render.
+    if(field === 'origin') ueOqUpdateQuestionOriginBadge(bid, gIdx, qIdx, value);
   };
 
   window.ueOqQuestionMove = function(bid, gIdx, qIdx, dir){
@@ -42462,17 +42505,20 @@
         function renderQuestion(q, gIdx, qIdx, total){
           const isCe = (q.type || 'true_false') === 'true_false';
           const isMc = q.type === 'multiple_choice';
+          // Y3 — source_type: past_exam (default) | ubique. Determina se mostra
+          // o campo de ID da prova ou não.
+          const sourceType = (q.source_type === 'ubique') ? 'ubique' : 'past_exam';
+          const isPastExam = sourceType === 'past_exam';
           const stats = q.stats || {};
           const ctxLabel = gIdx === -1 ? 'Avulsa ' + (qIdx + 1) : ('Q ' + (qIdx + 1));
 
-          // Tag automática derivada do origin (parser Y3 Fase A)
-          const parsedOrigin = LB.parseQuestionOrigin ? LB.parseQuestionOrigin(q.origin) : null;
-          const autoTag = parsedOrigin && LB.originToTag ? LB.originToTag(parsedOrigin) : null;
-          const autoTagBadge = autoTag
-            ? '<span class="card-label" style="background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border);padding:.1rem .45rem;border-radius:999px;font-size:.62rem;font-family:var(--mono);letter-spacing:.04em" title="' + esc(q.origin || '') + '">' + esc(autoTag) + '</span>'
-            : (q.origin
-                ? '<span class="card-label" style="background:rgba(229,115,115,.12);color:var(--red);border:1px solid rgba(229,115,115,.4);padding:.1rem .45rem;border-radius:999px;font-size:.62rem;font-family:var(--mono)" title="ID não reconhecido — esperado: [#G-N/YYYY] ou [#N/YYYY]">⚠ ID inválido</span>'
-                : '');
+          // Slot do badge derivado (atualizado via DOM sem re-render).
+          // Se sourceType === 'ubique', a "tag automática" vira "Ubique".
+          const badgeId = 'ue-oq-question-badge-' + bid + '-' + gIdx + '-' + qIdx;
+          const initialBadgeHTML = (sourceType === 'ubique')
+            ? '<span class="card-label" style="background:var(--bg-elev);color:var(--text-mute);border:1px solid var(--accent-border-soft);padding:.1rem .45rem;border-radius:999px;font-size:.62rem;font-family:var(--mono);letter-spacing:.04em" title="Questão Ubique (sem ID de prova)">Ubique</span>'
+            : _ueOqRenderOriginInnerHTML(q.origin, false);
+          const autoTagBadge = '<span id="' + badgeId + '" class="ue-oq-origin-badge-slot">' + initialBadgeHTML + '</span>';
 
           // Gabarito C/E
           const ceEditor = isCe ? (
@@ -42521,9 +42567,13 @@
           const headerHTML =
             '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">' +
               '<span class="card-label" style="background:var(--accent-lo);padding:.1rem .45rem;border-radius:var(--radius);border:1px solid var(--accent-border);font-size:.62rem">' + ctxLabel + '</span>' +
-              '<select class="field-input" onchange="ueOqQuestionUpdate(' + bid + ',' + gIdx + ',' + qIdx + ',\'type\',this.value)" style="width:auto;font-size:.72rem;padding:.25rem .4rem">' +
+              '<select class="field-input" onchange="ueOqQuestionUpdate(' + bid + ',' + gIdx + ',' + qIdx + ',\'type\',this.value)" style="width:auto;font-size:.72rem;padding:.25rem .4rem" title="Modalidade da questão">' +
                 '<option value="true_false"' + (isCe ? ' selected' : '') + '>Certo / Errado</option>' +
                 '<option value="multiple_choice"' + (isMc ? ' selected' : '') + '>Múltipla escolha</option>' +
+              '</select>' +
+              '<select class="field-input" onchange="ueOqQuestionUpdate(' + bid + ',' + gIdx + ',' + qIdx + ',\'source_type\',this.value)" style="width:auto;font-size:.72rem;padding:.25rem .4rem" title="Origem da questão">' +
+                '<option value="past_exam"' + (isPastExam ? ' selected' : '') + '>📜 Questão de provas anteriores</option>' +
+                '<option value="ubique"'    + (!isPastExam ? ' selected' : '') + '>✨ Questão Ubique</option>' +
               '</select>' +
               autoTagBadge +
               '<span style="flex:1"></span>' +
@@ -42532,13 +42582,22 @@
               '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.15rem .35rem;font-size:.65rem" onclick="ueOqQuestionRemove(' + bid + ',' + gIdx + ',' + qIdx + ')" title="Apagar questão">×</button>' +
             '</div>';
 
+          // Campo ID — só aparece se source_type === 'past_exam' (obrigatório).
+          // Se source_type === 'ubique', o campo some completamente.
+          const idIsEmpty = !q.origin || !String(q.origin).trim();
+          const idFieldHTML = isPastExam
+            ? '<div class="field" style="margin:0 0 .4rem"><label style="font-size:.62rem;color:var(--accent);font-weight:500">ID da prova <span style="color:var(--red)">*</span></label>' +
+                '<input class="field-input" value="' + esc(q.origin || '') + '" oninput="ueOqQuestionUpdate(' + bid + ',' + gIdx + ',' + qIdx + ',\'origin\',this.value)" placeholder="[#15-2/2023]  ou  [#150/2025]" style="font-family:var(--mono);font-size:.72rem;border-color:' + (idIsEmpty ? 'var(--red)' : 'var(--accent-border-soft)') + '"' + (idIsEmpty ? ' aria-invalid="true"' : '') + '>' +
+                '<span class="s-body" style="font-size:.6rem;color:' + (idIsEmpty ? 'var(--red)' : 'var(--text-mute)') + ';display:block;margin-top:.15rem">' +
+                  (idIsEmpty ? 'Obrigatório. ' : '') +
+                  'Formato: <code>[#G-N/YYYY]</code> (com grupo) ou <code>[#N/YYYY]</code> (sem grupo). Prefixo opcional pra outros concursos: <code>[pf:#10/2024]</code>.' +
+                '</span>' +
+              '</div>'
+            : '';
+
           return '<div style="border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.7rem .8rem;background:var(--bg-card);margin-bottom:.5rem">' +
             headerHTML +
-            // Origem / ID da prova
-            '<div class="field" style="margin:0 0 .4rem"><label style="font-size:.62rem">Origem (ID da prova) — opcional</label>' +
-              '<input class="field-input" value="' + esc(q.origin || '') + '" oninput="ueOqQuestionUpdate(' + bid + ',' + gIdx + ',' + qIdx + ',\'origin\',this.value)" placeholder="[#15-2/2023]  ou  [#150/2025]  ou  [ubique:#1/2025]" style="font-family:var(--mono);font-size:.72rem">' +
-              '<span class="s-body" style="font-size:.6rem;color:var(--text-mute);display:block;margin-top:.15rem">Vazio = questão Ubique (sem tag automática de prova). Use [#G-N/YYYY] pra prova com grupo, [#N/YYYY] sem grupo.</span>' +
-            '</div>' +
+            idFieldHTML +
             // Texto de referência individual
             '<div class="field" style="margin:0 0 .4rem"><label style="font-size:.62rem">Texto de referência (HTML — opcional, só se a questão tiver contexto próprio)</label>' +
               '<textarea class="field-input" rows="2" placeholder="<p>Trecho de fonte, <strong>citação</strong>, contexto…</p>" oninput="ueOqQuestionUpdate(' + bid + ',' + gIdx + ',' + qIdx + ',\'reference_text\',this.value)" style="font-family:var(--mono);font-size:.74rem;line-height:1.4">' + esc(q.reference_text || '') + '</textarea>' +
@@ -42573,11 +42632,11 @@
 
         function renderGroup(g, gIdx, total){
           const qs = Array.isArray(g.questions) ? g.questions : [];
-          const parsedOrigin = LB.parseQuestionOrigin ? LB.parseQuestionOrigin(g.origin) : null;
-          const autoTag = parsedOrigin && LB.originToTag ? LB.originToTag(parsedOrigin) : null;
-          const autoTagBadge = autoTag
-            ? '<span class="card-label" style="background:var(--accent);color:var(--bg);border:1px solid var(--accent);padding:.15rem .55rem;border-radius:999px;font-size:.65rem;font-family:var(--mono);font-weight:600" title="' + esc(g.origin || '') + '">' + esc(autoTag) + '</span>'
-            : '';
+          // Slot de badge estável (atualiza via DOM sem perder foco do input).
+          const gBadgeId = 'ue-oq-group-badge-' + bid + '-' + gIdx;
+          const autoTagBadge = '<span id="' + gBadgeId + '" class="ue-oq-origin-badge-slot">' +
+            _ueOqRenderOriginInnerHTML(g.origin, true) +
+          '</span>';
 
           return '<div style="border:1px solid var(--accent-border);border-radius:var(--radius);padding:.9rem 1rem;background:var(--bg-elev);margin-bottom:.8rem">' +
             // Header do grupo

@@ -539,12 +539,20 @@
 
         function _renderQuestion(q, ctxLabel){
           const tags = Array.isArray(q.tags) ? q.tags : [];
-          const parsedOrigin = _lbParseQuestionOrigin(q.origin);
-          const autoTag = _lbOriginToTag(parsedOrigin);
-          const tagsHTML =
-            (autoTag
-              ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)" title="' + attrHtml(q.origin || '') + '">' + e(autoTag) + '</span>'
-              : (q.reference ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(q.reference) + '</span>' : '')) +
+          // Y3: badge automática baseada em source_type
+          let originBadge = '';
+          if(q.source_type === 'ubique'){
+            originBadge = '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--bg-elev);color:var(--text-mute);border:1px solid var(--accent-border-soft);font-style:italic" title="Questão Ubique (sem ID de prova)">Ubique</span>';
+          } else {
+            const parsedOrigin = _lbParseQuestionOrigin(q.origin);
+            const autoTag = _lbOriginToTag(parsedOrigin);
+            if(autoTag){
+              originBadge = '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)" title="' + attrHtml(q.origin || '') + '">' + e(autoTag) + '</span>';
+            } else if(q.reference){
+              originBadge = '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + e(q.reference) + '</span>';
+            }
+          }
+          const tagsHTML = originBadge +
             tags.map(function(t){ return '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--bg-elev);border:1px solid var(--accent-border-soft);color:var(--text-mute)">' + e(t) + '</span>'; }).join('');
 
           let body = '';
