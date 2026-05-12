@@ -9,9 +9,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=20"></script>
+<script src="ubique-shared.js?v=21"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=20"></script>
+<script src="learning-blocks-render.js?v=21"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -7938,6 +7938,25 @@ window.GalleryDetail = GalleryDetail;
 /* ───────── Fragment hover card ─────────
    Singleton popup that shows definition, images, related terms for interactive
    fragments within structured text paragraphs. */
+/* Sanitização leve para conteúdo HTML inline em tooltips/cards de fragments.
+ * O conteúdo vem do admin (já confiável) — remove apenas script/style/event
+ * handlers e protocolos perigosos (javascript:, data:). Mantém formatação
+ * comum: b, strong, i, em, u, code, sub, sup, br, a, span, mark. */
+function _sanitizeInlineHTML(html){
+  if(!html) return '';
+  let s = String(html);
+  // Remove blocos completos perigosos
+  s = s.replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, '');
+  s = s.replace(/<\s*style[^>]*>[\s\S]*?<\s*\/\s*style\s*>/gi, '');
+  // Remove event handlers (onclick, onerror, etc.)
+  s = s.replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '');
+  s = s.replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '');
+  // Bloqueia protocolos perigosos em hrefs
+  s = s.replace(/(href|src)\s*=\s*"javascript:[^"]*"/gi, '$1="#"');
+  s = s.replace(/(href|src)\s*=\s*'javascript:[^']*'/gi, "$1='#'");
+  return s;
+}
+
 const FragmentCard = (function(){
   let _el = null, _currentId = null, _slideIdx = 0, _images = [];
   let _hideTimeout = null, _allFragments = {};
@@ -7984,7 +8003,10 @@ const FragmentCard = (function(){
     var el = ensureEl();
 
     el.querySelector('.frag-card-term').textContent = frag.text;
-    el.querySelector('.frag-card-definition').textContent = frag.definition;
+    // definition aceita HTML inline (b, i, em, strong, br, a, code, sub, sup).
+    // O conteúdo vem do admin (já confiável) — fazemos uma sanitização leve só
+    // pra remover <script>/<style> e atributos perigosos (on*, javascript:).
+    el.querySelector('.frag-card-definition').innerHTML = _sanitizeInlineHTML(frag.definition || '');
 
     // Images
     _images = frag.images || [];
@@ -8129,19 +8151,68 @@ Blocks.textgallery = {
     if(next) next.addEventListener('click', () => show(idx+1));
     dots.forEach((d,i) => d.addEventListener('click', () => show(i)));
 
-    // Scroll-sync: when a fragment scrolls into view, switch satellite to its image
-    const fragTerms = stageEl.querySelectorAll('.frag-term[data-fragment-id]');
-    if(fragTerms.length && imgs.some(im => im.fragmentId)){
-      const fragObs = new IntersectionObserver(entries => {
-        entries.forEach(entry => {
-          if(entry.isIntersecting){
-            const fid = entry.target.getAttribute('data-fragment-id');
-            const slideIdx = imgs.findIndex(im => im.fragmentId === fid);
-            if(slideIdx >= 0 && slideIdx !== idx) show(slideIdx);
+    // ── Scroll-sync da galeria flutuante ──────────────────────────────
+    // ABORDAGEM REFEITA: em vez de IntersectionObserver (que só dispara
+    // quando o termo entra/sai de uma zona estreita), usamos um listener
+    // de scroll que a cada frame calcula qual fragment está MAIS PRÓXIMO
+    // de uma linha de referência (~30% da altura do viewport). Garante
+    // troca contínua e suave da imagem conforme o usuário rola — tanto
+    // pra baixo quanto pra cima. Funciona mesmo com rolagem rápida.
+    //
+    // Constrói um mapa: cada slide vai ter um conjunto de "âncoras" no
+    // texto (todos os .frag-term com aquele data-fragment-id). Pode haver
+    // múltiplas ocorrências do mesmo termo — todas servem de gatilho.
+    const fragTerms = Array.from(stageEl.querySelectorAll('.frag-term[data-fragment-id]'));
+    const hasFragImg = imgs.some(im => im && im.fragmentId);
+    if(fragTerms.length && hasFragImg){
+      // Pré-calcula mapa fragmentId → slideIdx (usa a primeira ocorrência
+      // do fragment na lista de imagens; se houver várias imagens do mesmo
+      // fragment, só pulamos pra primeira — o user navega manualmente).
+      const fidToSlide = {};
+      imgs.forEach((im, i) => {
+        if(im && im.fragmentId && !(im.fragmentId in fidToSlide)){
+          fidToSlide[im.fragmentId] = i;
+        }
+      });
+
+      // Só os termos que TÊM imagem associada servem de gatilho
+      const triggerTerms = fragTerms.filter(t => fidToSlide.hasOwnProperty(t.getAttribute('data-fragment-id')));
+
+      if(triggerTerms.length){
+        let rafId = null;
+        function updateActive(){
+          rafId = null;
+          // Linha de referência: 30% da altura visível (zona de "leitura natural")
+          const refY = window.innerHeight * 0.30;
+          let bestTerm = null;
+          let bestDist = Infinity;
+          for(let i = 0; i < triggerTerms.length; i++){
+            const rect = triggerTerms[i].getBoundingClientRect();
+            // Centro vertical do span
+            const center = (rect.top + rect.bottom) / 2;
+            const dist = Math.abs(center - refY);
+            // Preferir termos acima ou na linha (leitura sequencial) — adicione
+            // um pequeno bônus pra termos acima.
+            const adjusted = center <= refY ? dist : dist + 8;
+            if(adjusted < bestDist){
+              bestDist = adjusted;
+              bestTerm = triggerTerms[i];
+            }
           }
-        });
-      }, { rootMargin:'-25% 0px -55% 0px', threshold:0 });
-      fragTerms.forEach(ft => fragObs.observe(ft));
+          if(bestTerm){
+            const fid = bestTerm.getAttribute('data-fragment-id');
+            const slideIdx = fidToSlide[fid];
+            if(slideIdx != null && slideIdx !== idx) show(slideIdx);
+          }
+        }
+        function onScrollOrResize(){
+          if(rafId == null) rafId = requestAnimationFrame(updateActive);
+        }
+        window.addEventListener('scroll', onScrollOrResize, { passive: true });
+        window.addEventListener('resize', onScrollOrResize);
+        // Disparo inicial
+        updateActive();
+      }
     }
   }
 };
