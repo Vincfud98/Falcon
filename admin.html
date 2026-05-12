@@ -8387,6 +8387,11 @@
             <span class="sub-h-text">Questões cadastradas</span>
             <span class="sub-h-rule"></span>
             <input class="field-input" id="qbSearch" placeholder="🔍 enunciado, ID ou tag…" style="max-width:300px" oninput="renderQuestionBankList()">
+            <select class="field-input" id="qbFilterKind" onchange="renderQuestionBankList()" style="width:auto">
+              <option value="">Todas as questões</option>
+              <option value="objective">✅ Objetivas</option>
+              <option value="essay">✍ Discursivas</option>
+            </select>
             <select class="field-input" id="qbFilterSource" onchange="renderQuestionBankList()" style="width:auto">
               <option value="">Todas origens</option>
               <option value="past_exam">📜 Provas anteriores</option>
@@ -8396,6 +8401,7 @@
               <option value="">Todos tipos</option>
               <option value="true_false">Certo / Errado</option>
               <option value="multiple_choice">Múltipla escolha</option>
+              <option value="essay">Discursiva</option>
             </select>
           </div>
 
@@ -12036,9 +12042,9 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=32"></script>
+<script src="ubique-shared.js?v=33"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=32"></script>
+<script src="learning-blocks-render.js?v=33"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -41727,48 +41733,230 @@
     _ueSaveStructured(bid);
   };
 
-  // ── Essay: items[].criteria[] e items[].modelAnswers[] ──────────────
-  window.ueEssayCriterionAdd = function(bid, idx){
+  // ─────────────────────────────────────────────────────────────────────
+  // Y3 Fase L — Editor de Questões Discursivas (essay)
+  //
+  // Schema do bloco:
+  //   content.items[] = [{ bank_id: 'cacd-3-2024' }]
+  // Bank (UbiqueStore.essays) tem: statement, maxLength, references[],
+  // criteria[], officialAnswer, modelAnswers[], show_*, tags, origin, etc.
+  //
+  // Toda mutação dos handlers ueEssay* delega ao EssayBank (similar ao
+  // ueOqQuestion* delegar ao QuestionBank).
+  // ─────────────────────────────────────────────────────────────────────
+
+  // Resolve a ref { bank_id } → registro completo do banco
+  function _ueEssayResolve(b, idx){
+    const ref = (b && b.content && Array.isArray(b.content.items)) ? b.content.items[idx] : null;
+    if(!ref) return null;
+    if(ref.bank_id && window.EssayBank){
+      return window.EssayBank.getById(ref.bank_id) || null;
+    }
+    return ref;  // legacy inline
+  }
+
+  // Persiste patch no banco (ou inline se legacy)
+  function _ueEssayPersist(bid, idx, patch){
     const b = _ueGetBlock(bid); if(!b || !b.content) return;
-    const item = (b.content.items || [])[idx]; if(!item) return;
-    if(!Array.isArray(item.criteria)) item.criteria = [];
-    item.criteria.push({ label: '', maxScore: 1, description: '', modelAnswer: '' });
+    const ref = (b.content.items || [])[idx]; if(!ref) return;
+    if(ref.bank_id && window.EssayBank){
+      window.EssayBank.update(ref.bank_id, patch);
+      // Re-checa se origin mudou e o bank_id virou outro
+      if('origin' in patch){
+        const LB = window.LearningBlocks;
+        if(LB && LB.questionBankIdFromOrigin && (patch.source_type || (window.EssayBank.getById(ref.bank_id) || {}).source_type) === 'past_exam'){
+          const newBankId = LB.questionBankIdFromOrigin(patch.origin);
+          if(newBankId && newBankId !== ref.bank_id && window.EssayBank.getById(newBankId)){
+            ref.bank_id = newBankId;
+            _ueSaveStructured(bid);
+          }
+        }
+      }
+    } else {
+      // Legacy inline
+      Object.keys(patch).forEach(function(k){
+        if(patch[k] === undefined) delete ref[k];
+        else ref[k] = patch[k];
+      });
+      _ueSaveStructured(bid);
+    }
+  }
+
+  // Adicionar / remover / mover discursiva
+  window.ueEssayAdd = function(bid){
+    const b = _ueGetBlock(bid); if(!b) return;
+    if(!b.content) b.content = {};
+    if(!Array.isArray(b.content.items)) b.content.items = [];
+    let ref;
+    if(window.EssayBank){
+      const bankId = window.EssayBank.createOrGet({ source_type: 'past_exam', statement: '', maxLength: 3000 });
+      ref = { bank_id: bankId };
+      window.EssayBank.registerUsage(bankId, b.unit_id, b.id, b.content.items.length);
+    } else {
+      ref = { id: 'essay-' + (b.content.items.length + 1), source_type: 'past_exam',
+              statement: '', maxLength: 3000, criteria: [], modelAnswers: [], references: [],
+              show_criteria: true, show_official_answer: true, show_model_answers: true };
+    }
+    b.content.items.push(ref);
     _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
+  };
+
+  window.ueEssayRemove = function(bid, idx){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const arr = b.content.items; if(!Array.isArray(arr)) return;
+    const ref = arr[idx]; if(!ref) return;
+    if(ref.bank_id && window.EssayBank){
+      const banked = window.EssayBank.getById(ref.bank_id);
+      const others = ((banked && banked.appears_in) || []).filter(function(u){ return u.block_id !== b.id; });
+      if(others.length > 0){
+        if(!confirm('Esta discursiva também aparece em ' + others.length + ' outro(s) bloco(s)/unidade(s).\n\nRemover daqui apenas?')) return;
+      } else {
+        if(!confirm('Apagar esta discursiva? Ela será removida do bloco. A entrada no banco será preservada (use a página Questões pra apagar definitivamente).')) return;
+      }
+      window.EssayBank.unregisterUsage(ref.bank_id, b.id);
+    } else {
+      if(!confirm('Apagar esta discursiva?')) return;
+    }
+    arr.splice(idx, 1);
+    _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
+  };
+
+  window.ueEssayMove = function(bid, idx, dir){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const arr = b.content.items; if(!Array.isArray(arr)) return;
+    const newIdx = idx + dir;
+    if(newIdx < 0 || newIdx >= arr.length) return;
+    const tmp = arr[idx]; arr[idx] = arr[newIdx]; arr[newIdx] = tmp;
+    _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
+  };
+
+  // Field updates (statement, maxLength, origin, source_type, officialAnswer)
+  window.ueEssayUpdate = function(bid, idx, field, value){
+    if(field === 'source_type'){
+      const newST = (value === 'ubique') ? 'ubique' : 'past_exam';
+      _ueEssayPersist(bid, idx, { source_type: newST, origin: newST === 'ubique' ? '' : (_ueEssayResolve(_ueGetBlock(bid), idx) || {}).origin });
+      _ueRerenderBlockBody(bid);
+      return;
+    }
+    if(field === 'maxLength'){
+      const n = parseInt(value, 10);
+      _ueEssayPersist(bid, idx, { maxLength: isNaN(n) ? 0 : n });
+      return;
+    }
+    if(field === 'origin'){
+      _ueEssayPersist(bid, idx, { origin: value });
+      // Atualiza badge sem re-render (já que o input tá focado)
+      const slot = document.getElementById('ue-essay-badge-' + bid + '-' + idx);
+      if(slot) slot.innerHTML = _ueOqRenderOriginInnerHTML(value, false);
+      return;
+    }
+    const patch = {};
+    patch[field] = value;
+    _ueEssayPersist(bid, idx, patch);
+  };
+
+  // Tags (CSV)
+  window.ueEssayTagsUpdate = function(bid, idx, csvValue){
+    const tags = String(csvValue || '').split(',').map(function(t){ return t.trim(); }).filter(Boolean);
+    _ueEssayPersist(bid, idx, { tags: tags });
+  };
+
+  // Visibilidade do gabarito (checkboxes show_criteria, show_official_answer, show_model_answers)
+  window.ueEssayShowToggle = function(bid, idx, field, checked){
+    const patch = {};
+    patch[field] = !!checked;
+    _ueEssayPersist(bid, idx, patch);
+  };
+
+  // ── Critérios de correção (criteria[]) ──
+  function _ueEssayMutateCriteria(bid, idx, mutator){
+    const b = _ueGetBlock(bid); if(!b) return;
+    const item = _ueEssayResolve(b, idx); if(!item) return;
+    const criteria = Array.isArray(item.criteria) ? item.criteria.slice() : [];
+    const newCriteria = mutator(criteria);
+    _ueEssayPersist(bid, idx, { criteria: newCriteria });
+  }
+  window.ueEssayCriterionAdd = function(bid, idx){
+    _ueEssayMutateCriteria(bid, idx, function(arr){
+      arr.push({ label: '', maxScore: 1, description: '', modelAnswer: '' });
+      return arr;
+    });
+    _ueRerenderBlockBody(bid);
   };
   window.ueEssayCriterionRemove = function(bid, idx, cIdx){
     if(!confirm('Apagar este critério?')) return;
-    const b = _ueGetBlock(bid); if(!b || !b.content) return;
-    const item = (b.content.items || [])[idx]; if(!item || !Array.isArray(item.criteria)) return;
-    item.criteria.splice(cIdx, 1);
-    _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
+    _ueEssayMutateCriteria(bid, idx, function(arr){ arr.splice(cIdx, 1); return arr; });
+    _ueRerenderBlockBody(bid);
   };
   window.ueEssayCriterionUpdate = function(bid, idx, cIdx, field, value){
-    const b = _ueGetBlock(bid); if(!b || !b.content) return;
-    const item = (b.content.items || [])[idx]; if(!item) return;
-    const cr = (item.criteria || [])[cIdx]; if(!cr) return;
-    cr[field] = (field === 'maxScore') ? (parseFloat(value) || 0) : value;
-    _ueSaveStructured(bid);
+    _ueEssayMutateCriteria(bid, idx, function(arr){
+      const cr = arr[cIdx]; if(!cr) return arr;
+      cr[field] = (field === 'maxScore') ? (parseFloat(value) || 0) : value;
+      return arr;
+    });
   };
+
+  // ── Respostas-modelo (modelAnswers[]) ──
+  function _ueEssayMutateModels(bid, idx, mutator){
+    const b = _ueGetBlock(bid); if(!b) return;
+    const item = _ueEssayResolve(b, idx); if(!item) return;
+    const models = Array.isArray(item.modelAnswers) ? item.modelAnswers.slice() : [];
+    const newModels = mutator(models);
+    _ueEssayPersist(bid, idx, { modelAnswers: newModels });
+  }
   window.ueEssayModelAdd = function(bid, idx){
-    const b = _ueGetBlock(bid); if(!b || !b.content) return;
-    const item = (b.content.items || [])[idx]; if(!item) return;
-    if(!Array.isArray(item.modelAnswers)) item.modelAnswers = [];
-    item.modelAnswers.push({ title: '', author: '', score: '', body: '' });
-    _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
+    _ueEssayMutateModels(bid, idx, function(arr){
+      arr.push({ title: '', author: '', score: '', body: '' });
+      return arr;
+    });
+    _ueRerenderBlockBody(bid);
   };
   window.ueEssayModelRemove = function(bid, idx, mIdx){
     if(!confirm('Apagar esta resposta-modelo?')) return;
-    const b = _ueGetBlock(bid); if(!b || !b.content) return;
-    const item = (b.content.items || [])[idx]; if(!item || !Array.isArray(item.modelAnswers)) return;
-    item.modelAnswers.splice(mIdx, 1);
-    _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
+    _ueEssayMutateModels(bid, idx, function(arr){ arr.splice(mIdx, 1); return arr; });
+    _ueRerenderBlockBody(bid);
   };
   window.ueEssayModelUpdate = function(bid, idx, mIdx, field, value){
-    const b = _ueGetBlock(bid); if(!b || !b.content) return;
-    const item = (b.content.items || [])[idx]; if(!item) return;
-    const m = (item.modelAnswers || [])[mIdx]; if(!m) return;
-    m[field] = value;
-    _ueSaveStructured(bid);
+    _ueEssayMutateModels(bid, idx, function(arr){
+      const m = arr[mIdx]; if(!m) return arr;
+      m[field] = value;
+      return arr;
+    });
+  };
+
+  // ── Textos de referência (references[]) ──
+  function _ueEssayMutateRefs(bid, idx, mutator){
+    const b = _ueGetBlock(bid); if(!b) return;
+    const item = _ueEssayResolve(b, idx); if(!item) return;
+    const refs = Array.isArray(item.references) ? item.references.slice() : [];
+    const newRefs = mutator(refs);
+    _ueEssayPersist(bid, idx, { references: newRefs });
+  }
+  window.ueEssayRefAdd = function(bid, idx){
+    _ueEssayMutateRefs(bid, idx, function(arr){
+      arr.push({ label: 'TEXTO-BASE ' + (arr.length + 1), title: '', body: '', image: '' });
+      return arr;
+    });
+    _ueRerenderBlockBody(bid);
+  };
+  window.ueEssayRefRemove = function(bid, idx, rIdx){
+    if(!confirm('Apagar este texto de referência?')) return;
+    _ueEssayMutateRefs(bid, idx, function(arr){ arr.splice(rIdx, 1); return arr; });
+    _ueRerenderBlockBody(bid);
+  };
+  window.ueEssayRefUpdate = function(bid, idx, rIdx, field, value){
+    _ueEssayMutateRefs(bid, idx, function(arr){
+      const r = arr[rIdx]; if(!r) return arr;
+      r[field] = value;
+      return arr;
+    });
+  };
+
+  // ── Aba ativa do gabarito (UI state, não persistido) ──
+  window._ueEssayActiveTab = window._ueEssayActiveTab || {};
+  window.ueEssayTabSwitch = function(bid, idx, tabKey){
+    window._ueEssayActiveTab[bid + '-' + idx] = tabKey;
+    _ueRerenderBlockBody(bid);
   };
 
   // ─────────────────────────────────────────────────────────────────────
@@ -42556,6 +42744,97 @@
     }).join('');
   };
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Y3 Fase L — Modal "Importar do banco" pra DISCURSIVAS
+  // ─────────────────────────────────────────────────────────────────────
+  window.ueEssayOpenBankPicker = function(bid){
+    window._ueEssayBankPickerTarget = { bid: bid };
+    if(!document.getElementById('ueEssayBankPickerModal')){
+      _ueEssayBuildBankPickerModal();
+    }
+    document.getElementById('ueEssayBankPickerSearch').value = '';
+    _ueEssayBankPickerRender('');
+    document.getElementById('ueEssayBankPickerModal').classList.add('active');
+  };
+
+  function _ueEssayBuildBankPickerModal(){
+    const modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    modal.id = 'ueEssayBankPickerModal';
+    modal.innerHTML =
+      '<div class="modal" style="max-width:760px;max-height:80vh;display:flex;flex-direction:column">' +
+        '<header class="modal-header">' +
+          '<div><span class="s-label">Importar discursiva do banco</span><h2 style="margin:.2rem 0 0">Banco de Discursivas</h2></div>' +
+          '<button class="modal-close" onclick="document.getElementById(\'ueEssayBankPickerModal\').classList.remove(\'active\')">×</button>' +
+        '</header>' +
+        '<div style="padding:1rem 1.5rem;flex:1;overflow:hidden;display:flex;flex-direction:column;gap:.7rem">' +
+          '<input class="field-input" id="ueEssayBankPickerSearch" placeholder="Buscar por enunciado, ID ou tag…" oninput="_ueEssayBankPickerRender(this.value)">' +
+          '<div id="ueEssayBankPickerList" style="flex:1;overflow-y:auto;border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.5rem"></div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+  }
+
+  window._ueEssayBankPickerRender = function(filter){
+    const list = document.getElementById('ueEssayBankPickerList');
+    if(!list || !window.EssayBank) return;
+    const all = window.EssayBank.list();
+    const f = String(filter || '').toLowerCase().trim();
+    const filtered = all.filter(function(q){
+      if(!f) return true;
+      const haystack = ((q.statement || '') + ' ' + (q.origin || '') + ' ' + (q.id || '') + ' ' + (q.tags || []).join(' ')).toLowerCase();
+      return haystack.indexOf(f) >= 0;
+    });
+    if(!filtered.length){
+      list.innerHTML = '<p class="s-body" style="font-style:italic;color:var(--text-mute);text-align:center;padding:1rem">' +
+        (all.length === 0 ? 'Banco vazio — adicione discursivas nos blocos pra popular.' : 'Nenhuma discursiva bate com o filtro.') +
+      '</p>';
+      return;
+    }
+    const LB = window.LearningBlocks;
+    list.innerHTML = filtered.slice(0, 200).map(function(q){
+      const parsed = (LB && q.origin) ? LB.parseQuestionOrigin(q.origin) : null;
+      const autoTag = parsed && LB ? LB.originToTag(parsed) : (q.source_type === 'ubique' ? 'Ubique' : '');
+      const tagBadge = autoTag
+        ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + esc(autoTag) + '</span>'
+        : '';
+      const usages = Array.isArray(q.appears_in) ? q.appears_in.length : 0;
+      const usageInfo = usages > 0
+        ? '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute);margin-left:auto">↻ em ' + usages + ' bloco(s)</span>'
+        : '';
+      const stmtPreview = String(q.statement || '').replace(/<[^>]+>/g, '').slice(0, 140);
+      return '<div style="display:flex;flex-direction:column;gap:.3rem;padding:.55rem .7rem;border-bottom:1px solid var(--accent-border-soft);cursor:pointer" onclick="ueEssayImportFromBank(\'' + esc(q.id) + '\')" onmouseover="this.style.background=\'var(--accent-lo)\'" onmouseout="this.style.background=\'\'">' +
+        '<div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">' +
+          tagBadge +
+          '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">' + esc(q.id) + '</span>' +
+          usageInfo +
+        '</div>' +
+        '<div style="font-family:var(--serif);font-size:.85rem;line-height:1.4;color:var(--text)">' + esc(stmtPreview) + (stmtPreview.length >= 140 ? '…' : '') + '</div>' +
+      '</div>';
+    }).join('');
+  };
+
+  window.ueEssayImportFromBank = function(bankId){
+    const target = window._ueEssayBankPickerTarget;
+    if(!target) return;
+    const b = _ueGetBlock(target.bid); if(!b) return;
+    if(!b.content) b.content = {};
+    if(!Array.isArray(b.content.items)) b.content.items = [];
+    const already = b.content.items.some(function(r){ return r && r.bank_id === bankId; });
+    if(already){
+      if(typeof window.ueToast === 'function') window.ueToast('Esta discursiva já está no bloco.', 'info');
+      document.getElementById('ueEssayBankPickerModal').classList.remove('active');
+      return;
+    }
+    b.content.items.push({ bank_id: bankId });
+    if(window.EssayBank){
+      window.EssayBank.registerUsage(bankId, b.unit_id, b.id, b.content.items.length - 1);
+    }
+    _ueSaveStructured(target.bid); _ueRerenderBlockBody(target.bid);
+    document.getElementById('ueEssayBankPickerModal').classList.remove('active');
+    if(typeof window.ueToast === 'function') window.ueToast('Discursiva importada do banco', 'success');
+  };
+
   window.ueOqImportFromBank = function(bankId){
     const target = window._ueOqBankPickerTarget;
     if(!target) return;
@@ -43133,26 +43412,116 @@
         '</div>';
       }
 
-      // ───────── ESSAY (Questões discursivas) ─────────
+      // ───────── ESSAY (Questões discursivas) — Y3 Fase L ─────────
+      // Schema: content.items[] = [{ bank_id: 'cacd-3-2024' }] (refs ao EssayBank)
+      // Cada bank entry tem: statement (HTML), maxLength, references[],
+      // criteria[], officialAnswer (HTML), modelAnswers[], show_*, tags.
       case 'essay': {
         const items = Array.isArray(content.items) ? content.items : [];
-        const tagsList = (window.UbiqueStore && UbiqueStore.tags && UbiqueStore.tags.list)
-          ? UbiqueStore.tags.list() : [];
 
-        function renderEssayItem(it, idx){
-          const id = it.id || ('essay-' + (idx + 1));
-          const criteria = Array.isArray(it.criteria) ? it.criteria : [];
+        function _resolveItem(ref){
+          if(!ref) return null;
+          if(ref.bank_id && window.EssayBank){
+            return window.EssayBank.getById(ref.bank_id) || {};
+          }
+          return ref;
+        }
+
+        function renderEssayItem(itemRef, idx){
+          const it = _resolveItem(itemRef) || {};
+          const ref = itemRef || {};
+          const total = items.length;
+          const id = it.id || ref.id || ('essay-' + (idx + 1));
+          const sourceType = (it.source_type === 'ubique') ? 'ubique' : 'past_exam';
+          const isPastExam = sourceType === 'past_exam';
           const tagsCsv = Array.isArray(it.tags) ? it.tags.join(', ') : '';
-          const onUp = function(field){ return ' oninput="ueListUpdate(' + bid + ',\'items\',' + idx + ',\'' + field + '\',this.value)"'; };
+          const tagsList = (window.UbiqueStore && UbiqueStore.tags && UbiqueStore.tags.list)
+            ? UbiqueStore.tags.list() : [];
+          const tagsInputId = 'ue-essay-tags-' + bid + '-' + idx;
+
+          // Tag automática derivada do origin (Y3 Fase A) + slot estável
+          const badgeId = 'ue-essay-badge-' + bid + '-' + idx;
+          const initialBadgeHTML = (sourceType === 'ubique')
+            ? '<span class="card-label" style="background:var(--bg-elev);color:var(--text-mute);border:1px solid var(--accent-border-soft);padding:.1rem .45rem;border-radius:999px;font-size:.62rem;font-family:var(--mono);letter-spacing:.04em;font-style:italic" title="Questão Ubique (sem ID de prova)">Ubique</span>'
+            : _ueOqRenderOriginInnerHTML(it.origin, false);
+          const autoTagBadge = '<span id="' + badgeId + '" class="ue-oq-origin-badge-slot">' + initialBadgeHTML + '</span>';
+
+          // Reuse badge (quantas unidades)
+          let unitsCount = 0;
+          if(ref.bank_id && window.EssayBank){
+            unitsCount = window.EssayBank.countUnits(ref.bank_id);
+          }
+          const reuseBadge = unitsCount > 1
+            ? '<span class="card-label" style="background:rgba(76,175,80,.15);color:#4caf50;border:1px solid rgba(76,175,80,.4);padding:.1rem .45rem;border-radius:999px;font-size:.6rem;font-family:var(--mono)" title="Esta discursiva também aparece em ' + (unitsCount - 1) + ' outra(s) unidade(s). Edições refletem em todas.">↻ em ' + unitsCount + ' unid.</span>'
+            : '';
+
+          // Tags sugestões clicáveis
           const knownTagsList = tagsList.length
             ? '<div style="display:flex;gap:.25rem;flex-wrap:wrap;margin-top:.25rem">' +
                 tagsList.slice(0, 12).map(function(t){
                   const name = t.name || t.id;
-                  return '<span class="card-label" style="background:var(--accent-lo);border:1px solid var(--accent-border-soft);padding:.05rem .35rem;border-radius:999px;font-size:.55rem;cursor:pointer" onclick="(function(el){var i=document.getElementById(\'ue-essay-tags-' + bid + '-' + idx + '\');var v=i.value.trim();v=v?v.replace(/,\\s*$/,\'\')+\', \'+el.textContent:el.textContent;i.value=v;ueListUpdate(' + bid + ',\'items\',' + idx + ',\'tagsCsv\',v);(function(){var b=ueBlocksCache.find(function(x){return x.id===' + bid + ';});if(!b)return;var item=(b.content.items||[])[' + idx + '];if(!item)return;item.tags=v.split(\',\').map(function(s){return s.trim();}).filter(Boolean);_ueSaveStructured(' + bid + ');})();})(this)">' + esc(name) + '</span>';
+                  return '<span class="card-label" style="background:var(--accent-lo);border:1px solid var(--accent-border-soft);padding:.05rem .35rem;border-radius:999px;font-size:.55rem;cursor:pointer" onmousedown="event.preventDefault();(function(el){var i=document.getElementById(\'' + tagsInputId + '\');var v=i.value.trim();v=v?v.replace(/,\\s*$/,\'\')+\', \'+el.textContent:el.textContent;i.value=v;ueEssayTagsUpdate(' + bid + ',' + idx + ',v);})(this)">' + esc(name) + '</span>';
                 }).join('') +
               '</div>'
             : '';
 
+          // Header
+          const headerHTML =
+            '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap">' +
+              '<span class="card-label" style="background:var(--accent-lo);padding:.1rem .45rem;border-radius:var(--radius);border:1px solid var(--accent-border);font-size:.62rem">Discursiva ' + (idx + 1) + '</span>' +
+              '<select class="field-input" onchange="ueEssayUpdate(' + bid + ',' + idx + ',\'source_type\',this.value)" style="width:auto;font-size:.72rem;padding:.25rem .4rem" title="Origem">' +
+                '<option value="past_exam"' + (isPastExam ? ' selected' : '') + '>📜 Provas anteriores</option>' +
+                '<option value="ubique"' + (!isPastExam ? ' selected' : '') + '>✨ Ubique</option>' +
+              '</select>' +
+              autoTagBadge +
+              reuseBadge +
+              '<span style="flex:1"></span>' +
+              '<button class="btn btn-ghost btn-sm" style="padding:.15rem .35rem;font-size:.65rem" onclick="ueEssayMove(' + bid + ',' + idx + ',-1)" ' + (idx === 0 ? 'disabled' : '') + '>▲</button>' +
+              '<button class="btn btn-ghost btn-sm" style="padding:.15rem .35rem;font-size:.65rem" onclick="ueEssayMove(' + bid + ',' + idx + ',1)" ' + (idx === total - 1 ? 'disabled' : '') + '>▼</button>' +
+              '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.15rem .35rem;font-size:.65rem" onclick="ueEssayRemove(' + bid + ',' + idx + ')" title="Remover do bloco">×</button>' +
+            '</div>';
+
+          // ID condicional
+          const idIsEmpty = !it.origin || !String(it.origin).trim();
+          const idFieldHTML = isPastExam
+            ? '<div class="field" style="margin:0 0 .4rem"><label style="font-size:.62rem;color:var(--accent);font-weight:500">ID da prova <span style="color:var(--red)">*</span></label>' +
+                '<input class="field-input" value="' + esc(it.origin || '') + '" oninput="ueEssayUpdate(' + bid + ',' + idx + ',\'origin\',this.value)" placeholder="[#3/2024]  ou  [pf:#5/2023]" style="font-family:var(--mono);font-size:.72rem;border-color:' + (idIsEmpty ? 'var(--red)' : 'var(--accent-border-soft)') + '"' + (idIsEmpty ? ' aria-invalid="true"' : '') + '>' +
+                '<span class="s-body" style="font-size:.6rem;color:' + (idIsEmpty ? 'var(--red)' : 'var(--text-mute)') + ';display:block;margin-top:.15rem">' +
+                  (idIsEmpty ? 'Obrigatório. ' : '') +
+                  'Formato: <code>[#N/YYYY]</code>. Discursivas não usam grupo.' +
+                '</span>' +
+              '</div>'
+            : '';
+
+          // Textos de referência (references[])
+          const references = Array.isArray(it.references) ? it.references : [];
+          const referencesHTML = references.map(function(r, rIdx){
+            return '<div style="border:1px dashed var(--accent-border-soft);border-radius:var(--radius);padding:.55rem .7rem;background:var(--bg-card);margin-bottom:.4rem">' +
+              '<div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.35rem">' +
+                '<input class="field-input" placeholder="TEXTO-BASE I" value="' + esc(r.label || '') + '" oninput="ueEssayRefUpdate(' + bid + ',' + idx + ',' + rIdx + ',\'label\',this.value)" style="flex:0 0 200px;font-family:var(--mono);font-size:.7rem">' +
+                '<input class="field-input" placeholder="Título do texto-base" value="' + esc(r.title || '') + '" oninput="ueEssayRefUpdate(' + bid + ',' + idx + ',' + rIdx + ',\'title\',this.value)" style="flex:1;font-size:.78rem">' +
+                '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.15rem .4rem;font-size:.65rem" onclick="ueEssayRefRemove(' + bid + ',' + idx + ',' + rIdx + ')">×</button>' +
+              '</div>' +
+              '<textarea class="field-input" rows="3" placeholder="Corpo do texto-base (HTML — citação, trecho de fonte, etc.)" oninput="ueEssayRefUpdate(' + bid + ',' + idx + ',' + rIdx + ',\'body\',this.value)" style="font-family:var(--mono);font-size:.74rem;line-height:1.4">' + esc(r.body || '') + '</textarea>' +
+              '<input class="field-input" placeholder="URL da imagem (opcional)" value="' + esc(r.image || '') + '" oninput="ueEssayRefUpdate(' + bid + ',' + idx + ',' + rIdx + ',\'image\',this.value)" style="font-family:var(--mono);font-size:.72rem;margin-top:.3rem">' +
+            '</div>';
+          }).join('');
+
+          // 3 ABAS do gabarito
+          const tabKey = (window._ueEssayActiveTab && window._ueEssayActiveTab[bid + '-' + idx]) || 'criteria';
+          const tabBtn = function(key, label){
+            const active = tabKey === key;
+            return '<button class="btn btn-ghost btn-sm" onclick="ueEssayTabSwitch(' + bid + ',' + idx + ',\'' + key + '\')" style="padding:.3rem .65rem;font-size:.72rem;font-family:var(--mono);letter-spacing:.04em;' + (active ? 'background:var(--accent);color:var(--bg);border-color:var(--accent);font-weight:600' : '') + '">' + label + '</button>';
+          };
+          const tabsBarHTML =
+            '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.5rem">' +
+              tabBtn('criteria', 'Critérios de correção') +
+              tabBtn('official',  'Padrão de Resposta da Banca') +
+              tabBtn('models',    'Resposta Modelo') +
+            '</div>';
+
+          // Aba 1: Critérios
+          const criteria = Array.isArray(it.criteria) ? it.criteria : [];
           const criteriaHTML = criteria.map(function(c, cIdx){
             return '<div style="border:1px dashed var(--accent-border-soft);border-radius:var(--radius);padding:.5rem .65rem;background:var(--bg-card);margin-bottom:.4rem">' +
               '<div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.35rem">' +
@@ -43163,44 +43532,104 @@
                 '<input class="field-input" placeholder="Rótulo (ex: Argumentação)" value="' + esc(c.label||'') + '" oninput="ueEssayCriterionUpdate(' + bid + ',' + idx + ',' + cIdx + ',\'label\',this.value)" style="font-size:.78rem">' +
                 '<input class="field-input" type="number" step="0.5" placeholder="Pontos" value="' + esc(c.maxScore||'') + '" oninput="ueEssayCriterionUpdate(' + bid + ',' + idx + ',' + cIdx + ',\'maxScore\',this.value)" style="font-size:.78rem">' +
               '</div>' +
-              '<textarea class="field-input" rows="2" placeholder="Descrição do critério" style="margin-top:.35rem;font-size:.78rem" oninput="ueEssayCriterionUpdate(' + bid + ',' + idx + ',' + cIdx + ',\'description\',this.value)">' + esc(c.description||'') + '</textarea>' +
+              '<textarea class="field-input" rows="2" placeholder="Descrição do critério (HTML)" style="margin-top:.35rem;font-family:var(--mono);font-size:.76rem;line-height:1.4" oninput="ueEssayCriterionUpdate(' + bid + ',' + idx + ',' + cIdx + ',\'description\',this.value)">' + esc(c.description||'') + '</textarea>' +
+              '<textarea class="field-input" rows="2" placeholder="Resposta-modelo deste critério (HTML)" style="margin-top:.35rem;font-family:var(--mono);font-size:.76rem;line-height:1.4" oninput="ueEssayCriterionUpdate(' + bid + ',' + idx + ',' + cIdx + ',\'modelAnswer\',this.value)">' + esc(c.modelAnswer||'') + '</textarea>' +
             '</div>';
           }).join('');
+          const tabCriteriaHTML = (tabKey !== 'criteria') ? '' :
+            '<div style="border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.6rem .75rem;background:var(--bg-card)">' +
+              '<label style="display:flex;gap:.45rem;align-items:center;cursor:pointer;margin-bottom:.6rem;font-size:.78rem;color:var(--text)">' +
+                '<input type="checkbox" ' + (it.show_criteria !== false ? 'checked' : '') + ' onchange="ueEssayShowToggle(' + bid + ',' + idx + ',\'show_criteria\',this.checked)" style="accent-color:var(--accent)">' +
+                '<span>Mostrar <strong>Critérios de correção</strong> ao aluno</span>' +
+              '</label>' +
+              criteriaHTML +
+              (criteria.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.72rem;margin:0">Nenhum critério ainda.</p>' : '') +
+              '<button class="btn btn-ghost btn-sm" onclick="ueEssayCriterionAdd(' + bid + ',' + idx + ')" style="padding:.2rem .55rem;font-size:.7rem;margin-top:.4rem;width:100%">+ Critério</button>' +
+            '</div>';
+
+          // Aba 2: Padrão de Resposta da Banca (officialAnswer — HTML)
+          const tabOfficialHTML = (tabKey !== 'official') ? '' :
+            '<div style="border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.6rem .75rem;background:var(--bg-card)">' +
+              '<label style="display:flex;gap:.45rem;align-items:center;cursor:pointer;margin-bottom:.6rem;font-size:.78rem;color:var(--text)">' +
+                '<input type="checkbox" ' + (it.show_official_answer !== false ? 'checked' : '') + ' onchange="ueEssayShowToggle(' + bid + ',' + idx + ',\'show_official_answer\',this.checked)" style="accent-color:var(--accent)">' +
+                '<span>Mostrar <strong>Padrão de Resposta</strong> ao aluno</span>' +
+              '</label>' +
+              '<div class="field" style="margin:0"><label style="font-size:.62rem">Padrão de Resposta da Banca (HTML)</label>' +
+                '<textarea class="field-input" rows="6" placeholder="Resposta integral esperada combinando os critérios (HTML aceito)…" oninput="ueEssayUpdate(' + bid + ',' + idx + ',\'officialAnswer\',this.value)" style="font-family:var(--mono);font-size:.78rem;line-height:1.45">' + esc(it.officialAnswer || '') + '</textarea>' +
+              '</div>' +
+            '</div>';
+
+          // Aba 3: Respostas-modelo (modelAnswers[])
+          const modelAnswers = Array.isArray(it.modelAnswers) ? it.modelAnswers : [];
+          const modelAnswersHTML = modelAnswers.map(function(m, mIdx){
+            return '<div style="border:1px dashed var(--accent-border-soft);border-radius:var(--radius);padding:.55rem .7rem;background:var(--bg-card);margin-bottom:.4rem">' +
+              '<div style="display:flex;align-items:center;gap:.4rem;margin-bottom:.35rem">' +
+                '<span class="s-subtitle" style="font-size:.6rem;color:var(--accent);flex:1">Resposta-modelo ' + String.fromCharCode(65 + mIdx) + '</span>' +
+                '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.15rem .4rem;font-size:.65rem" onclick="ueEssayModelRemove(' + bid + ',' + idx + ',' + mIdx + ')">×</button>' +
+              '</div>' +
+              '<div style="display:grid;grid-template-columns:1fr 1fr 80px;gap:.4rem;margin-bottom:.35rem">' +
+                '<input class="field-input" placeholder="Título" value="' + esc(m.title||'') + '" oninput="ueEssayModelUpdate(' + bid + ',' + idx + ',' + mIdx + ',\'title\',this.value)" style="font-size:.78rem">' +
+                '<input class="field-input" placeholder="Autor" value="' + esc(m.author||'') + '" oninput="ueEssayModelUpdate(' + bid + ',' + idx + ',' + mIdx + ',\'author\',this.value)" style="font-size:.78rem">' +
+                '<input class="field-input" placeholder="Nota" value="' + esc(m.score||'') + '" oninput="ueEssayModelUpdate(' + bid + ',' + idx + ',' + mIdx + ',\'score\',this.value)" style="font-size:.78rem">' +
+              '</div>' +
+              '<textarea class="field-input" rows="5" placeholder="Corpo da resposta-modelo (HTML aceito)" style="font-family:var(--mono);font-size:.76rem;line-height:1.4" oninput="ueEssayModelUpdate(' + bid + ',' + idx + ',' + mIdx + ',\'body\',this.value)">' + esc(m.body||'') + '</textarea>' +
+            '</div>';
+          }).join('');
+          const tabModelsHTML = (tabKey !== 'models') ? '' :
+            '<div style="border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.6rem .75rem;background:var(--bg-card)">' +
+              '<label style="display:flex;gap:.45rem;align-items:center;cursor:pointer;margin-bottom:.6rem;font-size:.78rem;color:var(--text)">' +
+                '<input type="checkbox" ' + (it.show_model_answers !== false ? 'checked' : '') + ' onchange="ueEssayShowToggle(' + bid + ',' + idx + ',\'show_model_answers\',this.checked)" style="accent-color:var(--accent)">' +
+                '<span>Mostrar <strong>Respostas-modelo</strong> ao aluno</span>' +
+              '</label>' +
+              modelAnswersHTML +
+              (modelAnswers.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.72rem;margin:0">Nenhuma resposta-modelo ainda.</p>' : '') +
+              '<button class="btn btn-ghost btn-sm" onclick="ueEssayModelAdd(' + bid + ',' + idx + ')" style="padding:.2rem .55rem;font-size:.7rem;margin-top:.4rem;width:100%">+ Resposta-modelo</button>' +
+            '</div>';
 
           return '<div style="border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.7rem .8rem;background:var(--bg-elev);margin-bottom:.6rem">' +
-            '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.55rem">' +
-              '<span class="card-label" style="background:var(--accent-lo);padding:.1rem .4rem;border-radius:var(--radius);border:1px solid var(--accent-border);font-size:.6rem">Discursiva ' + (idx + 1) + '</span>' +
-              '<input class="field-input" value="' + esc(id) + '" oninput="ueListUpdate(' + bid + ',\'items\',' + idx + ',\'id\',this.value)" placeholder="id" style="font-family:var(--mono);font-size:.7rem;max-width:120px">' +
-              '<input class="field-input" value="' + esc(it.reference||'') + '" placeholder="CACD 2018"' + onUp('reference') + ' style="flex:1;min-width:100px;font-family:var(--mono);font-size:.7rem">' +
-              '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.15rem .45rem;font-size:.7rem" onclick="ueListRemove(' + bid + ',\'items\',' + idx + ')">apagar</button>' +
+            headerHTML +
+            idFieldHTML +
+            // Enunciado (HTML)
+            '<div class="field" style="margin:0 0 .5rem"><label style="font-size:.62rem;color:var(--accent);font-weight:500">Enunciado da questão (HTML)</label>' +
+              '<textarea class="field-input" rows="4" placeholder="<p>O que se pede ao aluno…</p>" oninput="ueEssayUpdate(' + bid + ',' + idx + ',\'statement\',this.value)" style="font-family:var(--mono);font-size:.78rem;line-height:1.45">' + esc(it.statement || it.command || '') + '</textarea>' +
             '</div>' +
-            '<div class="field" style="margin:0 0 .5rem"><label style="font-size:.65rem">Enunciado da questão</label>' +
-              '<textarea class="field-input" rows="4" placeholder="O que se pede ao aluno..." style="font-size:.85rem"' + onUp('statement') + '>' + esc(it.statement || it.command || '') + '</textarea>' +
+            // Max caracteres
+            '<div class="field" style="margin:0 0 .5rem"><label style="font-size:.62rem">Max. caracteres da resposta</label>' +
+              '<input class="field-input" type="number" value="' + esc(it.maxLength||'') + '" placeholder="3000" oninput="ueEssayUpdate(' + bid + ',' + idx + ',\'maxLength\',this.value)" style="font-size:.78rem;max-width:140px">' +
             '</div>' +
-            '<div class="field" style="margin:0 0 .5rem"><label style="font-size:.65rem">Max. caracteres da resposta</label>' +
-              '<input class="field-input" type="number" value="' + esc(it.maxLength||'') + '" placeholder="3000"' + onUp('maxLength') + ' style="font-size:.78rem;max-width:140px">' +
-            '</div>' +
-            '<div class="field" style="margin:0 0 .5rem"><label style="font-size:.65rem">Tags (separadas por vírgula)</label>' +
-              '<input class="field-input" id="ue-essay-tags-' + bid + '-' + idx + '" value="' + esc(tagsCsv) + '" oninput="(function(v){var b=ueBlocksCache.find(function(x){return x.id===' + bid + ';});if(!b)return;var item=(b.content.items||[])[' + idx + '];if(!item)return;item.tags=v.split(\',\').map(function(s){return s.trim();}).filter(Boolean);_ueSaveStructured(' + bid + ');})(this.value)" placeholder="CACD, 2018, Brasil Império" style="font-size:.78rem">' +
-              knownTagsList +
-            '</div>' +
-            '<div style="margin-top:.4rem">' +
+            // Textos de referência
+            '<div style="margin:0 0 .55rem">' +
               '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.3rem">' +
-                '<span class="s-subtitle" style="font-size:.6rem">Critérios de correção (mostrar ao aluno via botão "ver critérios")</span>' +
-                '<button class="btn btn-ghost btn-sm" onclick="ueEssayCriterionAdd(' + bid + ',' + idx + ')" style="padding:.15rem .45rem;font-size:.7rem">+ critério</button>' +
+                '<span class="s-subtitle" style="font-size:.62rem">Textos de referência</span>' +
+                '<button class="btn btn-ghost btn-sm" onclick="ueEssayRefAdd(' + bid + ',' + idx + ')" style="padding:.15rem .45rem;font-size:.7rem">+ texto-base</button>' +
               '</div>' +
-              criteriaHTML +
+              referencesHTML +
+              (references.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.72rem;margin:0">Nenhum texto de referência. Use "+ texto-base" pra adicionar um trecho de fonte primária, citação, etc.</p>' : '') +
+            '</div>' +
+            // Gabarito (3 abas)
+            '<div style="margin:.7rem 0 .5rem;padding-top:.5rem;border-top:1px solid var(--accent-border-soft)">' +
+              '<span class="s-subtitle" style="font-size:.65rem;font-weight:600;color:var(--accent);display:block;margin-bottom:.4rem">📋 Gabarito</span>' +
+              tabsBarHTML +
+              tabCriteriaHTML + tabOfficialHTML + tabModelsHTML +
+            '</div>' +
+            // Tags
+            '<div class="field" style="margin:.5rem 0 0"><label style="font-size:.62rem">Tags (separadas por vírgula)</label>' +
+              '<input class="field-input" id="' + tagsInputId + '" value="' + esc(tagsCsv) + '" oninput="ueEssayTagsUpdate(' + bid + ',' + idx + ',this.value)" placeholder="CACD, Brasil Império, café" style="font-size:.78rem">' +
+              knownTagsList +
             '</div>' +
           '</div>';
         }
 
         const itemsHTML = items.map(renderEssayItem).join('');
-        const empty = items.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem;margin:0">Nenhuma discursiva ainda.</p>' : '';
-        const defaultsJson = esc(JSON.stringify({ __autoId: 'essay-', statement: '', maxLength: 3000, reference: '', criteria: [], tags: [] }));
+        const empty = items.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem;margin:1rem 0;text-align:center">Nenhuma discursiva ainda. Use "+ Discursiva" ou "📥 Do banco" pra adicionar.</p>' : '';
+
         return '<div style="margin-top:.4rem">' +
-          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem">' +
-            '<span class="s-subtitle" style="font-size:.65rem">Questões discursivas do bloco</span>' +
-            '<button class="btn btn-ghost btn-sm" onclick="ueListAdd(' + bid + ',\'items\',\'' + defaultsJson + '\')" style="padding:.25rem .6rem">+ Discursiva</button>' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">' +
+            '<span class="s-subtitle" style="font-size:.65rem">Questões discursivas</span>' +
+            '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueEssayOpenBankPicker(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem" title="Importar do banco de discursivas">📥 Do banco</button>' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueEssayAdd(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem">+ Discursiva</button>' +
+            '</div>' +
           '</div>' +
           itemsHTML + empty +
         '</div>';
@@ -45193,20 +45622,29 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   window.renderQuestionBankList = function(){
     const list = document.getElementById('questoesList');
     if(!list || !window.UbiqueStore) return;
-    const all = UbiqueStore.questions.list();
+    // Combina objetivas + discursivas, marcando o "kind"
+    const objectives = (UbiqueStore.questions.list() || []).map(function(q){
+      return Object.assign({ _kind: 'objective' }, q);
+    });
+    const essays = (UbiqueStore.essays.list() || []).map(function(q){
+      return Object.assign({ _kind: 'essay', type: 'essay' }, q);
+    });
+    const all = objectives.concat(essays);
     const counter = document.getElementById('count-questoes');
     if(counter) counter.textContent = all.length;
 
     const search = (document.getElementById('qbSearch') || {}).value || '';
+    const filterKind = (document.getElementById('qbFilterKind') || {}).value || '';
     const filterSource = (document.getElementById('qbFilterSource') || {}).value || '';
     const filterType = (document.getElementById('qbFilterType') || {}).value || '';
     const f = String(search).toLowerCase().trim();
 
     const filtered = all.filter(function(q){
+      if(filterKind && q._kind !== filterKind) return false;
       if(filterSource && q.source_type !== filterSource) return false;
       if(filterType && q.type !== filterType) return false;
       if(!f) return true;
-      const hay = (q.statement + ' ' + (q.origin || '') + ' ' + (q.id || '') + ' ' + (q.tags || []).join(' ')).toLowerCase();
+      const hay = ((q.statement || '') + ' ' + (q.origin || '') + ' ' + (q.id || '') + ' ' + (q.tags || []).join(' ')).toLowerCase();
       return hay.indexOf(f) >= 0;
     });
 
@@ -45227,8 +45665,11 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       const tagBadge = autoTag
         ? '<span class="card-label" style="background:' + (q.source_type === 'ubique' ? 'var(--bg-elev);color:var(--text-mute);border:1px solid var(--accent-border-soft)' : 'var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)') + ';padding:.15rem .55rem;border-radius:999px;font-size:.65rem;font-family:var(--mono);' + (q.source_type === 'ubique' ? 'font-style:italic;' : 'font-weight:500;') + '" title="' + esc(q.origin || '') + '">' + esc(autoTag) + '</span>'
         : '';
-      const typeBadge = '<span class="card-label" style="background:var(--bg-elev);padding:.1rem .45rem;border-radius:999px;font-size:.6rem;font-family:var(--mono);color:var(--text-dim);border:1px solid var(--accent-border-soft)">' +
-        (q.type === 'multiple_choice' ? 'MC' : 'C/E') +
+      const typeLabel = q._kind === 'essay'
+        ? '✍ Discursiva'
+        : (q.type === 'multiple_choice' ? 'MC' : 'C/E');
+      const typeBadge = '<span class="card-label" style="background:' + (q._kind === 'essay' ? 'var(--accent-lo)' : 'var(--bg-elev)') + ';padding:.1rem .45rem;border-radius:999px;font-size:.6rem;font-family:var(--mono);color:' + (q._kind === 'essay' ? 'var(--accent)' : 'var(--text-dim)') + ';border:1px solid ' + (q._kind === 'essay' ? 'var(--accent-border)' : 'var(--accent-border-soft)') + '">' +
+        typeLabel +
       '</span>';
       const tagsHTML = (q.tags || []).map(function(t){
         return '<span class="card-label" style="background:var(--bg-card);padding:.1rem .4rem;border-radius:999px;font-size:.6rem;font-family:var(--mono);color:var(--text-mute);border:1px solid var(--accent-border-soft)">' + esc(t) + '</span>';
@@ -45264,7 +45705,10 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     window._qbSubBound = true;
     UbiqueStore.subscribe(function(evt){
       if(!evt || !evt.type) return;
-      if(evt.type === 'sync' || evt.type === 'reset' || evt.type.indexOf('questions') === 0 || evt.type.indexOf('unit_blocks') === 0){
+      if(evt.type === 'sync' || evt.type === 'reset' ||
+         evt.type.indexOf('questions') === 0 ||
+         evt.type.indexOf('essays') === 0 ||
+         evt.type.indexOf('unit_blocks') === 0){
         if(document.getElementById('questoesList')) renderQuestionBankList();
       }
     });
