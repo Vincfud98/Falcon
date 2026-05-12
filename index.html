@@ -9,9 +9,9 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=27"></script>
+<script src="ubique-shared.js?v=28"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=27"></script>
+<script src="learning-blocks-render.js?v=28"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -6425,6 +6425,189 @@ window.COURSES = [
       }
     }catch(e){
       console.warn('[migrate-blocks] error:', e);
+    }
+  })();
+
+  /**
+   * Y3 Fase F — Migração idempotente de blocos de questões objetivas legacy
+   * pro novo schema (Y3 Fases B-D).
+   *
+   * Converte:
+   *   - type 'quiz' → type 'objective_questions'
+   *   - content.groups[].items[]   → content.groups[].questions[]
+   *     - it.assertion        → q.statement
+   *     - it.options[strings] → q.options[{label,text,correct}] (MC) OU C/E
+   *     - it.key              → q.correct (bool) OU opção marcada como correct
+   *     - it.comments         → q.comment
+   *     - it.reference (str)  → q.origin (auto-detecta padrão #G-N/YYYY)
+   *     - it.context          → q.reference_text
+   *     - it.image_url        → q.reference_image
+   *   - content.groups[].reference.text.{label,title,body,source} +
+   *                         .media.url
+   *                                → content.groups[].reference_text (HTML) +
+   *                                  content.groups[].reference_image
+   *   - content.groups[].enunciado → content.groups[].description
+   *   - Remove campo `difficulty` (foi removido na Fase B)
+   *
+   * Idempotente: se um campo Y3 já está preenchido, não sobrescreve.
+   * Detecta migração já feita pela existência de g.questions[].
+   */
+  (function migrateObjectiveQuestionsLegacyOnce(){
+    try{
+      if(!window.UbiqueStore) return;
+
+      function _migrateItemToQuestion(item){
+        if(!item || typeof item !== 'object') return null;
+        const q = {
+          id: item.id || ('q-mig-' + Date.now() + '-' + Math.floor(Math.random() * 9000)),
+          origin:          item.origin          || '',
+          reference_text:  item.reference_text  || item.context || item.support_text || '',
+          reference_image: item.reference_image || item.image_url || item.image || '',
+          statement:       item.statement       || item.assertion || '',
+          comment:         item.comment         || item.comments  || '',
+          tags:            Array.isArray(item.tags) ? item.tags.slice() : [],
+          stats:           item.stats && typeof item.stats === 'object' ? item.stats : { correct_pct: 0, wrong_pct: 0, guess_pct: 0 }
+        };
+        // Origin: se vier vazio mas houver `reference` legacy (string tipo "#15-2/2023"
+        // ou "[#150/2025]"), usa como origin. Se for "CACD 2018" (só prosa) não bate
+        // no parser e a tag vai cair pro fallback de string.
+        if(!q.origin && item.reference){
+          q.origin = String(item.reference).trim();
+        }
+
+        // Detecta tipo a partir das opções
+        const opts = Array.isArray(item.options) ? item.options : [];
+        const isCE2 = opts.length === 2 &&
+          /^(certo|errado|true|false|c|e|v|f|verdadeiro|falso)$/i.test(String(opts[0])) &&
+          /^(certo|errado|true|false|c|e|v|f|verdadeiro|falso)$/i.test(String(opts[1]));
+        if(isCE2){
+          q.type = 'true_false';
+          const key = String(item.key || '').toLowerCase().trim();
+          q.correct = /^(certo|true|c|v|verdadeiro)$/.test(key);
+        } else if(opts.length > 0){
+          q.type = 'multiple_choice';
+          q.options = opts.map(function(o, i){
+            const text = typeof o === 'string' ? o : (o.text || o.value || '');
+            const label = (typeof o === 'object' && o.label) ? o.label : String.fromCharCode(65 + i);
+            // Match do gabarito: key pode ser o texto da opção OU a letra
+            const keyStr = String(item.key || '');
+            const correct = keyStr === text ||
+                            keyStr.toUpperCase() === label ||
+                            (typeof o === 'object' && o.correct === true);
+            return { label: label, text: text, correct: !!correct };
+          });
+          // Garante ao menos uma opção correta
+          if(!q.options.some(function(o){ return o.correct; }) && q.options.length){
+            q.options[0].correct = true;
+          }
+        } else {
+          // Sem opções definidas — default C/E
+          q.type = 'true_false';
+          q.correct = true;
+        }
+        return q;
+      }
+
+      function _migrateGroup(g){
+        // Se já tem questions[], assume migrado — não toca
+        if(Array.isArray(g.questions)) return { group: g, changed: false };
+        const ng = Object.assign({}, g);
+        let changed = false;
+        // Reference legacy {text,media} → reference_text/reference_image
+        if(g.reference && (g.reference.text || g.reference.media)){
+          if(g.reference.text && !ng.reference_text){
+            const t = g.reference.text;
+            const parts = [];
+            if(t.label)  parts.push('<p><strong>' + String(t.label) + '</strong></p>');
+            if(t.title)  parts.push('<h4>' + String(t.title) + '</h4>');
+            if(t.body)   parts.push('<p>' + String(t.body) + '</p>');
+            if(t.source) parts.push('<p><em>' + String(t.source) + '</em></p>');
+            ng.reference_text = parts.join('\n');
+            changed = true;
+          }
+          if(g.reference.media && g.reference.media.url && !ng.reference_image){
+            ng.reference_image = g.reference.media.url;
+            changed = true;
+          }
+        }
+        // enunciado → description
+        if(g.enunciado && !ng.description){
+          ng.description = g.enunciado;
+          changed = true;
+        }
+        // items[] → questions[]
+        if(Array.isArray(g.items) && g.items.length){
+          ng.questions = g.items.map(_migrateItemToQuestion).filter(Boolean);
+          changed = true;
+        }
+        return { group: ng, changed: changed };
+      }
+
+      const blocks = UbiqueStore.unit_blocks.list() || [];
+      let migratedTypes = 0;
+      let migratedSchemas = 0;
+
+      blocks.forEach(function(b){
+        if(!b) return;
+        let blockType = b.type;
+        let blockChanged = false;
+
+        // 1. type 'quiz' → 'objective_questions'
+        if(blockType === 'quiz'){
+          blockType = 'objective_questions';
+          blockChanged = true;
+          migratedTypes++;
+        }
+
+        // 2. Só migra schema pros dois tipos
+        if(blockType !== 'objective_questions') return;
+
+        const content = b.content || {};
+        let contentChanged = false;
+        const newContent = Object.assign({}, content);
+
+        if(Array.isArray(content.groups)){
+          let anyGroupChanged = false;
+          newContent.groups = content.groups.map(function(g){
+            if(!g || typeof g !== 'object') return g;
+            const res = _migrateGroup(g);
+            if(res.changed) anyGroupChanged = true;
+            // Remove campo difficulty das questões (foi removido na Fase B)
+            if(Array.isArray(res.group.questions)){
+              res.group.questions.forEach(function(q){
+                if(q && 'difficulty' in q){ delete q.difficulty; anyGroupChanged = true; }
+              });
+            }
+            return res.group;
+          });
+          if(anyGroupChanged){ contentChanged = true; migratedSchemas++; }
+        }
+
+        // 3. Garante ungrouped como array (mesmo vazio)
+        if(blockType === 'objective_questions' && !Array.isArray(newContent.ungrouped)){
+          // Não força se já há ungrouped; só inicializa se ausente
+          if(content.ungrouped == null){
+            // não cria explicitamente — fica undefined até o admin criar uma avulsa.
+            // Só normaliza se já existia mas não-array
+          } else {
+            newContent.ungrouped = [];
+            contentChanged = true;
+          }
+        }
+
+        if(blockChanged || contentChanged){
+          const patch = {};
+          if(blockChanged) patch.type = blockType;
+          if(contentChanged) patch.content = newContent;
+          UbiqueStore.unit_blocks.update(b.id, patch);
+        }
+      });
+
+      if(migratedTypes > 0 || migratedSchemas > 0){
+        console.log('[migrate-oq] ' + migratedTypes + ' tipo(s) quiz→objective_questions, ' + migratedSchemas + ' bloco(s) com schema migrado pro novo formato (Y3 Fase F)');
+      }
+    }catch(e){
+      console.warn('[migrate-oq] error:', e);
     }
   })();
 
