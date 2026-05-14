@@ -823,19 +823,21 @@
         '</div>';
       }
       case 'flashcards': {
-        const cards = _lbParseList(c.cards);
+        const cards = _lbParseList(c.concepts || c.cards);
         if(!cards.length) return '<p class="s-body" style="font-style:italic;color:var(--text-mute)">Sem flashcards.</p>';
         return '<div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem">' +
           cards.map(function(card, i){
+            var front = card.term || card.front || '';
+            var back = card.description || card.back || '';
             return '<article class="card" style="padding:1rem 1.1rem">' +
               '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem">' +
                 '<div style="padding:.7rem;background:var(--bg-elev);border-radius:var(--radius)">' +
                   '<span class="s-label" style="font-size:.65rem;color:var(--accent)">FRENTE</span>' +
-                  '<p class="card-body" style="margin-top:.3rem;font-size:.9rem">' + e(card.front || '') + '</p>' +
+                  '<p class="card-body" style="margin-top:.3rem;font-size:.9rem">' + e(front) + '</p>' +
                 '</div>' +
                 '<div style="padding:.7rem;background:var(--accent-xlo);border-radius:var(--radius)">' +
                   '<span class="s-label" style="font-size:.65rem;color:var(--accent)">VERSO</span>' +
-                  '<p class="card-body" style="margin-top:.3rem;font-size:.9rem">' + e(card.back || '') + '</p>' +
+                  '<p class="card-body" style="margin-top:.3rem;font-size:.9rem">' + e(back) + '</p>' +
                 '</div>' +
               '</div>' +
               '<div style="display:flex;gap:.4rem;margin-top:.7rem">' +
