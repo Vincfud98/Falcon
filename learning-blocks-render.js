@@ -808,15 +808,16 @@
           '</div>';
       }
       case 'keypoints': {
-        const points = _lbParseList(c.points);
+        const points = _lbParseList(c.items || c.points);
         if(!points.length) return '<p class="s-body" style="font-style:italic;color:var(--text-mute)">Sem pontos cadastrados.</p>';
         return '<div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem">' +
           points.map(function(p, i){
+            var bodyText = p.body || p.description || '';
             return '<article class="card" style="padding:1.2rem 1.3rem">' +
               '<span style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute);letter-spacing:.1em">' + String(i+1).padStart(2,'0') + '</span>' +
               (p.label ? '<span class="card-label" style="margin-top:.3rem;display:block">' + e(p.label) + '</span>' : '') +
               '<h4 class="card-title" style="font-size:1.1rem;margin-top:.4rem">' + e(p.title || '') + '</h4>' +
-              (p.description ? '<p class="card-body" style="font-size:.85rem;margin-top:.4rem">' + e(p.description) + '</p>' : '') +
+              (bodyText ? '<div class="card-body" style="font-size:.85rem;margin-top:.4rem">' + bodyText + '</div>' : '') +
             '</article>';
           }).join('') +
         '</div>';
