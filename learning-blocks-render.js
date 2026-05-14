@@ -888,7 +888,7 @@
           }
           return parts.join(' ');
         }
-        return '<div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem">' +
+        return '<div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem">' +
           items.map(function(it){
             var label = kindLabel[it.kind] || (it.kind ? String(it.kind).toUpperCase() : 'OBRA');
             var coverUrl = it.image || it.cover_url || '';
