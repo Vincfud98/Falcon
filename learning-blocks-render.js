@@ -851,21 +851,69 @@
       case 'references': {
         const items = _lbParseList(c.items);
         if(!items.length) return '<p class="s-body" style="font-style:italic;color:var(--text-mute)">Sem obras.</p>';
-        const kindLabel = { livro:'LIVRO', artigo:'ARTIGO', 'fonte-web':'FONTE WEB', tese:'TESE', documento:'DOCUMENTO' };
-        return '<div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem">' +
+        const kindLabel = {
+          livro:'LIVRO', book:'LIVRO', artigo:'ARTIGO', article:'ARTIGO',
+          tese:'TESE', thesis:'TESE', dissertacao:'DISSERTAÇÃO',
+          relatorio:'RELATÓRIO', site:'SITE', web:'SITE',
+          'fonte-web':'FONTE WEB', documento:'DOCUMENTO', document:'DOCUMENTO',
+          outro:'OBRA'
+        };
+        function buildCitation(it){
+          if(it.citation && String(it.citation).trim()) return it.citation;
+          var author = (it.author || '').trim();
+          var title = (it.title || '').trim();
+          var publisher = (it.publisher || '').trim();
+          var year = (it.year || '').toString().trim();
+          var url = (it.url || '').trim();
+          var kind = String(it.kind || '').toLowerCase();
+          if(!title && !author) return '';
+          var authorPart = '';
+          if(author){
+            var tokens = author.split(/\s+/);
+            if(tokens.length >= 2 && !author.includes(';') && !author.includes(',')){
+              authorPart = tokens[tokens.length-1].toUpperCase() + ', ' + tokens.slice(0,-1).join(' ');
+            } else {
+              authorPart = author;
+            }
+          }
+          var parts = [];
+          if(authorPart) parts.push(e(authorPart) + '.');
+          if(title) parts.push('<em>' + e(title) + '</em>.');
+          var tail = [];
+          if(publisher) tail.push(e(publisher));
+          if(year) tail.push(e(year));
+          if(tail.length) parts.push(tail.join(', ') + '.');
+          if((kind === 'site' || kind === 'web' || kind === 'fonte-web') && url){
+            parts.push('Disponível em: ' + e(url) + '.');
+          }
+          return parts.join(' ');
+        }
+        return '<div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem">' +
           items.map(function(it){
-            const label = kindLabel[it.kind] || (it.kind ? String(it.kind).toUpperCase() : 'OBRA');
-            const cover = it.cover_url
-              ? '<div style="aspect-ratio:2/3;background-image:url(\'' + attrHtml(it.cover_url) + '\');background-size:cover;background-position:center;border-radius:var(--radius);margin-bottom:.7rem"></div>'
+            var label = kindLabel[it.kind] || (it.kind ? String(it.kind).toUpperCase() : 'OBRA');
+            var coverUrl = it.image || it.cover_url || '';
+            var cover = coverUrl
+              ? '<div style="aspect-ratio:2/3;background-image:url(\'' + attrHtml(coverUrl) + '\');background-size:cover;background-position:center;border-radius:var(--radius);margin-bottom:.7rem"></div>'
               : '<div style="aspect-ratio:2/3;background:linear-gradient(135deg,var(--accent-lo),var(--accent-xlo));border-radius:var(--radius);margin-bottom:.7rem;display:flex;align-items:center;justify-content:center;font-family:var(--serif);color:var(--accent);font-size:1.4rem">' + e((it.title||'?')[0]) + '</div>';
-            const linkBtn = (it.kind === 'fonte-web' && it.url)
+            var kindLow = String(it.kind || '').toLowerCase();
+            var linkBtn = ((kindLow === 'site' || kindLow === 'web' || kindLow === 'fonte-web') && it.url)
               ? '<a class="btn btn-ghost btn-sm" href="' + attrHtml(it.url) + '" target="_blank" rel="noopener" style="margin-top:.5rem">abrir →</a>'
               : '';
+            var metaChips = '';
+            if(it.year || it.publisher){
+              metaChips = '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.3rem">' +
+                (it.year ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .4rem;border:1px solid var(--border);border-radius:2px;color:var(--text-mute);text-transform:uppercase">' + e(it.year) + '</span>' : '') +
+                (it.publisher ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .4rem;border:1px solid var(--border);border-radius:2px;color:var(--text-mute);text-transform:uppercase">' + e(it.publisher) + '</span>' : '') +
+              '</div>';
+            }
+            var citation = buildCitation(it);
             return '<article class="card" style="padding:1rem">' +
               cover +
               '<span class="card-label">' + e(label) + '</span>' +
               '<h4 class="card-title" style="font-family:var(--serif);font-size:1rem;margin-top:.3rem">' + e(it.title || '') + '</h4>' +
               (it.author ? '<p style="font-style:italic;font-size:.78rem;color:var(--text-dim);margin-top:.2rem">' + e(it.author) + '</p>' : '') +
+              metaChips +
+              (citation ? '<p class="card-body" style="font-size:.75rem;margin-top:.45rem;color:var(--text-dim)">' + citation + '</p>' : '') +
               (it.description ? '<p class="card-body" style="font-size:.8rem;margin-top:.4rem">' + e(it.description) + '</p>' : '') +
               linkBtn +
             '</article>';

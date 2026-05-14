@@ -10747,6 +10747,48 @@
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════
+     SUB-MODAL: PICKER REFERÊNCIA DO BANCO (LB Fontes e Referências)
+     ═══════════════════════════════════════════════════════════ -->
+<div class="modal-backdrop sub-modal" id="refBankPickerModal">
+  <div class="modal" style="max-width:720px">
+    <div class="modal-header">
+      <div>
+        <span class="s-label">Banco de obras</span>
+        <h2>Selecionar referência</h2>
+      </div>
+      <button class="modal-close" onclick="ueRefClosePicker()">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:grid;grid-template-columns:1fr 200px;gap:.7rem;margin-bottom:1rem">
+        <input type="text" class="field-input" placeholder="buscar por título, autor, editora..." oninput="ueRefPickerSearch(this.value)">
+        <select class="field-input" onchange="ueRefPickerSetKind(this.value)">
+          <option value="">Todos os tipos</option>
+          <option value="livro">Livro</option>
+          <option value="artigo">Artigo</option>
+          <option value="tese">Tese</option>
+          <option value="dissertacao">Dissertação</option>
+          <option value="relatorio">Relatório</option>
+          <option value="site">Site / Online</option>
+          <option value="outro">Outro</option>
+        </select>
+      </div>
+      <div style="font-size:.72rem;color:var(--text-mute);margin-bottom:.5rem" id="refBankPickerCount">— obras</div>
+      <div id="refBankPickerList" style="max-height:54vh;overflow-y:auto"></div>
+    </div>
+    <div class="modal-footer">
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="ueRefClosePicker()">Fechar</button>
+        <button class="btn" onclick="ueRefClosePicker(); ueRefAddNew(window.__ueRefPickerBid)">+ Nova obra</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+  .ref-picker-row:hover{ border-color: var(--accent) !important; }
+</style>
+
+<!-- ═══════════════════════════════════════════════════════════
      SUB-MODAL: EDITAR CAPÍTULO
      ═══════════════════════════════════════════════════════════ -->
 <div class="modal-backdrop sub-modal" id="chapterModal">
@@ -12044,7 +12086,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
 <script src="ubique-shared.js?v=38"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=39"></script>
+<script src="learning-blocks-render.js?v=40"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -22190,8 +22232,10 @@
     }
   }
 
-  function openSourceModal(sourceId = null){
+  let sourceModalOnSaved = null;
+  function openSourceModal(sourceId = null, onSaved = null){
     editingSourceId = sourceId;
+    sourceModalOnSaved = (typeof onSaved === 'function') ? onSaved : null;
     modalSrcAuthors = new Set();
     modalSrcSubjects = new Set();
     modalChapters = [];
@@ -22264,6 +22308,7 @@
     sourceModal.classList.remove('active');
     document.body.style.overflow = '';
     editingSourceId = null;
+    sourceModalOnSaved = null;
   }
 
   // Tabs do modal de source
@@ -22591,14 +22636,20 @@
     await persistChapters(savedId);
 
     btn.disabled = false; btn.textContent = 'Salvar obra';
+    var cb = sourceModalOnSaved;
+    var wasEditing = editingSourceId;
     closeSourceModal();
-    showMsg('globalMessage', editingSourceId ? 'Obra atualizada.' : 'Obra criada.', 'success');
+    showMsg('globalMessage', wasEditing ? 'Obra atualizada.' : 'Obra criada.', 'success');
     await Promise.all([
       loadSources(), loadSourceAuthors(), loadSourceSubjects(),
       loadChapters(), loadChapterTopics(), loadChapterTags()
     ]);
     renderSources();
     renderAuthors();
+    if(cb){
+      var saved = (typeof sourcesCache !== 'undefined' ? sourcesCache : []).find(function(x){ return x.id === savedId; });
+      if(saved){ try{ cb(saved); }catch(err){ console.error('Source modal callback error:', err); } }
+    }
   });
 
   async function persistChapters(sourceId){
@@ -41661,6 +41712,137 @@
     _ueRerenderBlockBody(bid);
   };
 
+  // ── REFERENCES (LB Fontes e Referências) ────────────────────────────
+  // Helper: extrai os autores de uma obra a partir do cache de relações.
+  function _ueRefObraAuthors(sourceId){
+    try{
+      var rels = (typeof sourceAuthorsCache !== 'undefined' && Array.isArray(sourceAuthorsCache))
+        ? sourceAuthorsCache.filter(function(sa){ return sa.source_id === sourceId; })
+        : [];
+      var names = rels.map(function(sa){
+        var a = (typeof authorsCache !== 'undefined' ? authorsCache : []).find(function(x){ return x.id === sa.author_id; });
+        return a ? a.name : null;
+      }).filter(Boolean);
+      return names.join('; ');
+    }catch(_){ return ''; }
+  }
+
+  // Mapeia uma obra do banco (sourcesCache) para o snapshot do LB.
+  function _ueRefObraToItem(obra){
+    var n = 0; // id local; será sobrescrito ao push
+    return {
+      id: 'ref-' + (Date.now() % 100000),
+      sourceId: obra.id,
+      kind: obra.source_kind || 'livro',
+      title: obra.title || '',
+      author: _ueRefObraAuthors(obra.id),
+      year: obra.year ? String(obra.year) : '',
+      publisher: obra.publisher || '',
+      image: obra.image_url || '',
+      url: obra.url || '',
+      description: ''
+    };
+  }
+
+  // "+ Nova obra" — abre o sourceModal com callback que anexa a obra criada ao LB.
+  window.ueRefAddNew = function(bid){
+    if(typeof openSourceModal !== 'function'){
+      alert('Modal de obras não disponível neste contexto.');
+      return;
+    }
+    window.__ueRefPendingBid = bid;
+    openSourceModal(null, function(savedObra){
+      var b = _ueGetBlock(bid); if(!b) return;
+      if(!b.content) b.content = {};
+      if(!Array.isArray(b.content.items)) b.content.items = [];
+      b.content.items.push(_ueRefObraToItem(savedObra));
+      _ueSaveStructured(bid);
+      _ueRerenderBlockBody(bid);
+      if(typeof window.ueToast === 'function') window.ueToast('Obra criada e anexada à referência.', 'success');
+    });
+  };
+
+  // "+ Ref. do banco" — abre o picker modal.
+  window.ueRefOpenPicker = function(bid){
+    window.__ueRefPickerBid = bid;
+    window.__ueRefPickerFilter = '';
+    window.__ueRefPickerKind = '';
+    _ueRefRenderPicker();
+    var modal = document.getElementById('refBankPickerModal');
+    if(modal){ modal.classList.add('active'); document.body.style.overflow = 'hidden'; }
+  };
+
+  window.ueRefClosePicker = function(){
+    var modal = document.getElementById('refBankPickerModal');
+    if(modal){ modal.classList.remove('active'); document.body.style.overflow = ''; }
+  };
+
+  window.ueRefPickerSearch = function(value){
+    window.__ueRefPickerFilter = String(value || '').toLowerCase();
+    _ueRefRenderPicker();
+  };
+
+  window.ueRefPickerSetKind = function(value){
+    window.__ueRefPickerKind = String(value || '');
+    _ueRefRenderPicker();
+  };
+
+  window.ueRefPickerSelect = function(sourceId){
+    var bid = window.__ueRefPickerBid;
+    var b = _ueGetBlock(bid); if(!b) return;
+    var obra = (typeof sourcesCache !== 'undefined' ? sourcesCache : []).find(function(x){ return x.id === sourceId; });
+    if(!obra){ alert('Obra não encontrada no banco.'); return; }
+    if(!b.content) b.content = {};
+    if(!Array.isArray(b.content.items)) b.content.items = [];
+    // Evita duplicata por sourceId
+    var dup = b.content.items.find(function(it){ return it.sourceId === sourceId; });
+    if(dup){
+      if(!confirm('Esta obra já está no bloco. Adicionar novamente assim mesmo?')) return;
+    }
+    b.content.items.push(_ueRefObraToItem(obra));
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+    window.ueRefClosePicker();
+  };
+
+  function _ueRefRenderPicker(){
+    var list = document.getElementById('refBankPickerList');
+    if(!list) return;
+    var cache = (typeof sourcesCache !== 'undefined' && Array.isArray(sourcesCache)) ? sourcesCache : [];
+    var f = window.__ueRefPickerFilter || '';
+    var k = window.__ueRefPickerKind || '';
+    var filtered = cache.filter(function(s){
+      if(k && s.source_kind !== k) return false;
+      if(!f) return true;
+      var txt = ((s.title||'') + ' ' + (s.publisher||'') + ' ' + _ueRefObraAuthors(s.id)).toLowerCase();
+      return txt.indexOf(f) >= 0;
+    });
+    document.getElementById('refBankPickerCount').textContent = filtered.length + ' obra' + (filtered.length === 1 ? '' : 's');
+    if(filtered.length === 0){
+      list.innerHTML = '<p class="s-body" style="font-style:italic;color:var(--text-mute);padding:1.2rem 0">Nenhuma obra encontrada.</p>';
+      return;
+    }
+    var escFn = (typeof esc === 'function') ? esc : function(s){return String(s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});};
+    list.innerHTML = filtered.map(function(s){
+      var authors = _ueRefObraAuthors(s.id);
+      var cover = s.image_url
+        ? '<div style="width:42px;height:60px;background:url(\'' + escFn(s.image_url) + '\') center/cover;border-radius:3px;flex-shrink:0"></div>'
+        : '<div style="width:42px;height:60px;background:var(--bg-elev);border:1px solid var(--border);border-radius:3px;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:var(--text-mute);font-size:.65rem">' + escFn((s.title||'?').charAt(0)) + '</div>';
+      return '<button type="button" class="ref-picker-row" onclick="ueRefPickerSelect(' + s.id + ')" style="display:flex;gap:.7rem;align-items:flex-start;width:100%;text-align:left;padding:.7rem;border:1px solid var(--border);border-radius:4px;background:transparent;color:var(--text);cursor:pointer;margin-bottom:.5rem;transition:border-color .2s">' +
+        cover +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-family:var(--serif);font-size:.95rem;line-height:1.3">' + escFn(s.title || '(sem título)') + '</div>' +
+          (authors ? '<div style="font-size:.75rem;color:var(--text-dim);margin-top:.2rem">' + escFn(authors) + '</div>' : '') +
+          '<div style="font-size:.68rem;color:var(--text-mute);margin-top:.3rem;display:flex;gap:.6rem;flex-wrap:wrap">' +
+            (s.source_kind ? '<span>' + escFn(s.source_kind) + '</span>' : '') +
+            (s.year ? '<span>' + escFn(s.year) + '</span>' : '') +
+            (s.publisher ? '<span>' + escFn(s.publisher) + '</span>' : '') +
+          '</div>' +
+        '</div>' +
+      '</button>';
+    }).join('');
+  }
+
   // ── Timeline: items[].entries[] (sub-lista de eventos) ──────────────
   window.ueTimelineEntryAdd = function(bid, idx){
     const b = _ueGetBlock(bid); if(!b || !b.content) return;
@@ -42965,10 +43147,13 @@
       ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem;margin:0">Nenhum ' + esc(spec.itemLabel.toLowerCase()) + ' ainda.</p>'
       : '';
     const defaultsJson = esc(JSON.stringify(spec.defaults || {}));
+    var actions = spec.headerActions
+      ? spec.headerActions
+      : '<button class="btn btn-ghost btn-sm" onclick="ueListAdd(' + bid + ',\'' + ck + '\',\'' + defaultsJson + '\')" style="padding:.25rem .6rem">+ ' + esc(spec.itemLabel) + '</button>';
     return '<div style="margin-top:.4rem">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem">' +
         '<span class="s-subtitle" style="font-size:.65rem">' + esc(spec.itemLabel) + 's do bloco</span>' +
-        '<button class="btn btn-ghost btn-sm" onclick="ueListAdd(' + bid + ',\'' + ck + '\',\'' + defaultsJson + '\')" style="padding:.25rem .6rem">+ ' + esc(spec.itemLabel) + '</button>' +
+        actions +
       '</div>' +
       cards + empty +
     '</div>';
@@ -43787,26 +43972,36 @@
 
       // ───────── REFERENCES ─────────
       case 'references': {
+        var headerActions =
+          '<div style="display:flex;gap:.4rem">' +
+            '<button class="btn btn-ghost btn-sm" onclick="ueRefAddNew(' + bid + ')" style="padding:.25rem .6rem">+ Nova obra</button>' +
+            '<button class="btn btn-ghost btn-sm" onclick="ueRefOpenPicker(' + bid + ')" style="padding:.25rem .6rem">+ Ref. do banco</button>' +
+          '</div>';
         return _ueRenderListEditor(bid, content.items, {
           contentKey: 'items',
           itemLabel: 'Referência',
-          titleFrom: ['citation', 'author'],
-          defaults: { kind: 'book', label: 'Livro', citation: '', author: '', description: '', image: '', url: '' },
+          titleFrom: ['title', 'author'],
+          headerActions: headerActions,
+          defaults: { __autoId: 'ref-', sourceId: null, kind: 'livro', title: '', author: '', year: '', publisher: '', image: '', url: '', description: '' },
           fields: [
-            { key: 'kind',        label: 'Tipo (kind)', type: 'select',
+            { key: 'title',       label: 'Título da obra *', placeholder: 'História do Brasil' },
+            { key: 'author',      label: 'Autor(es)',     placeholder: 'Boris Fausto' },
+            { key: 'year',        label: 'Ano de publicação', placeholder: '2012', style: 'max-width:140px' },
+            { key: 'publisher',   label: 'Editora',       placeholder: 'Edusp' },
+            { key: 'kind',        label: 'Tipo', type: 'select',
               options: [
-                { value: 'book',     label: 'book — Livro' },
-                { value: 'article',  label: 'article — Artigo' },
-                { value: 'web',      label: 'web — Fonte web' },
-                { value: 'document', label: 'document — Documento' },
-                { value: 'thesis',   label: 'thesis — Tese' }
+                { value: 'livro',       label: 'Livro' },
+                { value: 'artigo',      label: 'Artigo' },
+                { value: 'tese',        label: 'Tese' },
+                { value: 'dissertacao', label: 'Dissertação' },
+                { value: 'relatorio',   label: 'Relatório' },
+                { value: 'site',        label: 'Site / Online' },
+                { value: 'documento',   label: 'Documento' },
+                { value: 'outro',       label: 'Outro' }
               ]
             },
-            { key: 'label',       label: 'Rótulo curto',  placeholder: 'Livro · Artigo · Fonte' },
-            { key: 'citation',    label: 'Citação completa', type: 'textarea', rows: 3, placeholder: 'FAUSTO, Boris. História do Brasil. São Paulo: Edusp, 1995.' },
-            { key: 'author',      label: 'Autor',         placeholder: 'Boris Fausto' },
-            { key: 'description', label: 'Descrição',     type: 'textarea', rows: 2, placeholder: 'Síntese do conteúdo da referência...' },
-            { key: 'image',       label: 'Capa/thumb (URL)', placeholder: 'https://...', mono: true },
+            { key: 'description', label: 'Descrição para esta unidade', type: 'textarea', rows: 3, placeholder: 'Por que esta obra é importante no contexto desta unidade?' },
+            { key: 'image',       label: 'Capa / thumb (URL)', placeholder: 'https://...', mono: true },
             { key: 'url',         label: 'Link externo',  placeholder: 'https://...', mono: true }
           ]
         });
