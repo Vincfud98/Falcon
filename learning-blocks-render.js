@@ -955,20 +955,26 @@
         });
       }
       case 'citations': {
-        const quotes = _lbParseList(c.quotes);
+        const quotes = _lbParseList(c.items || c.quotes);
+        if(!quotes.length){
+          return '<p class="s-body" style="font-style:italic;color:var(--text-mute)">Sem citações.</p>';
+        }
         return renderSlideCarousel(quotes, block.id, function(q){
-          const bg = q.photo_url
-            ? 'background-image:url(\'' + attrHtml(q.photo_url) + '\');background-size:cover;background-position:center'
+          var portraitUrl = q.portrait || q.photo_url || '';
+          var bg = portraitUrl
+            ? 'background-image:url(\'' + attrHtml(portraitUrl) + '\');background-size:cover;background-position:center'
             : 'background:linear-gradient(135deg,var(--accent-lo),var(--bg-elev))';
-          const meta = [q.author, q.source, q.date].filter(Boolean).map(e).join(' · ');
-          return '<div style="position:relative;border-radius:var(--radius-lg);overflow:hidden;min-height:280px;padding:2rem 2.4rem;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center">' +
-            '<div style="position:absolute;inset:0;' + bg + ';filter:blur(20px) brightness(.4);transform:scale(1.1)"></div>' +
+          var meta = [q.author, q.source, (q.year || q.date)].filter(Boolean).map(e).join(' · ');
+          var comment = q.body || q.comment || '';
+          return '<div style="position:relative;border-radius:var(--radius-lg);overflow:hidden;min-height:300px;padding:2.2rem 2.4rem;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center">' +
+            '<div style="position:absolute;inset:0;' + bg + ';filter:blur(20px) brightness(.35);transform:scale(1.15)"></div>' +
+            (portraitUrl ? '<div style="position:relative;z-index:1;width:96px;height:96px;border-radius:50%;background:url(\'' + attrHtml(portraitUrl) + '\') center/cover;border:2px solid rgba(255,255,255,.15);margin-bottom:1.2rem;box-shadow:0 6px 18px rgba(0,0,0,.4)"></div>' : '') +
             '<div style="position:relative;z-index:1;color:#fff;max-width:680px">' +
               '<div style="font-family:var(--serif);font-size:1.3rem;font-style:italic;line-height:1.6">"' + e(q.text||'') + '"</div>' +
               (meta ? '<div style="margin-top:1rem;font-family:var(--mono);font-size:.75rem;letter-spacing:.05em;opacity:.85">— ' + meta + '</div>' : '') +
             '</div>' +
           '</div>' +
-          (q.comment ? '<p class="s-body" style="margin-top:.8rem;color:var(--text-mute);font-size:.82rem;font-style:italic">' + e(q.comment) + '</p>' : '');
+          (comment ? '<p class="s-body" style="margin-top:.8rem;color:var(--text-mute);font-size:.82rem;font-style:italic">' + e(comment) + '</p>' : '');
         });
       }
       case 'timeline': {
