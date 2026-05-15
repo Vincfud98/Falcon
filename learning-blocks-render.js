@@ -925,21 +925,31 @@
           (c.html || '<p style="color:var(--text-mute);font-style:italic">Sem conteúdo.</p>') + '</div>';
       }
       case 'biography': {
-        const people = _lbParseList(c.people);
+        const people = _lbParseList(c.items || c.people);
+        if(!people.length){
+          return '<p class="s-body" style="font-style:italic;color:var(--text-mute)">Sem personagens.</p>';
+        }
         return renderSlideCarousel(people, block.id, function(p){
-          const photo = p.image_url
-            ? '<div style="width:180px;height:180px;border-radius:50%;background-image:url(\'' + attrHtml(p.image_url) + '\');background-size:cover;background-position:center;flex-shrink:0"></div>'
-            : '<div style="width:180px;height:180px;border-radius:50%;background:var(--accent-xlo);display:flex;align-items:center;justify-content:center;font-family:var(--serif);color:var(--accent);font-size:2.4rem;flex-shrink:0">' + e(((p.name||'?').split(/\s+/).map(function(s){return s[0];}).slice(0,2).join('')).toUpperCase()) + '</div>';
-          const roles = Array.isArray(p.roles) ? p.roles : (typeof p.roles === 'string' ? p.roles.split(/[,;]/).map(function(r){return r.trim();}).filter(Boolean) : []);
-          const roleChips = roles.map(function(r){ return '<span style="display:inline-block;padding:.15rem .6rem;font-size:.7rem;border:1px solid var(--accent-border-soft);border-radius:999px;color:var(--text-dim);font-family:var(--mono);text-transform:lowercase">' + e(r) + '</span>'; }).join(' ');
-          return '<div style="display:grid;grid-template-columns:auto 1fr;gap:1.4rem;align-items:start">' +
+          var imageUrl = p.portrait || p.image_url || '';
+          var photo = imageUrl
+            ? '<div style="width:180px;height:240px;border-radius:3px;background-image:url(\'' + attrHtml(imageUrl) + '\');background-size:cover;background-position:center;flex-shrink:0;border:1px solid var(--border);box-shadow:0 6px 18px rgba(0,0,0,.35)"></div>'
+            : '<div style="width:180px;height:240px;border-radius:3px;background:linear-gradient(135deg,var(--accent-lo),var(--accent-xlo));display:flex;align-items:center;justify-content:center;font-family:var(--serif);color:var(--accent);font-size:2.4rem;flex-shrink:0;border:1px solid var(--border)">' + e(((p.name||'?').split(/\s+/).map(function(s){return s[0];}).slice(0,2).join('')).toUpperCase()) + '</div>';
+          var rolesRaw = p.role || p.roles;
+          var roles = Array.isArray(rolesRaw) ? rolesRaw : (typeof rolesRaw === 'string' ? rolesRaw.split(/[,;·•]/).map(function(r){return r.trim();}).filter(Boolean) : []);
+          var roleChips = roles.map(function(r){
+            return '<span style="display:inline-block;padding:.2rem .7rem;font-size:.55rem;letter-spacing:.18em;text-transform:uppercase;border:1px solid var(--accent-border-soft);border-radius:12px;color:var(--text-dim);background:rgba(200,169,126,.04)">' + e(r) + '</span>';
+          }).join(' ');
+          var quote = p.summary || p.quote || '';
+          var desc = p.body || p.description || '';
+          return '<div style="display:grid;grid-template-columns:auto 1fr;gap:1.6rem;align-items:start">' +
             photo +
             '<div>' +
-              '<h4 style="font-family:var(--serif);font-size:1.5rem;color:var(--text);margin:0">' + e(p.name||'') + '</h4>' +
-              (p.dates ? '<span style="font-family:var(--mono);font-size:.75rem;color:var(--text-mute);display:block;margin-top:.2rem">' + e(p.dates) + '</span>' : '') +
-              (roleChips ? '<div style="margin-top:.6rem;display:flex;flex-wrap:wrap;gap:.3rem">' + roleChips + '</div>' : '') +
-              (p.quote ? '<blockquote style="border-left:3px solid var(--accent);padding:.4rem 1rem;font-family:var(--serif);font-style:italic;color:var(--text-dim);margin:.8rem 0 0;font-size:.95rem;line-height:1.6">' + e(p.quote) + '</blockquote>' : '') +
-              (p.description ? '<p class="card-body" style="margin-top:.8rem;line-height:1.7">' + e(p.description) + '</p>' : '') +
+              '<span style="font-family:var(--sans);font-weight:300;font-size:.55rem;letter-spacing:.3em;text-transform:uppercase;color:var(--accent)">Personagem</span>' +
+              '<h4 style="font-family:var(--serif);font-size:1.5rem;color:var(--text);margin:.3rem 0 .2rem;font-weight:400">' + e(p.name||'') + '</h4>' +
+              (p.dates ? '<span style="font-family:var(--serif);font-style:italic;font-size:.85rem;color:var(--accent);display:block">' + e(p.dates) + '</span>' : '') +
+              (roleChips ? '<div style="margin-top:.7rem;display:flex;flex-wrap:wrap;gap:.35rem">' + roleChips + '</div>' : '') +
+              (quote ? '<blockquote style="border-left:3px solid var(--accent);padding:.4rem 1rem;font-family:var(--serif);font-style:italic;color:var(--text-dim);margin:.9rem 0 0;font-size:.92rem;line-height:1.55">' + e(quote) + '</blockquote>' : '') +
+              (desc ? '<p class="card-body" style="margin-top:.8rem;line-height:1.7;color:var(--text-dim);white-space:pre-line">' + e(desc) + '</p>' : '') +
             '</div>' +
           '</div>';
         });
