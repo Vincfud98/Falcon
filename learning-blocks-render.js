@@ -949,7 +949,7 @@
               (p.dates ? '<span style="font-family:var(--serif);font-style:italic;font-size:.85rem;color:var(--accent);display:block">' + e(p.dates) + '</span>' : '') +
               (roleChips ? '<div style="margin-top:.7rem;display:flex;flex-wrap:wrap;gap:.35rem">' + roleChips + '</div>' : '') +
               (quote ? '<blockquote style="border-left:3px solid var(--accent);padding:.4rem 1rem;font-family:var(--serif);font-style:italic;color:var(--text-dim);margin:.9rem 0 0;font-size:.92rem;line-height:1.55">' + e(quote) + '</blockquote>' : '') +
-              (desc ? '<p class="card-body" style="margin-top:.8rem;line-height:1.7;color:var(--text-dim);white-space:pre-line">' + e(desc) + '</p>' : '') +
+              (desc ? '<div class="card-body" style="margin-top:.8rem;line-height:1.7;color:var(--text-dim);white-space:pre-line">' + desc + '</div>' : '') +
             '</div>' +
           '</div>';
         });
