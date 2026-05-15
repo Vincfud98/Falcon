@@ -8342,7 +8342,36 @@
             <button class="btn" id="btnOpenCreateUnit">+ Criar Unidade</button>
           </div>
 
+          <!-- Filtros e ordenação -->
+          <div class="units-filters" style="display:flex;flex-wrap:wrap;gap:.6rem;align-items:flex-end;margin:.6rem 0 1.2rem;padding:.85rem 1rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-elevated)">
+            <div class="field" style="margin:0;min-width:200px;flex:1">
+              <label style="font-size:.6rem;letter-spacing:.18em;text-transform:uppercase;color:var(--text-mute);margin-bottom:.2rem;display:block">Concurso</label>
+              <select class="field-input" id="unitsFilterExam" onchange="unitsApplyFilterChange('exam', this.value)">
+                <option value="">Todos os concursos</option>
+              </select>
+            </div>
+            <div class="field" style="margin:0;min-width:200px;flex:1">
+              <label style="font-size:.6rem;letter-spacing:.18em;text-transform:uppercase;color:var(--text-mute);margin-bottom:.2rem;display:block">Matéria</label>
+              <select class="field-input" id="unitsFilterSubject" onchange="unitsApplyFilterChange('subject', this.value)" disabled>
+                <option value="">— escolha um concurso —</option>
+              </select>
+            </div>
+            <div class="field" style="margin:0;min-width:160px">
+              <label style="font-size:.6rem;letter-spacing:.18em;text-transform:uppercase;color:var(--text-mute);margin-bottom:.2rem;display:block">Ordenar por</label>
+              <select class="field-input" id="unitsSortDir" onchange="unitsApplyFilterChange('sort', this.value)">
+                <option value="desc">Mais recentes</option>
+                <option value="asc">Mais antigas</option>
+              </select>
+            </div>
+            <button class="btn btn-ghost btn-sm" onclick="unitsClearFilters()" style="margin:0;height:34px">Limpar</button>
+            <div style="flex-basis:100%;font-size:.7rem;color:var(--text-mute);font-family:var(--mono);margin-top:.2rem" id="unitsFilterSummary"></div>
+          </div>
+
           <div class="cards-grid" id="unitsCards" data-a="1"></div>
+          <div id="unitsLoadMore" style="display:none;text-align:center;margin:1.4rem 0">
+            <button class="btn btn-ghost" id="unitsLoadMoreBtn" onclick="unitsLoadMore()">Carregar mais 20</button>
+            <p style="font-size:.7rem;color:var(--text-mute);margin-top:.4rem" id="unitsLoadMoreInfo"></p>
+          </div>
         </main>
       </section>
 
@@ -15881,25 +15910,112 @@
   // UNIDADES — cards + criar com cascata Matéria→Módulo→Capítulo
   // ═══════════════════════════════════════════════════════════
 
+  // Estado dos filtros / paginação (escopo do módulo)
+  if(typeof window.unitsFilters === 'undefined'){
+    window.unitsFilters = { examId: '', subjectId: '', sortDir: 'desc', page: 1 };
+  }
+  const UNITS_PER_PAGE = 20;
+
+  // Popula o <select> de concursos a partir do examsCache
+  function unitsPopulateExamFilter(){
+    const sel = document.getElementById('unitsFilterExam'); if(!sel) return;
+    const exams = (typeof examsCache !== 'undefined' && Array.isArray(examsCache)) ? examsCache : [];
+    const currentVal = window.unitsFilters.examId || '';
+    sel.innerHTML = '<option value="">Todos os concursos</option>' +
+      exams.map(function(ex){
+        return '<option value="' + ex.id + '">' + esc(ex.name || ex.title || ('Concurso #' + ex.id)) + '</option>';
+      }).join('');
+    sel.value = currentVal;
+  }
+
+  // Popula o <select> de matérias filtrado pelo concurso atual
+  function unitsPopulateSubjectFilter(){
+    const sel = document.getElementById('unitsFilterSubject'); if(!sel) return;
+    const subjects = (window.UbiqueStore && UbiqueStore.subjects.list()) || [];
+    const examId = window.unitsFilters.examId;
+    if(!examId){
+      sel.innerHTML = '<option value="">— escolha um concurso —</option>';
+      sel.disabled = true;
+      sel.value = '';
+      return;
+    }
+    // Subjects do concurso via examSubjectsCache
+    const exSubs = (typeof examSubjectsCache !== 'undefined' && Array.isArray(examSubjectsCache)) ? examSubjectsCache : [];
+    const subjIds = exSubs.filter(function(es){ return String(es.exam_id) === String(examId); })
+                          .map(function(es){ return es.subject_id; });
+    const filtered = subjects.filter(function(s){ return subjIds.indexOf(s.id) >= 0; });
+    sel.disabled = false;
+    sel.innerHTML = '<option value="">Todas as matérias do concurso</option>' +
+      filtered.map(function(s){
+        return '<option value="' + s.id + '">' + esc(s.subject || s.name || ('Matéria #' + s.id)) + '</option>';
+      }).join('');
+    // Mantém seleção atual se ainda válida
+    if(window.unitsFilters.subjectId && filtered.find(function(s){ return String(s.id) === String(window.unitsFilters.subjectId); })){
+      sel.value = window.unitsFilters.subjectId;
+    } else {
+      sel.value = '';
+      window.unitsFilters.subjectId = '';
+    }
+  }
+
+  window.unitsApplyFilterChange = function(kind, value){
+    if(kind === 'exam'){
+      window.unitsFilters.examId = value || '';
+      window.unitsFilters.subjectId = ''; // reset matéria
+      window.unitsFilters.page = 1;
+      unitsPopulateSubjectFilter();
+    } else if(kind === 'subject'){
+      window.unitsFilters.subjectId = value || '';
+      window.unitsFilters.page = 1;
+    } else if(kind === 'sort'){
+      window.unitsFilters.sortDir = value === 'asc' ? 'asc' : 'desc';
+      window.unitsFilters.page = 1;
+    }
+    renderUnitCards();
+  };
+
+  window.unitsClearFilters = function(){
+    window.unitsFilters = { examId: '', subjectId: '', sortDir: 'desc', page: 1 };
+    const ex = document.getElementById('unitsFilterExam'); if(ex) ex.value = '';
+    const sj = document.getElementById('unitsFilterSubject'); if(sj){ sj.value = ''; sj.disabled = true; }
+    const sd = document.getElementById('unitsSortDir'); if(sd) sd.value = 'desc';
+    unitsPopulateSubjectFilter();
+    renderUnitCards();
+  };
+
+  window.unitsLoadMore = function(){
+    window.unitsFilters.page = (window.unitsFilters.page || 1) + 1;
+    renderUnitCards();
+  };
+
   function renderUnitCards(){
     const container = document.getElementById('unitsCards');
     if(!container) return;
     if(!window.UbiqueStore) return;
 
+    // Atualiza selects (caso examsCache tenha sido carregado depois)
+    unitsPopulateExamFilter();
+    unitsPopulateSubjectFilter();
+    // Re-aplica valores nos selects
+    const exSel = document.getElementById('unitsFilterExam'); if(exSel) exSel.value = window.unitsFilters.examId || '';
+    const sdSel = document.getElementById('unitsSortDir'); if(sdSel) sdSel.value = window.unitsFilters.sortDir || 'desc';
+
     const subjects = UbiqueStore.subjects.list();
     const modules  = UbiqueStore.modules.list();
     const chapters = UbiqueStore.chapters.list();
-    const units    = UbiqueStore.units.list();
+    const allUnits = UbiqueStore.units.list();
 
-    // Atualiza badge de contagem
+    // Atualiza badge de contagem (total)
     const countEl = document.getElementById('count-units');
-    if(countEl) countEl.textContent = units.length;
+    if(countEl) countEl.textContent = allUnits.length;
 
-    if(units.length === 0){
+    if(allUnits.length === 0){
       container.innerHTML =
         '<div class="card" style="grid-column:1/-1;text-align:center;padding:3rem 2rem">' +
           '<p class="card-body" style="font-style:italic">Nenhuma unidade ainda. Clique em "+ Criar Unidade" para começar.</p>' +
         '</div>';
+      const lm = document.getElementById('unitsLoadMore'); if(lm) lm.style.display = 'none';
+      const sm = document.getElementById('unitsFilterSummary'); if(sm) sm.textContent = '';
       return;
     }
 
@@ -15908,7 +16024,93 @@
     const modById  = Object.fromEntries(modules.map(m => [m.id, m]));
     const subjById = Object.fromEntries(subjects.map(s => [s.id, s]));
 
-    container.innerHTML = units.map(function(u, i){
+    // ── APLICA FILTROS ──
+    const examId = window.unitsFilters.examId;
+    const subjectId = window.unitsFilters.subjectId;
+    const sortDir = window.unitsFilters.sortDir || 'desc';
+
+    let allowedSubjectIds = null; // null = sem restrição
+    if(examId){
+      const exSubs = (typeof examSubjectsCache !== 'undefined' && Array.isArray(examSubjectsCache)) ? examSubjectsCache : [];
+      const ids = exSubs.filter(function(es){ return String(es.exam_id) === String(examId); })
+                        .map(function(es){ return es.subject_id; });
+      allowedSubjectIds = new Set(ids);
+    }
+    if(subjectId){
+      const sidNum = isNaN(parseInt(subjectId)) ? subjectId : parseInt(subjectId);
+      allowedSubjectIds = new Set([sidNum]);
+    }
+
+    // Resolve subject_id de cada unit (chapter→module→subject)
+    function unitSubjectId(u){
+      const ch = chById[u.chapter_id]; if(!ch) return null;
+      const m = modById[ch.module_id]; if(!m) return null;
+      return m.subject_id;
+    }
+
+    let filteredUnits = allUnits;
+    if(allowedSubjectIds){
+      filteredUnits = filteredUnits.filter(function(u){
+        const sid = unitSubjectId(u);
+        return sid != null && allowedSubjectIds.has(sid);
+      });
+    }
+
+    // ── ORDENAÇÃO ──
+    // created_at é melhor; fallback p/ id (números maiores = mais recentes)
+    function unitTimeKey(u){
+      if(u.created_at){ const t = Date.parse(u.created_at); if(!isNaN(t)) return t; }
+      if(u.createdAt){ const t = Date.parse(u.createdAt); if(!isNaN(t)) return t; }
+      return typeof u.id === 'number' ? u.id : (parseInt(u.id) || 0);
+    }
+    filteredUnits = filteredUnits.slice().sort(function(a, b){
+      const ka = unitTimeKey(a), kb = unitTimeKey(b);
+      return sortDir === 'asc' ? (ka - kb) : (kb - ka);
+    });
+
+    // ── PAGINAÇÃO ──
+    const totalFiltered = filteredUnits.length;
+    const page = Math.max(1, window.unitsFilters.page || 1);
+    const showCount = Math.min(page * UNITS_PER_PAGE, totalFiltered);
+    const visibleUnits = filteredUnits.slice(0, showCount);
+
+    // Resumo dos filtros
+    const summaryEl = document.getElementById('unitsFilterSummary');
+    if(summaryEl){
+      const parts = [];
+      if(examId){
+        const exam = (typeof examsCache !== 'undefined' ? examsCache : []).find(function(x){ return String(x.id) === String(examId); });
+        parts.push('concurso: ' + (exam ? esc(exam.name || exam.title || ('#'+exam.id)) : '#'+examId));
+      }
+      if(subjectId){
+        const subj = subjects.find(function(x){ return String(x.id) === String(subjectId); });
+        parts.push('matéria: ' + (subj ? esc(subj.subject || subj.name) : '#'+subjectId));
+      }
+      parts.push('ordenado por: ' + (sortDir === 'asc' ? 'mais antigas' : 'mais recentes'));
+      summaryEl.textContent = 'Mostrando ' + showCount + ' de ' + totalFiltered + ' · ' + parts.join(' · ');
+    }
+
+    // Botão "Carregar mais"
+    const lm = document.getElementById('unitsLoadMore');
+    const lmInfo = document.getElementById('unitsLoadMoreInfo');
+    if(lm){
+      if(showCount < totalFiltered){
+        lm.style.display = '';
+        if(lmInfo) lmInfo.textContent = (totalFiltered - showCount) + ' restante' + (totalFiltered - showCount === 1 ? '' : 's');
+      } else {
+        lm.style.display = 'none';
+      }
+    }
+
+    if(visibleUnits.length === 0){
+      container.innerHTML =
+        '<div class="card" style="grid-column:1/-1;text-align:center;padding:3rem 2rem">' +
+          '<p class="card-body" style="font-style:italic">Nenhuma unidade encontrada com os filtros atuais.</p>' +
+        '</div>';
+      return;
+    }
+
+    container.innerHTML = visibleUnits.map(function(u, i){
       const ch  = chById[u.chapter_id];
       const mod = ch ? modById[ch.module_id] : null;
       const subj = mod ? subjById[mod.subject_id] : null;
