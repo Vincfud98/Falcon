@@ -978,17 +978,41 @@
         });
       }
       case 'timeline': {
-        const events = _lbParseList(c.events);
-        return renderSlideCarousel(events, block.id, function(ev){
-          const cols = ev.image_url ? 'grid-template-columns:1fr 1fr' : 'grid-template-columns:1fr';
-          return '<div style="display:grid;' + cols + ';gap:1.5rem;align-items:center;min-height:200px">' +
-            '<div>' +
-              '<div style="font-family:var(--mono);font-size:1.4rem;color:var(--accent);letter-spacing:.05em">' + e(ev.year||'') + '</div>' +
-              '<h4 style="font-family:var(--serif);font-size:1.4rem;color:var(--text);margin:.5rem 0">' + e(ev.title||'') + '</h4>' +
-              (ev.description ? '<p class="card-body" style="line-height:1.7">' + e(ev.description) + '</p>' : '') +
-            '</div>' +
-            (ev.image_url ? '<div style="aspect-ratio:4/3;background-image:url(\'' + attrHtml(ev.image_url) + '\');background-size:cover;background-position:center;border-radius:var(--radius-lg)"></div>' : '') +
-          '</div>';
+        // Schema canônico do admin: items[] (cronologias), cada uma com entries[].
+        // Schema legado: events[] flat. Aceita ambos.
+        var items = _lbParseList(c.items);
+        if(!items.length){
+          var legacyEvents = _lbParseList(c.events);
+          if(legacyEvents.length){
+            items = [{ title: '', entries: legacyEvents }];
+          }
+        }
+        if(!items.length){
+          return '<p class="s-body" style="font-style:italic;color:var(--text-mute)">Sem cronologias.</p>';
+        }
+        return renderSlideCarousel(items, block.id, function(it){
+          var entries = _lbParseList(it.entries);
+          var groupTitle = it.title
+            ? '<h4 style="font-family:var(--serif);font-size:1.2rem;color:var(--text);margin:0 0 1rem">' + e(it.title) + '</h4>'
+            : '';
+          var rows = entries.map(function(ev){
+            var imgUrl = ev.image || ev.image_url || '';
+            var imgHtml = imgUrl
+              ? '<div style="width:200px;height:140px;flex-shrink:0;background-image:url(\'' + attrHtml(imgUrl) + '\');background-size:cover;background-position:center;border-radius:3px;border:1px solid var(--border)"></div>'
+              : '';
+            var body = ev.body || ev.description || '';
+            return '<div style="display:flex;gap:1rem;align-items:flex-start;padding:.8rem 1rem;background:var(--bg-elev);border:1px solid var(--accent-border-soft);border-left:3px solid var(--accent);border-radius:3px;margin-bottom:.6rem">' +
+              '<div style="flex:1;min-width:0">' +
+                '<div style="display:flex;gap:.6rem;align-items:baseline;flex-wrap:wrap">' +
+                  '<span style="font-family:var(--mono);font-size:.72rem;color:var(--accent);letter-spacing:.06em;font-weight:500">' + e(ev.year||'') + '</span>' +
+                  '<span style="font-family:var(--serif);font-size:1rem;color:var(--text)">' + e(ev.title||'') + '</span>' +
+                '</div>' +
+                (body ? '<p style="font-family:var(--sans);font-size:.82rem;line-height:1.55;color:var(--text-dim);margin-top:.4rem">' + e(body) + '</p>' : '') +
+              '</div>' +
+              imgHtml +
+            '</div>';
+          }).join('');
+          return groupTitle + (rows || '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem">Sem eventos.</p>');
         });
       }
       case 'tables': {
