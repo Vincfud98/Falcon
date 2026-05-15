@@ -213,6 +213,71 @@ Mexa em [arquivo.html] na função foo(). Confirma um plano antes de codar.
 
 ---
 
+## Acessar o projeto de qualquer vibe coding app
+
+O repositório é **público** em https://github.com/Vincfud98/Falcon e pode ser aberto por qualquer ferramenta de "vibe coding" — Claude Code, Cursor, Windsurf, Zed, GitHub Codespaces, Lovable, Replit, etc.
+
+### Passo único em qualquer máquina nova
+
+```bash
+git clone https://github.com/Vincfud98/Falcon.git
+cd Falcon
+```
+
+E pronto — todos os arquivos do projeto estão lá. O preview server local já vem configurado em `.claude/launch.json` (porta 8080).
+
+### Por ferramenta
+
+**Claude Code (CLI)**
+```bash
+cd Falcon
+claude
+```
+
+**Cursor / Windsurf / VS Code**
+- File → Open Folder → escolhe a pasta `Falcon`
+- A extensão de IA já reconhece o repo
+
+**GitHub Codespaces (roda no navegador, zero setup)**
+1. Vai em https://github.com/Vincfud98/Falcon
+2. Clica em **Code → Codespaces → Create codespace on main**
+3. Abre um VS Code completo no navegador, com o repo já clonado
+
+**Replit / Lovable / qualquer "IDE no navegador"**
+- "Import from GitHub" → cola `https://github.com/Vincfud98/Falcon`
+
+### Autenticar para fazer push
+
+Primeira vez em uma máquina nova, depois de editar e tentar `git push`:
+
+**Via GitHub CLI (recomendado, mais fácil):**
+```bash
+gh auth login
+# escolhe HTTPS, autentica no browser
+```
+
+**Via Personal Access Token (PAT):**
+1. https://github.com/settings/tokens → Generate new token (classic)
+2. Marca a permissão `repo` (full control)
+3. Copia o token
+4. No primeiro `git push`, cola o token quando pedir senha (usuário é seu login do GitHub)
+
+**Via SSH (opcional, mais seguro):**
+```bash
+ssh-keygen -t ed25519 -C "seu@email.com"
+cat ~/.ssh/id_ed25519.pub   # copia a chave
+# Cola em https://github.com/settings/keys
+git remote set-url origin git@github.com:Vincfud98/Falcon.git
+```
+
+### Sincronização entre dispositivos
+
+- **Antes de começar** a mexer: `git pull` (puxa o que foi feito em outra máquina/IDE)
+- **Depois de mexer**: `git add . && git commit -m "..." && git push`
+- O que está rastreado pelo git é o que viaja entre os dispositivos. Configurações pessoais da ferramenta (`.claude/settings.local.json`, `.cursor/`, `.windsurf/`) ficam locais e **não** são commitadas.
+
+---
+
 ## Links úteis
 
 - **Repo:** https://github.com/Vincfud98/Falcon
