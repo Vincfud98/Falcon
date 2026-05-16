@@ -12276,7 +12276,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
 <script src="ubique-shared.js?v=38"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=45"></script>
+<script src="learning-blocks-render.js?v=46"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -42489,6 +42489,19 @@
   };
 
   // ── Tables: items[].columns[] e items[].rows[][] ────────────────────
+  // Cell pode ser string (legado) ou objeto { html, rowspan, colspan, hidden }.
+  // Helpers: extraem meta/html sem mudar a forma do dado.
+  function _ueTableCellMeta(cell){
+    if(cell && typeof cell === 'object'){
+      return {
+        rowspan: Math.max(1, parseInt(cell.rowspan) || 1),
+        colspan: Math.max(1, parseInt(cell.colspan) || 1),
+        hidden:  !!cell.hidden
+      };
+    }
+    return { rowspan:1, colspan:1, hidden:false };
+  }
+
   window.ueTableColAdd = function(bid, idx){
     const b = _ueGetBlock(bid); if(!b || !b.content) return;
     const item = (b.content.items || [])[idx]; if(!item) return;
@@ -42504,6 +42517,26 @@
     if(!confirm('Apagar esta coluna e todas as células?')) return;
     const b = _ueGetBlock(bid); if(!b || !b.content) return;
     const item = (b.content.items || [])[idx]; if(!item) return;
+    // Desmescla qualquer cell que cruze a coluna a ser removida.
+    if(Array.isArray(item.rows)){
+      item.rows.forEach(function(r, rIdx){
+        if(!Array.isArray(r)) return;
+        r.forEach(function(cell, cIdx){
+          const m = _ueTableCellMeta(cell);
+          if(m.hidden) return;
+          if(m.colspan > 1 && cIdx <= colIdx && (cIdx + m.colspan - 1) >= colIdx){
+            for(let dr=0; dr<m.rowspan; dr++){
+              for(let dc=0; dc<m.colspan; dc++){
+                if(dr===0 && dc===0) continue;
+                const t = item.rows[rIdx+dr] && item.rows[rIdx+dr][cIdx+dc];
+                if(t && typeof t === 'object') t.hidden = false;
+              }
+            }
+            if(typeof cell === 'object'){ cell.rowspan = 1; cell.colspan = 1; }
+          }
+        });
+      });
+    }
     if(Array.isArray(item.columns)) item.columns.splice(colIdx, 1);
     if(Array.isArray(item.rows)) item.rows.forEach(function(r){ if(Array.isArray(r)) r.splice(colIdx, 1); });
     _ueSaveStructured(bid);
@@ -42515,6 +42548,42 @@
     const item = (b.content.items || [])[idx]; if(!item || !Array.isArray(item.columns)) return;
     item.columns[colIdx] = value;
     _ueSaveStructured(bid);
+  };
+
+  // Move uma coluna: swap header + swap a célula correspondente em cada linha.
+  // Cells com spans cruzando a fronteira são desmescladas antes pra preservar
+  // a integridade da grade.
+  window.ueTableColMove = function(bid, idx, colIdx, dir){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const item = (b.content.items || [])[idx]; if(!item) return;
+    if(!Array.isArray(item.columns) || !Array.isArray(item.rows)) return;
+    const target = colIdx + dir;
+    if(target < 0 || target >= item.columns.length) return;
+    const lo = Math.min(colIdx, target);
+    const hi = Math.max(colIdx, target);
+    item.rows.forEach(function(r){
+      if(!Array.isArray(r)) return;
+      r.forEach(function(cell, ci){
+        const m = _ueTableCellMeta(cell);
+        if(m.hidden) return;
+        if(m.colspan > 1 && ci <= hi && (ci + m.colspan - 1) >= lo){
+          for(let dc=1; dc<m.colspan; dc++){
+            const t = r[ci+dc];
+            if(t && typeof t === 'object') t.hidden = false;
+          }
+          if(cell && typeof cell === 'object') cell.colspan = 1;
+        }
+      });
+    });
+    const tmp = item.columns[colIdx];
+    item.columns[colIdx] = item.columns[target];
+    item.columns[target] = tmp;
+    item.rows.forEach(function(r){
+      if(!Array.isArray(r)) return;
+      const t = r[colIdx]; r[colIdx] = r[target]; r[target] = t;
+    });
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
   };
 
   window.ueTableRowAdd = function(bid, idx){
@@ -42532,7 +42601,49 @@
     if(!confirm('Apagar esta linha?')) return;
     const b = _ueGetBlock(bid); if(!b || !b.content) return;
     const item = (b.content.items || [])[idx]; if(!item || !Array.isArray(item.rows)) return;
+    item.rows.forEach(function(r, rIdx){
+      if(!Array.isArray(r)) return;
+      r.forEach(function(cell, cIdx){
+        const m = _ueTableCellMeta(cell);
+        if(m.hidden) return;
+        if(m.rowspan > 1 && rIdx <= rowIdx && (rIdx + m.rowspan - 1) >= rowIdx){
+          for(let dr=1; dr<m.rowspan; dr++){
+            const t = item.rows[rIdx+dr] && item.rows[rIdx+dr][cIdx];
+            if(t && typeof t === 'object') t.hidden = false;
+          }
+          if(cell && typeof cell === 'object') cell.rowspan = 1;
+        }
+      });
+    });
     item.rows.splice(rowIdx, 1);
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  };
+
+  // Move uma linha: splice + insert, desmesclando spans verticais cruzando a fronteira.
+  window.ueTableRowMove = function(bid, idx, rowIdx, dir){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const item = (b.content.items || [])[idx]; if(!item || !Array.isArray(item.rows)) return;
+    const target = rowIdx + dir;
+    if(target < 0 || target >= item.rows.length) return;
+    const lo = Math.min(rowIdx, target);
+    const hi = Math.max(rowIdx, target);
+    item.rows.forEach(function(r, rIdx2){
+      if(!Array.isArray(r)) return;
+      r.forEach(function(cell, cIdx){
+        const m = _ueTableCellMeta(cell);
+        if(m.hidden) return;
+        if(m.rowspan > 1 && rIdx2 <= hi && (rIdx2 + m.rowspan - 1) >= lo){
+          for(let dr=1; dr<m.rowspan; dr++){
+            const t = item.rows[rIdx2+dr] && item.rows[rIdx2+dr][cIdx];
+            if(t && typeof t === 'object') t.hidden = false;
+          }
+          if(cell && typeof cell === 'object') cell.rowspan = 1;
+        }
+      });
+    });
+    const moved = item.rows.splice(rowIdx, 1)[0];
+    item.rows.splice(target, 0, moved);
     _ueSaveStructured(bid);
     _ueRerenderBlockBody(bid);
   };
@@ -42542,8 +42653,111 @@
     const item = (b.content.items || [])[idx]; if(!item) return;
     if(!Array.isArray(item.rows)) item.rows = [];
     if(!Array.isArray(item.rows[rowIdx])) item.rows[rowIdx] = [];
-    item.rows[rowIdx][colIdx] = value;
+    const cur = item.rows[rowIdx][colIdx];
+    if(cur && typeof cur === 'object'){
+      cur.html = value; // preserva rowspan/colspan/hidden
+    } else {
+      item.rows[rowIdx][colIdx] = value;
+    }
     _ueSaveStructured(bid);
+  };
+
+  // Promove célula string → objeto { html, rowspan:1, colspan:1, hidden:false }.
+  function _ueTableEnsureObj(item, r, c){
+    const row = item.rows[r]; if(!row) return null;
+    const cur = row[c];
+    if(cur && typeof cur === 'object') return cur;
+    const obj = { html: (typeof cur === 'string' ? cur : ''), rowspan:1, colspan:1, hidden:false };
+    row[c] = obj;
+    return obj;
+  }
+
+  // Mescla célula (r, c) com a próxima visível à direita.
+  window.ueTableMergeRight = function(bid, idx, r, c){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const item = (b.content.items || [])[idx]; if(!item) return;
+    const row = item.rows[r]; if(!row) return;
+    const cur = _ueTableEnsureObj(item, r, c); if(!cur) return;
+    const meta = _ueTableCellMeta(cur);
+    const nextIdx = c + meta.colspan;
+    if(nextIdx >= row.length){ alert('Não há célula à direita pra mesclar.'); return; }
+    const nxt = row[nextIdx];
+    const nMeta = _ueTableCellMeta(nxt);
+    if(nMeta.hidden){ alert('A célula à direita está mesclada com outra.'); return; }
+    if(nMeta.rowspan !== meta.rowspan){
+      alert('Mescla só funciona entre células com a mesma altura (rowspan). Desmescle uma das duas antes.');
+      return;
+    }
+    const colsAdded = nMeta.colspan;
+    for(let dr=0; dr<nMeta.rowspan; dr++){
+      for(let dc=0; dc<nMeta.colspan; dc++){
+        const tr = r + dr;
+        const tc = nextIdx + dc;
+        const target = item.rows[tr] && item.rows[tr][tc];
+        if(target && typeof target === 'object'){
+          target.hidden = true;
+        } else if(item.rows[tr]){
+          item.rows[tr][tc] = { html: typeof target === 'string' ? target : '', rowspan:1, colspan:1, hidden:true };
+        }
+      }
+    }
+    cur.colspan = meta.colspan + colsAdded;
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  };
+
+  // Mescla célula (r, c) com a próxima visível abaixo.
+  window.ueTableMergeDown = function(bid, idx, r, c){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const item = (b.content.items || [])[idx]; if(!item) return;
+    const cur = _ueTableEnsureObj(item, r, c); if(!cur) return;
+    const meta = _ueTableCellMeta(cur);
+    const nextRow = r + meta.rowspan;
+    if(nextRow >= item.rows.length){ alert('Não há célula abaixo pra mesclar.'); return; }
+    const below = item.rows[nextRow] && item.rows[nextRow][c];
+    const bMeta = _ueTableCellMeta(below);
+    if(bMeta.hidden){ alert('A célula abaixo está mesclada com outra.'); return; }
+    if(bMeta.colspan !== meta.colspan){
+      alert('Mescla só funciona entre células com a mesma largura (colspan). Desmescle uma das duas antes.');
+      return;
+    }
+    const rowsAdded = bMeta.rowspan;
+    for(let dr=0; dr<bMeta.rowspan; dr++){
+      for(let dc=0; dc<bMeta.colspan; dc++){
+        const tr = nextRow + dr;
+        const tc = c + dc;
+        const target = item.rows[tr] && item.rows[tr][tc];
+        if(target && typeof target === 'object'){
+          target.hidden = true;
+        } else if(item.rows[tr]){
+          item.rows[tr][tc] = { html: typeof target === 'string' ? target : '', rowspan:1, colspan:1, hidden:true };
+        }
+      }
+    }
+    cur.rowspan = meta.rowspan + rowsAdded;
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  };
+
+  // Desmescla: zera spans e libera as hidden cobertas.
+  window.ueTableUnmerge = function(bid, idx, r, c){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const item = (b.content.items || [])[idx]; if(!item) return;
+    const cur = item.rows[r] && item.rows[r][c];
+    if(!cur || typeof cur !== 'object') return;
+    const meta = _ueTableCellMeta(cur);
+    if(meta.rowspan === 1 && meta.colspan === 1) return;
+    for(let dr=0; dr<meta.rowspan; dr++){
+      for(let dc=0; dc<meta.colspan; dc++){
+        if(dr===0 && dc===0) continue;
+        const target = item.rows[r+dr] && item.rows[r+dr][c+dc];
+        if(target && typeof target === 'object') target.hidden = false;
+      }
+    }
+    cur.rowspan = 1;
+    cur.colspan = 1;
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
   };
 
   // ─────────────────────────────────────────────────────────────────────
@@ -44688,28 +44902,88 @@
           titleFrom: ['title'],
           defaults: { __autoId: 'tb-', title: '', columns: ['Coluna A', 'Coluna B'], rows: [['','']], notes: '' },
           fields: [
-            { key: 'id',    label: 'ID',     placeholder: 'tb-1', mono: true, style: 'max-width:140px' },
+            { key: 'id',    label: 'ID (automático)', mono: true, style: 'max-width:140px', readonly: true },
             { key: 'title', label: 'Título', placeholder: 'Embarcações típicas do séc. XVI' },
-            { key: 'notes', label: 'Observações (rodapé)', type: 'textarea', rows: 2, placeholder: 'Notas, fontes…' }
+            { key: 'notes', label: 'Observações (rodapé)', type: 'textarea', rows: 2, placeholder: 'Notas, fontes… (aceita HTML)' }
           ],
           afterFieldsHook: function(b_, idx, item){
+            // Helpers locais para extrair conteúdo/spans de cada célula.
+            // Cells podem ser string (legado) ou objeto {html, rowspan, colspan, hidden}.
+            function cellHtml(cell){
+              if(cell == null) return '';
+              if(typeof cell === 'string') return cell;
+              return cell.html || '';
+            }
+            function cellMeta(cell){
+              if(cell && typeof cell === 'object'){
+                return {
+                  rowspan: Math.max(1, parseInt(cell.rowspan) || 1),
+                  colspan: Math.max(1, parseInt(cell.colspan) || 1),
+                  hidden:  !!cell.hidden
+                };
+              }
+              return { rowspan:1, colspan:1, hidden:false };
+            }
             const cols = Array.isArray(item.columns) ? item.columns : [];
             const rows = Array.isArray(item.rows) ? item.rows : [];
-            // Cabeçalhos editáveis
+            const ncols = Math.max(cols.length, 1);
+            // ──────── Cabeçalhos com reorder ◀ ▶ ────────
             const colHeaders = cols.map(function(c, ci){
-              return '<div style="display:flex;gap:.25rem;align-items:center">' +
-                '<input class="field-input" value="' + esc(c) + '" oninput="ueTableColUpdate(' + b_ + ',' + idx + ',' + ci + ',this.value)" placeholder="Cabeçalho" style="font-size:.78rem;flex:1">' +
+              const canLeft  = ci > 0;
+              const canRight = ci < cols.length - 1;
+              return '<div style="display:flex;gap:.15rem;align-items:center">' +
+                '<button class="btn btn-ghost btn-sm" style="padding:.1rem .25rem;font-size:.65rem"' + (canLeft ? '' : ' disabled') + ' onclick="ueTableColMove(' + b_ + ',' + idx + ',' + ci + ',-1)" title="Mover coluna à esquerda">◀</button>' +
+                '<input class="field-input" value="' + esc(c) + '" oninput="ueTableColUpdate(' + b_ + ',' + idx + ',' + ci + ',this.value)" placeholder="Cabeçalho" style="font-size:.75rem;flex:1;min-width:0">' +
+                '<button class="btn btn-ghost btn-sm" style="padding:.1rem .25rem;font-size:.65rem"' + (canRight ? '' : ' disabled') + ' onclick="ueTableColMove(' + b_ + ',' + idx + ',' + ci + ',1)" title="Mover coluna à direita">▶</button>' +
                 '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.1rem .3rem;font-size:.65rem" onclick="ueTableColRemove(' + b_ + ',' + idx + ',' + ci + ')" title="Remover coluna">×</button>' +
               '</div>';
             }).join('');
-            // Linhas editáveis (matriz)
+            // ──────── Linhas com reorder + cells (textarea + merge) ────────
             const rowsHTML = rows.map(function(row, rIdx){
-              const cells = (Array.isArray(row) ? row : []).map(function(cell, cIdx){
-                return '<input class="field-input" value="' + esc(cell) + '" oninput="ueTableCellUpdate(' + b_ + ',' + idx + ',' + rIdx + ',' + cIdx + ',this.value)" style="font-size:.75rem">';
+              const total = rows.length;
+              const canUp   = rIdx > 0;
+              const canDown = rIdx < total - 1;
+              const cellArr = Array.isArray(row) ? row : [];
+              const cells = cellArr.map(function(cell, cIdx){
+                const m = cellMeta(cell);
+                if(m.hidden){
+                  return '<div style="background:repeating-linear-gradient(45deg,var(--bg-elev),var(--bg-elev) 6px,transparent 6px,transparent 12px);border:1px dashed var(--accent-border-soft);border-radius:var(--radius);min-height:54px;display:flex;align-items:center;justify-content:center;padding:.2rem;font-size:.6rem;font-style:italic;color:var(--text-mute)" title="Célula mesclada com outra">(mesclada)</div>';
+                }
+                const html = cellHtml(cell);
+                const merged = (m.rowspan > 1 || m.colspan > 1);
+                const canRight = cIdx < cellArr.length - m.colspan && cellArr.length > 1;
+                const canDownC = (rIdx + m.rowspan) < total;
+                // Toolbar inferior compacto: → mesclar à direita / ↓ mesclar abaixo / ↺ desmesclar
+                const toolbar =
+                  '<div style="display:flex;gap:.15rem;justify-content:flex-end;margin-top:.15rem;font-size:.6rem">' +
+                    (merged
+                      ? '<button class="btn btn-ghost btn-sm" style="padding:.05rem .35rem;font-size:.6rem" onclick="ueTableUnmerge(' + b_ + ',' + idx + ',' + rIdx + ',' + cIdx + ')" title="Desmesclar célula">↺ desmesclar</button>'
+                      : ('<button class="btn btn-ghost btn-sm" style="padding:.05rem .25rem;font-size:.6rem"' + (canRight ? '' : ' disabled') + ' onclick="ueTableMergeRight(' + b_ + ',' + idx + ',' + rIdx + ',' + cIdx + ')" title="Mesclar com a célula à direita">→</button>' +
+                         '<button class="btn btn-ghost btn-sm" style="padding:.05rem .25rem;font-size:.6rem"' + (canDownC ? '' : ' disabled') + ' onclick="ueTableMergeDown(' + b_ + ',' + idx + ',' + rIdx + ',' + cIdx + ')" title="Mesclar com a célula abaixo">↓</button>'
+                        )
+                    ) +
+                  '</div>';
+                const spanInfo = merged
+                  ? '<div style="font-family:var(--mono);font-size:.55rem;color:var(--accent);letter-spacing:.05em;margin-bottom:.15rem">' + m.rowspan + 'L × ' + m.colspan + 'C</div>'
+                  : '';
+                return '<div style="display:flex;flex-direction:column;gap:.15rem">' +
+                  spanInfo +
+                  '<textarea class="field-input" rows="2" placeholder="Célula (HTML permitido)" style="font-size:.75rem;min-height:54px;resize:vertical;font-family:var(--sans)" oninput="ueTableCellUpdate(' + b_ + ',' + idx + ',' + rIdx + ',' + cIdx + ',this.value)">' + esc(html) + '</textarea>' +
+                  toolbar +
+                '</div>';
               }).join('');
-              return '<div style="display:grid;grid-template-columns:repeat(' + Math.max(cols.length, 1) + ',1fr) auto;gap:.25rem;margin-bottom:.25rem;align-items:center">' +
+              return '<div style="display:grid;grid-template-columns:auto repeat(' + ncols + ',1fr) auto;gap:.3rem;margin-bottom:.4rem;align-items:start;padding:.3rem;border-radius:var(--radius);background:var(--bg-card)">' +
+                // Coluna 1: reorder ▲▼
+                '<div style="display:flex;flex-direction:column;gap:.15rem;padding-top:.5rem">' +
+                  '<button class="btn btn-ghost btn-sm" style="padding:.1rem .3rem;font-size:.65rem"' + (canUp   ? '' : ' disabled') + ' onclick="ueTableRowMove(' + b_ + ',' + idx + ',' + rIdx + ',-1)" title="Mover linha acima">▲</button>' +
+                  '<button class="btn btn-ghost btn-sm" style="padding:.1rem .3rem;font-size:.65rem"' + (canDown ? '' : ' disabled') + ' onclick="ueTableRowMove(' + b_ + ',' + idx + ',' + rIdx + ',1)"  title="Mover linha abaixo">▼</button>' +
+                '</div>' +
+                // Colunas das células
                 cells +
-                '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.1rem .3rem;font-size:.65rem" onclick="ueTableRowRemove(' + b_ + ',' + idx + ',' + rIdx + ')" title="Remover linha">×</button>' +
+                // Coluna final: remover linha
+                '<div style="padding-top:.5rem">' +
+                  '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.1rem .3rem;font-size:.65rem" onclick="ueTableRowRemove(' + b_ + ',' + idx + ',' + rIdx + ')" title="Remover linha">×</button>' +
+                '</div>' +
               '</div>';
             }).join('');
             return '<div style="margin-top:.5rem;padding-top:.4rem;border-top:1px solid var(--accent-border-soft)">' +
@@ -44717,13 +44991,16 @@
                 '<span class="s-subtitle" style="font-size:.6rem">Cabeçalhos (' + cols.length + ')</span>' +
                 '<button class="btn btn-ghost btn-sm" onclick="ueTableColAdd(' + b_ + ',' + idx + ')" style="padding:.15rem .45rem;font-size:.7rem">+ coluna</button>' +
               '</div>' +
-              '<div style="display:grid;grid-template-columns:repeat(' + Math.max(cols.length, 1) + ',1fr);gap:.25rem;margin-bottom:.5rem">' + colHeaders + '</div>' +
+              '<div style="display:grid;grid-template-columns:auto repeat(' + ncols + ',1fr) auto;gap:.3rem;margin-bottom:.5rem;align-items:center">' +
+                '<div></div>' + colHeaders + '<div></div>' +
+              '</div>' +
               '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.3rem">' +
                 '<span class="s-subtitle" style="font-size:.6rem">Linhas (' + rows.length + ')</span>' +
                 '<button class="btn btn-ghost btn-sm" onclick="ueTableRowAdd(' + b_ + ',' + idx + ')" style="padding:.15rem .45rem;font-size:.7rem">+ linha</button>' +
               '</div>' +
               rowsHTML +
               (rows.length === 0 ? '<p class="s-body" style="font-size:.7rem;font-style:italic;color:var(--text-mute);margin:0">Nenhuma linha ainda.</p>' : '') +
+              '<p class="s-body" style="font-size:.65rem;color:var(--text-mute);margin:.5rem 0 0;font-style:italic">Dica: células aceitam HTML (&lt;b&gt;, &lt;i&gt;, &lt;br&gt;, &lt;a href&gt;). Use os botões ▲▼ ◀▶ para reordenar e → ↓ ↺ para mesclar/desmesclar.</p>' +
             '</div>';
           }
         });

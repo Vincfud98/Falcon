@@ -1016,7 +1016,23 @@
         });
       }
       case 'tables': {
-        const tables = _lbParseList(c.tables);
+        const tables = _lbParseList(c.items || c.tables);
+        const sanitize = _lbSanitizeRichHTML;
+        function _cellMeta(cell){
+          if(cell && typeof cell === 'object'){
+            return {
+              rowspan: Math.max(1, parseInt(cell.rowspan) || 1),
+              colspan: Math.max(1, parseInt(cell.colspan) || 1),
+              hidden:  !!cell.hidden
+            };
+          }
+          return { rowspan:1, colspan:1, hidden:false };
+        }
+        function _cellHtml(cell){
+          if(cell == null) return '';
+          if(typeof cell === 'string') return sanitize(cell);
+          return sanitize(cell.html || '');
+        }
         return renderSlideCarousel(tables, block.id, function(tbl){
           const cols = Array.isArray(tbl.columns) ? tbl.columns : [];
           const rows = Array.isArray(tbl.rows) ? tbl.rows : [];
@@ -1024,17 +1040,24 @@
             '<div style="overflow:auto;border:1px solid var(--accent-border-soft);border-radius:var(--radius)">' +
               '<table style="width:100%;border-collapse:collapse;font-size:.9rem">' +
                 '<thead><tr style="background:var(--bg-elev)">' +
-                  cols.map(function(col){ return '<th style="text-align:left;padding:.7rem 1rem;font-family:var(--mono);font-size:.72rem;letter-spacing:.05em;color:var(--text-dim);border-bottom:1px solid var(--accent-border-soft)">' + e(col) + '</th>'; }).join('') +
+                  cols.map(function(col){ return '<th style="text-align:left;padding:.7rem 1rem;font-family:var(--mono);font-size:.72rem;letter-spacing:.05em;color:var(--text-dim);border-bottom:1px solid var(--accent-border-soft)">' + sanitize(col) + '</th>'; }).join('') +
                 '</tr></thead>' +
                 '<tbody>' +
                   rows.map(function(row){
-                    return '<tr onmouseover="this.style.background=\'var(--bg-elev)\'" onmouseout="this.style.background=\'\'">' +
-                      (Array.isArray(row) ? row : []).map(function(cell){ return '<td style="padding:.6rem 1rem;border-bottom:1px solid var(--accent-border-soft);color:var(--text)">' + e(cell) + '</td>'; }).join('') +
-                    '</tr>';
+                    const cells = Array.isArray(row) ? row : [];
+                    const tds = cells.map(function(cell){
+                      const m = _cellMeta(cell);
+                      if(m.hidden) return '';
+                      const spans = (m.rowspan > 1 ? ' rowspan="' + m.rowspan + '"' : '') +
+                                    (m.colspan > 1 ? ' colspan="' + m.colspan + '"' : '');
+                      return '<td' + spans + ' style="padding:.6rem 1rem;border-bottom:1px solid var(--accent-border-soft);color:var(--text);vertical-align:top">' + _cellHtml(cell) + '</td>';
+                    }).join('');
+                    return '<tr onmouseover="this.style.background=\'var(--bg-elev)\'" onmouseout="this.style.background=\'\'">' + tds + '</tr>';
                   }).join('') +
                 '</tbody>' +
               '</table>' +
-            '</div>';
+            '</div>' +
+            (tbl.notes ? '<div style="margin-top:.6rem;font-family:var(--serif);font-style:italic;font-size:.78rem;color:var(--text-mute);line-height:1.55">' + sanitize(tbl.notes) + '</div>' : '');
         });
       }
       case 'glossary': {
