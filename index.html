@@ -3989,6 +3989,55 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   .gloss-page-filters .fb-input{width:100%}
 }
 
+/* ─── Modal base (.modal-backdrop / .modal / .modal-header / .modal-body /
+       .modal-close) — usado pelo GlossaryLookup. Espelha o padrão do admin
+       (ubique-saas-components) já que o aluno não tinha modal genérico. ─── */
+.modal-backdrop{
+  display:none;
+  position:fixed;inset:0;z-index:1000;
+  background:rgba(11,12,15,.85);
+  backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);
+  align-items:flex-start;justify-content:center;
+  padding:2rem;overflow-y:auto;
+}
+.modal-backdrop.active{display:flex;animation:glossModalFade .25s var(--ease)}
+@keyframes glossModalFade{from{opacity:0}to{opacity:1}}
+.modal-backdrop .modal{
+  background:var(--bg-card);
+  border:1px solid rgba(200,169,126,.15);
+  border-radius:4px;
+  width:100%;max-width:680px;
+  max-height:calc(100vh - 4rem);
+  display:flex;flex-direction:column;
+  position:relative;
+  animation:glossModalSlide .35s var(--ease);
+}
+@keyframes glossModalSlide{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+.modal-backdrop .modal-header{
+  padding:1.4rem 1.6rem 1rem;
+  border-bottom:1px solid rgba(200,169,126,.1);
+  display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;
+}
+.modal-backdrop .modal-header h2{
+  font-family:var(--serif);font-weight:300;
+  font-size:1.6rem;line-height:1.15;margin:.2rem 0 0;
+}
+.modal-backdrop .modal-header .s-label{
+  font-family:var(--sans);font-weight:300;font-size:.58rem;
+  letter-spacing:.22em;text-transform:uppercase;color:var(--accent);
+}
+.modal-backdrop .modal-close{
+  background:transparent;border:1px solid var(--border);
+  border-radius:3px;width:32px;height:32px;
+  color:var(--text-mute);font-size:1.4rem;line-height:1;cursor:pointer;
+  transition:color .25s var(--ease),border-color .25s var(--ease);
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.modal-backdrop .modal-close:hover{color:var(--accent);border-color:var(--accent)}
+.modal-backdrop .modal-body{
+  padding:1.2rem 1.6rem 1.6rem;overflow-y:auto;flex:1;
+}
+
 /* ─── GLOSSARY LOOKUP modal (acionado pela ctxToolbar) ─── */
 .gloss-lookup-entry{
   padding:1rem 1.2rem;background:var(--bg-elevated);
@@ -4038,6 +4087,14 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   background:var(--bg-card);border-radius:0 var(--radius) var(--radius) 0;
   font-family:var(--sans);font-weight:300;font-size:.8rem;line-height:1.6;color:var(--text-mute);
 }
+.gloss-lookup-note{
+  margin:0 0 .8rem;padding:.5rem .8rem;
+  font-family:var(--sans);font-weight:300;font-size:.72rem;
+  letter-spacing:.05em;color:var(--text-mute);
+  background:var(--bg-elevated);border:1px solid var(--accent-border-soft);
+  border-left:2px solid var(--accent);border-radius:3px;
+}
+.gloss-lookup-note strong{color:var(--accent);font-weight:400}
 @media(max-width:900px){
   .gloss-layout{grid-template-columns:1fr}
   .gloss-sidebar{position:static;border-right:none;border-bottom:1px solid var(--border);padding:0 0 1rem;max-height:240px}
@@ -17918,21 +17975,80 @@ const GlossaryLookup = (function(){
   function normalize(s){
     return String(s||'').toLowerCase()
       .normalize('NFD').replace(/[̀-ͯ]/g, '')
-      .replace(/[^a-z0-9 ]+/g, ' ').trim();
+      .replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
   }
+
+  // Matéria da unidade atual (se aplicável) — usada pra priorizar resultados.
+  function _currentSubjectId(){
+    try{
+      if(!window.Router) return null;
+      const route = Router.parse();
+      const mid = route && route.params && route.params.moduleId;
+      if(!mid) return null;
+      // 1. UbiqueStore.modules (admin-edited)
+      if(window.UbiqueStore && UbiqueStore.modules){
+        const m = (UbiqueStore.modules.list() || []).find(x => String(x.id) === String(mid));
+        if(m && m.subject_id != null) return m.subject_id;
+      }
+      // 2. Fallback: window.COURSE mock
+      if(window.COURSE && Array.isArray(window.COURSE.modules)){
+        const cm = window.COURSE.modules.find(x => String(x.id) === String(mid));
+        if(cm && cm.subject_id != null) return cm.subject_id;
+      }
+    }catch(_){}
+    return null;
+  }
+
+  function termSubjectIds(t){
+    if(Array.isArray(t.subject_ids) && t.subject_ids.length) return t.subject_ids.map(String);
+    if(t.subject_id != null) return [String(t.subject_id)];
+    return [];
+  }
+
+  // Busca + ranking:
+  //   exato (n === q):                    1000
+  //   query inteira é substring do termo:  150
+  //   termo é substring da query:           80 (n >= 3)
+  //   todas as palavras da query no termo: 100
+  //   alguma palavra da query no termo:     20
+  //   bônus matéria da unidade atual:  +50 (faz subir no topo da lista)
+  //   - 0.01 por char do termo (desempate: termos mais curtos sobem)
+  // Para queries muito curtas (≤3 chars) exige match em WORD-BOUNDARY pra
+  // evitar lixo (é isso que faz "epd" achar "...Demanda (Epd)" mas não achar
+  // qualquer termo que tenha "ep" no meio).
+  function _score(t, q, qWords, currentSubject){
+    const n = normalize(stripHtml(t.term));
+    if(!n) return 0;
+    const tWords = n.split(/\s+/).filter(Boolean);
+    let s = 0;
+    if(n === q) s += 1000;
+    if(q.length >= 2 && n.indexOf(q) >= 0) s += 150;
+    if(n.length >= 3 && q.indexOf(n) >= 0) s += 80;
+    const allInside = qWords.every(w => {
+      if(w.length <= 3) return tWords.indexOf(w) >= 0; // word-boundary p/ tokens curtos
+      return n.indexOf(w) >= 0;
+    });
+    if(allInside) s += 100;
+    else if(qWords.some(w => w.length <= 3 ? tWords.indexOf(w) >= 0 : n.indexOf(w) >= 0)) s += 20;
+    if(currentSubject){
+      const tIds = termSubjectIds(t);
+      if(tIds.indexOf(String(currentSubject)) >= 0) s += 50;
+    }
+    s -= n.length * 0.01;
+    return s;
+  }
+
   function findMatches(query){
     if(!window.UbiqueStore || !UbiqueStore.glossary_terms) return [];
     const q = normalize(query);
     if(!q) return [];
+    const qWords = q.split(/\s+/).filter(Boolean);
     const all = UbiqueStore.glossary_terms.list() || [];
-    // 1. Match exato (case/acento-insensitive)
-    const exact = all.filter(t => normalize(stripHtml(t.term)) === q);
-    if(exact.length) return exact;
-    // 2. Contém: termo do banco contém a query OU vice-versa
-    return all.filter(t => {
-      const n = normalize(stripHtml(t.term));
-      return n.indexOf(q) >= 0 || q.indexOf(n) >= 0;
-    }).slice(0, 8);
+    const currentSubject = _currentSubjectId();
+    const scored = all.map(t => ({ t: t, s: _score(t, q, qWords, currentSubject) }))
+                      .filter(x => x.s > 0);
+    scored.sort((a, b) => b.s - a.s);
+    return scored.slice(0, 20).map(x => x.t);
   }
   function renderEntry(t){
     const sanitize = (window.LearningBlocks && window.LearningBlocks.sanitizeRichHTML) || Util.esc;
@@ -17977,15 +18093,27 @@ const GlossaryLookup = (function(){
     const trimmed = String(selectedText || '').trim();
     titleEl.textContent = trimmed ? `“${trimmed}”` : 'Consulta';
     const matches = findMatches(trimmed);
+    // Subtitle indicando prioridade pela matéria da unidade atual, quando relevante
+    const currentSubject = _currentSubjectId();
+    let priorityNote = '';
+    if(currentSubject && matches.length > 1 && window.UbiqueStore){
+      const subj = (UbiqueStore.subjects.list() || []).find(s => String(s.id) === String(currentSubject));
+      const subjName = subj ? (subj.subject || subj.title) : '';
+      if(subjName){
+        priorityNote = `<p class="gloss-lookup-note">Priorizando termos de <strong>${Util.esc(subjName)}</strong> (matéria da unidade).</p>`;
+      }
+    }
     if(matches.length === 0){
       bodyEl.innerHTML = `<div class="empty" style="text-align:center;padding:2rem 1rem">
         <div class="empty-title">Nenhum verbete encontrado</div>
-        <div class="empty-sub">A palavra <strong>${Util.esc(trimmed||'(vazia)')}</strong> não está no banco do glossário. Você pode pedir pro administrador adicionar.</div>
+        <div class="empty-body">A palavra <strong>${Util.esc(trimmed||'(vazia)')}</strong> não está no banco do glossário. Você pode pedir pro administrador adicionar.</div>
         <div style="margin-top:1.2rem"><a class="btn btn-ghost" href="#/glossario${trimmed ? '?q=' + encodeURIComponent(trimmed) : ''}" onclick="document.getElementById('glossaryLookupModal').classList.remove('active')">Ver glossário completo</a></div>
       </div>`;
     } else {
-      bodyEl.innerHTML = matches.map(renderEntry).join('') +
-        `<div style="text-align:center;padding-top:.5rem"><a class="btn btn-ghost btn-sm" href="#/glossario" onclick="document.getElementById('glossaryLookupModal').classList.remove('active')">Ver glossário completo →</a></div>`;
+      bodyEl.innerHTML =
+        priorityNote +
+        matches.map(renderEntry).join('') +
+        `<div style="text-align:center;padding-top:.5rem"><a class="btn btn-ghost btn-sm" href="#/glossario${trimmed ? '?q=' + encodeURIComponent(trimmed) : ''}" onclick="document.getElementById('glossaryLookupModal').classList.remove('active')">Ver glossário completo →</a></div>`;
     }
     modal.classList.add('active');
   }
