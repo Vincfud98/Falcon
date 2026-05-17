@@ -1073,7 +1073,8 @@
                 term: bank.term || '',
                 definitions: Array.isArray(bank.definitions) ? bank.definitions : [],
                 callout: bank.callout || '',
-                image: en.image || '',
+                // Imagem: prioridade per-bloco; cai pra bank.image_url
+                image: (en.image || '').toString().trim() || bank.image_url || '',
                 body: '',
                 __bank: true
               };
