@@ -8416,7 +8416,10 @@
           <div class="sub-h" style="gap:.6rem;flex-wrap:wrap">
             <span class="sub-h-text">Itens lexicais cadastrados</span>
             <span class="sub-h-rule"></span>
-            <input class="field-input" id="glSearch" placeholder="🔍 buscar termo…" style="max-width:260px" oninput="glRenderList()">
+            <input class="field-input" id="glSearch" placeholder="🔍 buscar termo…" style="max-width:240px" oninput="glRenderList()">
+            <select class="field-input" id="glFilterExam" onchange="glOnFilterExamChange()" style="width:auto">
+              <option value="">Todos os concursos</option>
+            </select>
             <select class="field-input" id="glFilterSubject" onchange="glRenderList()" style="width:auto">
               <option value="">Todas as matérias</option>
             </select>
@@ -12306,7 +12309,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=39"></script>
+<script src="ubique-shared.js?v=40"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=48"></script>
 
@@ -46588,11 +46591,14 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
         </div>
       </div>
 
-      <!-- Matéria + Classe -->
+      <!-- Concurso (helper) + Classe -->
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
         <div class="field">
-          <label>Matéria *</label>
-          <select class="field-input" id="glSubject"></select>
+          <label>Concurso (filtro de matérias)</label>
+          <select class="field-input" id="glExamFilter" onchange="glOnExamFilterChange()">
+            <option value="">— todos —</option>
+          </select>
+          <p class="s-body" style="font-size:.7rem;color:var(--text-mute);margin:.25rem 0 0">Apenas filtra a lista de matérias abaixo. Não é salvo no item.</p>
         </div>
         <div class="field">
           <label>Classe gramatical *</label>
@@ -46601,6 +46607,13 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
             <button class="btn btn-ghost btn-sm" onclick="glAddNewClass()" title="Criar nova classe">+</button>
           </div>
         </div>
+      </div>
+
+      <!-- Matérias (multi-select; conceitos podem ser interdisciplinares) -->
+      <div class="field">
+        <label>Matérias * <span style="color:var(--text-mute);font-weight:300;font-size:.7rem">(selecione 1 ou mais — segure Cmd/Ctrl)</span></label>
+        <select class="field-input" id="glSubjects" multiple size="6" style="min-height:140px;font-family:var(--sans);font-size:.85rem"></select>
+        <p class="s-body" style="font-size:.7rem;color:var(--text-mute);margin:.25rem 0 0">Termos interdisciplinares devem ser marcados em todas as matérias relevantes.</p>
       </div>
 
       <!-- Definições numeradas -->
@@ -46943,16 +46956,74 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     return (UbiqueStore.glossary_word_classes.list() || []).slice()
       .sort(function(a,b){ return String(a.name||'').localeCompare(String(b.name||''), 'pt-BR'); });
   }
+  function glExams(){
+    if(!window.UbiqueStore) return [];
+    return (UbiqueStore.exams.list() || []).slice()
+      .sort(function(a,b){ return String(a.name||'').localeCompare(String(b.name||''), 'pt-BR'); });
+  }
+  // Subjects filtrados pelo concurso (vazio na relação → todas, gracioso).
+  function glSubjectsForExam(examId){
+    const all = glSubjects();
+    if(!examId) return all;
+    const rel = (UbiqueStore.exam_subjects.list() || []);
+    const ids = rel.filter(function(r){ return String(r.exam_id) === String(examId); })
+                   .map(function(r){ return String(r.subject_id); });
+    if(ids.length === 0) return all;
+    return all.filter(function(s){ return ids.indexOf(String(s.id)) >= 0; });
+  }
+  function glTermSubjectIds(t){
+    if(Array.isArray(t.subject_ids) && t.subject_ids.length) return t.subject_ids.map(String);
+    if(t.subject_id != null) return [String(t.subject_id)];
+    return [];
+  }
 
   function glPopulateSelectors(){
-    const subjF = document.getElementById('glFilterSubject');
-    const subjM = document.getElementById('glSubject');
-    if(subjF || subjM){
-      const subjects = glSubjects();
-      const opts = subjects.map(function(s){ return '<option value="' + _esc(s.id) + '">' + _esc(s.subject || s.title || ('#'+s.id)) + '</option>'; }).join('');
-      if(subjF){ const cur = subjF.value; subjF.innerHTML = '<option value="">Todas as matérias</option>' + opts; subjF.value = cur; }
-      if(subjM){ const cur = subjM.value; subjM.innerHTML = '<option value="">— selecione —</option>' + opts; subjM.value = cur; }
+    const exams = glExams();
+    const examOpts = exams.map(function(e){ return '<option value="' + _esc(e.id) + '">' + _esc(e.name || e.id) + '</option>'; }).join('');
+    // Filter bar concurso
+    const examF = document.getElementById('glFilterExam');
+    if(examF){
+      const cur = examF.value;
+      examF.innerHTML = '<option value="">Todos os concursos</option>' + examOpts;
+      examF.value = cur;
     }
+    // Modal: concurso helper
+    const examM = document.getElementById('glExamFilter');
+    if(examM){
+      const cur = examM.value;
+      examM.innerHTML = '<option value="">— todos —</option>' + examOpts;
+      examM.value = cur;
+    }
+
+    // Filter bar matéria — depende do concurso selecionado no filtro
+    const subjF = document.getElementById('glFilterSubject');
+    if(subjF){
+      const cur = subjF.value;
+      const examSel = (examF && examF.value) || '';
+      const subjects = glSubjectsForExam(examSel);
+      subjF.innerHTML = '<option value="">Todas as matérias</option>' +
+        subjects.map(function(s){ return '<option value="' + _esc(s.id) + '">' + _esc(s.subject || s.title || ('#'+s.id)) + '</option>'; }).join('');
+      // Mantém seleção se ainda válida
+      if(cur && subjects.find(function(s){ return String(s.id) === String(cur); })){
+        subjF.value = cur;
+      } else {
+        subjF.value = '';
+      }
+    }
+
+    // Modal: matérias multi-select — filtra pelo concurso do modal
+    const subjM = document.getElementById('glSubjects');
+    if(subjM){
+      const selected = Array.from(subjM.selectedOptions || []).map(function(o){ return o.value; });
+      const examSel = (examM && examM.value) || '';
+      const subjects = glSubjectsForExam(examSel);
+      subjM.innerHTML = subjects.map(function(s){
+        const sel = selected.indexOf(String(s.id)) >= 0 ? ' selected' : '';
+        return '<option value="' + _esc(s.id) + '"' + sel + '>' + _esc(s.subject || s.title || ('#'+s.id)) + '</option>';
+      }).join('');
+    }
+
+    // Classes
     const classF = document.getElementById('glFilterClass');
     const classM = document.getElementById('glClass');
     if(classF || classM){
@@ -46963,19 +47034,41 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     }
   }
 
+  // Handler do dropdown de concurso na lista: repopula matérias antes de filtrar.
+  window.glOnFilterExamChange = function(){
+    glPopulateSelectors();
+    glRenderList();
+  };
+  // Handler do dropdown de concurso DENTRO do modal: repopula matérias filtradas.
+  window.glOnExamFilterChange = function(){
+    glPopulateSelectors();
+  };
+
   function glRenderList(){
     glPopulateSelectors();
     const container = document.getElementById('glossarioList');
     if(!container || !window.UbiqueStore) return;
     const q = ((document.getElementById('glSearch') || {}).value || '').trim().toLowerCase();
+    const ef = (document.getElementById('glFilterExam') || {}).value || '';
     const sf = (document.getElementById('glFilterSubject') || {}).value || '';
     const cf = (document.getElementById('glFilterClass') || {}).value || '';
     const all = UbiqueStore.glossary_terms.list() || [];
     const subjMap = {}; glSubjects().forEach(function(s){ subjMap[s.id] = s.subject || s.title; });
     const classMap = {}; glClasses().forEach(function(c){ classMap[c.id] = c.name; });
 
+    // Subjects elegíveis dado o concurso filtrado (gracioso: vazio na relação = todas)
+    let examSubjIds = null;
+    if(ef){
+      const rel = UbiqueStore.exam_subjects.list() || [];
+      const ids = rel.filter(function(r){ return String(r.exam_id) === String(ef); })
+                     .map(function(r){ return String(r.subject_id); });
+      examSubjIds = ids.length ? ids : null; // null = sem restrição
+    }
+
     const filtered = all.filter(function(t){
-      if(sf && String(t.subject_id) !== String(sf)) return false;
+      const tsubj = glTermSubjectIds(t);
+      if(examSubjIds && !tsubj.some(function(id){ return examSubjIds.indexOf(String(id)) >= 0; })) return false;
+      if(sf && tsubj.indexOf(String(sf)) < 0) return false;
       if(cf && t.class_id !== cf) return false;
       if(q){
         const hay = (_stripHtml(t.term) + ' ' + (t.definitions||[]).map(function(d){ return _stripHtml(d.html); }).join(' ')).toLowerCase();
@@ -47015,14 +47108,18 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
         '</div>' +
         '<div style="display:flex;flex-direction:column;gap:.4rem">' +
           groups[L].map(function(t){
-            const subjLabel = (t.subject_id && subjMap[t.subject_id]) ? subjMap[t.subject_id] : '';
+            const tsubj = glTermSubjectIds(t);
+            const subjLabels = tsubj.map(function(id){ return subjMap[id]; }).filter(Boolean);
             const classLabel = (t.class_id && classMap[t.class_id]) ? classMap[t.class_id] : '';
             const defCount = (t.definitions||[]).length;
+            const subjBadges = subjLabels.map(function(lbl){
+              return '<span class="card-label" style="font-size:.58rem;background:var(--accent-lo);border:1px solid var(--accent-border);padding:.1rem .45rem;border-radius:var(--radius)">' + _esc(lbl) + '</span>';
+            }).join('');
             return '<article class="card" style="display:grid;grid-template-columns:1fr auto;gap:1rem;padding:.8rem 1.1rem;align-items:center" data-gl-id="' + _esc(t.id) + '">' +
               '<div style="min-width:0;display:flex;flex-direction:column;gap:.3rem">' +
                 '<h3 class="card-title" style="margin:0;font-size:1.05rem;line-height:1.25">' + (t.term||'') + '</h3>' +
                 '<div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center">' +
-                  (subjLabel ? '<span class="card-label" style="font-size:.58rem;background:var(--accent-lo);border:1px solid var(--accent-border);padding:.1rem .45rem;border-radius:var(--radius)">' + _esc(subjLabel) + '</span>' : '') +
+                  subjBadges +
                   (classLabel ? '<span class="card-label" style="font-size:.58rem;background:transparent;border:1px solid var(--accent-border-soft);padding:.1rem .45rem;border-radius:var(--radius);color:var(--text-mute)">' + _esc(classLabel) + '</span>' : '') +
                   '<span style="font-size:.7rem;color:var(--text-mute);font-style:italic">' + defCount + ' ' + (defCount === 1 ? 'definição' : 'definições') + '</span>' +
                 '</div>' +
@@ -47073,7 +47170,10 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   window.glOpenModal = function(id){
     _glEditingId = id || null;
     _glDefsState = [];
-    glPopulateSelectors();
+
+    // Reseta os filtros do modal pra "todos" antes de popular os selectors
+    const examFilterEl = document.getElementById('glExamFilter');
+    if(examFilterEl) examFilterEl.value = '';
 
     if(id){
       const t = UbiqueStore.glossary_terms.get(id);
@@ -47081,7 +47181,6 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       document.getElementById('glModalTitle').textContent = 'Editar item lexical';
       document.getElementById('glId').value = t.id;
       document.getElementById('glTerm').value = t.term || '';
-      document.getElementById('glSubject').value = t.subject_id || '';
       document.getElementById('glClass').value = t.class_id || '';
       document.getElementById('glCallout').value = t.callout || '';
       _glDefsState = (t.definitions || []).map(function(d){
@@ -47092,15 +47191,28 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       });
       if(_glDefsState.length === 0) _glDefsState.push({ html:'', examples:[''] });
       document.getElementById('glBtnDelete').style.display = '';
+
+      // Popula os selectors com TODAS as matérias (concurso = vazio)
+      glPopulateSelectors();
+      // Agora aplica seleção de matérias (subject_ids[] ou legacy subject_id)
+      const sel = document.getElementById('glSubjects');
+      if(sel){
+        const ids = (Array.isArray(t.subject_ids) && t.subject_ids.length)
+          ? t.subject_ids.map(String)
+          : (t.subject_id != null ? [String(t.subject_id)] : []);
+        Array.from(sel.options || []).forEach(function(o){
+          o.selected = ids.indexOf(String(o.value)) >= 0;
+        });
+      }
     } else {
       document.getElementById('glModalTitle').textContent = 'Novo item lexical';
       document.getElementById('glId').value = '';
       document.getElementById('glTerm').value = '';
-      document.getElementById('glSubject').value = '';
       document.getElementById('glClass').value = '';
       document.getElementById('glCallout').value = '';
       _glDefsState = [{ html:'', examples:[''] }];
       document.getElementById('glBtnDelete').style.display = 'none';
+      glPopulateSelectors();
     }
     glRenderDefinitionsState();
     document.getElementById('glModalMsg').textContent = '';
@@ -47169,8 +47281,10 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
 
   window.glClearFilters = function(){
     const a = document.getElementById('glSearch'); if(a) a.value = '';
-    const b = document.getElementById('glFilterSubject'); if(b) b.value = '';
-    const c = document.getElementById('glFilterClass'); if(c) c.value = '';
+    const b = document.getElementById('glFilterExam'); if(b) b.value = '';
+    const c = document.getElementById('glFilterSubject'); if(c) c.value = '';
+    const d = document.getElementById('glFilterClass'); if(d) d.value = '';
+    glPopulateSelectors();
     glRenderList();
   };
 
@@ -47178,12 +47292,15 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     const msg = document.getElementById('glModalMsg');
     msg.textContent = '';
     const term = (document.getElementById('glTerm').value || '').trim();
-    const subject_id = document.getElementById('glSubject').value;
+    const subjSel = document.getElementById('glSubjects');
+    const subject_ids = subjSel
+      ? Array.from(subjSel.selectedOptions || []).map(function(o){ return o.value; }).filter(Boolean)
+      : [];
     const class_id = document.getElementById('glClass').value;
     const callout = (document.getElementById('glCallout').value || '').trim();
 
     if(!term || !_stripHtml(term)){ msg.textContent = 'O termo é obrigatório.'; return; }
-    if(!subject_id){ msg.textContent = 'Escolha uma matéria.'; return; }
+    if(subject_ids.length === 0){ msg.textContent = 'Escolha pelo menos uma matéria (segure Cmd/Ctrl para múltiplas).'; return; }
     if(!class_id){ msg.textContent = 'Escolha uma classe gramatical.'; return; }
     const defs = _glDefsState
       .filter(function(d){ return d.html && _stripHtml(d.html); })
@@ -47202,7 +47319,9 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
 
     const payload = {
       id: id, term: term,
-      subject_id: subject_id, class_id: class_id,
+      subject_ids: subject_ids,             // multi-matéria (interdisciplinar)
+      subject_id: subject_ids[0] || null,   // legacy: mantém p/ compat retroativa
+      class_id: class_id,
       definitions: defs, callout: callout || '',
       updated_at: Date.now()
     };

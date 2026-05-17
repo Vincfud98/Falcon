@@ -246,9 +246,25 @@
     verbetes: [],
     // Glossário (Y3 Fase Q): banco central de termos lexicais, separado de
     // `verbetes` (que serve aos tooltips de LB texto). Cada entrada tem
-    // term (HTML), subject_id, class_id, definitions[] (cada uma com html +
-    // examples[]) e callout (HTML opcional).
+    // term (HTML), subject_ids[] (interdisciplinar — pode pertencer a +1
+    // matéria), class_id, definitions[] (cada uma com html + examples[]) e
+    // callout (HTML opcional).
     glossary_terms: [],
+    // Concursos (espelho local pra filtros do glossário em ambos os lados —
+    // o cache Supabase do admin existe à parte e edita esses mesmos ids).
+    exams: [
+      { id:'cacd',     name:'CACD',     long_name:'Concurso de Admissão à Carreira de Diplomata' },
+      { id:'enem',     name:'ENEM',     long_name:'Exame Nacional do Ensino Médio' },
+      { id:'oab',      name:'OAB',      long_name:'Exame da Ordem dos Advogados' },
+      { id:'usp',      name:'USP / FUVEST' },
+      { id:'unicamp',  name:'UNICAMP' },
+      { id:'ita',      name:'ITA' },
+      { id:'ime',      name:'IME' }
+    ],
+    // Relação concurso ↔ matéria. Quando vazio para um concurso, o filtro
+    // exibe TODAS as matérias (degradação graciosa — admin popula via UI
+    // de Concursos quando quiser refinar).
+    exam_subjects: [],
     // Classes gramaticais — admin pode criar mais. Defaults universais:
     glossary_word_classes: [
       { id:'substantivo',  name:'Substantivo' },
@@ -429,6 +445,8 @@
     verbetes:          makeCRUD('verbetes',          'string'),
     glossary_terms:        makeCRUD('glossary_terms',        'string'),
     glossary_word_classes: makeCRUD('glossary_word_classes', 'string'),
+    exams:                 makeCRUD('exams',                 'string'),
+    exam_subjects:         makeCRUD('exam_subjects',         'number'),
 
     /**
      * Subscribe to all changes.

@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=39"></script>
+<script src="ubique-shared.js?v=40"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=48"></script>
 
@@ -3890,13 +3890,12 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
 
 /* ─── GLOSSÁRIO PAGE (top nav consulta do aluno) ─── */
 .gloss-page-wrap{ max-width:960px;margin:1.5rem auto 3rem;padding:0 1.5rem; }
-.gloss-page-filters{
-  display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;
-  padding:.85rem 1rem;border:1px solid var(--border);border-radius:4px;
-  background:var(--bg-elevated);margin-bottom:1.4rem;
-}
-.gloss-page-filters .field-input{min-width:140px;flex:0 1 auto}
-.gloss-page-filters #glossPageSearch{flex:1;min-width:240px}
+/* Filter bar usa as classes .filter-bar/.fb-* do design system. Aqui só
+   ajustes locais (não-sticky na página do glossário p/ liberar scroll). */
+.gloss-page-filters.filter-bar{position:static;background:var(--bg-elevated);border:1px solid var(--border);border-bottom:1px solid var(--border);border-radius:4px;padding:.85rem 1rem;margin-bottom:1.4rem}
+.gloss-page-filters .fb-group{display:flex;flex-direction:column;align-items:flex-start;gap:.25rem}
+.gloss-page-filters .fb-group-search{flex-direction:column}
+.gloss-page-filters .fb-group-search input{width:100%}
 .gloss-page-letter{margin-bottom:2rem}
 .gloss-page-letter-head{
   display:flex;align-items:baseline;gap:.8rem;margin-bottom:1rem;
@@ -3956,8 +3955,10 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   font-family:var(--sans);font-weight:300;font-size:.82rem;line-height:1.6;color:var(--text-mute);
 }
 @media(max-width:640px){
-  .gloss-page-filters{flex-direction:column;align-items:stretch}
-  .gloss-page-filters .field-input{width:100%}
+  .gloss-page-filters.filter-bar{flex-direction:column;align-items:stretch}
+  .gloss-page-filters .fb-group,
+  .gloss-page-filters .fb-select,
+  .gloss-page-filters .fb-input{width:100%}
 }
 
 /* ─── GLOSSARY LOOKUP modal (acionado pela ctxToolbar) ─── */
@@ -12239,16 +12240,23 @@ Renderers.login.mount = function(stageEl){
 /* ═══════════ COURSE CATALOG — main menu with all courses ═══════════ */
 
 /* ═══════════ GLOSSÁRIO — página de consulta (Y3 Fase Q) ═══════════
-   Lista alfabética de todos os itens lexicais do banco. Filtros somam-se:
-   busca textual + matéria + classe gramatical. */
-Renderers.glossario = function(route){
-  const q = (route && route.query) || {};
-  const search = (q.q || '').trim();
-  const subjF  = q.subject || '';
-  const classF = q.class || '';
+   Lista alfabética + filtros que SOMAM: busca textual + concurso →
+   matéria + classe gramatical. Filtros agem in-place via mount handlers
+   (sem Router.go a cada keystroke — preserva o foco do input). */
 
+// Estado dos filtros, externo ao Renderer pra sobreviver a re-mounts.
+window._glossFiltersState = window._glossFiltersState || {
+  q: '', exam: '', subject: '', class: ''
+};
+
+function _glossEntriesHtml(){
   const sanitize = (window.LearningBlocks && window.LearningBlocks.sanitizeRichHTML) || Util.esc;
   function stripHtml(s){ return String(s||'').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim(); }
+  const st = window._glossFiltersState || {};
+  const search = (st.q || '').trim();
+  const examF  = st.exam || '';
+  const subjF  = st.subject || '';
+  const classF = st.class || '';
 
   const allTerms = (window.UbiqueStore && UbiqueStore.glossary_terms.list()) || [];
   const subjects = (window.UbiqueStore && UbiqueStore.subjects.list()) || [];
@@ -12256,9 +12264,23 @@ Renderers.glossario = function(route){
   const subjMap = {}; subjects.forEach(s => { subjMap[s.id] = s.subject || s.title; });
   const classMap = {}; classes.forEach(c => { classMap[c.id] = c.name; });
 
+  // Subjects elegíveis dado o concurso (graceful: relation vazia = todas)
+  const examSubjIds = examF ? _glossSubjectsOfExam(examF) : null;
+
+  function termSubjects(t){
+    if(Array.isArray(t.subject_ids) && t.subject_ids.length) return t.subject_ids.map(String);
+    if(t.subject_id != null) return [String(t.subject_id)];
+    return [];
+  }
+
   const lq = search.toLowerCase();
   const filtered = allTerms.filter(t => {
-    if(subjF && String(t.subject_id) !== String(subjF)) return false;
+    const tsubj = termSubjects(t);
+    if(examSubjIds && examSubjIds.length){
+      // Pelo menos uma matéria do termo deve pertencer ao concurso
+      if(!tsubj.some(sid => examSubjIds.indexOf(String(sid)) >= 0)) return false;
+    }
+    if(subjF && tsubj.indexOf(String(subjF)) < 0) return false;
     if(classF && t.class_id !== classF) return false;
     if(lq){
       const hay = (stripHtml(t.term) + ' ' + (t.definitions||[]).map(d => stripHtml(d.html)).join(' ')).toLowerCase();
@@ -12267,7 +12289,6 @@ Renderers.glossario = function(route){
     return true;
   }).sort((a,b) => stripHtml(a.term).localeCompare(stripHtml(b.term), 'pt-BR', { sensitivity:'base' }));
 
-  // Agrupa por inicial
   const groups = {};
   filtered.forEach(t => {
     const L = (stripHtml(t.term)[0] || '#').toUpperCase();
@@ -12275,115 +12296,238 @@ Renderers.glossario = function(route){
   });
   const letters = Object.keys(groups).sort();
 
-  const subjOpts = subjects
-    .slice()
-    .sort((a,b) => String(a.subject||a.title||'').localeCompare(String(b.subject||b.title||''), 'pt-BR'))
-    .map(s => `<option value="${Util.attr(s.id)}"${String(subjF) === String(s.id) ? ' selected' : ''}>${Util.esc(s.subject||s.title||('#'+s.id))}</option>`).join('');
-  const classOpts = classes
-    .slice()
-    .sort((a,b) => String(a.name||'').localeCompare(String(b.name||''), 'pt-BR'))
-    .map(c => `<option value="${Util.attr(c.id)}"${classF === c.id ? ' selected' : ''}>${Util.esc(c.name)}</option>`).join('');
+  // Banner de contagem
+  const countBanner = `<div class="fb-count">${allTerms.length} ${allTerms.length === 1 ? 'termo' : 'termos'}${filtered.length !== allTerms.length ? ' · ' + filtered.length + ' filtrado' + (filtered.length === 1 ? '' : 's') : ''}</div>`;
 
-  const filterBar = `<div class="gloss-page-filters">
-    <input class="field-input" id="glossPageSearch" placeholder="🔍 buscar termo ou definição…" value="${Util.attr(search)}">
-    <select class="field-input" id="glossPageSubject">
-      <option value="">Todas as matérias</option>${subjOpts}
-    </select>
-    <select class="field-input" id="glossPageClass">
-      <option value="">Todas as classes</option>${classOpts}
-    </select>
-    <button class="btn btn-ghost btn-sm" id="glossPageClear">Limpar</button>
+  if(allTerms.length === 0){
+    return countBanner + `<div class="empty"><div class="empty-title">Glossário vazio</div>
+      <div class="empty-body">O administrador ainda não cadastrou termos. Os itens aparecem aqui assim que forem criados em <em>Gerenciar Conteúdo → Glossário</em>.</div></div>`;
+  }
+  if(filtered.length === 0){
+    return countBanner + `<div class="empty"><div class="empty-title">Nenhum resultado</div>
+      <div class="empty-body">Nenhum termo bate com os filtros aplicados. Tente ajustar a busca ou limpar os filtros.</div></div>`;
+  }
+
+  return countBanner + letters.map(L => `<section class="gloss-page-letter">
+    <header class="gloss-page-letter-head"><span>${Util.esc(L)}</span><span class="gloss-page-letter-rule"></span></header>
+    <div class="gloss-page-entries">
+      ${groups[L].map(t => {
+        const tsubj = termSubjects(t);
+        const subjLabels = tsubj.map(sid => subjMap[sid]).filter(Boolean);
+        const cls  = (t.class_id && classMap[t.class_id]) ? classMap[t.class_id] : '';
+        const defsHtml = (t.definitions||[]).map((d, i) => {
+          const examples = (Array.isArray(d.examples) ? d.examples : []).filter(Boolean);
+          const ex = examples.length
+            ? `<ul class="gloss-page-examples">${examples.map(e => `<li>${sanitize(e)}</li>`).join('')}</ul>`
+            : '';
+          const num = (t.definitions.length > 1) ? `<span class="gloss-page-num">${i+1}.</span> ` : '';
+          return `<div class="gloss-page-def">${num}${sanitize(d.html||'')}${ex}</div>`;
+        }).join('');
+        return `<article class="gloss-page-entry">
+          <header class="gloss-page-entry-head">
+            <h3 class="gloss-page-term">${sanitize(t.term||'')}</h3>
+            <div class="gloss-page-meta">
+              ${subjLabels.map(s => `<span class="gloss-page-tag gloss-page-tag-subj">${Util.esc(s)}</span>`).join('')}
+              ${cls  ? `<span class="gloss-page-tag gloss-page-tag-class">${Util.esc(cls)}</span>` : ''}
+            </div>
+          </header>
+          ${defsHtml}
+          ${t.callout ? `<aside class="gloss-page-callout">${sanitize(t.callout)}</aside>` : ''}
+        </article>`;
+      }).join('')}
+    </div>
+  </section>`).join('');
+}
+
+// Subjects-of-exam: lê UbiqueStore.exam_subjects. Vazio → null (= todas).
+function _glossSubjectsOfExam(examId){
+  if(!examId || !window.UbiqueStore || !UbiqueStore.exam_subjects) return null;
+  const rel = UbiqueStore.exam_subjects.list() || [];
+  const matches = rel.filter(es => String(es.exam_id) === String(examId)).map(es => String(es.subject_id));
+  return matches; // empty array → comportamento "nenhuma matéria casa" só se examId selecionado.
+}
+
+// Subjects do dropdown dado o concurso. Sem relação registrada → todas.
+function _glossSubjectsForDropdown(examId){
+  const all = (window.UbiqueStore && UbiqueStore.subjects.list()) || [];
+  if(!examId) return all;
+  const rel = (window.UbiqueStore && UbiqueStore.exam_subjects.list()) || [];
+  const relevantIds = rel.filter(es => String(es.exam_id) === String(examId)).map(es => String(es.subject_id));
+  if(relevantIds.length === 0) return all; // graceful: sem relação → mostra todas
+  return all.filter(s => relevantIds.indexOf(String(s.id)) >= 0);
+}
+
+Renderers.glossario = function(route){
+  // Lê filtros da URL na 1ª entrada e popula o estado externo
+  const q = (route && route.query) || {};
+  const st = window._glossFiltersState;
+  if(q.q != null) st.q = q.q;
+  if(q.exam != null) st.exam = q.exam;
+  if(q.subject != null) st.subject = q.subject;
+  if(q.class != null) st.class = q.class;
+
+  const exams    = (window.UbiqueStore && UbiqueStore.exams.list()) || [];
+  const classes  = (window.UbiqueStore && UbiqueStore.glossary_word_classes.list()) || [];
+
+  const examOpts = exams.slice()
+    .sort((a,b) => String(a.name||'').localeCompare(String(b.name||''), 'pt-BR'))
+    .map(e => `<option value="${Util.attr(e.id)}"${st.exam === e.id ? ' selected' : ''}>${Util.esc(e.name||e.id)}</option>`).join('');
+
+  const subjectsForDD = _glossSubjectsForDropdown(st.exam);
+  const subjOpts = subjectsForDD.slice()
+    .sort((a,b) => String(a.subject||a.title||'').localeCompare(String(b.subject||b.title||''), 'pt-BR'))
+    .map(s => `<option value="${Util.attr(s.id)}"${String(st.subject) === String(s.id) ? ' selected' : ''}>${Util.esc(s.subject||s.title||('#'+s.id))}</option>`).join('');
+  const classOpts = classes.slice()
+    .sort((a,b) => String(a.name||'').localeCompare(String(b.name||''), 'pt-BR'))
+    .map(c => `<option value="${Util.attr(c.id)}"${st.class === c.id ? ' selected' : ''}>${Util.esc(c.name)}</option>`).join('');
+
+  // Filter bar usa as classes .filter-bar/.fb-* do design system Falcon
+  // (mesmo padrão de /simulados, /edital, etc — ver ubique-saas-components).
+  const filterBar = `<div class="filter-bar gloss-page-filters">
+    <div class="fb-group fb-group-search" style="flex:1;min-width:240px">
+      <span class="fb-label">Buscar</span>
+      <input class="fb-input" type="text" id="glossPageSearch" placeholder="termo ou definição…" value="${Util.attr(st.q)}" autocomplete="off" style="flex:1">
+    </div>
+    <div class="fb-group">
+      <span class="fb-label">Concurso</span>
+      <select class="fb-select" id="glossPageExam">
+        <option value="">Todos</option>${examOpts}
+      </select>
+    </div>
+    <div class="fb-group">
+      <span class="fb-label">Matéria</span>
+      <select class="fb-select" id="glossPageSubject"${st.exam ? '' : ''}>
+        <option value="">Todas</option>${subjOpts}
+      </select>
+    </div>
+    <div class="fb-group">
+      <span class="fb-label">Classe</span>
+      <select class="fb-select" id="glossPageClass">
+        <option value="">Todas</option>${classOpts}
+      </select>
+    </div>
+    <button class="fb-clear" id="glossPageClear">Limpar</button>
   </div>`;
 
-  let body = '';
-  if(allTerms.length === 0){
-    body = `<div class="empty"><div class="empty-title">Glossário vazio</div>
-      <div class="empty-sub">O administrador ainda não cadastrou termos. Os itens aparecem aqui assim que forem criados em <em>Gerenciar Conteúdo → Glossário</em>.</div></div>`;
-  } else if(filtered.length === 0){
-    body = `<div class="empty"><div class="empty-title">Nenhum resultado</div>
-      <div class="empty-sub">Nenhum termo bate com os filtros aplicados. Tente ajustar a busca ou limpar os filtros.</div></div>`;
-  } else {
-    body = letters.map(L => `<section class="gloss-page-letter">
-      <header class="gloss-page-letter-head"><span>${Util.esc(L)}</span><span class="gloss-page-letter-rule"></span></header>
-      <div class="gloss-page-entries">
-        ${groups[L].map(t => {
-          const subj = (t.subject_id && subjMap[t.subject_id]) ? subjMap[t.subject_id] : '';
-          const cls  = (t.class_id && classMap[t.class_id]) ? classMap[t.class_id] : '';
-          const defsHtml = (t.definitions||[]).map((d, i) => {
-            const examples = (Array.isArray(d.examples) ? d.examples : []).filter(Boolean);
-            const ex = examples.length
-              ? `<ul class="gloss-page-examples">${examples.map(e => `<li>${sanitize(e)}</li>`).join('')}</ul>`
-              : '';
-            const num = (t.definitions.length > 1) ? `<span class="gloss-page-num">${i+1}.</span> ` : '';
-            return `<div class="gloss-page-def">${num}${sanitize(d.html||'')}${ex}</div>`;
-          }).join('');
-          return `<article class="gloss-page-entry">
-            <header class="gloss-page-entry-head">
-              <h3 class="gloss-page-term">${sanitize(t.term||'')}</h3>
-              <div class="gloss-page-meta">
-                ${subj ? `<span class="gloss-page-tag gloss-page-tag-subj">${Util.esc(subj)}</span>` : ''}
-                ${cls  ? `<span class="gloss-page-tag gloss-page-tag-class">${Util.esc(cls)}</span>` : ''}
-              </div>
-            </header>
-            ${defsHtml}
-            ${t.callout ? `<aside class="gloss-page-callout">${sanitize(t.callout)}</aside>` : ''}
-          </article>`;
-        }).join('')}
-      </div>
-    </section>`).join('');
-  }
+  const allTerms = (window.UbiqueStore && UbiqueStore.glossary_terms.list()) || [];
 
   return `<div class="hero unit-hero">
     <span class="s-label" data-a="1">Glossário</span>
     <h1 class="s-title" data-a="2">Itens lexicais</h1>
     <p class="s-subtitle" data-a="3">Banco de termos da plataforma. Use a busca e os filtros para encontrar.</p>
     <div class="s-divider" data-a="4"></div>
-    <p class="s-body" data-a="5">${allTerms.length} ${allTerms.length === 1 ? 'termo cadastrado' : 'termos cadastrados'}${filtered.length !== allTerms.length ? ' · ' + filtered.length + ' filtrados' : ''}.</p>
+    <p class="s-body" data-a="5">${allTerms.length} ${allTerms.length === 1 ? 'termo cadastrado' : 'termos cadastrados'} no banco.</p>
   </div>
   <div class="gloss-page-wrap">
     ${filterBar}
-    <div class="gloss-page-body">${body}</div>
+    <div class="gloss-page-body" id="glossPageBody">${_glossEntriesHtml()}</div>
   </div>`;
 };
 
 Renderers.glossario.mount = function(stageEl){
+  const st = window._glossFiltersState;
   const search = stageEl.querySelector('#glossPageSearch');
+  const exam   = stageEl.querySelector('#glossPageExam');
   const subj   = stageEl.querySelector('#glossPageSubject');
   const klass  = stageEl.querySelector('#glossPageClass');
   const clear  = stageEl.querySelector('#glossPageClear');
+  const body   = stageEl.querySelector('#glossPageBody');
+  if(!body) return;
 
-  function goWith(){
-    const q = {
-      q: (search.value||'').trim(),
-      subject: subj.value || '',
-      class: klass.value || ''
-    };
-    Router.go('/glossario' + Router.querystring(q));
+  // Re-popula o dropdown de matérias quando o concurso muda
+  function repopulateSubjects(){
+    const subjects = _glossSubjectsForDropdown(st.exam);
+    const cur = st.subject;
+    const opts = subjects.slice()
+      .sort((a,b) => String(a.subject||a.title||'').localeCompare(String(b.subject||b.title||''), 'pt-BR'))
+      .map(s => `<option value="${Util.attr(s.id)}"${String(cur) === String(s.id) ? ' selected' : ''}>${Util.esc(s.subject||s.title||('#'+s.id))}</option>`).join('');
+    subj.innerHTML = `<option value="">Todas</option>${opts}`;
+    // Se a matéria atual não está mais na lista, limpa
+    if(cur && !subjects.find(s => String(s.id) === String(cur))){
+      st.subject = '';
+      subj.value = '';
+    }
+  }
+
+  // Re-render só do body, sem tocar nos inputs (preserva foco/cursor)
+  function refreshBody(){
+    body.innerHTML = _glossEntriesHtml();
+  }
+
+  // Sincroniza URL apenas em mudanças "discretas" (selects/clear).
+  // Durante o input do search NÃO sincronizamos pra evitar qualquer chance
+  // do hashchange disparar App.render e refazer o shell (perderia o foco).
+  function syncUrl(){
+    const params = [];
+    if(st.q)       params.push('q='       + encodeURIComponent(st.q));
+    if(st.exam)    params.push('exam='    + encodeURIComponent(st.exam));
+    if(st.subject) params.push('subject=' + encodeURIComponent(st.subject));
+    if(st.class)   params.push('class='   + encodeURIComponent(st.class));
+    const hash = '#/glossario' + (params.length ? '?' + params.join('&') : '');
+    if(location.hash !== hash){
+      try{ history.replaceState(null, '', hash); }catch(_){}
+    }
   }
 
   let debounce;
   if(search){
     search.addEventListener('input', () => {
+      st.q = search.value || '';
       clearTimeout(debounce);
-      debounce = setTimeout(goWith, 220);
+      // Re-render do body apenas — sem URL sync; preserva foco do input.
+      debounce = setTimeout(refreshBody, 180);
+    });
+    // Ao desfocar, sincroniza URL pra suportar links compartilháveis.
+    search.addEventListener('blur', syncUrl);
+  }
+  if(exam){
+    exam.addEventListener('change', () => {
+      st.exam = exam.value || '';
+      repopulateSubjects();
+      refreshBody();
+      syncUrl();
     });
   }
-  if(subj)  subj.addEventListener('change', goWith);
-  if(klass) klass.addEventListener('change', goWith);
-  if(clear) clear.addEventListener('click', () => Router.go('/glossario'));
+  if(subj){
+    subj.addEventListener('change', () => {
+      st.subject = subj.value || '';
+      refreshBody();
+      syncUrl();
+    });
+  }
+  if(klass){
+    klass.addEventListener('change', () => {
+      st.class = klass.value || '';
+      refreshBody();
+      syncUrl();
+    });
+  }
+  if(clear){
+    clear.addEventListener('click', () => {
+      st.q = ''; st.exam = ''; st.subject = ''; st.class = '';
+      if(search) search.value = '';
+      if(exam) exam.value = '';
+      if(klass) klass.value = '';
+      repopulateSubjects();
+      refreshBody();
+      syncUrl();
+    });
+  }
 
-  // Re-render ao mudar o store (admin acabou de criar um termo, por ex)
+  // Quando outra aba (admin) cria/edita um termo, atualizamos só o body —
+  // NUNCA o shell — pra não perder foco do search.
   if(window.UbiqueStore && !window._glossPageSubBound){
     window._glossPageSubBound = true;
     UbiqueStore.subscribe(evt => {
       if(!evt || !evt.type) return;
-      if(evt.type.indexOf('glossary_terms') === 0 ||
-         evt.type.indexOf('glossary_word_classes') === 0 ||
-         evt.type === 'sync' || evt.type === 'reset'){
-        if(document.querySelector('.gloss-page-wrap')){
-          App.go && App.go();
-        }
-      }
+      const t = evt.type;
+      const isRelevant = t === 'sync' || t === 'reset' ||
+        t.indexOf('glossary_terms') === 0 ||
+        t.indexOf('glossary_word_classes') === 0 ||
+        t.indexOf('exam_subjects') === 0;
+      if(!isRelevant) return;
+      const bodyEl = document.getElementById('glossPageBody');
+      if(bodyEl) bodyEl.innerHTML = _glossEntriesHtml();
     });
   }
 };
@@ -17746,10 +17890,15 @@ const GlossaryLookup = (function(){
   }
   function renderEntry(t){
     const sanitize = (window.LearningBlocks && window.LearningBlocks.sanitizeRichHTML) || Util.esc;
-    const subj = t.subject_id && window.UbiqueStore
-      ? ((UbiqueStore.subjects.list() || []).find(s => String(s.id) === String(t.subject_id)) || null)
-      : null;
-    const subjLabel = subj ? (subj.subject || subj.title) : '';
+    // Multi-matéria: prefere subject_ids[]; cai pra subject_id legado.
+    const tIds = (Array.isArray(t.subject_ids) && t.subject_ids.length)
+      ? t.subject_ids.map(String)
+      : (t.subject_id != null ? [String(t.subject_id)] : []);
+    const subjList = window.UbiqueStore ? (UbiqueStore.subjects.list() || []) : [];
+    const subjLabels = tIds
+      .map(id => subjList.find(s => String(s.id) === id))
+      .filter(Boolean)
+      .map(s => s.subject || s.title);
     const cls = t.class_id && window.UbiqueStore
       ? ((UbiqueStore.glossary_word_classes.list() || []).find(c => c.id === t.class_id) || null)
       : null;
@@ -17766,7 +17915,7 @@ const GlossaryLookup = (function(){
       <header class="gloss-lookup-head">
         <h3 class="gloss-lookup-term">${sanitize(t.term||'')}</h3>
         <div class="gloss-lookup-meta">
-          ${subjLabel ? `<span class="gloss-lookup-tag gloss-lookup-tag-subj">${Util.esc(subjLabel)}</span>` : ''}
+          ${subjLabels.map(s => `<span class="gloss-lookup-tag gloss-lookup-tag-subj">${Util.esc(s)}</span>`).join('')}
           ${classLabel ? `<span class="gloss-lookup-tag gloss-lookup-tag-class">${Util.esc(classLabel)}</span>` : ''}
         </div>
       </header>
