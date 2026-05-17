@@ -1061,21 +1061,55 @@
         });
       }
       case 'glossary': {
-        // Admin salva em content.items; legacy mock usava content.entries
+        // Admin salva em content.items; legacy mock usava content.entries.
+        // Y3 Fase Q: items podem ser bank refs { bank_id, image? } — resolve.
         const entries = _lbParseList(c.items || c.entries);
         const sanitize = _lbSanitizeRichHTML;
+        function _resolveGl(en){
+          if(en && en.bank_id && typeof window !== 'undefined' && window.UbiqueStore && window.UbiqueStore.glossary_terms){
+            const bank = window.UbiqueStore.glossary_terms.get(en.bank_id);
+            if(bank){
+              return {
+                term: bank.term || '',
+                definitions: Array.isArray(bank.definitions) ? bank.definitions : [],
+                callout: bank.callout || '',
+                image: en.image || '',
+                body: '',
+                __bank: true
+              };
+            }
+          }
+          return {
+            term: en.term || '',
+            definitions: en.definition ? [{ html: en.definition, examples: [] }] : [],
+            body: en.body || en.paragraph || '',
+            image: en.image || en.image_url || '',
+            callout: ''
+          };
+        }
         return renderSlideCarousel(entries, block.id, function(en){
-          // Field aliases: admin usa `body`/`image`; legacy usa `paragraph`/`image_url`
-          const imageUrl = en.image || en.image_url || '';
-          const body     = en.body  || en.paragraph || '';
-          const cols = imageUrl ? 'grid-template-columns:1fr auto' : 'grid-template-columns:1fr';
+          const r = _resolveGl(en);
+          const cols = r.image ? 'grid-template-columns:1fr auto' : 'grid-template-columns:1fr';
+          const defsHtml = (r.definitions||[]).map(function(d, i){
+            const examples = (Array.isArray(d.examples) ? d.examples : []).filter(Boolean);
+            const exHtml = examples.length
+              ? '<ul style="list-style:none;margin:.4rem 0 0;padding:0 0 0 1rem;font-style:normal">' +
+                  examples.map(function(ex){ return '<li style="font-size:.8rem;color:var(--text-mute);padding:.1rem 0;position:relative"><span style="position:absolute;left:-.9rem;color:var(--accent);opacity:.7">›</span> ' + sanitize(ex) + '</li>'; }).join('') +
+                '</ul>'
+              : '';
+            const num = r.definitions.length > 1
+              ? '<span style="font-family:var(--mono);color:var(--accent);font-weight:500;margin-right:.4rem">' + (i+1) + '.</span> '
+              : '';
+            return '<div style="font-style:italic;color:var(--text-dim);margin-top:.4rem;font-size:.95rem;line-height:1.6">' + num + sanitize(d.html||'') + exHtml + '</div>';
+          }).join('');
           return '<div style="display:grid;' + cols + ';gap:1.5rem;align-items:start">' +
             '<div>' +
-              '<h4 style="font-family:var(--serif);font-size:1.6rem;color:var(--text);margin:0">' + e(en.term||'') + '</h4>' +
-              (en.definition ? '<p style="font-style:italic;color:var(--text-dim);margin-top:.4rem;font-size:.95rem;line-height:1.6">' + sanitize(en.definition) + '</p>' : '') +
-              (body ? '<div class="card-body" style="margin-top:.7rem;line-height:1.7">' + sanitize(body) + '</div>' : '') +
+              '<h4 style="font-family:var(--serif);font-size:1.6rem;color:var(--text);margin:0">' + sanitize(r.term||'') + '</h4>' +
+              defsHtml +
+              (r.body ? '<div class="card-body" style="margin-top:.7rem;line-height:1.7">' + sanitize(r.body) + '</div>' : '') +
+              (r.callout ? '<aside style="margin-top:.8rem;padding:.6rem .85rem;border-left:3px solid var(--accent);background:var(--bg-elev);border-radius:0 var(--radius) var(--radius) 0;font-size:.8rem;color:var(--text-mute);line-height:1.55">' + sanitize(r.callout) + '</aside>' : '') +
             '</div>' +
-            (imageUrl ? '<div style="width:200px;aspect-ratio:1;background-image:url(\'' + attrHtml(imageUrl) + '\');background-size:cover;background-position:center;border-radius:var(--radius-lg)"></div>' : '') +
+            (r.image ? '<div style="width:200px;aspect-ratio:1;background-image:url(\'' + attrHtml(r.image) + '\');background-size:cover;background-position:center;border-radius:var(--radius-lg)"></div>' : '') +
           '</div>';
         });
       }
