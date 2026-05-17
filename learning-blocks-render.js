@@ -1061,16 +1061,21 @@
         });
       }
       case 'glossary': {
-        const entries = _lbParseList(c.entries);
+        // Admin salva em content.items; legacy mock usava content.entries
+        const entries = _lbParseList(c.items || c.entries);
+        const sanitize = _lbSanitizeRichHTML;
         return renderSlideCarousel(entries, block.id, function(en){
-          const cols = en.image_url ? 'grid-template-columns:1fr auto' : 'grid-template-columns:1fr';
+          // Field aliases: admin usa `body`/`image`; legacy usa `paragraph`/`image_url`
+          const imageUrl = en.image || en.image_url || '';
+          const body     = en.body  || en.paragraph || '';
+          const cols = imageUrl ? 'grid-template-columns:1fr auto' : 'grid-template-columns:1fr';
           return '<div style="display:grid;' + cols + ';gap:1.5rem;align-items:start">' +
             '<div>' +
               '<h4 style="font-family:var(--serif);font-size:1.6rem;color:var(--text);margin:0">' + e(en.term||'') + '</h4>' +
-              (en.definition ? '<p style="font-style:italic;color:var(--text-dim);margin-top:.4rem;font-size:.95rem;line-height:1.6">' + e(en.definition) + '</p>' : '') +
-              (en.paragraph ? '<p class="card-body" style="margin-top:.7rem;line-height:1.7">' + e(en.paragraph) + '</p>' : '') +
+              (en.definition ? '<p style="font-style:italic;color:var(--text-dim);margin-top:.4rem;font-size:.95rem;line-height:1.6">' + sanitize(en.definition) + '</p>' : '') +
+              (body ? '<div class="card-body" style="margin-top:.7rem;line-height:1.7">' + sanitize(body) + '</div>' : '') +
             '</div>' +
-            (en.image_url ? '<div style="width:200px;aspect-ratio:1;background-image:url(\'' + attrHtml(en.image_url) + '\');background-size:cover;background-position:center;border-radius:var(--radius-lg)"></div>' : '') +
+            (imageUrl ? '<div style="width:200px;aspect-ratio:1;background-image:url(\'' + attrHtml(imageUrl) + '\');background-size:cover;background-position:center;border-radius:var(--radius-lg)"></div>' : '') +
           '</div>';
         });
       }
