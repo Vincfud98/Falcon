@@ -12332,7 +12332,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
 <script src="ubique-shared.js?v=40"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=50"></script>
+<script src="learning-blocks-render.js?v=51"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -40955,6 +40955,7 @@
     { type:'glossary',            label:'Glossário',            icon:'📖' },
     { type:'gallery',             label:'Galeria',              icon:'🖼' },
     { type:'image',               label:'Imagem',               icon:'🌅' }, // keep for backward compat
+    { type:'statistics',          label:'Estatísticas',         icon:'📈' },
   ];
 
   // ── Open / Close ──────────────────────────────────────────
@@ -45128,6 +45129,187 @@
         });
       }
 
+      // ───────── STATISTICS (gráficos) ─────────
+      // content.charts[] = [{ id, type:'pie'|'bar'|'line',
+      //   orientation?:'vertical'|'horizontal',  // bar
+      //   fill?:bool,                            // line
+      //   title, description (html),
+      //   slices?:[{label,value,color}],         // pie
+      //   xLabels?:[string], series?:[{label,color,values:[]}]  // bar/line
+      // }]
+      case 'statistics': {
+        const charts = Array.isArray(content.charts) ? content.charts : [];
+        const PALETTE = ['#c39364','#5db8a3','#8fa4d6','#d6a565','#a07cbf','#7ab98f','#d68a8a','#b9b0ff'];
+        function _color(i){ return PALETTE[i % PALETTE.length]; }
+
+        const cards = charts.map(function(ch, idx){
+          const total = charts.length;
+          const type = ch.type || 'pie';
+          const title = ch.title || '';
+          const desc  = ch.description || '';
+
+          // ── Cabeçalho do card ──
+          const head =
+            '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.55rem;flex-wrap:wrap">' +
+              '<span class="card-label" style="background:var(--accent-lo);padding:.1rem .4rem;border-radius:var(--radius);border:1px solid var(--accent-border);font-size:.6rem">Gráfico ' + (idx+1) + '</span>' +
+              '<span class="card-title" style="flex:1;margin:0;font-size:.85rem;color:var(--text);font-family:var(--serif)">' + esc(_stripHtml(title) || '(sem título)') + '</span>' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueStatsMoveChart(' + bid + ',' + idx + ',-1)" ' + (idx===0?'disabled ':'') + 'style="padding:.15rem .35rem;font-size:.65rem">▲</button>' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueStatsMoveChart(' + bid + ',' + idx + ',1)"  ' + (idx===total-1?'disabled ':'') + 'style="padding:.15rem .35rem;font-size:.65rem">▼</button>' +
+              '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.15rem .45rem;font-size:.7rem" onclick="ueStatsRemoveChart(' + bid + ',' + idx + ')">apagar</button>' +
+            '</div>';
+
+          // ── Top row: tipo, título, opções ──
+          const typeOpts = [
+            ['pie',           'Pizza'],
+            ['bar-vertical',  'Barras verticais'],
+            ['bar-horizontal','Barras horizontais'],
+            ['line',          'Linha']
+          ];
+          const currentTypeKey = (type === 'bar')
+            ? ((ch.orientation === 'horizontal') ? 'bar-horizontal' : 'bar-vertical')
+            : type;
+          const typeSelect =
+            '<select class="field-input" onchange="ueStatsSetType(' + bid + ',' + idx + ',this.value)" style="font-size:.78rem">' +
+              typeOpts.map(function(o){
+                return '<option value="' + o[0] + '"' + (currentTypeKey === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+              }).join('') +
+            '</select>';
+          const fillToggle = (type === 'line')
+            ? '<label style="display:flex;align-items:center;gap:.35rem;font-size:.72rem;color:var(--text-dim);white-space:nowrap;cursor:pointer">' +
+                '<input type="checkbox"' + (ch.fill ? ' checked' : '') + ' onchange="ueStatsSetField(' + bid + ',' + idx + ',\'fill\',this.checked)"> Preencher área abaixo' +
+              '</label>'
+            : '';
+
+          const topRow =
+            '<div style="display:grid;grid-template-columns:140px 1fr;gap:.5rem;margin-bottom:.55rem">' +
+              '<div class="field" style="margin:0"><label style="font-size:.6rem">Tipo</label>' + typeSelect + '</div>' +
+              '<div class="field" style="margin:0"><label style="font-size:.6rem">Título do gráfico</label>' +
+                '<input class="field-input" value="' + esc(title) + '" placeholder="ex: PIB por setor (2024)" oninput="ueStatsSetField(' + bid + ',' + idx + ',\'title\',this.value)" style="font-size:.8rem">' +
+              '</div>' +
+            '</div>' +
+            (fillToggle ? '<div style="margin-bottom:.55rem">' + fillToggle + '</div>' : '');
+
+          // ── Descrição (HTML) ──
+          const descRow =
+            '<div class="field" style="margin:0 0 .6rem">' +
+              '<label style="font-size:.6rem">Descrição/legenda (aceita HTML: &lt;b&gt;, &lt;i&gt;, &lt;br&gt;, &lt;em&gt;, &lt;a&gt;…)</label>' +
+              '<textarea class="field-input" rows="3" placeholder="Texto que aparece à esquerda do gráfico, com formatação rica." oninput="ueStatsSetField(' + bid + ',' + idx + ',\'description\',this.value)" style="font-size:.78rem;line-height:1.55">' + esc(desc) + '</textarea>' +
+            '</div>';
+
+          // ── Editor de dados ──
+          let dataEditor = '';
+          if(type === 'pie'){
+            const slices = Array.isArray(ch.slices) ? ch.slices : [];
+            const rows = slices.map(function(sl, sIdx){
+              const c = sl.color || _color(sIdx);
+              return '<div style="display:grid;grid-template-columns:1fr 80px 90px auto;gap:.35rem;margin-bottom:.3rem;align-items:center">' +
+                '<input class="field-input" value="' + esc(sl.label||'') + '" placeholder="Nome da variável" oninput="ueStatsSetSlice(' + bid + ',' + idx + ',' + sIdx + ',\'label\',this.value)" style="font-size:.75rem">' +
+                '<input class="field-input" type="number" step="any" value="' + esc(String(sl.value != null ? sl.value : '')) + '" placeholder="valor" oninput="ueStatsSetSlice(' + bid + ',' + idx + ',' + sIdx + ',\'value\',this.value)" style="font-size:.75rem">' +
+                '<div style="display:flex;align-items:center;gap:.25rem">' +
+                  '<span style="width:18px;height:18px;border-radius:3px;background:' + esc(c) + ';border:1px solid var(--border);flex-shrink:0"></span>' +
+                  '<input class="field-input" value="' + esc(c) + '" placeholder="#hex" oninput="ueStatsSetSlice(' + bid + ',' + idx + ',' + sIdx + ',\'color\',this.value)" style="font-size:.7rem;font-family:var(--mono);padding:.2rem .35rem">' +
+                '</div>' +
+                '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.1rem .3rem;font-size:.65rem" onclick="ueStatsRemoveSlice(' + bid + ',' + idx + ',' + sIdx + ')" title="Remover fatia">×</button>' +
+              '</div>';
+            }).join('');
+            dataEditor =
+              '<div style="border-top:1px solid var(--accent-border-soft);padding-top:.5rem;margin-top:.3rem">' +
+                '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.3rem;gap:.4rem">' +
+                  '<span class="s-subtitle" style="font-size:.6rem">Fatias (' + slices.length + ')</span>' +
+                  '<button class="btn btn-ghost btn-sm" onclick="ueStatsAddSlice(' + bid + ',' + idx + ')" style="padding:.15rem .55rem;font-size:.7rem">+ dados</button>' +
+                '</div>' +
+                '<div style="display:grid;grid-template-columns:1fr 80px 90px auto;gap:.35rem;margin-bottom:.3rem;align-items:center">' +
+                  '<span class="s-subtitle" style="font-size:.55rem">Variável</span>' +
+                  '<span class="s-subtitle" style="font-size:.55rem">Valor</span>' +
+                  '<span class="s-subtitle" style="font-size:.55rem">Cor</span>' +
+                  '<span></span>' +
+                '</div>' +
+                rows +
+                (slices.length === 0 ? '<p class="s-body" style="font-size:.7rem;color:var(--text-mute);font-style:italic;margin:.3rem 0 0">Nenhuma fatia. Clique em "+ dados" pra começar.</p>' : '') +
+              '</div>';
+          } else {
+            // bar / line: 2D table (xLabels × series)
+            const xLabels = Array.isArray(ch.xLabels) ? ch.xLabels : [];
+            const series  = Array.isArray(ch.series)  ? ch.series  : [];
+            const nCols = Math.max(xLabels.length, 1);
+
+            // Header: empty + each xLabel + actions
+            const header =
+              '<div style="display:grid;grid-template-columns:170px repeat(' + nCols + ',1fr) auto;gap:.25rem;margin-bottom:.3rem">' +
+                '<span class="s-subtitle" style="font-size:.55rem;align-self:center">Série · cor</span>' +
+                xLabels.map(function(lab, cIdx){
+                  return '<input class="field-input" value="' + esc(lab) + '" placeholder="X' + (cIdx+1) + '" oninput="ueStatsSetXLabel(' + bid + ',' + idx + ',' + cIdx + ',this.value)" style="font-size:.7rem;text-align:center" title="Rótulo do eixo X (coluna)">';
+                }).join('') +
+                '<button class="btn btn-ghost btn-sm" onclick="ueStatsAddColumn(' + bid + ',' + idx + ')" style="padding:.15rem .45rem;font-size:.65rem" title="Adicionar coluna (eixo X)">+ col</button>' +
+              '</div>';
+
+            // Each series row
+            const seriesRows = series.map(function(s, sIdx){
+              const c = s.color || _color(sIdx);
+              const vals = Array.isArray(s.values) ? s.values : [];
+              return '<div style="display:grid;grid-template-columns:170px repeat(' + nCols + ',1fr) auto;gap:.25rem;margin-bottom:.25rem;align-items:center">' +
+                // Label + color
+                '<div style="display:flex;gap:.25rem;align-items:center">' +
+                  '<span style="width:14px;height:14px;border-radius:3px;background:' + esc(c) + ';border:1px solid var(--border);flex-shrink:0"></span>' +
+                  '<input class="field-input" value="' + esc(s.label||'') + '" placeholder="Série ' + (sIdx+1) + '" oninput="ueStatsSetSeriesField(' + bid + ',' + idx + ',' + sIdx + ',\'label\',this.value)" style="font-size:.7rem;flex:1;min-width:0">' +
+                  '<input class="field-input" value="' + esc(c) + '" placeholder="#hex" oninput="ueStatsSetSeriesField(' + bid + ',' + idx + ',' + sIdx + ',\'color\',this.value)" style="font-size:.65rem;width:62px;font-family:var(--mono);padding:.2rem .25rem">' +
+                '</div>' +
+                // Values per column
+                xLabels.map(function(_, cIdx){
+                  const v = vals[cIdx];
+                  return '<input class="field-input" type="number" step="any" value="' + esc(String(v != null ? v : '')) + '" oninput="ueStatsSetCell(' + bid + ',' + idx + ',' + sIdx + ',' + cIdx + ',this.value)" style="font-size:.7rem;text-align:center">';
+                }).join('') +
+                // Remove row
+                '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.1rem .3rem;font-size:.65rem" onclick="ueStatsRemoveSeries(' + bid + ',' + idx + ',' + sIdx + ')" title="Remover série">×</button>' +
+              '</div>';
+            }).join('');
+
+            // Remove column buttons row (compact)
+            const removeColsRow = xLabels.length > 0
+              ? '<div style="display:grid;grid-template-columns:170px repeat(' + nCols + ',1fr) auto;gap:.25rem;margin-top:.2rem">' +
+                  '<span></span>' +
+                  xLabels.map(function(_, cIdx){
+                    return '<button class="btn btn-ghost btn-sm" onclick="ueStatsRemoveColumn(' + bid + ',' + idx + ',' + cIdx + ')" style="color:var(--red);padding:.05rem .3rem;font-size:.6rem" title="Remover esta coluna">×col</button>';
+                  }).join('') +
+                  '<span></span>' +
+                '</div>'
+              : '';
+
+            const addSeriesBtn =
+              '<button class="btn btn-ghost btn-sm" onclick="ueStatsAddSeries(' + bid + ',' + idx + ')" style="padding:.2rem .6rem;font-size:.7rem;margin-top:.4rem">+ série (linha)</button>';
+
+            dataEditor =
+              '<div style="border-top:1px solid var(--accent-border-soft);padding-top:.5rem;margin-top:.3rem">' +
+                '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem">' +
+                  '<span class="s-subtitle" style="font-size:.6rem">Dados — linhas = séries (eixo Y), colunas = eixo X</span>' +
+                  '<button class="btn btn-ghost btn-sm" onclick="ueStatsAddColumn(' + bid + ',' + idx + ');ueStatsAddSeries(' + bid + ',' + idx + ');" style="padding:.15rem .55rem;font-size:.7rem;display:none">+ dados</button>' +
+                '</div>' +
+                header +
+                seriesRows +
+                removeColsRow +
+                (series.length === 0 ? '<p class="s-body" style="font-size:.7rem;color:var(--text-mute);font-style:italic;margin:.3rem 0 0">Nenhuma série. Clique em "+ série" pra começar.</p>' : '') +
+                addSeriesBtn +
+              '</div>';
+          }
+
+          return '<div style="border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.7rem .8rem;background:var(--bg-elev);margin-bottom:.6rem">' +
+            head + topRow + descRow + dataEditor +
+          '</div>';
+        }).join('');
+
+        const headerBtn =
+          '<button class="btn btn-ghost btn-sm" onclick="ueStatsAddChart(' + bid + ')" style="padding:.25rem .6rem">+ Gráfico</button>';
+
+        return '<div style="margin-top:.4rem">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.4rem;gap:.4rem;flex-wrap:wrap">' +
+            '<span class="s-subtitle" style="font-size:.65rem">Gráficos do bloco</span>' +
+            headerBtn +
+          '</div>' +
+          cards +
+          (charts.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem;margin:0">Nenhum gráfico ainda. Use "+ Gráfico" pra começar.</p>' : '') +
+        '</div>';
+      }
+
       // ───────── GALLERY (canônico) ─────────
       case 'gallery': {
         const captionHTML = '<div class="field" style="margin:0 0 .6rem"><label style="font-size:.65rem">Legenda geral (opcional)</label>' +
@@ -47458,6 +47640,169 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     const d = document.getElementById('glFilterClass'); if(d) d.value = '';
     glPopulateSelectors();
     glRenderList();
+  };
+
+  // ═════════════════════════════════════════════════════════════════════
+  //  STATISTICS — handlers do editor de charts[]
+  //  Cada chart vive em b.content.charts[idx]. Tipos: 'pie' | 'bar' | 'line'.
+  //  Pie: chart.slices = [{label,value,color}].
+  //  Bar/Line: chart.xLabels[] + chart.series = [{label,color,values:[]}].
+  // ═════════════════════════════════════════════════════════════════════
+  const _UE_STATS_PALETTE = ['#c39364','#5db8a3','#8fa4d6','#d6a565','#a07cbf','#7ab98f','#d68a8a','#b9b0ff'];
+  function _ueStatsColor(i){ return _UE_STATS_PALETTE[i % _UE_STATS_PALETTE.length]; }
+
+  function _ueStatsGetChart(bid, idx){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return null;
+    if(!Array.isArray(b.content.charts)) b.content.charts = [];
+    return b.content.charts[idx] || null;
+  }
+  function _ueStatsSave(bid){
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  }
+
+  window.ueStatsAddChart = function(bid){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    if(!Array.isArray(b.content.charts)) b.content.charts = [];
+    const id = 'ch_' + Date.now().toString(36) + '_' + b.content.charts.length;
+    b.content.charts.push({
+      id: id,
+      type: 'pie',
+      title: '',
+      description: '',
+      slices: [
+        { label: 'Variável A', value: 60, color: _ueStatsColor(0) },
+        { label: 'Variável B', value: 40, color: _ueStatsColor(1) }
+      ],
+      xLabels: ['Jan','Fev','Mar'],
+      series:  [{ label: 'Série 1', color: _ueStatsColor(0), values: [10, 20, 15] }]
+    });
+    _ueStatsSave(bid);
+  };
+
+  window.ueStatsRemoveChart = function(bid, idx){
+    if(!confirm('Apagar este gráfico?')) return;
+    const b = _ueGetBlock(bid); if(!b || !b.content || !Array.isArray(b.content.charts)) return;
+    b.content.charts.splice(idx, 1);
+    _ueStatsSave(bid);
+  };
+
+  window.ueStatsMoveChart = function(bid, idx, dir){
+    const b = _ueGetBlock(bid); if(!b || !b.content || !Array.isArray(b.content.charts)) return;
+    const t = idx + dir;
+    if(t < 0 || t >= b.content.charts.length) return;
+    const m = b.content.charts.splice(idx, 1)[0];
+    b.content.charts.splice(t, 0, m);
+    _ueStatsSave(bid);
+  };
+
+  // type viene da combo 'pie' | 'bar-vertical' | 'bar-horizontal' | 'line'
+  window.ueStatsSetType = function(bid, idx, typeKey){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch) return;
+    if(typeKey === 'bar-vertical'){ ch.type = 'bar'; ch.orientation = 'vertical'; }
+    else if(typeKey === 'bar-horizontal'){ ch.type = 'bar'; ch.orientation = 'horizontal'; }
+    else if(typeKey === 'line'){ ch.type = 'line'; if(ch.fill == null) ch.fill = false; }
+    else { ch.type = 'pie'; }
+    // Garante estruturas mínimas pro tipo escolhido
+    if(ch.type === 'pie' && (!Array.isArray(ch.slices) || ch.slices.length === 0)){
+      ch.slices = [
+        { label: 'Variável A', value: 60, color: _ueStatsColor(0) },
+        { label: 'Variável B', value: 40, color: _ueStatsColor(1) }
+      ];
+    }
+    if((ch.type === 'bar' || ch.type === 'line')){
+      if(!Array.isArray(ch.xLabels) || ch.xLabels.length === 0) ch.xLabels = ['Jan','Fev','Mar'];
+      if(!Array.isArray(ch.series)  || ch.series.length  === 0){
+        ch.series = [{ label: 'Série 1', color: _ueStatsColor(0), values: [10, 20, 15] }];
+      }
+    }
+    _ueStatsSave(bid);
+  };
+
+  window.ueStatsSetField = function(bid, idx, key, value){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch) return;
+    ch[key] = value;
+    // Re-render só quando muda algo que altera o layout (description não precisa)
+    const visualKeys = ['title', 'fill'];
+    if(visualKeys.indexOf(key) >= 0) _ueStatsSave(bid);
+    else _ueSaveStructured(bid);
+  };
+
+  // ─── Pie: slices ───
+  window.ueStatsAddSlice = function(bid, idx){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch) return;
+    if(!Array.isArray(ch.slices)) ch.slices = [];
+    ch.slices.push({ label: 'Variável ' + (ch.slices.length + 1), value: 10, color: _ueStatsColor(ch.slices.length) });
+    _ueStatsSave(bid);
+  };
+  window.ueStatsRemoveSlice = function(bid, idx, sIdx){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch || !Array.isArray(ch.slices)) return;
+    ch.slices.splice(sIdx, 1);
+    _ueStatsSave(bid);
+  };
+  window.ueStatsSetSlice = function(bid, idx, sIdx, key, value){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch || !Array.isArray(ch.slices)) return;
+    const sl = ch.slices[sIdx]; if(!sl) return;
+    if(key === 'value'){ sl[key] = value === '' ? '' : parseFloat(value); }
+    else { sl[key] = value; }
+    _ueSaveStructured(bid);
+    // Cor muda o quadrado da preview ao lado — re-render do card
+    if(key === 'color') _ueRerenderBlockBody(bid);
+  };
+
+  // ─── Bar/Line: xLabels + series ───
+  window.ueStatsAddColumn = function(bid, idx){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch) return;
+    if(!Array.isArray(ch.xLabels)) ch.xLabels = [];
+    if(!Array.isArray(ch.series))  ch.series  = [];
+    ch.xLabels.push('X' + (ch.xLabels.length + 1));
+    ch.series.forEach(function(s){
+      if(!Array.isArray(s.values)) s.values = [];
+      s.values.push(0);
+    });
+    _ueStatsSave(bid);
+  };
+  window.ueStatsRemoveColumn = function(bid, idx, cIdx){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch || !Array.isArray(ch.xLabels)) return;
+    ch.xLabels.splice(cIdx, 1);
+    (ch.series || []).forEach(function(s){
+      if(Array.isArray(s.values)) s.values.splice(cIdx, 1);
+    });
+    _ueStatsSave(bid);
+  };
+  window.ueStatsSetXLabel = function(bid, idx, cIdx, value){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch || !Array.isArray(ch.xLabels)) return;
+    ch.xLabels[cIdx] = value;
+    _ueSaveStructured(bid);
+  };
+
+  window.ueStatsAddSeries = function(bid, idx){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch) return;
+    if(!Array.isArray(ch.xLabels)) ch.xLabels = [];
+    if(!Array.isArray(ch.series))  ch.series  = [];
+    const n = ch.xLabels.length || 1;
+    const values = new Array(n).fill(0);
+    ch.series.push({ label: 'Série ' + (ch.series.length + 1), color: _ueStatsColor(ch.series.length), values: values });
+    _ueStatsSave(bid);
+  };
+  window.ueStatsRemoveSeries = function(bid, idx, sIdx){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch || !Array.isArray(ch.series)) return;
+    ch.series.splice(sIdx, 1);
+    _ueStatsSave(bid);
+  };
+  window.ueStatsSetSeriesField = function(bid, idx, sIdx, key, value){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch || !Array.isArray(ch.series)) return;
+    const s = ch.series[sIdx]; if(!s) return;
+    s[key] = value;
+    _ueSaveStructured(bid);
+    if(key === 'color') _ueRerenderBlockBody(bid);
+  };
+  window.ueStatsSetCell = function(bid, idx, sIdx, cIdx, value){
+    const ch = _ueStatsGetChart(bid, idx); if(!ch || !Array.isArray(ch.series)) return;
+    const s = ch.series[sIdx]; if(!s) return;
+    if(!Array.isArray(s.values)) s.values = [];
+    s.values[cIdx] = value === '' ? '' : parseFloat(value);
+    _ueSaveStructured(bid);
   };
 
   // ═════════════════════════════════════════════════════════════════════

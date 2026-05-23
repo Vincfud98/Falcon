@@ -39,7 +39,7 @@
     references:'Obras & fontes', integrated:'Conteúdo integrado',
     biography:'Biografias', citations:'Citações', timeline:'Linha do tempo',
     tables:'Tabelas', glossary:'Glossário', gallery:'Galeria',
-    quote:'Citação', image:'Imagem'
+    quote:'Citação', image:'Imagem', statistics:'Estatísticas'
   };
 
   /* ─────────── parsers / utilitários ─────────── */
@@ -1145,10 +1145,244 @@
           (c.caption ? '<figcaption style="margin-top:.6rem;font-family:var(--serif);font-style:italic;font-size:.85rem;color:var(--text-mute);line-height:1.65">' + sanitize(c.caption) + '</figcaption>' : '') +
         '</figure>';
       }
+      case 'statistics': {
+        // Reusa o renderer do aluno (window.renderStatsChart) — mesmo SVG
+        // que sai pro estudante aparece na pré-visualização do admin.
+        const charts = Array.isArray(c.charts) ? c.charts : [];
+        if(!charts.length){
+          return '<p class="s-body" style="color:var(--text-mute);font-style:italic">Sem gráficos.</p>';
+        }
+        if(typeof window !== 'undefined' && typeof window.renderStatsChart === 'function'){
+          return '<div class="statistics-block"><div class="stats-charts">' +
+            charts.map(window.renderStatsChart).join('') +
+          '</div></div>';
+        }
+        // Fallback (sem renderStatsChart disponível): só lista títulos
+        return '<ul style="margin:0;padding-left:1rem;font-family:var(--sans);font-size:.85rem;color:var(--text-dim)">' +
+          charts.map(function(ch){ return '<li>' + e(ch.title || '(sem título)') + ' <span style="opacity:.6">[' + e(ch.type || '?') + ']</span></li>'; }).join('') +
+        '</ul>';
+      }
       default:
         return '<p class="s-body" style="color:var(--text-mute);font-style:italic">Tipo de bloco não suportado: ' + e(block.type) + '</p>';
     }
   }
+
+  /* ─────────── STATISTICS — gráficos SVG (pizza, barras, linha) ───────────
+     Compartilhado entre o aluno e o admin (preview). Sem dependências
+     externas; tudo via SVG inline + tokens do design system. */
+  const STATS_PALETTE = ['#c39364','#5db8a3','#8fa4d6','#d6a565','#a07cbf','#7ab98f','#d68a8a','#b9b0ff'];
+  function _statsColor(i){ return STATS_PALETTE[i % STATS_PALETTE.length]; }
+  function _statsNum(v){ const n = parseFloat(v); return isFinite(n) ? n : 0; }
+  function _statsEscAttr(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function _statsEscTxt(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  function _statsRenderPie(slices){
+    const data = (slices || []).map(function(sl, i){
+      return { label: sl.label || '', value: Math.max(0, _statsNum(sl.value)), color: sl.color || _statsColor(i) };
+    }).filter(function(d){ return d.value > 0; });
+    const total = data.reduce(function(s, d){ return s + d.value; }, 0);
+    if(total <= 0) return '<div class="stats-empty">Sem dados</div>';
+    const size = 240, cx = size/2, cy = size/2, r = 105;
+    let start = -Math.PI/2;
+    const arcs = data.map(function(d){
+      const frac = d.value / total;
+      const angle = frac * Math.PI * 2;
+      if(data.length === 1){
+        return '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="' + _statsEscAttr(d.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="2"><title>' + _statsEscAttr(d.label + ': ' + Math.round(frac*100) + '%') + '</title></circle>';
+      }
+      const end = start + angle;
+      const x1 = cx + r * Math.cos(start);
+      const y1 = cy + r * Math.sin(start);
+      const x2 = cx + r * Math.cos(end);
+      const y2 = cy + r * Math.sin(end);
+      const large = angle > Math.PI ? 1 : 0;
+      const path = 'M' + cx + ',' + cy + ' L' + x1.toFixed(2) + ',' + y1.toFixed(2) +
+                   ' A' + r + ',' + r + ' 0 ' + large + ' 1 ' + x2.toFixed(2) + ',' + y2.toFixed(2) + ' Z';
+      start = end;
+      return '<path d="' + path + '" fill="' + _statsEscAttr(d.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="2"><title>' + _statsEscAttr(d.label + ': ' + Math.round(frac*100) + '%') + '</title></path>';
+    }).join('');
+    const legend = data.map(function(d){
+      const pct = Math.round((d.value / total) * 100);
+      return '<li><span class="stats-leg-sw" style="background:' + _statsEscAttr(d.color) + '"></span><span class="stats-leg-lab">' + _statsEscTxt(d.label) + '</span><span class="stats-leg-val">' + pct + '%</span></li>';
+    }).join('');
+    return '<svg viewBox="0 0 ' + size + ' ' + size + '" class="stats-svg stats-pie" role="img" aria-label="Gráfico de pizza">' + arcs + '</svg>' +
+      '<ul class="stats-legend">' + legend + '</ul>';
+  }
+
+  function _statsRenderBar(xLabels, series, orientation){
+    const isH = orientation === 'horizontal';
+    const labels = xLabels || [];
+    const ss = (series || []).map(function(s, i){
+      return { label: s.label || '', color: s.color || _statsColor(i), values: (s.values || []).map(_statsNum) };
+    });
+    const allVals = ss.reduce(function(acc, s){ return acc.concat(s.values); }, []);
+    const maxV = Math.max.apply(null, [0].concat(allVals));
+    if(maxV <= 0 || labels.length === 0 || ss.length === 0) return '<div class="stats-empty">Sem dados</div>';
+
+    if(!isH){
+      const width = 420, height = 260;
+      const pad = { left:36, right:14, top:14, bottom:38 };
+      const cw = width - pad.left - pad.right;
+      const ch = height - pad.top - pad.bottom;
+      const colW = cw / labels.length;
+      const nS = ss.length;
+      const groupW = colW * 0.72;
+      const barW = groupW / nS;
+      const gap = (colW - groupW) / 2;
+      const ticks = 4;
+
+      const bars = ss.map(function(s, sIdx){
+        return s.values.map(function(v, cIdx){
+          const val = Math.max(0, v);
+          const h = (val / maxV) * ch;
+          const x = pad.left + cIdx * colW + gap + sIdx * barW;
+          const y = pad.top + (ch - h);
+          return '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + (barW * 0.92).toFixed(2) + '" height="' + h.toFixed(2) + '" fill="' + _statsEscAttr(s.color) + '" rx="2"><title>' + _statsEscAttr(s.label + ' · ' + labels[cIdx] + ': ' + val) + '</title></rect>';
+        }).join('');
+      }).join('');
+
+      const grid = []; for(let i=0;i<=ticks;i++){
+        const y = pad.top + ch - (i/ticks) * ch;
+        const v = maxV * i / ticks;
+        const lbl = v >= 100 ? v.toFixed(0) : v.toFixed(v % 1 === 0 ? 0 : 1);
+        grid.push('<line x1="' + pad.left + '" y1="' + y.toFixed(2) + '" x2="' + (width - pad.right) + '" y2="' + y.toFixed(2) + '" class="stats-grid"/>' +
+                  '<text x="' + (pad.left - 6) + '" y="' + (y + 3).toFixed(2) + '" class="stats-axis-y" text-anchor="end">' + _statsEscTxt(lbl) + '</text>');
+      }
+      const xAxis = labels.map(function(lab, i){
+        const x = pad.left + i * colW + colW/2;
+        return '<text x="' + x.toFixed(2) + '" y="' + (height - pad.bottom + 18) + '" class="stats-axis-x" text-anchor="middle">' + _statsEscTxt(lab) + '</text>';
+      }).join('');
+
+      return '<svg viewBox="0 0 ' + width + ' ' + height + '" class="stats-svg stats-bar stats-bar-v" role="img">' +
+        grid.join('') +
+        '<line x1="' + pad.left + '" y1="' + pad.top + '" x2="' + pad.left + '" y2="' + (height - pad.bottom) + '" class="stats-axis"/>' +
+        '<line x1="' + pad.left + '" y1="' + (height - pad.bottom) + '" x2="' + (width - pad.right) + '" y2="' + (height - pad.bottom) + '" class="stats-axis"/>' +
+        bars + xAxis +
+      '</svg>' + _statsRenderSeriesLegend(ss);
+    } else {
+      const width = 420, height = Math.max(220, 40 + labels.length * 38);
+      const pad = { left:90, right:18, top:14, bottom:30 };
+      const cw = width - pad.left - pad.right;
+      const chH = height - pad.top - pad.bottom;
+      const rowH = chH / labels.length;
+      const nS = ss.length;
+      const groupH = rowH * 0.7;
+      const barH = groupH / nS;
+      const gap = (rowH - groupH) / 2;
+      const ticks = 4;
+
+      const grid = []; for(let i=1;i<=ticks;i++){
+        const x = pad.left + (i/ticks) * cw;
+        const v = maxV * i / ticks;
+        const lbl = v >= 100 ? v.toFixed(0) : v.toFixed(v % 1 === 0 ? 0 : 1);
+        grid.push('<line x1="' + x.toFixed(2) + '" y1="' + pad.top + '" x2="' + x.toFixed(2) + '" y2="' + (height - pad.bottom) + '" class="stats-grid"/>' +
+                  '<text x="' + x.toFixed(2) + '" y="' + (height - pad.bottom + 16) + '" class="stats-axis-x" text-anchor="middle">' + _statsEscTxt(lbl) + '</text>');
+      }
+      const bars = ss.map(function(s, sIdx){
+        return s.values.map(function(v, rIdx){
+          const val = Math.max(0, v);
+          const w = (val / maxV) * cw;
+          const y = pad.top + rIdx * rowH + gap + sIdx * barH;
+          return '<rect x="' + pad.left + '" y="' + y.toFixed(2) + '" width="' + w.toFixed(2) + '" height="' + (barH * 0.92).toFixed(2) + '" fill="' + _statsEscAttr(s.color) + '" rx="2"><title>' + _statsEscAttr(s.label + ' · ' + labels[rIdx] + ': ' + val) + '</title></rect>';
+        }).join('');
+      }).join('');
+      const yAxis = labels.map(function(lab, i){
+        const y = pad.top + i * rowH + rowH/2 + 4;
+        return '<text x="' + (pad.left - 8) + '" y="' + y.toFixed(2) + '" class="stats-axis-y" text-anchor="end">' + _statsEscTxt(lab) + '</text>';
+      }).join('');
+
+      return '<svg viewBox="0 0 ' + width + ' ' + height + '" class="stats-svg stats-bar stats-bar-h" role="img">' +
+        grid.join('') +
+        '<line x1="' + pad.left + '" y1="' + pad.top + '" x2="' + pad.left + '" y2="' + (height - pad.bottom) + '" class="stats-axis"/>' +
+        '<line x1="' + pad.left + '" y1="' + (height - pad.bottom) + '" x2="' + (width - pad.right) + '" y2="' + (height - pad.bottom) + '" class="stats-axis"/>' +
+        bars + yAxis +
+      '</svg>' + _statsRenderSeriesLegend(ss);
+    }
+  }
+
+  function _statsRenderLine(xLabels, series, fill){
+    const labels = xLabels || [];
+    const ss = (series || []).map(function(s, i){
+      return { label: s.label || '', color: s.color || _statsColor(i), values: (s.values || []).map(_statsNum) };
+    });
+    const allVals = ss.reduce(function(acc, s){ return acc.concat(s.values); }, []);
+    const maxV = Math.max.apply(null, [0].concat(allVals));
+    if(maxV <= 0 || labels.length === 0 || ss.length === 0) return '<div class="stats-empty">Sem dados</div>';
+
+    const width = 420, height = 260;
+    const pad = { left:36, right:14, top:14, bottom:38 };
+    const cw = width - pad.left - pad.right;
+    const ch = height - pad.top - pad.bottom;
+    const n = labels.length;
+    const stepX = n > 1 ? cw / (n - 1) : 0;
+    const ticks = 4;
+
+    function point(cIdx, val){
+      const x = pad.left + (n > 1 ? cIdx * stepX : cw/2);
+      const y = pad.top + ch - (val / maxV) * ch;
+      return [x, y];
+    }
+
+    const grid = []; for(let i=0;i<=ticks;i++){
+      const y = pad.top + ch - (i/ticks) * ch;
+      const v = maxV * i / ticks;
+      const lbl = v >= 100 ? v.toFixed(0) : v.toFixed(v % 1 === 0 ? 0 : 1);
+      grid.push('<line x1="' + pad.left + '" y1="' + y.toFixed(2) + '" x2="' + (width - pad.right) + '" y2="' + y.toFixed(2) + '" class="stats-grid"/>' +
+                '<text x="' + (pad.left - 6) + '" y="' + (y + 3).toFixed(2) + '" class="stats-axis-y" text-anchor="end">' + _statsEscTxt(lbl) + '</text>');
+    }
+    const layers = ss.map(function(s){
+      const pts = s.values.map(function(v, cIdx){ return point(cIdx, Math.max(0, v)); });
+      const lineD = pts.map(function(p, i){ return (i === 0 ? 'M' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2); }).join(' ');
+      let area = '';
+      if(fill && pts.length > 0){
+        const baseY = pad.top + ch;
+        const first = pts[0], last = pts[pts.length - 1];
+        const areaD = 'M' + first[0].toFixed(2) + ',' + baseY.toFixed(2) +
+                      ' ' + pts.map(function(p, i){ return (i === 0 ? 'L' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2); }).join(' ') +
+                      ' L' + last[0].toFixed(2) + ',' + baseY.toFixed(2) + ' Z';
+        area = '<path d="' + areaD + '" fill="' + _statsEscAttr(s.color) + '" fill-opacity=".18"/>';
+      }
+      const dots = pts.map(function(p, i){
+        return '<circle cx="' + p[0].toFixed(2) + '" cy="' + p[1].toFixed(2) + '" r="3.5" fill="' + _statsEscAttr(s.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="1.5"><title>' + _statsEscAttr(s.label + ' · ' + labels[i] + ': ' + s.values[i]) + '</title></circle>';
+      }).join('');
+      return area + '<path d="' + lineD + '" fill="none" stroke="' + _statsEscAttr(s.color) + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' + dots;
+    }).join('');
+
+    const xAxis = labels.map(function(lab, i){
+      const x = pad.left + (n > 1 ? i * stepX : cw/2);
+      return '<text x="' + x.toFixed(2) + '" y="' + (height - pad.bottom + 18) + '" class="stats-axis-x" text-anchor="middle">' + _statsEscTxt(lab) + '</text>';
+    }).join('');
+
+    return '<svg viewBox="0 0 ' + width + ' ' + height + '" class="stats-svg stats-line" role="img">' +
+      grid.join('') +
+      '<line x1="' + pad.left + '" y1="' + pad.top + '" x2="' + pad.left + '" y2="' + (height - pad.bottom) + '" class="stats-axis"/>' +
+      '<line x1="' + pad.left + '" y1="' + (height - pad.bottom) + '" x2="' + (width - pad.right) + '" y2="' + (height - pad.bottom) + '" class="stats-axis"/>' +
+      layers + xAxis +
+    '</svg>' + _statsRenderSeriesLegend(ss);
+  }
+
+  function _statsRenderSeriesLegend(ss){
+    if(!ss || ss.length === 0) return '';
+    return '<ul class="stats-legend stats-legend-series">' + ss.map(function(s){
+      return '<li><span class="stats-leg-sw" style="background:' + _statsEscAttr(s.color) + '"></span><span class="stats-leg-lab">' + _statsEscTxt(s.label) + '</span></li>';
+    }).join('') + '</ul>';
+  }
+
+  function _statsRenderChart(ch){
+    let svg = '';
+    if(ch.type === 'pie'){ svg = _statsRenderPie(ch.slices); }
+    else if(ch.type === 'line'){ svg = _statsRenderLine(ch.xLabels, ch.series, !!ch.fill); }
+    else if(ch.type === 'bar'){ svg = _statsRenderBar(ch.xLabels, ch.series, ch.orientation || 'vertical'); }
+    else { svg = '<div class="stats-empty">Tipo desconhecido</div>'; }
+    const title = ch.title ? '<h4 class="stats-chart-title">' + escHtml(ch.title) + '</h4>' : '';
+    const desc  = ch.description ? '<div class="stats-chart-desc">' + _lbSanitizeRichHTML(ch.description) + '</div>' : '';
+    return '<article class="stats-chart">' +
+      '<div class="stats-chart-text">' + title + desc + '</div>' +
+      '<div class="stats-chart-viz">' + svg + '</div>' +
+    '</article>';
+  }
+  // Exporta no escopo global pra index.html (Blocks.statistics) consumir.
+  global.renderStatsChart = _statsRenderChart;
 
   /* ─────────── card completo (header + corpo) ─────────── */
   function renderLearningBlock(block){
