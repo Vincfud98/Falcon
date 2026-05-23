@@ -1187,8 +1187,9 @@
     const arcs = data.map(function(d){
       const frac = d.value / total;
       const angle = frac * Math.PI * 2;
+      const tip = _statsEscAttr(d.label + ': ' + Math.round(frac*100) + '%');
       if(data.length === 1){
-        return '<circle cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="' + _statsEscAttr(d.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="2"><title>' + _statsEscAttr(d.label + ': ' + Math.round(frac*100) + '%') + '</title></circle>';
+        return '<circle class="stats-slice" cx="' + cx + '" cy="' + cy + '" r="' + r + '" fill="' + _statsEscAttr(d.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="2"><title>' + tip + '</title></circle>';
       }
       const end = start + angle;
       const x1 = cx + r * Math.cos(start);
@@ -1199,7 +1200,7 @@
       const path = 'M' + cx + ',' + cy + ' L' + x1.toFixed(2) + ',' + y1.toFixed(2) +
                    ' A' + r + ',' + r + ' 0 ' + large + ' 1 ' + x2.toFixed(2) + ',' + y2.toFixed(2) + ' Z';
       start = end;
-      return '<path d="' + path + '" fill="' + _statsEscAttr(d.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="2"><title>' + _statsEscAttr(d.label + ': ' + Math.round(frac*100) + '%') + '</title></path>';
+      return '<path class="stats-slice" d="' + path + '" fill="' + _statsEscAttr(d.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="2"><title>' + tip + '</title></path>';
     }).join('');
     const legend = data.map(function(d){
       const pct = Math.round((d.value / total) * 100);
@@ -1237,7 +1238,7 @@
           const h = (val / maxV) * ch;
           const x = pad.left + cIdx * colW + gap + sIdx * barW;
           const y = pad.top + (ch - h);
-          return '<rect x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + (barW * 0.92).toFixed(2) + '" height="' + h.toFixed(2) + '" fill="' + _statsEscAttr(s.color) + '" rx="2"><title>' + _statsEscAttr(s.label + ' · ' + labels[cIdx] + ': ' + val) + '</title></rect>';
+          return '<rect class="stats-bar-rect" x="' + x.toFixed(2) + '" y="' + y.toFixed(2) + '" width="' + (barW * 0.92).toFixed(2) + '" height="' + h.toFixed(2) + '" fill="' + _statsEscAttr(s.color) + '" rx="2"><title>' + _statsEscAttr(s.label + ' · ' + labels[cIdx] + ': ' + val) + '</title></rect>';
         }).join('');
       }).join('');
 
@@ -1283,7 +1284,7 @@
           const val = Math.max(0, v);
           const w = (val / maxV) * cw;
           const y = pad.top + rIdx * rowH + gap + sIdx * barH;
-          return '<rect x="' + pad.left + '" y="' + y.toFixed(2) + '" width="' + w.toFixed(2) + '" height="' + (barH * 0.92).toFixed(2) + '" fill="' + _statsEscAttr(s.color) + '" rx="2"><title>' + _statsEscAttr(s.label + ' · ' + labels[rIdx] + ': ' + val) + '</title></rect>';
+          return '<rect class="stats-bar-rect" x="' + pad.left + '" y="' + y.toFixed(2) + '" width="' + w.toFixed(2) + '" height="' + (barH * 0.92).toFixed(2) + '" fill="' + _statsEscAttr(s.color) + '" rx="2"><title>' + _statsEscAttr(s.label + ' · ' + labels[rIdx] + ': ' + val) + '</title></rect>';
         }).join('');
       }).join('');
       const yAxis = labels.map(function(lab, i){
@@ -1343,9 +1344,9 @@
         area = '<path d="' + areaD + '" fill="' + _statsEscAttr(s.color) + '" fill-opacity=".18"/>';
       }
       const dots = pts.map(function(p, i){
-        return '<circle cx="' + p[0].toFixed(2) + '" cy="' + p[1].toFixed(2) + '" r="3.5" fill="' + _statsEscAttr(s.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="1.5"><title>' + _statsEscAttr(s.label + ' · ' + labels[i] + ': ' + s.values[i]) + '</title></circle>';
+        return '<circle class="stats-line-dot" cx="' + p[0].toFixed(2) + '" cy="' + p[1].toFixed(2) + '" r="3.5" fill="' + _statsEscAttr(s.color) + '" stroke="var(--bg-card,#0e0f12)" stroke-width="1.5"><title>' + _statsEscAttr(s.label + ' · ' + labels[i] + ': ' + s.values[i]) + '</title></circle>';
       }).join('');
-      return area + '<path d="' + lineD + '" fill="none" stroke="' + _statsEscAttr(s.color) + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' + dots;
+      return area + '<path class="stats-line-path" d="' + lineD + '" fill="none" stroke="' + _statsEscAttr(s.color) + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>' + dots;
     }).join('');
 
     const xAxis = labels.map(function(lab, i){
@@ -1374,11 +1375,25 @@
     else if(ch.type === 'line'){ svg = _statsRenderLine(ch.xLabels, ch.series, !!ch.fill); }
     else if(ch.type === 'bar'){ svg = _statsRenderBar(ch.xLabels, ch.series, ch.orientation || 'vertical'); }
     else { svg = '<div class="stats-empty">Tipo desconhecido</div>'; }
-    const title = ch.title ? '<h4 class="stats-chart-title">' + escHtml(ch.title) + '</h4>' : '';
+    const layout = (ch.layout === 'stacked') ? 'stacked' : 'side';
+    const title = ch.title ? '<div class="stats-chart-title">' + escHtml(ch.title) + '</div>' : '';
     const desc  = ch.description ? '<div class="stats-chart-desc">' + _lbSanitizeRichHTML(ch.description) + '</div>' : '';
-    return '<article class="stats-chart">' +
-      '<div class="stats-chart-text">' + title + desc + '</div>' +
-      '<div class="stats-chart-viz">' + svg + '</div>' +
+    // Card wrap usa o mesmo padrão estético do LB tabelas (.ref-datatable-wrap)
+    if(layout === 'stacked'){
+      // Centralizado: gráfico em cima, descrição abaixo (igual tabela de ref).
+      return '<article class="stats-chart stats-chart--stacked">' +
+        (title ? '<header class="stats-chart-head">' + title + '</header>' : '') +
+        '<div class="stats-chart-viz">' + svg + '</div>' +
+        (desc ? '<div class="stats-chart-foot">' + desc + '</div>' : '') +
+      '</article>';
+    }
+    // Side (padrão): descrição esquerda, gráfico direita, mesma altura.
+    return '<article class="stats-chart stats-chart--side">' +
+      (title ? '<header class="stats-chart-head">' + title + '</header>' : '') +
+      '<div class="stats-chart-body">' +
+        '<div class="stats-chart-text">' + desc + '</div>' +
+        '<div class="stats-chart-viz">' + svg + '</div>' +
+      '</div>' +
     '</article>';
   }
   // Exporta no escopo global pra index.html (Blocks.statistics) consumir.
