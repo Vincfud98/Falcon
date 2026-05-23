@@ -11,7 +11,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin -->
 <script src="ubique-shared.js?v=40"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=55"></script>
+<script src="learning-blocks-render.js?v=56"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -9707,52 +9707,91 @@ Blocks.images = Blocks.image;
   // Escapa pra atributo HTML (srcdoc precisa de aspas escapadas)
   function _esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-  // Injeta script de auto-resize. Aceita doc completo ou fragmento.
-  // Se vier doc completo, encaixa antes de </body>. Senão, embrulha
-  // o fragmento num doc mínimo com estilo base que herda do navegador.
+  // CSS injetado em TODOS os artefatos pra prevenir o bug de crescimento
+  // infinito. Causa raiz: artefatos do Gemini Canvas frequentemente usam
+  //   body { min-height: 100vh }    (ou Tailwind .min-h-screen)
+  // Dentro do iframe, 100vh = altura DO IFRAME. Quando a gente cresce o
+  // iframe pra caber o conteúdo, vh cresce, body cresce, ResizeObserver
+  // dispara, parent cresce iframe de novo… loop infinito.
+  // Solução: forçar height:auto + min-height:0 no html/body, neutralizar
+  // .min-h-screen e .h-screen do Tailwind. O artefato pode perder
+  // centralização vertical "viewport-full" mas continua interativo.
+  const ARTEFACT_RESET_CSS =
+    'html,body{margin:0!important;padding:0!important;' +
+      'min-height:0!important;height:auto!important;' +
+      'overflow-x:hidden}' +
+    'body{background:transparent;color:inherit;' +
+      'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;' +
+      'box-sizing:border-box}' +
+    /* Neutraliza utilitários comuns de altura-viewport (Tailwind/Bootstrap) */
+    '.min-h-screen,.h-screen,.min-vh-100,.vh-100{' +
+      'min-height:0!important;height:auto!important' +
+    '}';
+
+  // Script de auto-resize com guardas anti-loop:
+  //   · skip se a nova altura igualar a última (Math.abs < 4)
+  //   · max-cap 8000px (defesa contra runaway)
+  //   · sem buffer +N — usamos o valor exato
+  //   · debounce de ~80ms em mudanças do ResizeObserver
   function _wrapArtefactHtml(html){
     const sizerScript =
-      '<script>\n' +
-      '(function(){\n' +
-      '  function postH(){\n' +
-      '    try{\n' +
-      '      var h = Math.max(\n' +
-      '        document.documentElement.scrollHeight,\n' +
-      '        document.body ? document.body.scrollHeight : 0,\n' +
-      '        document.documentElement.offsetHeight,\n' +
-      '        document.body ? document.body.offsetHeight : 0\n' +
-      '      );\n' +
-      '      parent.postMessage({type:"ubique-artefact-h", h:h}, "*");\n' +
-      '    }catch(e){}\n' +
-      '  }\n' +
-      '  if(document.readyState === "complete") postH();\n' +
-      '  else window.addEventListener("load", postH);\n' +
-      '  // Observa mudanças de layout (sliders, accordions, etc)\n' +
-      '  if(window.ResizeObserver && document.body){\n' +
-      '    try{ new ResizeObserver(postH).observe(document.body); }catch(e){}\n' +
-      '  } else {\n' +
-      '    setInterval(postH, 1500);\n' +
-      '  }\n' +
-      '  // Reposta após eventuais imagens carregarem\n' +
-      '  setTimeout(postH, 250);\n' +
-      '  setTimeout(postH, 1200);\n' +
-      '})();\n' +
-      '<\/script>';
+      '<script>(function(){' +
+      'var lastH=-1, tid=null;' +
+      'function post(){' +
+        'try{' +
+          'var h=Math.max(' +
+            'document.documentElement.scrollHeight||0,' +
+            '(document.body?document.body.scrollHeight:0)' +
+          ');' +
+          // Cap defensivo — se algo escapou da nossa CSS, pelo menos
+          // limita o estrago. Conteúdos reais raramente passam disso.
+          'if(h>8000) h=8000;' +
+          'if(h<=0) return;' +
+          // Ignora mudanças pequenas (subpixel noise) que poderiam
+          // realimentar o loop.
+          'if(Math.abs(h-lastH)<4) return;' +
+          'lastH=h;' +
+          'parent.postMessage({type:"ubique-artefact-h", h:h}, "*");' +
+        '}catch(e){}' +
+      '}' +
+      'function schedule(){clearTimeout(tid); tid=setTimeout(post, 80);}' +
+      'if(document.readyState==="complete") post();' +
+      'else window.addEventListener("load", post);' +
+      'if(window.ResizeObserver && document.body){' +
+        'try{ new ResizeObserver(schedule).observe(document.body); }catch(e){ setInterval(post, 1500); }' +
+      '} else { setInterval(post, 1500); }' +
+      // Reposta após carregamento tardio (imagens, fontes)
+      'setTimeout(post, 250);' +
+      'setTimeout(post, 1200);' +
+      '})();<\/script>';
 
+    const resetTag = '<style>' + ARTEFACT_RESET_CSS + '</style>';
     const isFullDoc = /<\/body\s*>/i.test(html) || /<html\b/i.test(html);
     if(isFullDoc){
-      // Se já tem </body>, insere antes; senão, anexa no final
-      if(/<\/body\s*>/i.test(html)){
-        return html.replace(/<\/body\s*>/i, sizerScript + '</body>');
+      // Doc completo: injeta o reset DEPOIS de qualquer <link>/<style>
+      // já existente (pra ganhar a especificidade !important). Coloca o
+      // sizerScript no final do body.
+      let out = html;
+      if(/<\/head\s*>/i.test(out)){
+        out = out.replace(/<\/head\s*>/i, resetTag + '</head>');
+      } else if(/<head\b[^>]*>/i.test(out)){
+        out = out.replace(/<head\b[^>]*>/i, function(m){ return m + resetTag; });
+      } else if(/<html\b[^>]*>/i.test(out)){
+        out = out.replace(/<html\b[^>]*>/i, function(m){ return m + '<head>' + resetTag + '</head>'; });
+      } else {
+        out = resetTag + out;
       }
-      return html + sizerScript;
+      if(/<\/body\s*>/i.test(out)){
+        out = out.replace(/<\/body\s*>/i, sizerScript + '</body>');
+      } else {
+        out = out + sizerScript;
+      }
+      return out;
     }
-    // Fragmento — envelopa em doc HTML5 mínimo com fundo transparente
-    // (deixa o artefato decidir cores; sem reset agressivo pra preservar
-    // o look do Gemini Canvas).
+    // Fragmento — embrulha em doc mínimo
     return '<!doctype html><html><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-      '<style>html,body{margin:0;padding:0}body{background:transparent;color:inherit;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}</style>' +
+      resetTag +
       '</head><body>' + html + sizerScript + '</body></html>';
   }
   window._wrapArtefactHtml = _wrapArtefactHtml;
@@ -9793,20 +9832,27 @@ Blocks.artefact = {
   mount(stageEl, block){
     const iframe = stageEl.querySelector('.artefact-iframe');
     if(!iframe) return;
+    // Cap defensivo no lado do parent — se algum artefato ainda escapar
+    // do reset CSS (custom shadow DOM, etc), pelo menos limita o estrago.
+    const MAX_H = 8000;
+    let lastApplied = -1;
     function onMsg(e){
       if(!e || e.source !== iframe.contentWindow) return;
       const d = e.data;
       if(!d || d.type !== 'ubique-artefact-h') return;
-      const h = parseInt(d.h, 10);
+      let h = parseInt(d.h, 10);
       if(!isFinite(h) || h <= 0) return;
-      // Pequeno buffer pra evitar barra de scroll interna
-      iframe.style.height = (h + 6) + 'px';
+      if(h > MAX_H) h = MAX_H;
+      // Sem buffer +N — qualquer offset realimentaria o loop de
+      // ResizeObserver no caso de artefatos com min-h:100vh residual.
+      // Skip se mudança for pequena (subpixel/round-trip noise).
+      if(Math.abs(h - lastApplied) < 4) return;
+      lastApplied = h;
+      iframe.style.height = h + 'px';
       const wrap = iframe.closest('.artefact-frame');
       if(wrap) wrap.style.minHeight = '';
     }
     window.addEventListener('message', onMsg);
-    // Cleanup: quando o stage é desmontado, removemos o listener.
-    // (Se o framework usa MutationObserver, isso evita listener leak.)
     if(typeof MutationObserver !== 'undefined'){
       const obs = new MutationObserver(function(){
         if(!document.body.contains(iframe)){
