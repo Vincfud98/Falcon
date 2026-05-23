@@ -1147,16 +1147,16 @@
         '</figure>';
       }
       case 'artefact': {
-        // Preview do admin: mesma estratégia de iframe srcdoc do aluno,
-        // pra que scripts/interatividade rodem dentro do editor também.
+        // Preview do admin: iframe sandboxed com altura FIXA (mesma do aluno).
+        // Scroll interno se passar da altura — nunca auto-resize (que
+        // causava loop com vh/vw do Gemini Canvas).
         const html = c.html || '';
         const initH = parseInt(c.initialHeight, 10);
-        const ih = (initH > 0 ? initH : 400);
+        const ih = (initH > 0 ? initH : 720);
         const cap = c.caption || '';
         if(!html || !String(html).trim()){
           return '<p class="s-body" style="color:var(--text-mute);font-style:italic">Cole o código HTML do artefato no campo acima.</p>';
         }
-        // Reusa o wrapper do aluno se disponível; senão, gera doc mínimo.
         let wrapped;
         if(typeof window !== 'undefined' && typeof window._wrapArtefactHtml === 'function'){
           wrapped = window._wrapArtefactHtml(html);
@@ -1169,11 +1169,11 @@
           .replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         const sanitize = _lbSanitizeRichHTML;
         return '<div class="artefact-block">' +
-          '<div class="artefact-frame" style="border:1px solid var(--border);border-radius:4px;overflow:hidden;background:var(--bg-card);min-height:' + ih + 'px">' +
+          '<div class="artefact-frame" style="border:1px solid var(--border);border-radius:4px;overflow:hidden;background:var(--bg-card);height:' + ih + 'px">' +
             '<iframe class="artefact-iframe" srcdoc="' + srcdoc + '" ' +
               'loading="lazy" referrerpolicy="no-referrer" ' +
               'sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads" ' +
-              'style="width:100%;height:' + ih + 'px;border:0;display:block;background:transparent" ' +
+              'style="width:100%;height:100%;border:0;display:block;background:transparent" ' +
               'title="Artefato interativo (preview)"></iframe>' +
           '</div>' +
           (cap ? '<figcaption class="artefact-caption" style="margin:.7rem 0 0;font-family:var(--serif);font-weight:300;font-style:italic;font-size:.85rem;color:var(--text-mute);line-height:1.65">' + sanitize(cap) + '</figcaption>' : '') +

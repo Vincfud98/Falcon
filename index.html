@@ -11,7 +11,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin -->
 <script src="ubique-shared.js?v=40"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=56"></script>
+<script src="learning-blocks-render.js?v=57"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -2377,21 +2377,25 @@ html[data-theme="light"] .module-overlay{
 }
 
 /* — ARTEFACT BLOCK — HTML interativo (Gemini Canvas, Claude artifacts).
-   Roda dentro de iframe sandboxed; o frame externo só fornece borda
-   sutil e legenda opcional. Width full pra não sobrar espaço morto. */
+   Iframe sandboxed com altura FIXA definida pelo admin. Se o conteúdo
+   ultrapassar essa altura, o scroll é INTERNO ao iframe — único LB que
+   permite scroll interno (esta foi a regra explícita pedida pelo usuário). */
 .artefact-block .artefact-frame{
   width:100%;
   border:1px solid var(--border);border-radius:4px;
   background:var(--bg-card);
-  overflow:hidden;
+  overflow:hidden;                /* corta visual fora do frame */
   transition:border-color .25s var(--ease);
   position:relative;
+  /* height vem inline do renderer (initialHeight ou 720px default) */
 }
 .artefact-block .artefact-frame:hover{border-color:var(--accent-border)}
 .artefact-block .artefact-iframe{
-  width:100%;border:0;display:block;
+  width:100%;height:100%;border:0;display:block;
   background:transparent;
   color-scheme:dark light;
+  /* O navegador habilita scroll DENTRO do iframe automaticamente quando
+     o conteúdo é maior que sua altura — sem precisar de scrolling=yes. */
 }
 .artefact-block .artefact-caption{
   margin:.7rem 0 0;
@@ -9707,92 +9711,23 @@ Blocks.images = Blocks.image;
   // Escapa pra atributo HTML (srcdoc precisa de aspas escapadas)
   function _esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-  // CSS injetado em TODOS os artefatos pra prevenir o bug de crescimento
-  // infinito. Causa raiz: artefatos do Gemini Canvas frequentemente usam
-  //   body { min-height: 100vh }    (ou Tailwind .min-h-screen)
-  // Dentro do iframe, 100vh = altura DO IFRAME. Quando a gente cresce o
-  // iframe pra caber o conteúdo, vh cresce, body cresce, ResizeObserver
-  // dispara, parent cresce iframe de novo… loop infinito.
-  // Solução: forçar height:auto + min-height:0 no html/body, neutralizar
-  // .min-h-screen e .h-screen do Tailwind. O artefato pode perder
-  // centralização vertical "viewport-full" mas continua interativo.
-  const ARTEFACT_RESET_CSS =
-    'html,body{margin:0!important;padding:0!important;' +
-      'min-height:0!important;height:auto!important;' +
-      'overflow-x:hidden}' +
-    'body{background:transparent;color:inherit;' +
-      'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;' +
-      'box-sizing:border-box}' +
-    /* Neutraliza utilitários comuns de altura-viewport (Tailwind/Bootstrap) */
-    '.min-h-screen,.h-screen,.min-vh-100,.vh-100{' +
-      'min-height:0!important;height:auto!important' +
-    '}';
-
-  // Script de auto-resize com guardas anti-loop:
-  //   · skip se a nova altura igualar a última (Math.abs < 4)
-  //   · max-cap 8000px (defesa contra runaway)
-  //   · sem buffer +N — usamos o valor exato
-  //   · debounce de ~80ms em mudanças do ResizeObserver
+  // Wrapper FIEL — não injeta script de auto-resize nem mexe em
+  // min-height/100vh. A versão anterior fazia auto-resize via postMessage,
+  // o que entrava em loop com artefatos do Gemini Canvas que usam vh/vw
+  // (ex: `.chart-container { height:65vh }`): cada novo tamanho do
+  // iframe redimensionava o conteúdo, que pedia novo tamanho de iframe...
+  // Solução: altura FIXA (admin define no editor) + scroll INTERNO no
+  // iframe (overflow:auto via CSS). O artefato renderiza exatamente
+  // como o autor projetou, e se passar da altura, vira scrollable.
+  // Doc completo passa intacto; fragmento é envelopado em doc mínimo.
   function _wrapArtefactHtml(html){
-    const sizerScript =
-      '<script>(function(){' +
-      'var lastH=-1, tid=null;' +
-      'function post(){' +
-        'try{' +
-          'var h=Math.max(' +
-            'document.documentElement.scrollHeight||0,' +
-            '(document.body?document.body.scrollHeight:0)' +
-          ');' +
-          // Cap defensivo — se algo escapou da nossa CSS, pelo menos
-          // limita o estrago. Conteúdos reais raramente passam disso.
-          'if(h>8000) h=8000;' +
-          'if(h<=0) return;' +
-          // Ignora mudanças pequenas (subpixel noise) que poderiam
-          // realimentar o loop.
-          'if(Math.abs(h-lastH)<4) return;' +
-          'lastH=h;' +
-          'parent.postMessage({type:"ubique-artefact-h", h:h}, "*");' +
-        '}catch(e){}' +
-      '}' +
-      'function schedule(){clearTimeout(tid); tid=setTimeout(post, 80);}' +
-      'if(document.readyState==="complete") post();' +
-      'else window.addEventListener("load", post);' +
-      'if(window.ResizeObserver && document.body){' +
-        'try{ new ResizeObserver(schedule).observe(document.body); }catch(e){ setInterval(post, 1500); }' +
-      '} else { setInterval(post, 1500); }' +
-      // Reposta após carregamento tardio (imagens, fontes)
-      'setTimeout(post, 250);' +
-      'setTimeout(post, 1200);' +
-      '})();<\/script>';
-
-    const resetTag = '<style>' + ARTEFACT_RESET_CSS + '</style>';
     const isFullDoc = /<\/body\s*>/i.test(html) || /<html\b/i.test(html);
-    if(isFullDoc){
-      // Doc completo: injeta o reset DEPOIS de qualquer <link>/<style>
-      // já existente (pra ganhar a especificidade !important). Coloca o
-      // sizerScript no final do body.
-      let out = html;
-      if(/<\/head\s*>/i.test(out)){
-        out = out.replace(/<\/head\s*>/i, resetTag + '</head>');
-      } else if(/<head\b[^>]*>/i.test(out)){
-        out = out.replace(/<head\b[^>]*>/i, function(m){ return m + resetTag; });
-      } else if(/<html\b[^>]*>/i.test(out)){
-        out = out.replace(/<html\b[^>]*>/i, function(m){ return m + '<head>' + resetTag + '</head>'; });
-      } else {
-        out = resetTag + out;
-      }
-      if(/<\/body\s*>/i.test(out)){
-        out = out.replace(/<\/body\s*>/i, sizerScript + '</body>');
-      } else {
-        out = out + sizerScript;
-      }
-      return out;
-    }
-    // Fragmento — embrulha em doc mínimo
+    if(isFullDoc) return html;
+    // Fragmento — embrulha em doc HTML5 mínimo, sem resets agressivos.
     return '<!doctype html><html><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1">' +
-      resetTag +
-      '</head><body>' + html + sizerScript + '</body></html>';
+      '<style>html,body{margin:0;padding:0}body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif}</style>' +
+      '</head><body>' + html + '</body></html>';
   }
   window._wrapArtefactHtml = _wrapArtefactHtml;
   window._escArtefactAttr  = _esc;
@@ -9804,7 +9739,11 @@ Blocks.artefact = {
     const html = block.html || (block.content && block.content.html) || '';
     const caption = block.caption || (block.content && block.content.caption) || '';
     const initH = parseInt(block.initialHeight || (block.content && block.content.initialHeight) || 0, 10);
-    const initialHeight = (initH > 0 ? initH : 400);
+    // Altura padrão maior — artefatos do Gemini Canvas costumam ter
+    // chart-container com 65vh + cabeçalho + controles + descrição.
+    // Se passar disso, o iframe tem scroll INTERNO (overflow:auto no CSS),
+    // sem afetar a página do aluno.
+    const height = (initH > 0 ? initH : 720);
     if(!html || !String(html).trim()){
       return `<section class="block-wrap artefact-block">
         ${blockHeader(block, 'Artefato', Icons.artefact, ctx)}
@@ -9816,52 +9755,24 @@ Blocks.artefact = {
     const srcdoc = window._escArtefactAttr(wrappedHtml);
     return `<section class="block-wrap artefact-block" data-block-id="${Util.attr(block.id)}">
       ${blockHeader(block, 'Artefato', Icons.artefact, ctx)}
-      <div class="artefact-frame" data-init-h="${initialHeight}" style="min-height:${initialHeight}px">
+      <div class="artefact-frame" style="height:${height}px">
         <iframe class="artefact-iframe"
                 srcdoc="${srcdoc}"
                 loading="lazy"
                 referrerpolicy="no-referrer"
                 sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads"
-                style="width:100%;height:${initialHeight}px;border:0;display:block;background:transparent"
+                style="width:100%;height:100%;border:0;display:block;background:transparent"
                 title="Artefato interativo"></iframe>
       </div>
       ${caption ? `<figcaption class="artefact-caption">${sanitize(caption)}</figcaption>` : ''}
       ${Util.chips(block.topics, block.tags)}
     </section>`;
   },
-  mount(stageEl, block){
-    const iframe = stageEl.querySelector('.artefact-iframe');
-    if(!iframe) return;
-    // Cap defensivo no lado do parent — se algum artefato ainda escapar
-    // do reset CSS (custom shadow DOM, etc), pelo menos limita o estrago.
-    const MAX_H = 8000;
-    let lastApplied = -1;
-    function onMsg(e){
-      if(!e || e.source !== iframe.contentWindow) return;
-      const d = e.data;
-      if(!d || d.type !== 'ubique-artefact-h') return;
-      let h = parseInt(d.h, 10);
-      if(!isFinite(h) || h <= 0) return;
-      if(h > MAX_H) h = MAX_H;
-      // Sem buffer +N — qualquer offset realimentaria o loop de
-      // ResizeObserver no caso de artefatos com min-h:100vh residual.
-      // Skip se mudança for pequena (subpixel/round-trip noise).
-      if(Math.abs(h - lastApplied) < 4) return;
-      lastApplied = h;
-      iframe.style.height = h + 'px';
-      const wrap = iframe.closest('.artefact-frame');
-      if(wrap) wrap.style.minHeight = '';
-    }
-    window.addEventListener('message', onMsg);
-    if(typeof MutationObserver !== 'undefined'){
-      const obs = new MutationObserver(function(){
-        if(!document.body.contains(iframe)){
-          window.removeEventListener('message', onMsg);
-          obs.disconnect();
-        }
-      });
-      obs.observe(document.body, { childList:true, subtree:true });
-    }
+  mount(){
+    // Altura fixa — sem listener de message, sem ResizeObserver. O scroll
+    // interno do iframe lida com conteúdo mais alto que a altura definida
+    // pelo admin. Isso evita o loop que existia com auto-resize (vh do
+    // iframe alimentando crescimento perpétuo).
   }
 };
 
