@@ -39,7 +39,8 @@
     references:'Obras & fontes', integrated:'Conteúdo integrado',
     biography:'Biografias', citations:'Citações', timeline:'Linha do tempo',
     tables:'Tabelas', glossary:'Glossário', gallery:'Galeria',
-    quote:'Citação', image:'Imagem', statistics:'Estatísticas'
+    quote:'Citação', image:'Imagem', statistics:'Estatísticas',
+    artefact:'Artefato'
   };
 
   /* ─────────── parsers / utilitários ─────────── */
@@ -1144,6 +1145,39 @@
           '<img src="' + attrHtml(c.url||'') + '" alt="' + attrHtml(altText) + '" style="max-width:100%;border-radius:var(--radius-lg)">' +
           (c.caption ? '<figcaption style="margin-top:.6rem;font-family:var(--serif);font-style:italic;font-size:.85rem;color:var(--text-mute);line-height:1.65">' + sanitize(c.caption) + '</figcaption>' : '') +
         '</figure>';
+      }
+      case 'artefact': {
+        // Preview do admin: mesma estratégia de iframe srcdoc do aluno,
+        // pra que scripts/interatividade rodem dentro do editor também.
+        const html = c.html || '';
+        const initH = parseInt(c.initialHeight, 10);
+        const ih = (initH > 0 ? initH : 400);
+        const cap = c.caption || '';
+        if(!html || !String(html).trim()){
+          return '<p class="s-body" style="color:var(--text-mute);font-style:italic">Cole o código HTML do artefato no campo acima.</p>';
+        }
+        // Reusa o wrapper do aluno se disponível; senão, gera doc mínimo.
+        let wrapped;
+        if(typeof window !== 'undefined' && typeof window._wrapArtefactHtml === 'function'){
+          wrapped = window._wrapArtefactHtml(html);
+        } else {
+          wrapped = /<\/body\s*>/i.test(html)
+            ? html
+            : '<!doctype html><html><head><meta charset="utf-8"></head><body>' + html + '</body></html>';
+        }
+        const srcdoc = String(wrapped)
+          .replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const sanitize = _lbSanitizeRichHTML;
+        return '<div class="artefact-block">' +
+          '<div class="artefact-frame" style="border:1px solid var(--border);border-radius:4px;overflow:hidden;background:var(--bg-card);min-height:' + ih + 'px">' +
+            '<iframe class="artefact-iframe" srcdoc="' + srcdoc + '" ' +
+              'loading="lazy" referrerpolicy="no-referrer" ' +
+              'sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads" ' +
+              'style="width:100%;height:' + ih + 'px;border:0;display:block;background:transparent" ' +
+              'title="Artefato interativo (preview)"></iframe>' +
+          '</div>' +
+          (cap ? '<figcaption class="artefact-caption" style="margin:.7rem 0 0;font-family:var(--serif);font-weight:300;font-style:italic;font-size:.85rem;color:var(--text-mute);line-height:1.65">' + sanitize(cap) + '</figcaption>' : '') +
+        '</div>';
       }
       case 'statistics': {
         // Reusa o renderer do aluno (window.renderStatsChart) — mesmo SVG

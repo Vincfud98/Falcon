@@ -11,7 +11,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin -->
 <script src="ubique-shared.js?v=40"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=54"></script>
+<script src="learning-blocks-render.js?v=55"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -2375,6 +2375,34 @@ html[data-theme="light"] .module-overlay{
   .stats-chart--side .stats-chart-viz{order:2}
   .stats-chart--side .stats-chart-text{order:1}
 }
+
+/* — ARTEFACT BLOCK — HTML interativo (Gemini Canvas, Claude artifacts).
+   Roda dentro de iframe sandboxed; o frame externo só fornece borda
+   sutil e legenda opcional. Width full pra não sobrar espaço morto. */
+.artefact-block .artefact-frame{
+  width:100%;
+  border:1px solid var(--border);border-radius:4px;
+  background:var(--bg-card);
+  overflow:hidden;
+  transition:border-color .25s var(--ease);
+  position:relative;
+}
+.artefact-block .artefact-frame:hover{border-color:var(--accent-border)}
+.artefact-block .artefact-iframe{
+  width:100%;border:0;display:block;
+  background:transparent;
+  color-scheme:dark light;
+}
+.artefact-block .artefact-caption{
+  margin:.7rem 0 0;
+  font-family:var(--serif);font-weight:300;font-style:italic;
+  font-size:.85rem;color:var(--text-mute);line-height:1.65;
+  max-width:760px;
+}
+.artefact-block .artefact-caption p{margin:.3rem 0}
+.artefact-block .artefact-caption strong{color:var(--text);font-style:normal;font-weight:400}
+.artefact-block .artefact-caption em{color:var(--accent)}
+.artefact-block .artefact-caption a{color:var(--accent);text-decoration:underline}
 
 /* — IMAGE BLOCK — single image with optional rich-text caption */
 .image-block .ib-figure{
@@ -9357,6 +9385,7 @@ const Icons = {
   readingList:'<svg viewBox="0 0 24 24"><path d="M6 3h12a1 1 0 011 1v17l-7-4-7 4V4a1 1 0 011-1z"/></svg>',
   chart:'<svg viewBox="0 0 24 24"><line x1="4" y1="20" x2="4" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="20" y1="20" x2="20" y2="14"/></svg>',
   statistics:'<svg viewBox="0 0 24 24"><polyline points="3 17 9 11 13 15 21 7"/><polyline points="14 7 21 7 21 14"/></svg>',
+  artefact:'<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><circle cx="7" cy="6" r=".7"/><circle cx="10" cy="6" r=".7"/><circle cx="13" cy="6" r=".7"/><rect x="6" y="12" width="5" height="6" rx=".7"/><line x1="14" y1="13" x2="18" y2="13"/><line x1="14" y1="16" x2="18" y2="16"/></svg>',
   expand:'<svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>',
   eye:'<svg viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>',
   eyeOff:'<svg viewBox="0 0 24 24"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>',
@@ -9668,6 +9697,128 @@ Blocks.images = Blocks.image;
 /* STATISTICS — gráficos editoriais (pizza, barras V/H, linha).
    A função `window.renderStatsChart` vive em learning-blocks-render.js
    (compartilhada com o admin preview). Aqui apenas o Block delega pra ela. */
+/* ARTEFACT — HTML interativo (Gemini Canvas, Claude artifacts, etc.)
+   Renderiza dentro de iframe sandboxed via srcdoc. Mantém scripts e
+   estilos do artefato isolados da página, mas TODA a interatividade
+   funciona: hover, click, sliders, fetch, animações.
+   Auto-resize: injetamos um script no srcdoc que postMessage a altura
+   ao parent; o mount escuta e ajusta o iframe. */
+(function(){
+  // Escapa pra atributo HTML (srcdoc precisa de aspas escapadas)
+  function _esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // Injeta script de auto-resize. Aceita doc completo ou fragmento.
+  // Se vier doc completo, encaixa antes de </body>. Senão, embrulha
+  // o fragmento num doc mínimo com estilo base que herda do navegador.
+  function _wrapArtefactHtml(html){
+    const sizerScript =
+      '<script>\n' +
+      '(function(){\n' +
+      '  function postH(){\n' +
+      '    try{\n' +
+      '      var h = Math.max(\n' +
+      '        document.documentElement.scrollHeight,\n' +
+      '        document.body ? document.body.scrollHeight : 0,\n' +
+      '        document.documentElement.offsetHeight,\n' +
+      '        document.body ? document.body.offsetHeight : 0\n' +
+      '      );\n' +
+      '      parent.postMessage({type:"ubique-artefact-h", h:h}, "*");\n' +
+      '    }catch(e){}\n' +
+      '  }\n' +
+      '  if(document.readyState === "complete") postH();\n' +
+      '  else window.addEventListener("load", postH);\n' +
+      '  // Observa mudanças de layout (sliders, accordions, etc)\n' +
+      '  if(window.ResizeObserver && document.body){\n' +
+      '    try{ new ResizeObserver(postH).observe(document.body); }catch(e){}\n' +
+      '  } else {\n' +
+      '    setInterval(postH, 1500);\n' +
+      '  }\n' +
+      '  // Reposta após eventuais imagens carregarem\n' +
+      '  setTimeout(postH, 250);\n' +
+      '  setTimeout(postH, 1200);\n' +
+      '})();\n' +
+      '<\/script>';
+
+    const isFullDoc = /<\/body\s*>/i.test(html) || /<html\b/i.test(html);
+    if(isFullDoc){
+      // Se já tem </body>, insere antes; senão, anexa no final
+      if(/<\/body\s*>/i.test(html)){
+        return html.replace(/<\/body\s*>/i, sizerScript + '</body>');
+      }
+      return html + sizerScript;
+    }
+    // Fragmento — envelopa em doc HTML5 mínimo com fundo transparente
+    // (deixa o artefato decidir cores; sem reset agressivo pra preservar
+    // o look do Gemini Canvas).
+    return '<!doctype html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<style>html,body{margin:0;padding:0}body{background:transparent;color:inherit;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}</style>' +
+      '</head><body>' + html + sizerScript + '</body></html>';
+  }
+  window._wrapArtefactHtml = _wrapArtefactHtml;
+  window._escArtefactAttr  = _esc;
+})();
+
+Blocks.artefact = {
+  render(block, ctx){
+    const sanitize = (window.LearningBlocks && window.LearningBlocks.sanitizeRichHTML) || Util.esc;
+    const html = block.html || (block.content && block.content.html) || '';
+    const caption = block.caption || (block.content && block.content.caption) || '';
+    const initH = parseInt(block.initialHeight || (block.content && block.content.initialHeight) || 0, 10);
+    const initialHeight = (initH > 0 ? initH : 400);
+    if(!html || !String(html).trim()){
+      return `<section class="block-wrap artefact-block">
+        ${blockHeader(block, 'Artefato', Icons.artefact, ctx)}
+        <div class="empty"><div class="empty-title">Sem código</div>
+        <div class="empty-body">Cole o HTML do artefato no editor admin.</div></div>
+      </section>`;
+    }
+    const wrappedHtml = window._wrapArtefactHtml(html);
+    const srcdoc = window._escArtefactAttr(wrappedHtml);
+    return `<section class="block-wrap artefact-block" data-block-id="${Util.attr(block.id)}">
+      ${blockHeader(block, 'Artefato', Icons.artefact, ctx)}
+      <div class="artefact-frame" data-init-h="${initialHeight}" style="min-height:${initialHeight}px">
+        <iframe class="artefact-iframe"
+                srcdoc="${srcdoc}"
+                loading="lazy"
+                referrerpolicy="no-referrer"
+                sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads"
+                style="width:100%;height:${initialHeight}px;border:0;display:block;background:transparent"
+                title="Artefato interativo"></iframe>
+      </div>
+      ${caption ? `<figcaption class="artefact-caption">${sanitize(caption)}</figcaption>` : ''}
+      ${Util.chips(block.topics, block.tags)}
+    </section>`;
+  },
+  mount(stageEl, block){
+    const iframe = stageEl.querySelector('.artefact-iframe');
+    if(!iframe) return;
+    function onMsg(e){
+      if(!e || e.source !== iframe.contentWindow) return;
+      const d = e.data;
+      if(!d || d.type !== 'ubique-artefact-h') return;
+      const h = parseInt(d.h, 10);
+      if(!isFinite(h) || h <= 0) return;
+      // Pequeno buffer pra evitar barra de scroll interna
+      iframe.style.height = (h + 6) + 'px';
+      const wrap = iframe.closest('.artefact-frame');
+      if(wrap) wrap.style.minHeight = '';
+    }
+    window.addEventListener('message', onMsg);
+    // Cleanup: quando o stage é desmontado, removemos o listener.
+    // (Se o framework usa MutationObserver, isso evita listener leak.)
+    if(typeof MutationObserver !== 'undefined'){
+      const obs = new MutationObserver(function(){
+        if(!document.body.contains(iframe)){
+          window.removeEventListener('message', onMsg);
+          obs.disconnect();
+        }
+      });
+      obs.observe(document.body, { childList:true, subtree:true });
+    }
+  }
+};
+
 Blocks.statistics = {
   render(block, ctx){
     const charts = Array.isArray(block.charts) ? block.charts : [];
