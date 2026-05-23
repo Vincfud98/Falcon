@@ -779,7 +779,7 @@
             }
 
             gabaritoHTML = '<details style="margin-top:.7rem;border-top:1px solid var(--accent-border-soft);padding-top:.55rem">' +
-                '<summary style="cursor:pointer;font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;color:var(--accent);text-transform:uppercase">📋 Gabarito (' + tabs.length + ' aba' + (tabs.length > 1 ? 's' : '') + ')</summary>' +
+                '<summary style="cursor:pointer;font-family:var(--mono);font-size:.7rem;letter-spacing:.05em;color:var(--accent);text-transform:uppercase">Gabarito (' + tabs.length + ' aba' + (tabs.length > 1 ? 's' : '') + ')</summary>' +
                 '<div style="margin-top:.5rem">' + tabsBar + firstPaneHTML + '</div>' +
               '</details>';
           }
