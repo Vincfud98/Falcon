@@ -576,7 +576,9 @@ html[data-theme="light"] .topbar{background:rgba(244,241,236,.92)}
 .search-user-avatar img.avatar-img,
 .peer-card-avatar img.avatar-img,
 .avbank-thumb img,
-.upm-photo img.avatar-img{
+.upm-photo img.avatar-img,
+.cmt-avatar img.avatar-img,
+.mention-avatar img.avatar-img{
   display:block;
   max-width:none !important;
   max-height:none !important;
@@ -2177,7 +2179,11 @@ html[data-theme="light"] .module-overlay{
   display:flex;align-items:center;justify-content:center;
   font-family:var(--sans);font-weight:500;font-size:.62rem;
   letter-spacing:.04em;
+  /* Suporta <img class="avatar-img"> via renderAvatarInto:
+     position:relative pra absolute centrar, overflow:hidden pro cover-clip */
+  position:relative;overflow:hidden;
 }
+.comments-block .cmt-avatar.has-photo{background:var(--bg-elevated);color:transparent}
 .comments-block .cmt-input-wrap{flex:1;display:flex;flex-direction:column;gap:.5rem}
 .comments-block .cmt-textarea{
   width:100%;resize:vertical;min-height:60px;padding:.6rem .8rem;
@@ -13147,7 +13153,7 @@ Blocks.comments = {
       const replies = allComments.filter(r => r.parentId === c.id);
       const isOwn = c.authorId === (window.MOCK_USER&&window.MOCK_USER.id);
       return `<div class="cmt-item" data-comment-id="${Util.attr(c.id)}">
-        <div class="cmt-avatar">${Util.esc(Util.initials(c.author||''))}</div>
+        <div class="cmt-avatar" data-cmt-avatar-uid="${Util.attr(c.authorId||'')}">${Util.esc(Util.initials(c.author||''))}</div>
         <div class="cmt-item-body">
           <div class="cmt-item-head">
             <span class="cmt-author">${Util.esc(c.author||'Anônimo')}</span>
@@ -13173,7 +13179,7 @@ Blocks.comments = {
       ${blockHeader(block, block.title||'Discussão', Icons.comments, ctx)}
       ${block.prompt ? `<div class="cmt-prompt" style="font-family:var(--sans);font-weight:300;font-size:.85rem;color:var(--text-dim);line-height:1.7;margin-bottom:1.4rem">${Util.esc(block.prompt)}</div>` : ''}
       <div class="cmt-compose">
-        <div class="cmt-avatar">${Util.esc(initials)}</div>
+        <div class="cmt-avatar" data-cmt-avatar-uid="${Util.attr((window.MOCK_USER && window.MOCK_USER.id)||'')}">${Util.esc(initials)}</div>
         <div class="cmt-input-wrap">
           <textarea class="cmt-textarea" id="cmtInput-${Util.attr(block.id)}" placeholder="Escreva seu comentário..."></textarea>
           <button class="cmt-submit" data-action="post-comment">Publicar</button>
@@ -13186,6 +13192,37 @@ Blocks.comments = {
   mount(stageEl, block, ctx){
     const wrap = stageEl.querySelector('.comments-block[data-block-id="'+CSS.escape(block.id)+'"]');
     if(!wrap) return;
+
+    // Hidrata todos os .cmt-avatar com a foto do user (avatar do banco,
+    // upload ou URL salvos em user_profiles). Fallback: iniciais
+    // existentes ficam visíveis se o user não tem foto.
+    function hydrateCmtAvatars(root){
+      (root || wrap).querySelectorAll('.cmt-avatar[data-cmt-avatar-uid]').forEach(el => {
+        const uid = el.getAttribute('data-cmt-avatar-uid');
+        if(!uid) return;
+        const u = (typeof UserDirectory !== 'undefined') ? UserDirectory.getById(uid) : null;
+        if(u && u.photoUrl){
+          // Limpa texto de iniciais antes de inserir img (textNode no fim
+          // sobreviveria; aqui zeramos pra evitar dupla camada de texto)
+          el.classList.add('has-photo');
+          // Remove text nodes (mantém eventuais filhos elementos)
+          Array.from(el.childNodes).forEach(n => { if(n.nodeType === 3) n.remove(); });
+          renderAvatarInto(el, u.photoUrl, u.photoTransform);
+        }
+      });
+    }
+    hydrateCmtAvatars(wrap);
+    // Listener pra atualizar quando perfis mudam em outras abas
+    if(window.UbiqueStore && UbiqueStore.subscribe && !wrap.__avatarSubBound){
+      wrap.__avatarSubBound = true;
+      UbiqueStore.subscribe(evt => {
+        if(!evt || !evt.type) return;
+        if(evt.type.indexOf('user_profiles') === 0 || evt.type === 'sync' || evt.type === 'reset'){
+          hydrateCmtAvatars(wrap);
+        }
+      });
+    }
+    wrap.__hydrateCmtAvatars = hydrateCmtAvatars;  // expor pra reuse no reply/edit
 
     // Auto-complete @ no textarea principal
     const composeTa = wrap.querySelector('.cmt-textarea');
@@ -13278,13 +13315,15 @@ Blocks.comments = {
         const form = document.createElement('div');
         form.className = 'cmt-reply-compose';
         form.setAttribute('data-for', parentId);
-        form.innerHTML = '<div class="cmt-avatar" style="width:28px;height:28px;font-size:.5rem">'+Util.esc(Util.initials(window.MOCK_USER.name))+'</div>'
+        form.innerHTML = '<div class="cmt-avatar" data-cmt-avatar-uid="'+Util.attr((window.MOCK_USER && window.MOCK_USER.id)||'')+'" style="width:28px;height:28px;font-size:.5rem">'+Util.esc(Util.initials(window.MOCK_USER.name))+'</div>'
           +'<div class="cmt-input-wrap"><textarea class="cmt-textarea" placeholder="Escreva sua resposta..."></textarea>'
           +'<button class="cmt-submit" data-action="submit-reply" data-parent-id="'+Util.attr(parentId)+'">Responder</button></div>';
         item.after(form);
         const replyTa = form.querySelector('.cmt-textarea');
         replyTa.focus();
         if(typeof window.attachMentionAutocomplete === 'function') attachMentionAutocomplete(replyTa);
+        // Hidrata avatar do compose do reply (current user) com foto salva
+        if(typeof wrap.__hydrateCmtAvatars === 'function') wrap.__hydrateCmtAvatars(form);
       }
 
       if(deleteBtn){
