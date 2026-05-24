@@ -276,6 +276,14 @@
     // Avatares do banco (admin cadastra) — usuário escolhe na /conta.
     //   { id, category_id, url, name, transform: { x, y, zoom } }
     avatars: [],
+    // Fase 2.3 — Notificações (menções, pedidos de seguir, aceites)
+    //   { id, user_id (destinatário), type, payload, read, created_at }
+    //   type: 'mention' | 'follow_request' | 'follow_accepted'
+    notifications: [],
+    // Fase 2.3 — Relações de seguir entre usuários.
+    //   { id, follower_id, following_id, status, created_at, responded_at }
+    //   status: 'pending' | 'accepted' | 'declined'
+    follows: [],
     // Classes gramaticais — admin pode criar mais. Defaults universais:
     glossary_word_classes: [
       { id:'substantivo',  name:'Substantivo' },
@@ -462,6 +470,9 @@
     user_profiles:         makeCRUD('user_profiles',         'string'),
     avatar_categories:     makeCRUD('avatar_categories',     'string'),
     avatars:               makeCRUD('avatars',               'string'),
+    // Fase 2.3 — Notificações e relações de seguir
+    notifications:         makeCRUD('notifications',         'string'),
+    follows:               makeCRUD('follows',               'string'),
 
     /**
      * Subscribe to all changes.
