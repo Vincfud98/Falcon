@@ -13801,14 +13801,35 @@ function attachMentionAutocomplete(textareaEl){
   }
   function commit(user){
     if(!user || !trigger){ close(); return; }
+    // Safety net: usuário sem handle não pode ser mencionado de forma
+    // notificável (parseMentions usa getByHandle pra resolver). Antes
+    // disso filtramos em search/render, mas reforçamos aqui pra evitar
+    // inserir um "@ " vazio caso algum candidato sem handle escape.
+    const handle = (user.handle || '').trim();
+    if(!handle){
+      if(typeof window.ueToast === 'function'){
+        window.ueToast('Esse usuário ainda não definiu um @ — não dá pra mencionar.', 'warn');
+      }
+      close();
+      return;
+    }
     const before = textareaEl.value.slice(0, trigger.start);
     const after  = textareaEl.value.slice(trigger.end);
-    const insert = '@' + (user.handle || '') + ' ';
+    const insert = '@' + handle + ' ';
     textareaEl.value = before + insert + after;
     const pos = (before + insert).length;
     try{ textareaEl.setSelectionRange(pos, pos); }catch(_){}
     textareaEl.focus();
-    close();
+    // Fecha o dropdown ANTES de dispatch. O handler 'input' usa detectTrigger,
+    // que retorna null quando o cursor está logo após o espaço inserido (' ')
+    // — então o dropdown não reabre. Mas zeramos o estado explicitamente
+    // pra evitar qualquer race com handlers extras.
+    trigger = null;
+    candidates = [];
+    if(dropdown) dropdown.classList.remove('is-on');
+    // Dispara 'input' pra que listeners externos (autosave, contadores)
+    // saibam que o valor mudou. Como detectTrigger retorna null logo após
+    // o espaço, o dropdown NÃO reabre.
     textareaEl.dispatchEvent(new Event('input', { bubbles:true }));
   }
   function detectTrigger(){
@@ -13834,7 +13855,15 @@ function attachMentionAutocomplete(textareaEl){
   textareaEl.addEventListener('input', () => {
     trigger = detectTrigger();
     if(!trigger){ close(); return; }
-    candidates = UserDirectory.search(trigger.query, { excludeUserId: me && me.id, limit: 8 });
+    // Só mostra usuários COM handle definido — não dá pra mencionar
+    // alguém sem @ (parseMentions usa o handle pra resolver e notificar).
+    // Quando trigger.query é vazio (acabou de digitar "@"), mostra os
+    // primeiros usuários com handle pra orientar o aluno.
+    const rawQ = trigger.query || '';
+    const rawCands = rawQ
+      ? UserDirectory.search(rawQ, { excludeUserId: me && me.id, limit: 24 })
+      : (UserDirectory.all() || []).filter(u => !me || u.id !== me.id);
+    candidates = rawCands.filter(u => u && u.handle && String(u.handle).trim()).slice(0, 8);
     activeIndex = 0;
     render();
   });
@@ -14047,6 +14076,19 @@ window.openUserProfile = openUserProfile;
      photoUrl, photoTransform, bio, created_at
    } sem expor `password` ou outros campos sensíveis. */
 const UserDirectory = (function(){
+  // Fallback de handle: deriva de nickname / name / id quando o perfil
+  // ainda não tem @handle salvo. Garante que qualquer usuário do
+  // AUTH_USERS já possa ser mencionado em comentários, mesmo antes do
+  // onboarding em /conta. Quando o aluno escolhe um @ próprio em /conta,
+  // p.handle substitui esse fallback (precedência: p.handle || fallback).
+  function _fallbackHandle(authUser){
+    const src = (authUser && (authUser.nickname || authUser.name || authUser.id)) || '';
+    const slug = String(src).toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')  // remove combining diacritics
+      .replace(/[^a-z0-9_.]+/g, '')                       // mantém [a-z0-9_.]
+      .slice(0, 24);
+    return slug || (authUser && authUser.id) || '';
+  }
   function _publicShape(authUser, profile){
     const p = profile || {};
     return {
@@ -14055,7 +14097,7 @@ const UserDirectory = (function(){
       role: authUser.role || 'student',
       displayName: p.displayName || authUser.name || '',
       nickname:    p.nickname    || authUser.nickname || '',
-      handle:      p.handle      || '',
+      handle:      p.handle      || _fallbackHandle(authUser),
       bio:         p.bio         || '',
       photoUrl:    p.photoUrl    || '',
       photoTransform: p.photoTransform || { x:0, y:0, scale:1 },
