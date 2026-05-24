@@ -265,6 +265,17 @@
     // exibe TODAS as matérias (degradação graciosa — admin popula via UI
     // de Concursos quando quiser refinar).
     exam_subjects: [],
+    // Fase 2 — perfis de usuário (editáveis pelo aluno na página /conta).
+    // Key por user_id (do AUTH_USERS / Auth.getUser()). Schema:
+    //   { id, user_id, displayName, nickname, handle, bio,
+    //     photoUrl, photoTransform: { x, y, zoom },
+    //     created_at, updated_at }
+    user_profiles: [],
+    // Categorias de avatares (admin cria) — { id, name, position }
+    avatar_categories: [],
+    // Avatares do banco (admin cadastra) — usuário escolhe na /conta.
+    //   { id, category_id, url, name, transform: { x, y, zoom } }
+    avatars: [],
     // Classes gramaticais — admin pode criar mais. Defaults universais:
     glossary_word_classes: [
       { id:'substantivo',  name:'Substantivo' },
@@ -447,6 +458,10 @@
     glossary_word_classes: makeCRUD('glossary_word_classes', 'string'),
     exams:                 makeCRUD('exams',                 'string'),
     exam_subjects:         makeCRUD('exam_subjects',         'number'),
+    // Fase 2 — perfis de usuário + biblioteca de avatares
+    user_profiles:         makeCRUD('user_profiles',         'string'),
+    avatar_categories:     makeCRUD('avatar_categories',     'string'),
+    avatars:               makeCRUD('avatars',               'string'),
 
     /**
      * Subscribe to all changes.
