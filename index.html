@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=41"></script>
+<script src="ubique-shared.js?v=42"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -562,7 +562,11 @@ html[data-theme="light"] .topbar{background:rgba(244,241,236,.92)}
   background:var(--accent);color:var(--bg);
   display:flex;align-items:center;justify-content:center;
   font-family:var(--serif);font-weight:500;font-size:.72rem;
+  /* position+overflow pra suportar <img> interno com transform pan/zoom */
+  position:relative;overflow:hidden;
 }
+.tb-user-avatar.has-photo{background:var(--bg-elevated)}
+.tb-user-avatar img.avatar-img{display:block}
 .tb-user-name{
   font-family:var(--sans);font-weight:300;font-size:.65rem;
   letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);
@@ -4296,6 +4300,31 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
 /* ─── GLOSSÁRIO PAGE (top nav consulta do aluno) ─── */
 .gloss-page-wrap{ max-width:960px;margin:1.5rem auto 3rem;padding:0 1.5rem; }
 
+/* ─── Avatar Bank Picker (modal acionado pela /conta) ─── */
+.avbank-section{display:flex;flex-direction:column;gap:.6rem;margin-bottom:.8rem}
+.avbank-section-head{
+  display:flex;align-items:center;gap:.8rem;
+  padding-bottom:.35rem;border-bottom:1px solid var(--border);
+}
+.avbank-section-name{
+  font-family:var(--serif-stable);font-weight:400;font-size:1rem;color:var(--text);
+}
+.avbank-section-count{
+  font-family:var(--mono);font-size:.65rem;color:var(--text-mute);letter-spacing:.05em;
+}
+.avbank-grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(70px, 1fr));gap:.6rem}
+.avbank-thumb{
+  position:relative;width:100%;aspect-ratio:1;border-radius:50%;
+  overflow:hidden;background:var(--bg-elevated);
+  border:2px solid var(--border);cursor:pointer;padding:0;
+  transition:all .2s ease;
+}
+.avbank-thumb:hover{border-color:var(--accent);transform:scale(1.05)}
+.avbank-thumb img{
+  position:absolute;left:50%;top:50%;display:block;
+  user-select:none;pointer-events:none;
+}
+
 /* ─── ACCOUNT PAGE (/conta) — Perfil & Aparência ─── */
 .account-wrap{max-width:960px;margin:1.5rem auto 3rem;padding:0 1.5rem}
 .account-tabs{
@@ -4339,6 +4368,7 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   font-family:var(--serif-stable);font-weight:300;font-size:3.5rem;
 }
 .account-photo.has-photo{background-color:var(--bg-elevated)}
+.account-photo img.avatar-img{display:block}
 .account-photo-initials{user-select:none;line-height:1}
 .account-photo-edit{
   position:absolute;bottom:6px;right:6px;
@@ -6244,6 +6274,24 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
 </div>
 
 <!-- Glossary lookup modal (Y3 Fase Q) — abre via botão "Glossário" da ctxToolbar -->
+<!-- ─── Modal: Picker de Avatar do Banco (Fase 2.2) ───
+     Aluno escolhe um avatar pré-cadastrado pelo admin. Filtrado por
+     categoria via tabs. Click aplica como pending photo no estado do
+     editor (.account-photo) — só persiste quando aluno clica "Salvar
+     perfil". -->
+<div class="modal-backdrop" id="avatarPickerModal">
+  <div class="modal" style="max-width:760px;max-height:88vh;display:flex;flex-direction:column">
+    <header class="modal-header">
+      <div>
+        <span class="s-label">Banco de avatares</span>
+        <h2>Escolha seu avatar</h2>
+      </div>
+      <button class="modal-close" onclick="document.getElementById('avatarPickerModal').classList.remove('active')">×</button>
+    </header>
+    <div class="modal-body" id="avatarPickerBody" style="overflow-y:auto;display:flex;flex-direction:column;gap:1rem;padding:1.2rem 1.5rem"></div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="glossaryLookupModal">
   <div class="modal" id="glossaryLookupCard" style="max-width:680px;max-height:85vh;display:flex;flex-direction:column">
     <header class="modal-header">
@@ -13123,6 +13171,66 @@ const Portal = {
 };
 window.Portal = Portal;
 
+/* ───────── Avatar renderer (Fase 2) ─────────
+   Helper único pra aplicar (url + transform) num elemento circular.
+   Reaproveitado em: topbar avatar, página /conta, picker do banco,
+   futuros comentários e perfis públicos. Garante consistência visual
+   independente do tamanho do círculo (transform.x/y são em % do frame).
+
+   Uso: renderAvatarInto(el, url, transform)
+   `el` deve estar com position:relative + overflow:hidden + border-radius
+   (o helper só popula o <img> interno com o transform correto).        */
+function renderAvatarInto(targetEl, url, transform){
+  if(!targetEl) return;
+  if(!url){
+    // Sem foto — remove o <img> mas preserva outros filhos (botões etc)
+    const oldImg = targetEl.querySelector(':scope > img.avatar-img');
+    if(oldImg) oldImg.remove();
+    targetEl.style.backgroundImage = '';
+    targetEl.classList.remove('has-photo');
+    return;
+  }
+  const t = transform || { x:0, y:0, scale:1 };
+  // Reset background-image (caso o el use bg em vez de img — limpa pra
+  // não duplicar)
+  targetEl.style.backgroundImage = '';
+  // Usa <img> interno pra suportar transform { x, y, scale } com pan
+  let img = targetEl.querySelector(':scope > img.avatar-img');
+  if(!img){
+    img = document.createElement('img');
+    img.className = 'avatar-img';
+    img.alt = '';
+    img.style.position = 'absolute';
+    img.style.left = '50%';
+    img.style.top = '50%';
+    img.style.userSelect = 'none';
+    img.style.pointerEvents = 'none';
+    // Insere como PRIMEIRO filho pra ficar atrás de botões (edit etc)
+    if(targetEl.firstChild) targetEl.insertBefore(img, targetEl.firstChild);
+    else targetEl.appendChild(img);
+  }
+  // Aplica transform após onload (precisamos do naturalWidth/Height)
+  function apply(){
+    if(!img.naturalWidth || !img.naturalHeight) return;
+    const frameSize = targetEl.offsetWidth || 100;
+    const fit = Math.max(frameSize / img.naturalWidth, frameSize / img.naturalHeight);
+    const final = fit * (t.scale || 1);
+    img.style.width  = (img.naturalWidth * final) + 'px';
+    img.style.height = (img.naturalHeight * final) + 'px';
+    const tx = (t.x || 0) * frameSize / 100;
+    const ty = (t.y || 0) * frameSize / 100;
+    img.style.transform = 'translate(-50%, -50%) translate(' + tx + 'px, ' + ty + 'px)';
+  }
+  if(img.src !== url){
+    img.onload = apply;
+    img.src = url;
+  } else {
+    apply();
+  }
+  targetEl.classList.add('has-photo');
+}
+window.renderAvatarInto = renderAvatarInto;
+
 /* ───────── Profile (Fase 2) ─────────
    Gerencia os dados editáveis do usuário (nome completo, apelido, @handle,
    bio, foto) no UbiqueStore.user_profiles. Cada perfil é keyed por user_id
@@ -13228,11 +13336,10 @@ Renderers.account = function(route){
   // — Tab Perfil & Aparência —
   const initials = Util.initials(profile.displayName || user.name);
   const photoUrl = profile.photoUrl || '';
-  const photoStyle = photoUrl
-    ? `background-image:url('${Util.attr(photoUrl)}');background-size:cover;background-position:center`
-    : '';
+  // O <img> com transform é populado via renderAvatarInto no mount —
+  // aqui só geramos a estrutura base com initials fallback.
   const photoHTML = `
-    <div class="account-photo${photoUrl ? ' has-photo' : ''}" id="accountPhoto" style="${photoStyle}">
+    <div class="account-photo${photoUrl ? ' has-photo' : ''}" id="accountPhoto">
       ${photoUrl ? '' : `<span class="account-photo-initials">${Util.esc(initials)}</span>`}
       <button class="account-photo-edit" id="accountPhotoEdit" type="button" title="Trocar foto">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>
@@ -13241,10 +13348,9 @@ Renderers.account = function(route){
 
   const photoChooser = `
     <div class="account-photo-picker" id="accountPhotoPicker" hidden>
-      <button class="account-pp-opt" data-photo-opt="bank" type="button" disabled title="Disponível em breve (admin precisa popular o banco)">
+      <button class="account-pp-opt" data-photo-opt="bank" type="button">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-7 8-7s8 3 8 7"/></svg>
         <span>Avatar do banco</span>
-        <span class="account-pp-tag">em breve</span>
       </button>
       <label class="account-pp-opt" tabindex="0">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -13365,6 +13471,13 @@ Renderers.account = function(route){
 Renderers.account.mount = function(stageEl){
   const user = Auth.getUser();
   if(!user) return;
+  const profile = Profile.get(user.id);
+
+  // Renderiza a foto via helper (suporta transform { x, y, scale } salvo)
+  const photoEl = stageEl.querySelector('#accountPhoto');
+  if(photoEl && profile.photoUrl){
+    renderAvatarInto(photoEl, profile.photoUrl, profile.photoTransform);
+  }
 
   // ── Tabs ──
   const tabs = Array.from(stageEl.querySelectorAll('[data-acc-tab]'));
@@ -13400,6 +13513,7 @@ Renderers.account.mount = function(stageEl){
   const photoFile   = stageEl.querySelector('#accountPhotoFile');
 
   let pendingPhoto = null;          // ainda não persistido; salva junto com o resto
+  let pendingTransform = null;      // transform { x, y, scale } associado à foto pending
   let pendingPhotoRemove = false;
 
   // Live count da bio
@@ -13456,24 +13570,25 @@ Renderers.account.mount = function(stageEl){
       if(!photoPicker.contains(e.target) && !photoEdit.contains(e.target)) photoPicker.hidden = true;
     });
   }
-  function applyPhoto(url){
+  function applyPhoto(url, transform){
     pendingPhoto = url;
+    pendingTransform = transform || { x:0, y:0, scale:1 };
     pendingPhotoRemove = false;
     if(!photo) return;
-    photo.style.backgroundImage = "url('" + url.replace(/'/g, "\\'") + "')";
-    photo.style.backgroundSize = 'cover';
-    photo.style.backgroundPosition = 'center';
-    photo.classList.add('has-photo');
+    // Render via helper — suporta transform { x, y, scale }
+    renderAvatarInto(photo, url, pendingTransform);
     const initialsSpan = photo.querySelector('.account-photo-initials');
     if(initialsSpan) initialsSpan.style.display = 'none';
     if(photoPicker) photoPicker.hidden = true;
   }
   function removePhoto(){
     pendingPhoto = null;
+    pendingTransform = null;
     pendingPhotoRemove = true;
     if(!photo) return;
-    photo.style.backgroundImage = '';
-    photo.classList.remove('has-photo');
+    // Limpa o img via helper (preserva botão de editar)
+    renderAvatarInto(photo, '', null);
+    // Recria/exibe initials span
     let initialsSpan = photo.querySelector('.account-photo-initials');
     if(!initialsSpan){
       initialsSpan = document.createElement('span');
@@ -13514,9 +13629,70 @@ Renderers.account.mount = function(stageEl){
       } else if(kind === 'remove'){
         removePhoto();
       } else if(kind === 'bank'){
-        if(window.ueToast) window.ueToast('Biblioteca de avatares chega em breve — admin precisa cadastrar.', 'info');
+        _openAvatarBankPicker();
       }
     });
+  }
+
+  // ── Picker do banco de avatares ──
+  // Lê UbiqueStore.avatar_categories + UbiqueStore.avatars, agrupa por
+  // categoria e renderiza no #avatarPickerModal. Click num avatar aplica
+  // como pendingPhoto + pendingTransform (não persiste — espera "Salvar").
+  function _openAvatarBankPicker(){
+    const modal = document.getElementById('avatarPickerModal');
+    const body = document.getElementById('avatarPickerBody');
+    if(!modal || !body) return;
+    const cats = (window.UbiqueStore && UbiqueStore.avatar_categories.list() || [])
+      .slice().sort((a,b) => (a.position||0) - (b.position||0));
+    const avs = (window.UbiqueStore && UbiqueStore.avatars.list() || []);
+    if(!cats.length){
+      body.innerHTML = `<div class="empty" style="text-align:left">
+        <div class="empty-title">Banco vazio</div>
+        <div class="empty-body">O administrador ainda não cadastrou nenhuma categoria de avatar. Por enquanto, use <strong>Carregar imagem</strong> ou <strong>Por URL</strong>.</div>
+      </div>`;
+      modal.classList.add('active');
+      return;
+    }
+    body.innerHTML = cats.map(c => {
+      const list = avs.filter(a => String(a.category_id) === String(c.id));
+      if(!list.length) return '';
+      const thumbs = list.map(av => {
+        const t = av.transform || {x:0,y:0,scale:1};
+        const tx = (t.x || 0) + '%';
+        const ty = (t.y || 0) + '%';
+        const scalePct = ((t.scale || 1) * 100) + '%';
+        return `<button type="button" class="avbank-thumb"
+                  data-url="${Util.attr(av.url)}"
+                  data-tx="${Util.attr(t.x||0)}"
+                  data-ty="${Util.attr(t.y||0)}"
+                  data-ts="${Util.attr(t.scale||1)}"
+                  title="${Util.attr(av.name||'')}">
+          <img src="${Util.attr(av.url)}" alt="${Util.attr(av.name||'')}" style="width:${scalePct};height:auto;transform:translate(-50%, -50%) translate(${tx}, ${ty})">
+        </button>`;
+      }).join('');
+      return `<section class="avbank-section">
+        <header class="avbank-section-head"><span class="avbank-section-name">${Util.esc(c.name)}</span>
+          <span class="avbank-section-count">${list.length} ${list.length === 1 ? 'avatar' : 'avatares'}</span>
+        </header>
+        <div class="avbank-grid">${thumbs}</div>
+      </section>`;
+    }).join('') || `<div class="empty" style="text-align:left">
+      <div class="empty-title">Sem avatares cadastrados</div>
+      <div class="empty-body">As categorias existem mas ainda não têm avatares dentro. Use <strong>Carregar imagem</strong> ou <strong>Por URL</strong> por enquanto.</div>
+    </div>`;
+    // Click delegado
+    body.querySelectorAll('.avbank-thumb').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const url = btn.getAttribute('data-url') || '';
+        const tx  = parseFloat(btn.getAttribute('data-tx') || 0) || 0;
+        const ty  = parseFloat(btn.getAttribute('data-ty') || 0) || 0;
+        const ts  = parseFloat(btn.getAttribute('data-ts') || 1) || 1;
+        applyPhoto(url, { x:tx, y:ty, scale:ts });
+        modal.classList.remove('active');
+        if(window.ueToast) window.ueToast('Avatar selecionado. Clique em "Salvar perfil" pra confirmar.', 'info');
+      });
+    });
+    modal.classList.add('active');
   }
 
   // ── Salvar ──
@@ -13541,10 +13717,16 @@ Renderers.account.mount = function(stageEl){
         handle: h,
         bio: bioTxt
       };
-      if(pendingPhoto != null) patch.photoUrl = pendingPhoto;
-      else if(pendingPhotoRemove) patch.photoUrl = '';
+      if(pendingPhoto != null){
+        patch.photoUrl = pendingPhoto;
+        patch.photoTransform = pendingTransform || { x:0, y:0, scale:1 };
+      } else if(pendingPhotoRemove){
+        patch.photoUrl = '';
+        patch.photoTransform = { x:0, y:0, scale:1 };
+      }
       Profile.update(user.id, patch);
       pendingPhoto = null;
+      pendingTransform = null;
       pendingPhotoRemove = false;
       if(saveFB){
         saveFB.textContent = '✓ Perfil salvo';
@@ -20238,12 +20420,12 @@ const AppShell = {
     if(userAvatar){
       const photo = profile && profile.photoUrl;
       if(photo){
+        // Usa helper renderAvatarInto pra aplicar transform { x, y, scale }
+        // consistente em qualquer tamanho de círculo (topbar é 32px).
+        renderAvatarInto(userAvatar, photo, profile.photoTransform);
         userAvatar.textContent = '';
-        userAvatar.style.backgroundImage = "url('" + photo.replace(/'/g, "\\'") + "')";
-        userAvatar.style.backgroundSize = 'cover';
-        userAvatar.style.backgroundPosition = 'center';
-        userAvatar.classList.add('has-photo');
       } else {
+        userAvatar.innerHTML = '';
         userAvatar.textContent = user ? Util.initials((profile && profile.displayName) || user.name) : '•';
         userAvatar.style.backgroundImage = '';
         userAvatar.classList.remove('has-photo');
