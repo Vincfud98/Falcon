@@ -12351,7 +12351,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=73"></script>
+<script src="ubique-shared.js?v=74"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -41690,27 +41690,43 @@
     }
   }
 
-  function ueSectionAdd(title){
+  // ueSectionAdd agora é async — Supabase primeiro pra pegar ID real
+  async function ueSectionAdd(title){
     const payload = {
       unit_id: ueCurrentUnitId,
       title: title || 'Seção',
       position: ueSectionsCache.length,
     };
-    if(window.UbiqueStore){
-      const data = UbiqueStore.unit_sections.add(payload);
-      return data;
+    let supaId = null;
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { data, error } = await conteudo()
+          .from('unit_sections').insert(payload).select('id').single();
+        if(error){
+          console.error('[Supabase] unit_sections.insert falhou:', error);
+          alert('Erro ao criar seção no Supabase: ' + error.message);
+          return null;
+        }
+        supaId = data && data.id;
+      }catch(e){
+        console.error('[Supabase] unit_sections.insert exception:', e);
+        alert('Erro de rede ao criar seção: ' + e.message);
+        return null;
+      }
     }
-    return null;
+    if(window.UbiqueStore){
+      return UbiqueStore.unit_sections.add(
+        supaId != null ? Object.assign({}, payload, { id: supaId }) : payload
+      );
+    }
+    return supaId != null ? Object.assign({}, payload, { id: supaId }) : null;
   }
 
   async function ueAddSection(){
     const name = prompt('Nome da nova seção:', 'Nova seção');
     if(!name) return;
-    const sec = ueSectionAdd(name.trim());
-    if(!sec){ alert('Falha ao criar seção.'); return; }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('unit_sections').insert(sec); }catch(_){}
-    }
+    const sec = await ueSectionAdd(name.trim());
+    if(!sec) return; // já mostrou erro
     ueSectionsCache.push(sec);
     _ueCurrentSectionId = sec.id;
     ueRefreshBlocksForCurrentSection();
@@ -41726,10 +41742,21 @@
     if(name == null) return;
     const trimmed = (name || '').trim();
     if(!trimmed) return;
-    if(window.UbiqueStore){ UbiqueStore.unit_sections.update(id, { title: trimmed }); }
     if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('unit_sections').update({ title: trimmed }).eq('id', id); }catch(_){}
+      try{
+        const { error } = await conteudo().from('unit_sections').update({ title: trimmed }).eq('id', id);
+        if(error){
+          console.error('[Supabase] unit_sections.update falhou:', error);
+          alert('Erro ao renomear no Supabase: ' + error.message);
+          return;
+        }
+      }catch(e){
+        console.error('[Supabase] unit_sections.update exception:', e);
+        alert('Erro de rede ao renomear: ' + e.message);
+        return;
+      }
     }
+    if(window.UbiqueStore){ UbiqueStore.unit_sections.update(id, { title: trimmed }); }
     sec.title = trimmed;
     ueRenderSectionsNav();
     ueUpdateCurrentSectionLabel();
@@ -41743,16 +41770,31 @@
       ? 'Apagar seção "' + (sec.title||'') + '"?\nIsso removerá ' + blocksInSec.length + ' bloco(s) dela.'
       : 'Apagar seção "' + (sec.title||'') + '"?';
     if(!confirm(msg)) return;
-    // remove blocos da seção
-    blocksInSec.forEach(b => {
-      if(window.UbiqueStore) UbiqueStore.unit_blocks.remove(b.id);
-    });
+    // Supabase primeiro: apaga blocks da section, depois a section
     if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('unit_blocks').delete().eq('section_id', id); }catch(_){}
+      try{
+        const r1 = await conteudo().from('unit_blocks').delete().eq('section_id', id);
+        if(r1.error){
+          console.error('[Supabase] unit_blocks.delete (cascade) falhou:', r1.error);
+          alert('Erro ao apagar blocks da seção: ' + r1.error.message);
+          return;
+        }
+        const r2 = await conteudo().from('unit_sections').delete().eq('id', id);
+        if(r2.error){
+          console.error('[Supabase] unit_sections.delete falhou:', r2.error);
+          alert('Erro ao apagar seção: ' + r2.error.message);
+          return;
+        }
+      }catch(e){
+        console.error('[Supabase] section delete exception:', e);
+        alert('Erro de rede: ' + e.message);
+        return;
+      }
     }
-    if(window.UbiqueStore){ UbiqueStore.unit_sections.remove(id); }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('unit_sections').delete().eq('id', id); }catch(_){}
+    // Local cleanup
+    if(window.UbiqueStore){
+      blocksInSec.forEach(b => UbiqueStore.unit_blocks.remove(b.id));
+      UbiqueStore.unit_sections.remove(id);
     }
     ueSectionsCache = ueSectionsCache.filter(s => s.id !== id);
     ueAllBlocksCache = ueAllBlocksCache.filter(b => b.section_id !== id);
