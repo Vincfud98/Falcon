@@ -278,6 +278,9 @@
     // exibe TODAS as matérias (degradação graciosa — admin popula via UI
     // de Concursos quando quiser refinar).
     exam_subjects: [],
+    // Histórico de bancas por ano de cada concurso. { id, exam_id, year,
+    // banca_id, phases? }. Substituía exam_bancas no Supabase.
+    exam_bancas: [],
     // Fase 2 — perfis de usuário (editáveis pelo aluno na página /conta).
     // Key por user_id (do AUTH_USERS / Auth.getUser()). Schema:
     //   { id, user_id, displayName, nickname, handle, bio,
@@ -500,6 +503,7 @@
     glossary_word_classes: makeCRUD('glossary_word_classes', 'string'),
     exams:                 makeCRUD('exams',                 'string'),
     exam_subjects:         makeCRUD('exam_subjects',         'number'),
+    exam_bancas:           makeCRUD('exam_bancas',           'number'),
     // Fase 2 — perfis de usuário + biblioteca de avatares
     user_profiles:         makeCRUD('user_profiles',         'string'),
     avatar_categories:     makeCRUD('avatar_categories',     'string'),

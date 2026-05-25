@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=52"></script>
+<script src="ubique-shared.js?v=53"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -18964,32 +18964,22 @@ Renderers.questionBank = function(route){
   const f = _bankParseFilters(route.query);
   const panelHtml = _renderBankFilterPanel(bankItems, f, false);
 
-  // Auto-recovery silenciosa: se o banco está vazio mas há blocos inline
-  // nas unidades (questões adicionadas pelo admin que não foram migradas
-  // por algum motivo), roda a migração AGORA, sem mostrar nada pro aluno.
-  // O aluno nunca deve precisar saber/clicar nada — é "responsabilidade
-  // do admin", e a migração é idempotente.
-  if(bankItems.length === 0 && typeof window._bankRescanQuestions === 'function'){
-    let hasInline = false;
-    if(window.UbiqueStore && UbiqueStore.unit_blocks){
-      const blocks = UbiqueStore.unit_blocks.list() || [];
-      hasInline = blocks.some(function(b){
-        if(!b || b.type !== 'objective_questions' || !b.content) return false;
-        if(Array.isArray(b.content.groups)){
-          for(const g of b.content.groups){
-            if(Array.isArray(g.questions) && g.questions.length) return true;
-          }
-        }
-        if(Array.isArray(b.content.ungrouped) && b.content.ungrouped.length) return true;
-        return false;
-      });
-    }
-    if(hasInline){
-      const result = window._bankRescanQuestions();
-      console.log('[bank] auto-rescan silencioso na abertura do banco:', result);
+  // Auto-rescan silenciosa SEMPRE na abertura do banco — idempotente.
+  // Garante que questões adicionadas no admin (locally) que NÃO tenham
+  // sido migradas pro QuestionBank (race conditions, edições legacy,
+  // questões em blocos novos sem bank_id) sejam capturadas.
+  // Aluno nunca vê nada — é responsabilidade do admin, mas o sistema
+  // se autocorrige silenciosamente.
+  if(typeof window._bankRescanQuestions === 'function'){
+    const before = bankItems.length;
+    const result = window._bankRescanQuestions();
+    if(result && (result.createdInBank > 0 || result.migratedInline > 0)){
+      console.log('[bank] auto-rescan na abertura: +' + result.createdInBank +
+        ' novas, ' + result.migratedInline + ' migradas (' + result.blocksScanned + ' blocos varridos)');
       // Re-lê o bankItems pra refletir o resultado da migração
       bankItems.length = 0;
       (QuestionBank.list() || []).forEach(function(q){ bankItems.push(q); });
+      console.log('[bank] bank cresceu de ' + before + ' → ' + bankItems.length);
     }
   }
 
@@ -19012,24 +19002,13 @@ Renderers.questionBank = function(route){
       '</div>';
   }
 
-  // Aplicou filtros: roda engine, monta bloco sintético quiz
+  // Aplicou filtros: roda engine, monta bloco sintético quiz PRESERVANDO
+  // a estrutura de grupos originais (enunciado/reference_text/etc.).
   const results = _bankApplyFilters(bankItems, f, { isEssay:false });
   const PAGE_SIZE = 20;
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
-
-  // Bloco sintético no formato esperado por Blocks.quiz.render — uma única
-  // group cujos `questions[]` são as entradas do banco (referenciadas por
-  // bank_id). _convertQuestionToItem resolve cada uma via QuestionBank.getById.
-  const synthBlock = {
-    id: '__bank_block_q',
-    type: 'quiz',
-    title: '',
-    groups: [{
-      enunciado: '',
-      questions: shown.map(function(q){ return { bank_id: q.id }; })
-    }]
-  };
+  const synthBlock = _bankBuildSynthQuizBlock(shown);
   const synthCtx = { unitId:'__bank_q', store: Store, suppressActions: true };
 
   let resultsHtml = '';
@@ -19056,6 +19035,65 @@ Renderers.questionBank = function(route){
     '</div>';
 };
 
+// Constrói um synth block agrupando as questões filtradas pelo seu
+// grupo de origem (block_id|group_id em appears_in). Cada grupo
+// preserva enunciado/reference_text/reference_image/origin do bloco
+// original. Quando o filtro pega só 1 questão de um grupo de 5,
+// o grupo aparece com aquela única questão (mantendo o contexto).
+// Resultado: bank UI fica EXATAMENTE como LB de quiz com grupos.
+function _bankBuildSynthQuizBlock(filteredQuestions){
+  // Index original groups por (block_id, group_id) consultando unit_blocks
+  const originalGroupsMap = {};
+  if(window.UbiqueStore && UbiqueStore.unit_blocks){
+    (UbiqueStore.unit_blocks.list() || []).forEach(function(b){
+      if(!b || b.type !== 'objective_questions' || !b.content) return;
+      if(!Array.isArray(b.content.groups)) return;
+      b.content.groups.forEach(function(g){
+        const key = String(b.id) + '|' + String(g.id || '');
+        originalGroupsMap[key] = {
+          enunciado:       g.enunciado || g.description || g.title || '',
+          description:     g.description || '',
+          title:           g.title || '',
+          reference_text:  g.reference_text || '',
+          reference_image: g.reference_image || '',
+          origin:          g.origin || ''
+        };
+      });
+    });
+  }
+  // Agrupa questões pela primeira aparição (preserva ordem de inserção)
+  const groupKeys = [];
+  const groupBuckets = {};
+  (filteredQuestions || []).forEach(function(q){
+    const usage = (q && Array.isArray(q.appears_in) && q.appears_in[0]) || null;
+    const key = usage
+      ? String(usage.block_id) + '|' + String(usage.group_id || '')
+      : '__ungrouped__';
+    if(!(key in groupBuckets)){
+      groupBuckets[key] = {
+        meta: originalGroupsMap[key] || { enunciado:'', reference_text:'', reference_image:'', origin:'' },
+        questions: []
+      };
+      groupKeys.push(key);
+    }
+    groupBuckets[key].questions.push({ bank_id: q.id });
+  });
+  // Constrói groups[] no formato esperado por Blocks.quiz
+  const synthGroups = groupKeys.map(function(k, idx){
+    const bucket = groupBuckets[k];
+    return Object.assign({}, bucket.meta, {
+      id: 'bg-' + idx,
+      questions: bucket.questions
+    });
+  });
+  return {
+    id: '__bank_block_q',
+    type: 'quiz',
+    title: '',
+    groups: synthGroups.length ? synthGroups : [{ id:'bg-empty', enunciado:'', questions:[] }]
+  };
+}
+
 Renderers.questionBank.mount = function(stageEl, route){
   _wireBankFilterPanel(stageEl, route, false);
   const f = _bankParseFilters(route.query);
@@ -19066,18 +19104,10 @@ Renderers.questionBank.mount = function(stageEl, route){
   const PAGE_SIZE = 20;
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
-  const synthBlock = {
-    id: '__bank_block_q',
-    type: 'quiz',
-    title: '',
-    groups: [{
-      enunciado: '',
-      questions: shown.map(function(q){ return { bank_id: q.id }; })
-    }]
-  };
+  const synthBlock = _bankBuildSynthQuizBlock(shown);
   const synthCtx = { unitId:'__bank_q', store: Store, suppressActions: true };
   const resultsEl = stageEl.querySelector('[data-bf-results]');
-  if(resultsEl && window.Blocks && Blocks.quiz && Blocks.quiz.mount){
+  if(resultsEl && typeof Blocks !== 'undefined' && Blocks.quiz && Blocks.quiz.mount){
     try { Blocks.quiz.mount(resultsEl, synthBlock, synthCtx); } catch(e){ console.warn('[bankQuestions] mount falhou:', e); }
   }
   // Paginação
@@ -19174,7 +19204,7 @@ Renderers.essayBank.mount = function(stageEl, route){
   const synthCtx = { unitId:'__bank_e', store: Store, suppressActions: true,
     moduleId: null, chapterId: null, unitTitle: 'Banco de discursivas' };
   const resultsEl = stageEl.querySelector('[data-bf-results]');
-  if(resultsEl && window.Blocks && Blocks.essay && Blocks.essay.mount){
+  if(resultsEl && typeof Blocks !== 'undefined' && Blocks.essay && Blocks.essay.mount){
     try { Blocks.essay.mount(resultsEl, synthBlock, synthCtx); } catch(e){ console.warn('[bankEssays] mount falhou:', e); }
   }
   const moreBtn = stageEl.querySelector('#bfMore');

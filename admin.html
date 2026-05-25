@@ -12488,7 +12488,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=52"></script>
+<script src="ubique-shared.js?v=53"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -18121,17 +18121,20 @@
   }
 
   async function loadExamSubjects(){
-    const { data, error } = await questoes()
-      .from('exam_subjects').select('*');
-    if(error){ console.error('exam_subjects load:', error); return; }
-    examSubjectsCache = data || [];
+    if(!window.UbiqueStore || !window.UbiqueStore.exam_subjects){
+      examSubjectsCache = []; return;
+    }
+    examSubjectsCache = window.UbiqueStore.exam_subjects.list() || [];
   }
 
   async function loadExamBancas(){
-    const { data, error } = await questoes()
-      .from('exam_bancas').select('*').order('year', { ascending: false });
-    if(error){ console.error('exam_bancas load:', error); return; }
-    examBancasCache = data || [];
+    if(!window.UbiqueStore || !window.UbiqueStore.exam_bancas){
+      examBancasCache = []; return;
+    }
+    // Sort por ano descendente (espelha o behavior original do Supabase)
+    examBancasCache = (window.UbiqueStore.exam_bancas.list() || [])
+      .slice()
+      .sort((a,b) => (b.year||0) - (a.year||0));
   }
 
   function renderExamsList(){
@@ -18362,63 +18365,69 @@
       renderExamDetail();
     });
 
-    // Chips de matérias — toggle
+    // Chips de matérias — toggle (UbiqueStore.exam_subjects local-only)
     document.querySelectorAll('#examDetail .chip-pick').forEach(chip => {
-      chip.addEventListener('click', async () => {
+      chip.addEventListener('click', () => {
         const subjectId = parseInt(chip.dataset.subjectId);
         const isActive = chip.classList.contains('active');
-
-        if(isActive){
-          const { error } = await questoes()
-            .from('exam_subjects')
-            .delete()
-            .eq('exam_id', exam.id)
-            .eq('subject_id', subjectId);
-          if(error){ showMsg('globalMessage2', `Erro: ${error.message}`); return; }
-        } else {
-          const { error } = await questoes()
-            .from('exam_subjects')
-            .insert({ exam_id: exam.id, subject_id: subjectId });
-          if(error){ showMsg('globalMessage2', `Erro: ${error.message}`); return; }
+        if(!window.UbiqueStore || !window.UbiqueStore.exam_subjects){
+          showMsg('globalMessage2', 'Store indisponível.'); return;
         }
+        if(isActive){
+          // Remove o link exam_id ↔ subject_id existente
+          const existing = (window.UbiqueStore.exam_subjects.list() || [])
+            .find(r => r && String(r.exam_id) === String(exam.id) && r.subject_id === subjectId);
+          if(existing) window.UbiqueStore.exam_subjects.remove(existing.id);
+        } else {
+          window.UbiqueStore.exam_subjects.add({ exam_id: exam.id, subject_id: subjectId });
+        }
+        loadExamSubjects().then(() => {
+          renderExamsList();
+          renderExamDetail();
+        });
+      });
+    });
 
-        await loadExamSubjects();
+    // Adicionar ano + banca (UbiqueStore.exam_bancas local-only)
+    document.getElementById('addYearBtn').addEventListener('click', () => {
+      const year = parseInt(document.getElementById('eb-year').value);
+      const banca_id = parseInt(document.getElementById('eb-banca').value);
+      if(!year){ showMsg('globalMessage2', 'Informe o ano.'); return; }
+      if(!banca_id){ showMsg('globalMessage2', 'Escolha uma banca.'); return; }
+      if(!window.UbiqueStore || !window.UbiqueStore.exam_bancas){
+        showMsg('globalMessage2', 'Store indisponível.'); return;
+      }
+      // Detecta duplicado (mesmo exam+year)
+      const dup = (window.UbiqueStore.exam_bancas.list() || [])
+        .find(r => r && String(r.exam_id) === String(exam.id) && r.year === year);
+      if(dup){
+        showMsg('globalMessage2', `O ano ${year} já está cadastrado neste concurso.`);
+        return;
+      }
+      window.UbiqueStore.exam_bancas.add({ exam_id: exam.id, year, banca_id });
+      showMsg('globalMessage2', `Ano ${year} adicionado.`, 'success');
+      loadExamBancas().then(() => {
         renderExamsList();
         renderExamDetail();
       });
     });
 
-    // Adicionar ano + banca
-    document.getElementById('addYearBtn').addEventListener('click', async () => {
-      const year = parseInt(document.getElementById('eb-year').value);
-      const banca_id = parseInt(document.getElementById('eb-banca').value);
-      if(!year){ showMsg('globalMessage2', 'Informe o ano.'); return; }
-      if(!banca_id){ showMsg('globalMessage2', 'Escolha uma banca.'); return; }
-      const { error } = await questoes()
-        .from('exam_bancas')
-        .insert({ exam_id: exam.id, year, banca_id });
-      if(error){ showMsg('globalMessage2', `Erro: ${error.message}`); return; }
-      showMsg('globalMessage2', `Ano ${year} adicionado.`, 'success');
-      await loadExamBancas();
-      renderExamsList();
-      renderExamDetail();
-    });
-
-    // Remover ano
+    // Remover ano (UbiqueStore local-only)
     document.querySelectorAll('#examDetail [data-act="remove-year"]').forEach(btn => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => {
         const year = parseInt(btn.closest('.year-banca-row').dataset.year);
         if(!confirm(`Remover o ano ${year} deste concurso?`)) return;
-        const { error } = await questoes()
-          .from('exam_bancas')
-          .delete()
-          .eq('exam_id', exam.id)
-          .eq('year', year);
-        if(error){ showMsg('globalMessage2', `Erro: ${error.message}`); return; }
+        if(!window.UbiqueStore || !window.UbiqueStore.exam_bancas){
+          showMsg('globalMessage2', 'Store indisponível.'); return;
+        }
+        const matches = (window.UbiqueStore.exam_bancas.list() || [])
+          .filter(r => r && String(r.exam_id) === String(exam.id) && r.year === year);
+        matches.forEach(r => window.UbiqueStore.exam_bancas.remove(r.id));
         showMsg('globalMessage2', 'Ano removido.', 'success');
-        await loadExamBancas();
-        renderExamsList();
-        renderExamDetail();
+        loadExamBancas().then(() => {
+          renderExamsList();
+          renderExamDetail();
+        });
       });
     });
 
