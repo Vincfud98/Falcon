@@ -12351,7 +12351,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=67"></script>
+<script src="ubique-shared.js?v=68"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -22375,20 +22375,48 @@
       status: document.getElementById('cc-status').value,
       position: parseInt(document.getElementById('cc-position').value) || null,
     };
-    if(window.UbiqueStore){
-      if(id){
-        const idNum = isNaN(parseInt(id)) ? id : parseInt(id);
-        UbiqueStore.chapters.update(idNum, payload);
-      } else {
-        UbiqueStore.chapters.add(payload);
+    if(id){
+      // UPDATE — Supabase primeiro
+      const idNum = isNaN(parseInt(id)) ? id : parseInt(id);
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          const { error } = await conteudo().from('course_chapters').update(payload).eq('id', idNum);
+          if(error){
+            console.error('[Supabase] course_chapters.update falhou:', error);
+            showMsg('ccModalMsg', 'Erro ao atualizar no Supabase: ' + error.message);
+            return;
+          }
+        }catch(e){
+          console.error('[Supabase] course_chapters.update exception:', e);
+          showMsg('ccModalMsg', 'Erro de rede ao atualizar: ' + e.message);
+          return;
+        }
+      }
+      if(window.UbiqueStore){ UbiqueStore.chapters.update(idNum, payload); }
+    } else {
+      // CREATE — Supabase primeiro pra pegar o ID real
+      let supaId = null;
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          const { data, error } = await conteudo()
+            .from('course_chapters').insert(payload).select('id').single();
+          if(error){
+            console.error('[Supabase] course_chapters.insert falhou:', error);
+            showMsg('ccModalMsg', 'Erro ao salvar no Supabase: ' + error.message);
+            return;
+          }
+          supaId = data && data.id;
+        }catch(e){
+          console.error('[Supabase] course_chapters.insert exception:', e);
+          showMsg('ccModalMsg', 'Erro de rede ao salvar: ' + e.message);
+          return;
+        }
+      }
+      if(window.UbiqueStore){
+        UbiqueStore.chapters.add(supaId != null ? Object.assign({}, payload, { id: supaId }) : payload);
       }
     }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{
-        if(id){ await conteudo().from('course_chapters').update(payload).eq('id', id); }
-        else  { await conteudo().from('course_chapters').insert(payload); }
-      }catch(_){}
-    }
+
     document.getElementById('courseChapterModal').classList.remove('active');
     await loadCourseChapters();
     renderCurriculumTree();
@@ -22397,14 +22425,30 @@
   async function deleteCourseChapter(id){
     if(!confirm('Apagar este capítulo e todas suas unidades?')) return;
     const idNum = isNaN(parseInt(id)) ? id : parseInt(id);
+
+    // 1. Supabase primeiro (FK cascade remove unidades via course_chapters)
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { error } = await conteudo().from('course_chapters').delete().eq('id', idNum);
+        if(error){
+          console.error('[Supabase] course_chapters.delete falhou:', error);
+          alert('Erro ao apagar no Supabase: ' + error.message);
+          return;
+        }
+      }catch(e){
+        console.error('[Supabase] course_chapters.delete exception:', e);
+        alert('Erro de rede ao apagar: ' + e.message);
+        return;
+      }
+    }
+
+    // 2. UbiqueStore — cascade local
     if(window.UbiqueStore){
       const us = UbiqueStore.units.list().filter(u => u.chapter_id === idNum);
       us.forEach(u => UbiqueStore.units.remove(u.id));
       UbiqueStore.chapters.remove(idNum);
     }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('course_chapters').delete().eq('id', id); }catch(_){}
-    }
+
     await Promise.all([loadCourseChapters(), loadUnits()]);
     renderCurriculumTree();
   }
