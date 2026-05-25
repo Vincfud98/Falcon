@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=49"></script>
+<script src="ubique-shared.js?v=50"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -8862,13 +8862,21 @@ window.COURSES = [
    *   ser migrada "vence" e define o conteúdo no banco; as seguintes só
    *   viram refs.
    */
-  (function migrateInlineQuestionsToBankOnce(){
-    try{
-      if(!window.UbiqueStore || !window.QuestionBank || !window.LearningBlocks) return;
-      const LB = window.LearningBlocks;
-
-      let createdInBank = 0;
-      let migratedInline = 0;
+  // Exporta a função como global pra que o aluno possa rodar manualmente
+  // a ressincronização (botão "Ressincronizar do unit_blocks" quando o
+  // banco aparece vazio mesmo havendo unit_blocks com questões).
+  // Retorna { createdInBank, migratedInline, blocksScanned } pra log.
+  window._bankRescanQuestions = function _bankRescanQuestions(){
+    return migrateInlineQuestionsToBank();
+  };
+  function migrateInlineQuestionsToBank(){
+    if(!window.UbiqueStore || !window.QuestionBank || !window.LearningBlocks){
+      return { createdInBank:0, migratedInline:0, blocksScanned:0, error:'pré-requisitos não carregados' };
+    }
+    const LB = window.LearningBlocks;
+    let createdInBank = 0;
+    let migratedInline = 0;
+    let blocksScanned = 0;
 
       function migrateQuestion(q, ctx){
         if(!q || typeof q !== 'object') return q;
@@ -8913,8 +8921,10 @@ window.COURSES = [
         return { bank_id: bankId };
       }
 
+    try {
       UbiqueStore.unit_blocks.list().forEach(function(b){
         if(!b || b.type !== 'objective_questions' || !b.content) return;
+        blocksScanned++;
         let blockChanged = false;
 
         if(Array.isArray(b.content.groups)){
@@ -8952,12 +8962,16 @@ window.COURSES = [
       });
 
       if(createdInBank > 0 || migratedInline > 0){
-        console.log('[migrate-qb] ' + createdInBank + ' questão(ões) adicionada(s) ao banco; ' + migratedInline + ' refs (inline → bank_id) — Fase G');
+        console.log('[migrate-qb] ' + createdInBank + ' questão(ões) adicionada(s) ao banco; ' + migratedInline + ' refs (inline → bank_id); ' + blocksScanned + ' blocos varridos');
       }
-    }catch(e){
+    } catch(e){
       console.warn('[migrate-qb] error:', e);
+      return { createdInBank, migratedInline, blocksScanned, error: e.message };
     }
-  })();
+    return { createdInBank, migratedInline, blocksScanned };
+  }
+  // Roda uma vez no boot (mantém comportamento original)
+  migrateInlineQuestionsToBank();
 
   /**
    * Y3 Fase N — Migra essays INLINE pro EssayBank (UbiqueStore.essays).
@@ -18950,6 +18964,26 @@ Renderers.questionBank = function(route){
   const f = _bankParseFilters(route.query);
   const panelHtml = _renderBankFilterPanel(bankItems, f, false);
 
+  // Diagnóstico do banco — sempre verifica se há blocos de questões nas
+  // unidades que NÃO viraram bank entries (race condition, migração antiga).
+  // Conta blocos pra dar feedback acionável no empty state.
+  let inlineBlockCount = 0;
+  let inlineQuestionCount = 0;
+  if(window.UbiqueStore && UbiqueStore.unit_blocks){
+    (UbiqueStore.unit_blocks.list() || []).forEach(function(b){
+      if(!b || b.type !== 'objective_questions' || !b.content) return;
+      inlineBlockCount++;
+      if(Array.isArray(b.content.groups)){
+        b.content.groups.forEach(function(g){
+          if(Array.isArray(g.questions)) inlineQuestionCount += g.questions.length;
+        });
+      }
+      if(Array.isArray(b.content.ungrouped)) inlineQuestionCount += b.content.ungrouped.length;
+    });
+  }
+  const bankIsEmpty = bankItems.length === 0;
+  const hasOrphans = bankIsEmpty && inlineQuestionCount > 0;
+
   const hero = '<div class="hero">'+
     '<span class="s-label" data-a="1">Portal do curso</span>'+
     '<h1 class="s-title hero" data-a="2">Banco de questões</h1>'+
@@ -18958,14 +18992,30 @@ Renderers.questionBank = function(route){
     '<div class="cta-row" data-a="5"><a class="btn-ghost" href="#/portal">'+Icons.chevron+' Voltar ao portal</a></div>'+
   '</div>';
 
+  // Diagnostic banner: aparece quando há órfãos (inline em unit_blocks mas
+  // não registrados no QuestionBank). Oferece ressincronização manual.
+  const orphansBanner = hasOrphans
+    ? '<div class="bf-gate-hint" data-a="6" style="margin-bottom:1rem;background:var(--accent-glow);border-color:var(--accent)">'+
+        '<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.6" fill="none"/><line x1="12" y1="8" x2="12" y2="13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="16" r=".9" fill="currentColor"/></svg>'+
+        '<div style="flex:1">'+
+          '<div style="margin-bottom:.5rem"><strong>Banco vazio, mas detectamos '+inlineQuestionCount+' questão'+(inlineQuestionCount===1?'':'es')+' em '+inlineBlockCount+' bloco'+(inlineBlockCount===1?'':'s')+' inline nas unidades.</strong></div>'+
+          '<div style="font-size:.85rem;margin-bottom:.7rem;color:var(--text-mute)">Provavelmente a migração inline→banco não rodou ou as questões foram criadas antes do schema de bank_id. Clica abaixo pra ressincronizar:</div>'+
+          '<button type="button" class="btn-primary" id="bfRescanBtn" style="padding:.5rem 1.1rem">↻ Ressincronizar banco das unidades</button>'+
+        '</div>'+
+      '</div>'
+    : '';
+
   if(!f.applied){
     // Gate: só painel de filtros + dica
     return hero +
-      '<div class="bf-wrap" data-a="6">'+ panelHtml +
+      '<div class="bf-wrap" data-a="6">'+
+        orphansBanner +
+        panelHtml +
+        (hasOrphans ? '' :
         '<div class="bf-gate-hint">'+
           '<svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.6" fill="none"/><line x1="12" y1="8" x2="12" y2="13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="16" r=".9" fill="currentColor"/></svg>'+
           '<span><strong>Configure os filtros e clique em "Buscar questões"</strong> — o banco pode ser grande, então só carregamos os resultados depois que você aplica os filtros.</span>'+
-        '</div>'+
+        '</div>')+
       '</div>';
   }
 
@@ -19015,6 +19065,30 @@ Renderers.questionBank = function(route){
 
 Renderers.questionBank.mount = function(stageEl, route){
   _wireBankFilterPanel(stageEl, route, false);
+  // Rescan affordance — quando o banner de órfãos aparece, esse botão
+  // re-roda a migração inline→bank e força um re-render da página.
+  const rescanBtn = stageEl.querySelector('#bfRescanBtn');
+  if(rescanBtn){
+    rescanBtn.addEventListener('click', function(){
+      if(typeof window._bankRescanQuestions !== 'function'){
+        console.warn('[bank] função de rescan não disponível');
+        return;
+      }
+      const before = (window.QuestionBank && QuestionBank.list) ? QuestionBank.list().length : 0;
+      const result = window._bankRescanQuestions();
+      const after = (window.QuestionBank && QuestionBank.list) ? QuestionBank.list().length : 0;
+      console.log('[bank] rescan completo. Antes:', before, '· Depois:', after, '· Resultado:', result);
+      if(typeof window.ueToast === 'function'){
+        const delta = after - before;
+        window.ueToast(delta > 0
+          ? ('Banco ressincronizado: ' + delta + ' questão' + (delta===1?'':'es') + ' adicionada' + (delta===1?'':'s') + '.')
+          : 'Nenhuma questão nova encontrada.',
+          delta > 0 ? 'success' : 'warn');
+      }
+      // Força re-render pra refletir o banco atualizado
+      if(window.App && typeof App.render === 'function') App.render();
+    });
+  }
   const f = _bankParseFilters(route.query);
   if(!f.applied) return;
   // Hidrata o quiz interativo: monta o bloco sintético com Blocks.quiz.mount
