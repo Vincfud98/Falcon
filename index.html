@@ -2100,10 +2100,31 @@ html[data-theme="light"] .module-overlay{
 }
 .bf-grid{
   display:grid;grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
-  gap:1rem .9rem;
+  gap:1rem .9rem;margin-bottom:1.2rem;
 }
+.bf-grid:last-child{margin-bottom:0}
+/* Section header dentro do painel — mimetiza .sub-h da saas-components:
+   texto curto à esquerda + régua que estende; hint pequeno no fim. */
+.bf-section-head{
+  display:flex;align-items:center;gap:.7rem;margin:1.4rem 0 .8rem;
+}
+.bf-section-text{
+  font-family:var(--sans);font-weight:400;font-size:.66rem;
+  letter-spacing:.22em;text-transform:uppercase;color:var(--accent);
+  flex-shrink:0;
+}
+.bf-section-rule{
+  flex:1;height:1px;background:var(--accent-lo);min-width:1rem;
+}
+.bf-section-hint{
+  font-family:var(--sans);font-weight:300;font-size:.7rem;
+  color:var(--text-mute);font-style:italic;
+  flex-shrink:1;text-align:right;
+}
+@media(max-width:640px){ .bf-section-hint{display:none} }
 .bf-field{display:flex;flex-direction:column;gap:.4rem;min-width:0}
-.bf-field-full{grid-column:1 / -1}
+.bf-field-full{grid-column:1 / -1;margin-bottom:1.2rem}
+.bf-field-full:last-of-type{margin-bottom:0}
 .bf-label{
   font-family:var(--sans);font-weight:400;font-size:.58rem;
   letter-spacing:.16em;text-transform:uppercase;color:var(--text-dim);
@@ -18377,11 +18398,30 @@ const BankFilters = (function(){
       return { id: s.id, name: s.subject || s.name || ('Matéria '+s.id) };
     }).sort(function(a,b){ return a.name.localeCompare(b.name, 'pt-BR'); });
   }
-  // Edital: árvore lida do seed. parentId=null → roots; parentId=X → filhos diretos.
-  function availableEditalTopics(parentId){
+  // Edital: árvore lida do seed. parentId=null → roots; parentId=X → filhos.
+  // examId opcional: quando passado, restringe aos topics cujo edital
+  // pertence àquele concurso (via examIdsByEdital — match nominal de
+  // exam.id no edital.name, ex.: "CACD 2026" → cacd).
+  function availableEditalTopics(parentId, examId){
     if(!_store() || !_store().edital_topics) return [];
     const all = _store().edital_topics.list() || [];
+    let allowedEditalIds = null;
+    if(examId){
+      const editais = (_store().editais && _store().editais.list && _store().editais.list()) || [];
+      const exams = (_store().exams && _store().exams.list && _store().exams.list()) || [];
+      const xid = String(examId).toLowerCase();
+      // Acha o exam pra comparar id contra o name de cada edital
+      allowedEditalIds = new Set();
+      editais.forEach(function(e){
+        const lowName = String(e.name||'').toLowerCase();
+        if(e.exam_id && String(e.exam_id).toLowerCase() === xid){ allowedEditalIds.add(e.id); return; }
+        if(lowName.indexOf(xid) >= 0) allowedEditalIds.add(e.id);
+      });
+      // Se nenhum edital casa com o concurso, retorna vazio
+      if(!allowedEditalIds.size) return [];
+    }
     const filteredByParent = all.filter(function(t){
+      if(allowedEditalIds && !allowedEditalIds.has(t.edital_id)) return false;
       if(parentId == null) return t.parent_id == null;
       return String(t.parent_id) === String(parentId);
     });
@@ -18447,7 +18487,6 @@ function _bankParseFilters(routeQuery){
     topic1:    String(q.t1 || ''),
     topic2:    String(q.t2 || ''),
     topic3:    String(q.t3 || ''),
-    legacyTopic: String(q.topic || ''),  // TOPIC_REGISTRY (legado)
     tags:      splitCSV(q.tags),
     origem:    String(q.origem || ''),  // 'past_exam' | 'ubique' | ''
     status:    splitCSV(q.status),       // ['unanswered','right',...]
@@ -18463,7 +18502,6 @@ function _bankFiltersToQuery(f, applied){
   if(f.topic1)      out.t1 = f.topic1;
   if(f.topic2)      out.t2 = f.topic2;
   if(f.topic3)      out.t3 = f.topic3;
-  if(f.legacyTopic) out.topic = f.legacyTopic;
   if(f.tags && f.tags.length) out.tags = f.tags.join(',');
   if(f.origem)      out.origem = f.origem;
   if(f.status && f.status.length) out.status = f.status.join(',');
@@ -18675,11 +18713,6 @@ function _bankApplyFilters(items, f, opts){
       return false;
     });
   }
-  if(f.legacyTopic){
-    out = out.filter(function(q){
-      return Array.isArray(q.topics) && q.topics.indexOf(f.legacyTopic) >= 0;
-    });
-  }
   if(f.tags && f.tags.length){
     out = out.filter(function(q){
       if(!Array.isArray(q.tags) || !q.tags.length) return false;
@@ -18707,15 +18740,17 @@ function _bankApplyFilters(items, f, opts){
    completa (pré-filtragem) — usada para detectar quais filtros têm
    dado pra mostrar. `f` é o estado atual dos filtros (parsed). */
 function _renderBankFilterPanel(bankItems, f, isEssay){
-  // Sempre mostra TODOS os dropdowns (lendo do seed/registry global)
-  // independente de já existir questão usando aquele valor. Assim o aluno
-  // entende as opções desde o primeiro acesso, mesmo com banco vazio.
+  // ARQUITETURA (pós-redundância):
+  //   Seção 1 — Onde eu estudo:  Matéria
+  //   Seção 2 — O que o concurso cobra:  Concurso → Tópico → Subtópico → Subsubtópico
+  //   Seção 3 — Refinar:  Origem, Dificuldade, Status (só questões)
+  //   Tags fica abaixo (cross-cutting, multi-AND)
+  // Edital topics são filtrados pelo Concurso selecionado (escopo correto).
   const exams = BankFilters.availableExams();
   const subjects = BankFilters.availableSubjects(f.exam);
-  const topics1 = BankFilters.availableEditalTopics(null);
-  const topics2 = f.topic1 ? BankFilters.availableEditalTopics(f.topic1) : [];
-  const topics3 = f.topic2 ? BankFilters.availableEditalTopics(f.topic2) : [];
-  const legacyTopics = BankFilters.availableTopics();
+  const topics1 = BankFilters.availableEditalTopics(null, f.exam || null);
+  const topics2 = f.topic1 ? BankFilters.availableEditalTopics(f.topic1, f.exam || null) : [];
+  const topics3 = f.topic2 ? BankFilters.availableEditalTopics(f.topic2, f.exam || null) : [];
   const tags = BankFilters.availableTags();
   const difficulties = BankFilters.availableDifficulties();
 
@@ -18723,11 +18758,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
     const sel = String(current) === String(value) ? ' selected' : '';
     return '<option value="'+Util.attr(value)+'"'+sel+'>'+Util.esc(label)+'</option>';
   }
-  // buildSelect agora SEMPRE renderiza o select. Quando não há opções,
-  // mostra <option> "Nenhuma cadastrada" desabilitada como dica visual.
-  function buildSelect(name, currentValue, options, placeholder, opts){
-    const allowEmpty = !(opts && opts.hideWhenEmpty) || options.length;
-    if(!allowEmpty) return '';
+  function buildSelect(name, currentValue, options, placeholder){
     const noneNote = options.length ? '' : '<option value="" disabled>— Nenhuma cadastrada ainda —</option>';
     const disabled = options.length ? '' : ' disabled aria-disabled="true"';
     return '<div class="bf-field">'+
@@ -18739,6 +18770,14 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
       '</select>'+
     '</div>';
   }
+  function sectionHead(label, hint){
+    return '<div class="bf-section-head">'+
+      '<span class="bf-section-text">'+Util.esc(label)+'</span>'+
+      '<span class="bf-section-rule"></span>'+
+      (hint ? '<span class="bf-section-hint">'+Util.esc(hint)+'</span>' : '')+
+    '</div>';
+  }
+
   // Origem: sempre 2 opções
   const origemHtml = '<div class="bf-field">'+
     '<label class="bf-label">Origem</label>'+
@@ -18747,6 +18786,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
       selOpt('past_exam', 'Questão de prova anterior', f.origem)+
       selOpt('ubique',    'Questão Ubique (Inédita)', f.origem)+
     '</select></div>';
+
   // Status: multiselect (checkboxes em popover) — só pra questions
   let statusHtml = '';
   if(!isEssay){
@@ -18777,33 +18817,50 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
         '</div>'+
       '</div></div>';
   }
+
+  const editalHint = f.exam
+    ? 'Hierárquico: vincular a um subtópico cobre tudo abaixo dele.'
+    : 'Escolha um concurso pra ver os tópicos do edital correspondente.';
+
   return '<form class="bf-panel" id="bankFilterPanel" onsubmit="return false">'+
     '<header class="bf-panel-head">'+
       '<div class="bf-panel-title">Filtros</div>'+
       '<div class="bf-panel-sub">Configure os filtros antes de carregar as '+(isEssay?'discursivas':'questões')+'. '+(bankItems.length)+' '+(isEssay?'discursivas':'questões')+' no banco.</div>'+
     '</header>'+
+    // Palavras-chave (sempre no topo, full-width)
+    '<div class="bf-field bf-field-full">'+
+      '<label class="bf-label">Palavras-chave</label>'+
+      '<textarea class="bf-textarea" data-bf="keyword" placeholder="Busca no enunciado, nas alternativas e nos comentários…" rows="2">'+Util.esc(f.keyword||'')+'</textarea>'+
+    '</div>'+
+    // ─── Onde eu estudo ───
+    sectionHead('Onde eu estudo', 'A matéria interna da Ubique (História do Brasil, Geografia, …)') +
     '<div class="bf-grid">'+
-      '<div class="bf-field bf-field-full">'+
-        '<label class="bf-label">Palavras-chave</label>'+
-        '<textarea class="bf-textarea" data-bf="keyword" placeholder="Busca no enunciado, nas alternativas e nos comentários…" rows="2">'+Util.esc(f.keyword||'')+'</textarea>'+
-      '</div>'+
+      buildSelect('subject', f.subject, subjects, { label:'Matéria', empty: f.exam ? 'Todas as matérias do concurso' : 'Todas as matérias' })+
+    '</div>'+
+    // ─── O que o concurso cobra ───
+    sectionHead('O que o concurso cobra', editalHint) +
+    '<div class="bf-grid">'+
       buildSelect('exam', f.exam, exams, { label:'Concurso', empty:'Todos os concursos' })+
-      buildSelect('subject', f.subject, subjects, { label:'Matéria', empty:'Todas as matérias' })+
-      buildSelect('topic1', f.topic1, topics1, { label:'Tópico (edital)', empty:'Qualquer tópico' })+
+      buildSelect('topic1', f.topic1, topics1, { label:'Tópico do edital', empty:'Qualquer tópico' })+
       buildSelect('topic2', f.topic2, topics2, { label:'Subtópico', empty:'Qualquer subtópico' })+
       buildSelect('topic3', f.topic3, topics3, { label:'Subsubtópico', empty:'Qualquer subsubtópico' })+
-      buildSelect('legacyTopic', f.legacyTopic, legacyTopics, { label:'Tópico (taxonomia)', empty:'Todos os tópicos' })+
-      buildSelect('difficulty', f.difficulty, difficulties, { label:'Dificuldade', empty:'Qualquer dificuldade' })+
+    '</div>'+
+    // ─── Refinar ───
+    sectionHead('Refinar', 'Filtros adicionais opcionais') +
+    '<div class="bf-grid">'+
       origemHtml+
+      buildSelect('difficulty', f.difficulty, difficulties, { label:'Dificuldade', empty:'Qualquer dificuldade' })+
       statusHtml+
-      '<div class="bf-field bf-field-full"><label class="bf-label">Tags <span class="bf-label-hint">(clique pra marcar múltiplas)</span></label>'+
-        (tags.length
-          ? '<div class="bf-tags">' + tags.map(function(t){
-              const on = (f.tags||[]).indexOf(t.id) >= 0 ? ' is-on' : '';
-              return '<button type="button" class="bf-tag'+on+'" data-bf-tag="'+Util.attr(t.id)+'">'+Util.esc(t.name)+'</button>';
-            }).join('') + '</div>'
-          : '<div class="bf-empty-hint">Nenhuma tag cadastrada no registry global ainda.</div>')+
-      '</div>'+
+    '</div>'+
+    // ─── Tags (cross-cutting, multi-AND) ───
+    sectionHead('Tags', 'Marcações livres — clique pra alternar; combina por AND lógico') +
+    '<div class="bf-field bf-field-full">'+
+      (tags.length
+        ? '<div class="bf-tags">' + tags.map(function(t){
+            const on = (f.tags||[]).indexOf(t.id) >= 0 ? ' is-on' : '';
+            return '<button type="button" class="bf-tag'+on+'" data-bf-tag="'+Util.attr(t.id)+'">'+Util.esc(t.name)+'</button>';
+          }).join('') + '</div>'
+        : '<div class="bf-empty-hint">Nenhuma tag cadastrada no registry global ainda.</div>')+
     '</div>'+
     '<footer class="bf-panel-foot">'+
       '<button type="button" class="btn-ghost bf-clear" id="bfClear">Limpar filtros</button>'+
@@ -19084,7 +19141,6 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       topic1:      (panel.querySelector('[data-bf="topic1"]')||{}).value || '',
       topic2:      (panel.querySelector('[data-bf="topic2"]')||{}).value || '',
       topic3:      (panel.querySelector('[data-bf="topic3"]')||{}).value || '',
-      legacyTopic: (panel.querySelector('[data-bf="legacyTopic"]')||{}).value || '',
       tags:        Array.from(panel.querySelectorAll('[data-bf-tag].is-on')).map(function(b){ return b.getAttribute('data-bf-tag'); }),
       origem:      (panel.querySelector('[data-bf="origem"]')||{}).value || '',
       status:      Array.from(panel.querySelectorAll('[data-bf-status]:checked')).map(function(c){ return c.getAttribute('data-bf-status'); }),
@@ -19148,25 +19204,38 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
   }
   const examSel = panel.querySelector('[data-bf="exam"]');
   const subjSel = panel.querySelector('[data-bf="subject"]');
-  if(examSel && subjSel){
-    examSel.addEventListener('change', function(){
-      const newOpts = window.BankFilters.availableSubjects(examSel.value || null);
-      repopulateSelect(subjSel, newOpts, examSel.value ? 'Todas as matérias do concurso' : 'Todas as matérias');
-    });
-  }
   const t1Sel = panel.querySelector('[data-bf="topic1"]');
   const t2Sel = panel.querySelector('[data-bf="topic2"]');
   const t3Sel = panel.querySelector('[data-bf="topic3"]');
+  // Mudar Concurso reseta MATÉRIA (interseção via exam_subjects) E
+  // ÁRVORE DO EDITAL (porque agora topics são escopados pelo exam).
+  if(examSel){
+    examSel.addEventListener('change', function(){
+      const examId = examSel.value || null;
+      if(subjSel){
+        const newSubjects = window.BankFilters.availableSubjects(examId);
+        repopulateSelect(subjSel, newSubjects, examId ? 'Todas as matérias do concurso' : 'Todas as matérias');
+      }
+      if(t1Sel){
+        const newTopics = window.BankFilters.availableEditalTopics(null, examId);
+        repopulateSelect(t1Sel, newTopics, 'Qualquer tópico');
+      }
+      if(t2Sel) repopulateSelect(t2Sel, [], 'Qualquer subtópico');
+      if(t3Sel) repopulateSelect(t3Sel, [], 'Qualquer subsubtópico');
+    });
+  }
   if(t1Sel && t2Sel){
     t1Sel.addEventListener('change', function(){
-      const newOpts = t1Sel.value ? window.BankFilters.availableEditalTopics(t1Sel.value) : [];
+      const examId = examSel ? (examSel.value || null) : null;
+      const newOpts = t1Sel.value ? window.BankFilters.availableEditalTopics(t1Sel.value, examId) : [];
       repopulateSelect(t2Sel, newOpts, 'Qualquer subtópico');
       if(t3Sel) repopulateSelect(t3Sel, [], 'Qualquer subsubtópico');
     });
   }
   if(t2Sel && t3Sel){
     t2Sel.addEventListener('change', function(){
-      const newOpts = t2Sel.value ? window.BankFilters.availableEditalTopics(t2Sel.value) : [];
+      const examId = examSel ? (examSel.value || null) : null;
+      const newOpts = t2Sel.value ? window.BankFilters.availableEditalTopics(t2Sel.value, examId) : [];
       repopulateSelect(t3Sel, newOpts, 'Qualquer subsubtópico');
     });
   }
