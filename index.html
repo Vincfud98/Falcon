@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=53"></script>
+<script src="ubique-shared.js?v=54"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -8923,7 +8923,11 @@ window.COURSES = [
 
     try {
       UbiqueStore.unit_blocks.list().forEach(function(b){
-        if(!b || b.type !== 'objective_questions' || !b.content) return;
+        // Aceita tanto 'objective_questions' (canônico admin) quanto 'quiz'
+        // (legacy do window.COURSE seed que NÃO foi normalizado por
+        // mapMockBlockToStore). Os dois têm a mesma shape de content.
+        if(!b || !b.content) return;
+        if(b.type !== 'objective_questions' && b.type !== 'quiz') return;
         blocksScanned++;
         let blockChanged = false;
 
@@ -18617,19 +18621,49 @@ function _bankBuildUnitContext(){
   });
 
   // unit_id → [topic_id, …] (direto) e [exam_id, …] (derivado via edital)
+  // EXPANSÃO HIERÁRQUICA: target_type pode ser 'module'/'chapter'/'unit'.
+  //   - 'module' → propaga pro topic_id pra TODAS as unidades em chapters
+  //                desse módulo
+  //   - 'chapter'→ propaga pra TODAS as unidades desse capítulo
+  //   - 'unit'   → vai pra unidade
+  //   - (legacy: sem target_type, usa unit_id como 'unit')
   const editalByUnit = {};
   const examIdsByUnit = {};
+  function _addEditalUnitLink(unitId, topicId, examIdsForTopic){
+    if(unitId == null) return;
+    const key = String(unitId);
+    (editalByUnit[key] = editalByUnit[key] || []);
+    if(editalByUnit[key].indexOf(String(topicId)) < 0) editalByUnit[key].push(String(topicId));
+    (examIdsForTopic || []).forEach(function(xid){
+      const arr = (examIdsByUnit[key] = examIdsByUnit[key] || []);
+      if(arr.indexOf(xid) < 0) arr.push(xid);
+    });
+  }
   topicUnits.forEach(function(tu){
-    if(!tu || tu.unit_id == null) return;
-    const key = String(tu.unit_id);
-    (editalByUnit[key] = editalByUnit[key] || []).push(String(tu.topic_id));
-    // Resolve qual edital esse topic pertence → coleta os exam_ids
+    if(!tu) return;
+    const ttype = tu.target_type || (tu.unit_id != null ? 'unit' : null);
+    const targetId = tu.target_id != null ? tu.target_id : tu.unit_id;
+    if(!ttype || targetId == null) return;
     const topic = editalTopicById[tu.topic_id];
-    if(topic && topic.edital_id != null){
-      const examsForEdital = examIdsByEdital[topic.edital_id] || [];
-      examsForEdital.forEach(function(xid){
-        const arr = (examIdsByUnit[key] = examIdsByUnit[key] || []);
-        if(arr.indexOf(xid) < 0) arr.push(xid);
+    if(!topic) return;
+    const examsForEdital = (topic.edital_id != null) ? (examIdsByEdital[topic.edital_id] || []) : [];
+
+    if(ttype === 'unit'){
+      _addEditalUnitLink(targetId, tu.topic_id, examsForEdital);
+    } else if(ttype === 'chapter'){
+      // Todas as unidades do capítulo recebem o link
+      units.forEach(function(u){
+        if(u && u.chapter_id === targetId) _addEditalUnitLink(u.id, tu.topic_id, examsForEdital);
+      });
+    } else if(ttype === 'module'){
+      // Todas as unidades dos capítulos desse módulo (+ units direto no módulo)
+      const chapsOfMod = chapters.filter(function(c){ return c.module_id === targetId; });
+      const chapIds = new Set(chapsOfMod.map(function(c){ return c.id; }));
+      units.forEach(function(u){
+        if(!u) return;
+        const matchesByChapter = chapIds.has(u.chapter_id);
+        const matchesByDirectModule = u.module_id === targetId;
+        if(matchesByChapter || matchesByDirectModule) _addEditalUnitLink(u.id, tu.topic_id, examsForEdital);
       });
     }
   });
@@ -19046,7 +19080,8 @@ function _bankBuildSynthQuizBlock(filteredQuestions){
   const originalGroupsMap = {};
   if(window.UbiqueStore && UbiqueStore.unit_blocks){
     (UbiqueStore.unit_blocks.list() || []).forEach(function(b){
-      if(!b || b.type !== 'objective_questions' || !b.content) return;
+      if(!b || !b.content) return false;
+      if(b.type !== 'objective_questions' && b.type !== 'quiz') return false;
       if(!Array.isArray(b.content.groups)) return;
       b.content.groups.forEach(function(g){
         const key = String(b.id) + '|' + String(g.id || '');
