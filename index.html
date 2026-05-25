@@ -18355,16 +18355,27 @@ const BankFilters = (function(){
       return { id: String(e.id||'').toLowerCase(), name: e.name || String(e.id||'').toUpperCase() };
     }).sort(function(a,b){ return a.name.localeCompare(b.name, 'pt-BR'); });
   }
-  // Matérias: filtra por concurso selecionado (se houver). Sempre mostra
-  // o dropdown mesmo vazio — o aluno entende que precisa cadastrar.
+  // Matérias: lê do source-of-truth `subjects` (História do Brasil,
+  // Geografia, Política Internacional, Direito Interno…). Quando há
+  // exam selecionado E `exam_subjects` tem mapeamento M2M, filtra a
+  // intersecção; senão mostra todas. Cada subject vira { id, name }.
   function availableSubjects(examId){
-    if(!_store() || !_store().exam_subjects) return [];
-    let all = _store().exam_subjects.list() || [];
-    if(examId){
-      all = all.filter(function(s){ return s && String(s.exam_id||'').toLowerCase() === String(examId).toLowerCase(); });
+    if(!_store() || !_store().subjects) return [];
+    const all = _store().subjects.list() || [];
+    let scoped = all;
+    if(examId && _store().exam_subjects){
+      const xs = _store().exam_subjects.list() || [];
+      const subjectIdsForExam = xs
+        .filter(function(r){ return r && String(r.exam_id||'').toLowerCase() === String(examId).toLowerCase(); })
+        .map(function(r){ return r.subject_id; });
+      if(subjectIdsForExam.length){
+        scoped = all.filter(function(s){ return subjectIdsForExam.indexOf(s.id) >= 0; });
+      }
     }
-    return all.map(function(s){ return { id: s.id, name: s.name || ('Matéria '+s.id) }; })
-      .sort(function(a,b){ return a.name.localeCompare(b.name, 'pt-BR'); });
+    return scoped.map(function(s){
+      // O campo título é `subject` (não `name`) — schema histórico
+      return { id: s.id, name: s.subject || s.name || ('Matéria '+s.id) };
+    }).sort(function(a,b){ return a.name.localeCompare(b.name, 'pt-BR'); });
   }
   // Edital: árvore lida do seed. parentId=null → roots; parentId=X → filhos diretos.
   function availableEditalTopics(parentId){
@@ -18479,11 +18490,79 @@ function _bankEditalDescendants(topicId){
   return Array.from(out);
 }
 
+/* Constrói um índice unit_id → { subject_id, module_id, chapter_id,
+   edital_topic_ids[] }. Usado pra resolver filtros indiretos do banco:
+   uma questão só "pertence" à matéria 'História do Brasil' via cadeia
+     question.appears_in[].unit_id → unit.chapter_id → chapter.module_id
+     → module.subject_id.
+   Idem pra edital_topics via tabela edital_topic_units. */
+let _unitContextCache = null;
+let _unitContextCacheKey = null;
+function _bankBuildUnitContext(){
+  if(!window.UbiqueStore) return {};
+  const store = UbiqueStore;
+  // Invalida cache se qualquer das tabelas mudou (simples: rev count)
+  const rev = [
+    store.units && store.units.list ? store.units.list().length : 0,
+    store.chapters && store.chapters.list ? store.chapters.list().length : 0,
+    store.modules && store.modules.list ? store.modules.list().length : 0,
+    store.edital_topic_units && store.edital_topic_units.list ? store.edital_topic_units.list().length : 0
+  ].join('|');
+  if(_unitContextCache && _unitContextCacheKey === rev) return _unitContextCache;
+
+  const modules = (store.modules && store.modules.list && store.modules.list()) || [];
+  const chapters = (store.chapters && store.chapters.list && store.chapters.list()) || [];
+  const units = (store.units && store.units.list && store.units.list()) || [];
+  const topicUnits = (store.edital_topic_units && store.edital_topic_units.list && store.edital_topic_units.list()) || [];
+
+  const modById = {}; modules.forEach(function(m){ modById[m.id] = m; });
+  const chapById = {}; chapters.forEach(function(c){ chapById[c.id] = c; });
+
+  // unit_id → [topic_id, …]
+  const editalByUnit = {};
+  topicUnits.forEach(function(tu){
+    if(!tu || tu.unit_id == null) return;
+    const key = String(tu.unit_id);
+    (editalByUnit[key] = editalByUnit[key] || []).push(String(tu.topic_id));
+  });
+
+  const ctx = {};
+  units.forEach(function(u){
+    if(!u) return;
+    const chap = u.chapter_id != null ? chapById[u.chapter_id] : null;
+    // Algumas unidades podem ter module_id direto (sem chapter)
+    const moduleId = u.module_id != null ? u.module_id : (chap ? chap.module_id : null);
+    const mod = moduleId != null ? modById[moduleId] : null;
+    const subjectId = mod && mod.subject_id != null ? mod.subject_id : null;
+    // Mapeia também por _origMockId (ex.: 'u1') pra casar com appears_in
+    // antigos que usam o id mock string.
+    const editalIds = editalByUnit[String(u.id)] || editalByUnit[String(u._origMockId||'')] || [];
+    const entry = {
+      unit_id: u.id, module_id: moduleId, chapter_id: chap ? chap.id : null,
+      subject_id: subjectId, edital_topic_ids: editalIds
+    };
+    ctx[String(u.id)] = entry;
+    if(u._origMockId) ctx[String(u._origMockId)] = entry;  // alias mock
+  });
+
+  _unitContextCache = ctx;
+  _unitContextCacheKey = rev;
+  return ctx;
+}
+
+/* Devolve a lista de unit_ids em que a questão aparece (lê appears_in[]
+   e normaliza string). Vazio = sem vínculo, ignora filtros indiretos. */
+function _bankQuestionUnitIds(q){
+  if(!q || !Array.isArray(q.appears_in)) return [];
+  return q.appears_in.map(function(u){ return String(u && u.unit_id); }).filter(Boolean);
+}
+
 /* Engine: aplica todos os filtros a uma lista de items (bank questions ou
    bank essays). Retorna a sublista que passa em TODOS os filtros. */
 function _bankApplyFilters(items, f, opts){
   const isEssay = !!(opts && opts.isEssay);
   const LB = window.LearningBlocks || {};
+  const ctx = _bankBuildUnitContext();
   let out = (items||[]).slice();
 
   // Keyword (textarea — qualquer das palavras precisa aparecer no haystack)
@@ -18515,16 +18594,41 @@ function _bankApplyFilters(items, f, opts){
       return false;
     });
   }
+  // MATÉRIA — resolve via appears_in[].unit_id → chapter → module → subject_id.
+  // Fallback: campo explícito q.subject_id ou q.exam_subject_id se admin setou.
   if(f.subject){
-    out = out.filter(function(q){ return String(q.exam_subject_id||'') === String(f.subject); });
+    const target = String(f.subject);
+    out = out.filter(function(q){
+      if(q.subject_id != null && String(q.subject_id) === target) return true;
+      if(q.exam_subject_id != null && String(q.exam_subject_id) === target) return true;
+      const unitIds = _bankQuestionUnitIds(q);
+      for(let i = 0; i < unitIds.length; i++){
+        const c = ctx[unitIds[i]];
+        if(c && c.subject_id != null && String(c.subject_id) === target) return true;
+      }
+      return false;
+    });
   }
-  // Edital tree — qualquer dos 3 níveis aplicados restringe pra
-  // descendentes do nó mais profundo informado.
+  // EDITAL — Tópico → Subtópico → Subsubtópico. Aplica o nó mais profundo
+  // informado e checa se a questão está em UMA unidade vinculada a algum
+  // descendente desse nó.
   const editalNode = f.topic3 || f.topic2 || f.topic1;
   if(editalNode){
     const descendants = _bankEditalDescendants(editalNode);
+    const descSet = new Set(descendants);
     out = out.filter(function(q){
-      return q.edital_topic_id && descendants.indexOf(String(q.edital_topic_id)) >= 0;
+      // 1) Campo explícito (raro mas suportado)
+      if(q.edital_topic_id != null && descSet.has(String(q.edital_topic_id))) return true;
+      // 2) Cadeia indireta: appears_in → unit → edital_topic_units
+      const unitIds = _bankQuestionUnitIds(q);
+      for(let i = 0; i < unitIds.length; i++){
+        const c = ctx[unitIds[i]];
+        if(!c) continue;
+        for(let j = 0; j < c.edital_topic_ids.length; j++){
+          if(descSet.has(c.edital_topic_ids[j])) return true;
+        }
+      }
+      return false;
     });
   }
   if(f.legacyTopic){
