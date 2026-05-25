@@ -18506,7 +18506,9 @@ function _bankBuildUnitContext(){
     store.units && store.units.list ? store.units.list().length : 0,
     store.chapters && store.chapters.list ? store.chapters.list().length : 0,
     store.modules && store.modules.list ? store.modules.list().length : 0,
-    store.edital_topic_units && store.edital_topic_units.list ? store.edital_topic_units.list().length : 0
+    store.edital_topic_units && store.edital_topic_units.list ? store.edital_topic_units.list().length : 0,
+    store.editais && store.editais.list ? store.editais.list().length : 0,
+    store.edital_topics && store.edital_topics.list ? store.edital_topics.list().length : 0
   ].join('|');
   if(_unitContextCache && _unitContextCacheKey === rev) return _unitContextCache;
 
@@ -18514,16 +18516,46 @@ function _bankBuildUnitContext(){
   const chapters = (store.chapters && store.chapters.list && store.chapters.list()) || [];
   const units = (store.units && store.units.list && store.units.list()) || [];
   const topicUnits = (store.edital_topic_units && store.edital_topic_units.list && store.edital_topic_units.list()) || [];
+  const editais = (store.editais && store.editais.list && store.editais.list()) || [];
+  const editalTopics = (store.edital_topics && store.edital_topics.list && store.edital_topics.list()) || [];
+  const exams = (store.exams && store.exams.list && store.exams.list()) || [];
 
   const modById = {}; modules.forEach(function(m){ modById[m.id] = m; });
   const chapById = {}; chapters.forEach(function(c){ chapById[c.id] = c; });
+  const editalById = {}; editais.forEach(function(e){ editalById[e.id] = e; });
+  const editalTopicById = {}; editalTopics.forEach(function(t){ editalTopicById[t.id] = t; });
 
-  // unit_id → [topic_id, …]
+  // edital_id → [exam_id, …] — derivado por:
+  //  a) campo explícito `e.exam_id` (futuro)
+  //  b) ou casamento de exam.id (cacd/enem/oab…) com `e.name.toLowerCase()`
+  const examIdsByEdital = {};
+  editais.forEach(function(e){
+    const ids = [];
+    if(e.exam_id) ids.push(String(e.exam_id).toLowerCase());
+    const lowName = String(e.name || '').toLowerCase();
+    exams.forEach(function(x){
+      const xid = String(x.id||'').toLowerCase();
+      if(xid && lowName.indexOf(xid) >= 0 && ids.indexOf(xid) < 0) ids.push(xid);
+    });
+    examIdsByEdital[e.id] = ids;
+  });
+
+  // unit_id → [topic_id, …] (direto) e [exam_id, …] (derivado via edital)
   const editalByUnit = {};
+  const examIdsByUnit = {};
   topicUnits.forEach(function(tu){
     if(!tu || tu.unit_id == null) return;
     const key = String(tu.unit_id);
     (editalByUnit[key] = editalByUnit[key] || []).push(String(tu.topic_id));
+    // Resolve qual edital esse topic pertence → coleta os exam_ids
+    const topic = editalTopicById[tu.topic_id];
+    if(topic && topic.edital_id != null){
+      const examsForEdital = examIdsByEdital[topic.edital_id] || [];
+      examsForEdital.forEach(function(xid){
+        const arr = (examIdsByUnit[key] = examIdsByUnit[key] || []);
+        if(arr.indexOf(xid) < 0) arr.push(xid);
+      });
+    }
   });
 
   const ctx = {};
@@ -18537,9 +18569,10 @@ function _bankBuildUnitContext(){
     // Mapeia também por _origMockId (ex.: 'u1') pra casar com appears_in
     // antigos que usam o id mock string.
     const editalIds = editalByUnit[String(u.id)] || editalByUnit[String(u._origMockId||'')] || [];
+    const examIds = examIdsByUnit[String(u.id)] || examIdsByUnit[String(u._origMockId||'')] || [];
     const entry = {
       unit_id: u.id, module_id: moduleId, chapter_id: chap ? chap.id : null,
-      subject_id: subjectId, edital_topic_ids: editalIds
+      subject_id: subjectId, edital_topic_ids: editalIds, exam_ids: examIds
     };
     ctx[String(u.id)] = entry;
     if(u._origMockId) ctx[String(u._origMockId)] = entry;  // alias mock
@@ -18582,7 +18615,13 @@ function _bankApplyFilters(items, f, opts){
       return hay.indexOf(needle) >= 0;
     });
   }
-  // Concurso (exam_id derivado de origin OU campo explícito)
+  // CONCURSO — match em camadas:
+  //  1) q.exam_id explícito (raro)
+  //  2) source_type='past_exam' + origin parseável (CACD 2014, ENEM 2018…)
+  //  3) cadeia indireta: appears_in → unit → edital_topic_units → edital → exam
+  //     (derivado via match do exam.id no edital.name; ex.: "CACD 2026" → cacd)
+  //  Questões Ubique (inéditas) sem nenhum link a um edital ainda não casam
+  //  com concurso — admin precisa linkar a unidade ao edital pra cobertura.
   if(f.exam){
     const target = String(f.exam).toLowerCase();
     out = out.filter(function(q){
@@ -18590,6 +18629,11 @@ function _bankApplyFilters(items, f, opts){
       if(q.source_type === 'past_exam' && q.origin && LB.parseQuestionOrigin){
         const parsed = LB.parseQuestionOrigin(q.origin);
         if(parsed && parsed.exam && String(parsed.exam).toLowerCase() === target) return true;
+      }
+      const unitIds = _bankQuestionUnitIds(q);
+      for(let i = 0; i < unitIds.length; i++){
+        const c = ctx[unitIds[i]];
+        if(c && Array.isArray(c.exam_ids) && c.exam_ids.indexOf(target) >= 0) return true;
       }
       return false;
     });
@@ -19069,19 +19113,63 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       if((e.key === 'Enter') && (e.ctrlKey || e.metaKey)){ e.preventDefault(); apply(); }
     });
   }
-  // Cascading exam→subject e topic1→2→3: ao mudar pai, limpa filhos no DOM
-  function clearChildren(selectors){
-    selectors.forEach(function(sel){
-      const el = panel.querySelector(sel);
-      if(el) el.value = '';
-    });
+  // Cascading dinâmico (sem re-render do painel): ao mudar o pai,
+  // RECONSTRÓI as <option>s do filho com base na lista do BankFilters.
+  // Antes só limpávamos o value (clearChildren) — daí o filho ficava
+  // travado se o sub-cadastro só populava no full re-render.
+  function repopulateSelect(sel, options, emptyLabel){
+    if(!sel) return;
+    const wasDisabled = sel.disabled;
+    sel.innerHTML = '';
+    const optEmpty = document.createElement('option');
+    optEmpty.value = '';
+    optEmpty.textContent = emptyLabel;
+    sel.appendChild(optEmpty);
+    if(!options.length){
+      const note = document.createElement('option');
+      note.value = '';
+      note.disabled = true;
+      note.textContent = '— Nenhuma cadastrada ainda —';
+      sel.appendChild(note);
+      sel.disabled = true;
+      sel.setAttribute('aria-disabled','true');
+    } else {
+      sel.disabled = false;
+      sel.removeAttribute('aria-disabled');
+      options.forEach(function(o){
+        const opt = document.createElement('option');
+        opt.value = o.id;
+        opt.textContent = (o.code ? o.code + ' · ' : '') + (o.name || o.title || o.id);
+        sel.appendChild(opt);
+      });
+    }
+    sel.value = '';  // sempre reseta seleção do filho
+    void wasDisabled;
   }
   const examSel = panel.querySelector('[data-bf="exam"]');
-  if(examSel) examSel.addEventListener('change', function(){ clearChildren(['[data-bf="subject"]']); });
+  const subjSel = panel.querySelector('[data-bf="subject"]');
+  if(examSel && subjSel){
+    examSel.addEventListener('change', function(){
+      const newOpts = window.BankFilters.availableSubjects(examSel.value || null);
+      repopulateSelect(subjSel, newOpts, examSel.value ? 'Todas as matérias do concurso' : 'Todas as matérias');
+    });
+  }
   const t1Sel = panel.querySelector('[data-bf="topic1"]');
-  if(t1Sel) t1Sel.addEventListener('change', function(){ clearChildren(['[data-bf="topic2"]','[data-bf="topic3"]']); });
   const t2Sel = panel.querySelector('[data-bf="topic2"]');
-  if(t2Sel) t2Sel.addEventListener('change', function(){ clearChildren(['[data-bf="topic3"]']); });
+  const t3Sel = panel.querySelector('[data-bf="topic3"]');
+  if(t1Sel && t2Sel){
+    t1Sel.addEventListener('change', function(){
+      const newOpts = t1Sel.value ? window.BankFilters.availableEditalTopics(t1Sel.value) : [];
+      repopulateSelect(t2Sel, newOpts, 'Qualquer subtópico');
+      if(t3Sel) repopulateSelect(t3Sel, [], 'Qualquer subsubtópico');
+    });
+  }
+  if(t2Sel && t3Sel){
+    t2Sel.addEventListener('change', function(){
+      const newOpts = t2Sel.value ? window.BankFilters.availableEditalTopics(t2Sel.value) : [];
+      repopulateSelect(t3Sel, newOpts, 'Qualquer subsubtópico');
+    });
+  }
 }
 
 /* PORTAL DETAIL (module-scoped — kept for backward compat) */
