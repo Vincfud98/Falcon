@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=45"></script>
+<script src="ubique-shared.js?v=46"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -18483,10 +18483,11 @@ function _bankParseFilters(routeQuery){
   return {
     keyword:   String(q.k || '').trim(),
     exam:      String(q.exam || ''),
-    subject:   String(q.subject || ''),
-    topic1:    String(q.t1 || ''),
-    topic2:    String(q.t2 || ''),
-    topic3:    String(q.t3 || ''),
+    // f.subject removido — "Matéria" agora é o nível 0 da árvore do edital
+    // (topic1), eliminando a redundância subjects vs edital top-level.
+    topic1:    String(q.t1 || ''),  // Matéria (= top-level do edital)
+    topic2:    String(q.t2 || ''),  // Tópico
+    topic3:    String(q.t3 || ''),  // Subtópico
     tags:      splitCSV(q.tags),
     origem:    String(q.origem || ''),  // 'past_exam' | 'ubique' | ''
     status:    splitCSV(q.status),       // ['unanswered','right',...]
@@ -18498,7 +18499,6 @@ function _bankFiltersToQuery(f, applied){
   const out = {};
   if(f.keyword)     out.k = f.keyword;
   if(f.exam)        out.exam = f.exam;
-  if(f.subject)     out.subject = f.subject;
   if(f.topic1)      out.t1 = f.topic1;
   if(f.topic2)      out.t2 = f.topic2;
   if(f.topic3)      out.t3 = f.topic3;
@@ -18557,11 +18557,28 @@ function _bankBuildUnitContext(){
   const editais = (store.editais && store.editais.list && store.editais.list()) || [];
   const editalTopics = (store.edital_topics && store.edital_topics.list && store.edital_topics.list()) || [];
   const exams = (store.exams && store.exams.list && store.exams.list()) || [];
+  const subjects = (store.subjects && store.subjects.list && store.subjects.list()) || [];
 
   const modById = {}; modules.forEach(function(m){ modById[m.id] = m; });
   const chapById = {}; chapters.forEach(function(c){ chapById[c.id] = c; });
   const editalById = {}; editais.forEach(function(e){ editalById[e.id] = e; });
   const editalTopicById = {}; editalTopics.forEach(function(t){ editalTopicById[t.id] = t; });
+  const subjectById = {}; subjects.forEach(function(s){ subjectById[s.id] = s; });
+
+  // Normaliza string pra match por nome (lowercase + sem acentos + trim)
+  function _norm(s){
+    return String(s||'').toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/\s+/g, ' ').trim();
+  }
+  // Pré-indexa edital_topics por (edital_id + parent_id + título normalizado)
+  // pra match por nome de subject (top-level) e module (nível 1).
+  const topicsByEditalParentName = {};  // key: edital_id|parent_id|normName → topic
+  editalTopics.forEach(function(t){
+    if(!t) return;
+    const key = String(t.edital_id) + '|' + String(t.parent_id || '') + '|' + _norm(t.title);
+    topicsByEditalParentName[key] = t;
+  });
 
   // edital_id → [exam_id, …] — derivado por:
   //  a) campo explícito `e.exam_id` (futuro)
@@ -18604,13 +18621,64 @@ function _bankBuildUnitContext(){
     const moduleId = u.module_id != null ? u.module_id : (chap ? chap.module_id : null);
     const mod = moduleId != null ? modById[moduleId] : null;
     const subjectId = mod && mod.subject_id != null ? mod.subject_id : null;
-    // Mapeia também por _origMockId (ex.: 'u1') pra casar com appears_in
-    // antigos que usam o id mock string.
-    const editalIds = editalByUnit[String(u.id)] || editalByUnit[String(u._origMockId||'')] || [];
-    const examIds = examIdsByUnit[String(u.id)] || examIdsByUnit[String(u._origMockId||'')] || [];
+    const subject = subjectId != null ? subjectById[subjectId] : null;
+    const subjectName = subject ? (subject.subject || subject.name || '') : '';
+    const moduleName = mod ? (mod.title || '') : '';
+
+    // VÍNCULO EXPLÍCITO via edital_topic_units
+    const directEdital = (editalByUnit[String(u.id)] || editalByUnit[String(u._origMockId||'')] || []).slice();
+
+    // VÍNCULO IMPLÍCITO por nome (resolve o gap quando admin não popula
+    // edital_topic_units pra cada unidade):
+    //   a) top-level: subject.subject == edital_topic.title  (parent=null)
+    //   b) nível-1:   module.title == edital_topic.title    (parent=top-match)
+    // Aplica em CADA edital cadastrado — uma unidade pode estar vinculada
+    // implicitamente a múltiplos editais (concursos diferentes).
+    const implicitEdital = [];
+    if(subjectName){
+      editais.forEach(function(e){
+        // (a) Top-level match: subject.subject == topic.title (parent=null)
+        const topKey = String(e.id) + '|' + '' + '|' + _norm(subjectName);
+        const topTopic = topicsByEditalParentName[topKey];
+        if(topTopic){
+          if(directEdital.indexOf(String(topTopic.id)) < 0 && implicitEdital.indexOf(String(topTopic.id)) < 0){
+            implicitEdital.push(String(topTopic.id));
+          }
+          // (b) Nível-1 match dentro do top: module.title == topic.title
+          if(moduleName){
+            const lv1Key = String(e.id) + '|' + String(topTopic.id) + '|' + _norm(moduleName);
+            const lv1Topic = topicsByEditalParentName[lv1Key];
+            if(lv1Topic){
+              if(directEdital.indexOf(String(lv1Topic.id)) < 0 && implicitEdital.indexOf(String(lv1Topic.id)) < 0){
+                implicitEdital.push(String(lv1Topic.id));
+              }
+            }
+          }
+        }
+      });
+    }
+    // União: explícitos + implícitos
+    const allEditalIds = directEdital.concat(implicitEdital);
+
+    // exam_ids derivado de TODOS os edital_topic_ids (explícitos+implícitos)
+    const examIdsForUnit = (examIdsByUnit[String(u.id)] || examIdsByUnit[String(u._origMockId||'')] || []).slice();
+    implicitEdital.forEach(function(tid){
+      const t = editalTopicById[Number(tid)] || editalTopicById[tid];
+      if(t && t.edital_id != null){
+        const examsForEdital = examIdsByEdital[t.edital_id] || [];
+        examsForEdital.forEach(function(xid){
+          if(examIdsForUnit.indexOf(xid) < 0) examIdsForUnit.push(xid);
+        });
+      }
+    });
+
     const entry = {
       unit_id: u.id, module_id: moduleId, chapter_id: chap ? chap.id : null,
-      subject_id: subjectId, edital_topic_ids: editalIds, exam_ids: examIds
+      subject_id: subjectId,
+      edital_topic_ids: allEditalIds,
+      edital_topic_ids_direct: directEdital,
+      edital_topic_ids_implicit: implicitEdital,
+      exam_ids: examIdsForUnit
     };
     ctx[String(u.id)] = entry;
     if(u._origMockId) ctx[String(u._origMockId)] = entry;  // alias mock
@@ -18676,22 +18744,10 @@ function _bankApplyFilters(items, f, opts){
       return false;
     });
   }
-  // MATÉRIA — resolve via appears_in[].unit_id → chapter → module → subject_id.
-  // Fallback: campo explícito q.subject_id ou q.exam_subject_id se admin setou.
-  if(f.subject){
-    const target = String(f.subject);
-    out = out.filter(function(q){
-      if(q.subject_id != null && String(q.subject_id) === target) return true;
-      if(q.exam_subject_id != null && String(q.exam_subject_id) === target) return true;
-      const unitIds = _bankQuestionUnitIds(q);
-      for(let i = 0; i < unitIds.length; i++){
-        const c = ctx[unitIds[i]];
-        if(c && c.subject_id != null && String(c.subject_id) === target) return true;
-      }
-      return false;
-    });
-  }
-  // EDITAL — Tópico → Subtópico → Subsubtópico. Aplica o nó mais profundo
+  // (filtro de Matéria standalone removido — Matéria agora é o top-level
+  // da árvore do edital, capturado por f.topic1 abaixo)
+
+  // EDITAL — Matéria → Tópico → Subtópico. Aplica o nó mais profundo
   // informado e checa se a questão está em UMA unidade vinculada a algum
   // descendente desse nó.
   const editalNode = f.topic3 || f.topic2 || f.topic1;
@@ -18740,14 +18796,14 @@ function _bankApplyFilters(items, f, opts){
    completa (pré-filtragem) — usada para detectar quais filtros têm
    dado pra mostrar. `f` é o estado atual dos filtros (parsed). */
 function _renderBankFilterPanel(bankItems, f, isEssay){
-  // ARQUITETURA (pós-redundância):
-  //   Seção 1 — Onde eu estudo:  Matéria
-  //   Seção 2 — O que o concurso cobra:  Concurso → Tópico → Subtópico → Subsubtópico
-  //   Seção 3 — Refinar:  Origem, Dificuldade, Status (só questões)
-  //   Tags fica abaixo (cross-cutting, multi-AND)
-  // Edital topics são filtrados pelo Concurso selecionado (escopo correto).
+  // ARQUITETURA V3 (sem redundância):
+  //   Seção 1 — Concurso e edital:
+  //     Concurso → Matéria (=top-level) → Tópico (=nível 1) → Subtópico (=nível 2)
+  //     Tudo é UMA mesma árvore: edital_topics escopados pelo concurso.
+  //     Esse fluxo respeita a hierarquia real: concurso > matéria > tópicos.
+  //   Seção 2 — Refinar:  Origem, Dificuldade, Status (só questões)
+  //   Seção 3 — Tags (cross-cutting, multi-AND)
   const exams = BankFilters.availableExams();
-  const subjects = BankFilters.availableSubjects(f.exam);
   const topics1 = BankFilters.availableEditalTopics(null, f.exam || null);
   const topics2 = f.topic1 ? BankFilters.availableEditalTopics(f.topic1, f.exam || null) : [];
   const topics3 = f.topic2 ? BankFilters.availableEditalTopics(f.topic2, f.exam || null) : [];
@@ -18819,8 +18875,8 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
   }
 
   const editalHint = f.exam
-    ? 'Hierárquico: vincular a um subtópico cobre tudo abaixo dele.'
-    : 'Escolha um concurso pra ver os tópicos do edital correspondente.';
+    ? 'Cascata: vincular a um subtópico cobre tudo abaixo dele.'
+    : 'Escolha um concurso pra ver as matérias e tópicos do edital.';
 
   return '<form class="bf-panel" id="bankFilterPanel" onsubmit="return false">'+
     '<header class="bf-panel-head">'+
@@ -18832,18 +18888,13 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
       '<label class="bf-label">Palavras-chave</label>'+
       '<textarea class="bf-textarea" data-bf="keyword" placeholder="Busca no enunciado, nas alternativas e nos comentários…" rows="2">'+Util.esc(f.keyword||'')+'</textarea>'+
     '</div>'+
-    // ─── Onde eu estudo ───
-    sectionHead('Onde eu estudo', 'A matéria interna da Ubique (História do Brasil, Geografia, …)') +
-    '<div class="bf-grid">'+
-      buildSelect('subject', f.subject, subjects, { label:'Matéria', empty: f.exam ? 'Todas as matérias do concurso' : 'Todas as matérias' })+
-    '</div>'+
-    // ─── O que o concurso cobra ───
-    sectionHead('O que o concurso cobra', editalHint) +
+    // ─── Concurso e edital (cascata: Concurso → Matéria → Tópico → Subtópico) ───
+    sectionHead('Concurso e edital', editalHint) +
     '<div class="bf-grid">'+
       buildSelect('exam', f.exam, exams, { label:'Concurso', empty:'Todos os concursos' })+
-      buildSelect('topic1', f.topic1, topics1, { label:'Tópico do edital', empty:'Qualquer tópico' })+
-      buildSelect('topic2', f.topic2, topics2, { label:'Subtópico', empty:'Qualquer subtópico' })+
-      buildSelect('topic3', f.topic3, topics3, { label:'Subsubtópico', empty:'Qualquer subsubtópico' })+
+      buildSelect('topic1', f.topic1, topics1, { label:'Matéria', empty: f.exam ? 'Todas as matérias' : '— Escolha o concurso primeiro —' })+
+      buildSelect('topic2', f.topic2, topics2, { label:'Tópico', empty: f.topic1 ? 'Qualquer tópico' : '— Escolha a matéria primeiro —' })+
+      buildSelect('topic3', f.topic3, topics3, { label:'Subtópico', empty: f.topic2 ? 'Qualquer subtópico' : '— Escolha o tópico primeiro —' })+
     '</div>'+
     // ─── Refinar ───
     sectionHead('Refinar', 'Filtros adicionais opcionais') +
@@ -19137,7 +19188,6 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
     const f = {
       keyword:     (panel.querySelector('[data-bf="keyword"]')||{}).value || '',
       exam:        (panel.querySelector('[data-bf="exam"]')||{}).value || '',
-      subject:     (panel.querySelector('[data-bf="subject"]')||{}).value || '',
       topic1:      (panel.querySelector('[data-bf="topic1"]')||{}).value || '',
       topic2:      (panel.querySelector('[data-bf="topic2"]')||{}).value || '',
       topic3:      (panel.querySelector('[data-bf="topic3"]')||{}).value || '',
@@ -19203,40 +19253,35 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
     void wasDisabled;
   }
   const examSel = panel.querySelector('[data-bf="exam"]');
-  const subjSel = panel.querySelector('[data-bf="subject"]');
-  const t1Sel = panel.querySelector('[data-bf="topic1"]');
-  const t2Sel = panel.querySelector('[data-bf="topic2"]');
-  const t3Sel = panel.querySelector('[data-bf="topic3"]');
-  // Mudar Concurso reseta MATÉRIA (interseção via exam_subjects) E
-  // ÁRVORE DO EDITAL (porque agora topics são escopados pelo exam).
+  const t1Sel = panel.querySelector('[data-bf="topic1"]');  // Matéria
+  const t2Sel = panel.querySelector('[data-bf="topic2"]');  // Tópico
+  const t3Sel = panel.querySelector('[data-bf="topic3"]');  // Subtópico
+  // Cascata estrita: Concurso → Matéria (top-level) → Tópico → Subtópico.
+  // Mudar um nível reseta tudo abaixo.
   if(examSel){
     examSel.addEventListener('change', function(){
       const examId = examSel.value || null;
-      if(subjSel){
-        const newSubjects = window.BankFilters.availableSubjects(examId);
-        repopulateSelect(subjSel, newSubjects, examId ? 'Todas as matérias do concurso' : 'Todas as matérias');
-      }
       if(t1Sel){
         const newTopics = window.BankFilters.availableEditalTopics(null, examId);
-        repopulateSelect(t1Sel, newTopics, 'Qualquer tópico');
+        repopulateSelect(t1Sel, newTopics, examId ? 'Todas as matérias' : '— Escolha o concurso primeiro —');
       }
-      if(t2Sel) repopulateSelect(t2Sel, [], 'Qualquer subtópico');
-      if(t3Sel) repopulateSelect(t3Sel, [], 'Qualquer subsubtópico');
+      if(t2Sel) repopulateSelect(t2Sel, [], examId ? '— Escolha a matéria primeiro —' : '— Escolha o concurso primeiro —');
+      if(t3Sel) repopulateSelect(t3Sel, [], '— Escolha o tópico primeiro —');
     });
   }
   if(t1Sel && t2Sel){
     t1Sel.addEventListener('change', function(){
       const examId = examSel ? (examSel.value || null) : null;
       const newOpts = t1Sel.value ? window.BankFilters.availableEditalTopics(t1Sel.value, examId) : [];
-      repopulateSelect(t2Sel, newOpts, 'Qualquer subtópico');
-      if(t3Sel) repopulateSelect(t3Sel, [], 'Qualquer subsubtópico');
+      repopulateSelect(t2Sel, newOpts, t1Sel.value ? 'Qualquer tópico' : '— Escolha a matéria primeiro —');
+      if(t3Sel) repopulateSelect(t3Sel, [], '— Escolha o tópico primeiro —');
     });
   }
   if(t2Sel && t3Sel){
     t2Sel.addEventListener('change', function(){
       const examId = examSel ? (examSel.value || null) : null;
       const newOpts = t2Sel.value ? window.BankFilters.availableEditalTopics(t2Sel.value, examId) : [];
-      repopulateSelect(t3Sel, newOpts, 'Qualquer subsubtópico');
+      repopulateSelect(t3Sel, newOpts, t2Sel.value ? 'Qualquer subtópico' : '— Escolha o tópico primeiro —');
     });
   }
 }
