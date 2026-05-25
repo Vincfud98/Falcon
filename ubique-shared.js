@@ -268,17 +268,12 @@
     // matéria), class_id, definitions[] (cada uma com html + examples[]) e
     // callout (HTML opcional).
     glossary_terms: [],
-    // Concursos (espelho local pra filtros do glossário em ambos os lados —
-    // o cache Supabase do admin existe à parte e edita esses mesmos ids).
-    exams: [
-      { id:'cacd',     name:'CACD',     long_name:'Concurso de Admissão à Carreira de Diplomata' },
-      { id:'enem',     name:'ENEM',     long_name:'Exame Nacional do Ensino Médio' },
-      { id:'oab',      name:'OAB',      long_name:'Exame da Ordem dos Advogados' },
-      { id:'usp',      name:'USP / FUVEST' },
-      { id:'unicamp',  name:'UNICAMP' },
-      { id:'ita',      name:'ITA' },
-      { id:'ime',      name:'IME' }
-    ],
+    // Concursos — vazio por default. O ÚNICO source-of-truth é o que o
+    // admin cadastra (UI em /admin#concursos). syncExamsToUbiqueStore
+    // (admin.html, chamado por loadExams) espelha o cache do Supabase
+    // pra cá. Não pré-populamos mocks pra evitar mostrar concursos
+    // inexistentes no dropdown do aluno.
+    exams: [],
     // Relação concurso ↔ matéria. Quando vazio para um concurso, o filtro
     // exibe TODAS as matérias (degradação graciosa — admin popula via UI
     // de Concursos quando quiser refinar).
@@ -381,6 +376,27 @@
 
   // ── INIT ──
   _state = loadFromStorage();
+
+  // ─── Migração one-shot: limpa mocks legados de `exams` ───
+  // Versões anteriores do seed populavam `exams` com 7 entries fake
+  // (CACD/ENEM/OAB/USP/UNICAMP/ITA/IME). Agora o seed é [], e o admin
+  // é o source-of-truth via Supabase sync. Esta migração roda UMA vez
+  // por browser pra limpar a sujeira legada.
+  try {
+    const CLEANUP_FLAG = 'ubique.exams_seed_cleanup.v1';
+    if(typeof window !== 'undefined' && window.localStorage &&
+       !window.localStorage.getItem(CLEANUP_FLAG)){
+      if(Array.isArray(_state.exams) && _state.exams.length){
+        // Wipe geral — admin's syncExamsToUbiqueStore (admin.html) re-popula
+        // a partir do Supabase na próxima carga da página Concursos.
+        const wipedCount = _state.exams.length;
+        _state.exams = [];
+        try{ localStorage.setItem(STORE_KEY, JSON.stringify(_state)); }catch(_){}
+        console.log('[ubique-cleanup] removidos ' + wipedCount + ' mocks legados de exams. Admin precisa rodar a sync via /admin#concursos.');
+      }
+      window.localStorage.setItem(CLEANUP_FLAG, '1');
+    }
+  } catch(e){ console.warn('[ubique-cleanup] error:', e); }
 
   // Cross-tab sync via 'storage' event
   if(typeof window !== 'undefined'){
