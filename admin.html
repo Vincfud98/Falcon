@@ -12351,7 +12351,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=72"></script>
+<script src="ubique-shared.js?v=73"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -45935,7 +45935,7 @@
       alert('Crie ou selecione uma seção antes de adicionar blocos.');
       return;
     }
-    const payload = {
+    const localPayload = {
       unit_id: ueCurrentUnitId,
       section_id: _ueCurrentSectionId,
       type: type,
@@ -45944,17 +45944,40 @@
       content: {},
       status: 'draft',
     };
+    // Tabela conteudo.unit_blocks não tem coluna `status` — remove pro Supabase
+    const supaPayload = {
+      unit_id: localPayload.unit_id,
+      section_id: localPayload.section_id,
+      type: localPayload.type,
+      title: localPayload.title,
+      position: localPayload.position,
+      content: localPayload.content,
+    };
+
     let data = null;
-    // 1. UbiqueStore (sempre)
-    if(window.UbiqueStore){
-      data = UbiqueStore.unit_blocks.add(payload);
-    }
-    // 2. Supabase opcional
+    // CREATE — Supabase primeiro pra pegar o ID real
     if(window.UBIQUE_USE_SUPABASE){
       try{
-        const res = await conteudo().from('unit_blocks').insert(payload).select().single();
-        if(!res.error && res.data) data = res.data;
-      }catch(_){}
+        const { data: row, error } = await conteudo()
+          .from('unit_blocks').insert(supaPayload).select().single();
+        if(error){
+          console.error('[Supabase] unit_blocks.insert falhou:', error);
+          alert('Erro ao criar bloco no Supabase: ' + error.message);
+          return;
+        }
+        data = row;
+      }catch(e){
+        console.error('[Supabase] unit_blocks.insert exception:', e);
+        alert('Erro de rede ao criar bloco: ' + e.message);
+        return;
+      }
+    }
+    if(window.UbiqueStore){
+      const localWithId = data && data.id != null
+        ? Object.assign({}, localPayload, { id: data.id })
+        : localPayload;
+      const added = UbiqueStore.unit_blocks.add(localWithId);
+      if(!data) data = added; // fallback se Supabase off
     }
     if(!data){ alert('Falha ao criar bloco.'); return; }
     ueAllBlocksCache.push(data);
@@ -46017,14 +46040,26 @@
     const updates = { title: title, status: status, content: content };
     // Y3: tags vivem em b.tags (root do bloco) — preserva ao salvar
     if(Array.isArray(b.tags)) updates.tags = b.tags;
-    if(window.UbiqueStore){
-      UbiqueStore.unit_blocks.update(bid, updates);
-    }
+    // Supabase: omite `status` (coluna não existe na tabela conteudo.unit_blocks)
+    const supaUpdates = { title: updates.title, content: updates.content };
+    if(Array.isArray(updates.tags)) supaUpdates.tags = updates.tags;
+
     if(window.UBIQUE_USE_SUPABASE){
       try{
-        const { error } = await conteudo().from('unit_blocks').update(updates).eq('id', bid);
-        if(error) console.warn('[unit_blocks.save] Supabase:', error.message);
-      }catch(_){}
+        const { error } = await conteudo().from('unit_blocks').update(supaUpdates).eq('id', bid);
+        if(error){
+          console.error('[Supabase] unit_blocks.update falhou:', error);
+          alert('Erro ao salvar bloco no Supabase: ' + error.message);
+          return;
+        }
+      }catch(e){
+        console.error('[Supabase] unit_blocks.update exception:', e);
+        alert('Erro de rede ao salvar bloco: ' + e.message);
+        return;
+      }
+    }
+    if(window.UbiqueStore){
+      UbiqueStore.unit_blocks.update(bid, updates);
     }
     Object.assign(b, updates);
     // mantém ueAllBlocksCache em sincronia
@@ -46056,11 +46091,22 @@
       showMsg('ueDeleteBlockMsg','Frase incorreta.');
       return;
     }
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { error } = await conteudo().from('unit_blocks').delete().eq('id', ueDeleteTargetBlockId);
+        if(error){
+          console.error('[Supabase] unit_blocks.delete falhou:', error);
+          alert('Erro ao apagar bloco no Supabase: ' + error.message);
+          return;
+        }
+      }catch(e){
+        console.error('[Supabase] unit_blocks.delete exception:', e);
+        alert('Erro de rede ao apagar bloco: ' + e.message);
+        return;
+      }
+    }
     if(window.UbiqueStore){
       UbiqueStore.unit_blocks.remove(ueDeleteTargetBlockId);
-    }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('unit_blocks').delete().eq('id', ueDeleteTargetBlockId); }catch(_){}
     }
     document.getElementById('ueDeleteBlockModal').classList.remove('active');
     ueAllBlocksCache = ueAllBlocksCache.filter(function(b){ return b.id !== ueDeleteTargetBlockId; });
@@ -46133,7 +46179,7 @@
     const startPos = ueBlocksCache.length;
     for(let i = 0; i < items.length; i++){
       const raw = items[i];
-      const payload = {
+      const localPayload = {
         unit_id: ueCurrentUnitId,
         section_id: _ueCurrentSectionId,
         type: raw.type,
@@ -46142,13 +46188,35 @@
         status: raw.status === 'published' ? 'published' : 'draft',
         position: startPos + i,
       };
+      // Supabase omite status
+      const supaPayload = {
+        unit_id: localPayload.unit_id,
+        section_id: localPayload.section_id,
+        type: localPayload.type,
+        title: localPayload.title,
+        content: localPayload.content,
+        position: localPayload.position,
+      };
       let data = null;
-      if(window.UbiqueStore){ data = UbiqueStore.unit_blocks.add(payload); }
       if(window.UBIQUE_USE_SUPABASE){
         try{
-          const res = await conteudo().from('unit_blocks').insert(payload).select().single();
-          if(!res.error && res.data) data = res.data;
-        }catch(_){}
+          const res = await conteudo().from('unit_blocks').insert(supaPayload).select().single();
+          if(res.error){
+            console.error('[Supabase] unit_blocks bulk insert falhou no item ' + i + ':', res.error);
+            continue; // pula este item mas continua o loop
+          }
+          data = res.data;
+        }catch(e){
+          console.error('[Supabase] unit_blocks bulk insert exception no item ' + i + ':', e);
+          continue;
+        }
+      }
+      if(window.UbiqueStore){
+        const localWithId = data && data.id != null
+          ? Object.assign({}, localPayload, { id: data.id })
+          : localPayload;
+        const added = UbiqueStore.unit_blocks.add(localWithId);
+        if(!data) data = added;
       }
       if(data){
         ueAllBlocksCache.push(data);
