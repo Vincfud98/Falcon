@@ -12351,7 +12351,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=68"></script>
+<script src="ubique-shared.js?v=69"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -17014,12 +17014,23 @@
       subjectId = created.id;
     }
 
-    // Sincroniza módulos: remove os que foram apagados, atualiza/cria os existentes
+    // ─── Sincroniza MÓDULOS + CAPÍTULOS no Supabase + UbiqueStore ──────
+    // 1) Apaga módulos que sumiram do form
     const existingMods = UbiqueStore.modules.list().filter(m => m.subject_id === subjectId);
     const keptModIds = new Set(csModulesState.filter(m => m.dbId).map(m => m.dbId));
-    existingMods.forEach(m => { if(!keptModIds.has(m.id)) UbiqueStore.modules.remove(m.id); });
+    for(const m of existingMods){
+      if(!keptModIds.has(m.id)){
+        if(window.UBIQUE_USE_SUPABASE){
+          const { error } = await conteudo().from('modules').delete().eq('id', m.id);
+          if(error) console.error('[Supabase] modules.delete (cascade) falhou:', error);
+        }
+        UbiqueStore.modules.remove(m.id);
+      }
+    }
 
-    csModulesState.forEach((mod, idx) => {
+    // 2) Insere/Atualiza módulos + cascade de capítulos
+    for(let idx = 0; idx < csModulesState.length; idx++){
+      const mod = csModulesState[idx];
       const modPayload = {
         subject_id: subjectId,
         title: mod.title || `Módulo ${idx+1}`,
@@ -17031,19 +17042,54 @@
       };
       let modId;
       if(mod.dbId){
+        // UPDATE
+        if(window.UBIQUE_USE_SUPABASE){
+          const { error } = await conteudo().from('modules').update(modPayload).eq('id', mod.dbId);
+          if(error){
+            console.error('[Supabase] modules.update (cascade) falhou:', error);
+            showMsg('csModalMsg', 'Erro ao atualizar módulo no Supabase: ' + error.message);
+            return;
+          }
+        }
         UbiqueStore.modules.update(mod.dbId, modPayload);
         modId = mod.dbId;
       } else {
-        const newMod = UbiqueStore.modules.add(modPayload);
+        // INSERT — Supabase primeiro pra pegar o ID real
+        let supaId = null;
+        if(window.UBIQUE_USE_SUPABASE){
+          const { data, error } = await conteudo()
+            .from('modules').insert(modPayload).select('id').single();
+          if(error){
+            console.error('[Supabase] modules.insert (cascade) falhou:', error);
+            showMsg('csModalMsg', 'Erro ao salvar módulo no Supabase: ' + error.message);
+            return;
+          }
+          supaId = data && data.id;
+        }
+        const newMod = UbiqueStore.modules.add(
+          supaId != null ? Object.assign({}, modPayload, { id: supaId }) : modPayload
+        );
         modId = newMod.id;
+        mod.dbId = modId;  // pra próximas iterações/saves
       }
 
-      // Capítulos do módulo
+      // ─── Capítulos do módulo ───
+      // 2a) Apaga capítulos que sumiram
       const existingChs = UbiqueStore.chapters.list().filter(c => c.module_id === modId);
       const keptChIds = new Set(mod.chapters.filter(c => c.dbId).map(c => c.dbId));
-      existingChs.forEach(c => { if(!keptChIds.has(c.id)) UbiqueStore.chapters.remove(c.id); });
+      for(const c of existingChs){
+        if(!keptChIds.has(c.id)){
+          if(window.UBIQUE_USE_SUPABASE){
+            const { error } = await conteudo().from('course_chapters').delete().eq('id', c.id);
+            if(error) console.error('[Supabase] course_chapters.delete (cascade) falhou:', error);
+          }
+          UbiqueStore.chapters.remove(c.id);
+        }
+      }
 
-      mod.chapters.forEach((ch, ci) => {
+      // 2b) Insere/Atualiza capítulos
+      for(let ci = 0; ci < mod.chapters.length; ci++){
+        const ch = mod.chapters[ci];
         const chPayload = {
           module_id: modId,
           title: ch.title || `Capítulo ${ci+1}`,
@@ -17053,12 +17099,34 @@
           status: 'published',
         };
         if(ch.dbId){
+          if(window.UBIQUE_USE_SUPABASE){
+            const { error } = await conteudo().from('course_chapters').update(chPayload).eq('id', ch.dbId);
+            if(error){
+              console.error('[Supabase] course_chapters.update (cascade) falhou:', error);
+              showMsg('csModalMsg', 'Erro ao atualizar capítulo: ' + error.message);
+              return;
+            }
+          }
           UbiqueStore.chapters.update(ch.dbId, chPayload);
         } else {
-          UbiqueStore.chapters.add(chPayload);
+          let supaChId = null;
+          if(window.UBIQUE_USE_SUPABASE){
+            const { data, error } = await conteudo()
+              .from('course_chapters').insert(chPayload).select('id').single();
+            if(error){
+              console.error('[Supabase] course_chapters.insert (cascade) falhou:', error);
+              showMsg('csModalMsg', 'Erro ao salvar capítulo: ' + error.message);
+              return;
+            }
+            supaChId = data && data.id;
+          }
+          const newCh = UbiqueStore.chapters.add(
+            supaChId != null ? Object.assign({}, chPayload, { id: supaChId }) : chPayload
+          );
+          ch.dbId = newCh.id;
         }
-      });
-    });
+      }
+    }
 
     csCloseModal();
     await loadSubjects();
