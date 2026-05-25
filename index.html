@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=55"></script>
+<script src="ubique-shared.js?v=56"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -9659,36 +9659,84 @@ const Auth = (function(){
   // esperado pelo resto da app (id, email, name, role, etc.).
   async function _hydrateSupabaseUser(authUser){
     if(!authUser) return null;
-    let appUser = null, profile = null;
+    let row = null;
+    // 1) Tenta RPC pública get_my_profile (não depende de schemas expostos)
     try {
-      const r1 = await window._sb.schema('crm').from('app_users')
-        .select('id, email, full_name, nickname, role, status, metadata')
-        .eq('id', authUser.id).maybeSingle();
-      appUser = r1.data;
-      const r2 = await window._sb.schema('crm').from('user_profiles')
-        .select('user_id, display_name, handle, bio, photo_url, photo_transform')
-        .eq('user_id', authUser.id).maybeSingle();
-      profile = r2.data;
-    } catch(e){ console.warn('[auth] hydrate fetch error:', e); }
+      const r = await window._sb.rpc('get_my_profile');
+      if(r.error){
+        console.warn('[auth] RPC get_my_profile error:', r.error.message || r.error);
+      } else if(Array.isArray(r.data) && r.data.length){
+        row = r.data[0];
+        console.log('[auth] perfil carregado via RPC:', row.email, '· role=', row.role);
+      } else {
+        console.warn('[auth] RPC vazio — user em auth.users mas sem linha em crm.app_users?');
+      }
+    } catch(e){ console.warn('[auth] RPC exception:', e); }
 
-    const rawRole = (appUser && appUser.role) || 'student';
-    // Internamente, superadmin se comporta como admin (mesmo poder de UI).
+    // 2) Fallback: schema crm direto (se RPC falhou e schema estiver exposto)
+    if(!row){
+      try {
+        const r1 = await window._sb.schema('crm').from('app_users')
+          .select('id, email, full_name, nickname, role, status')
+          .eq('id', authUser.id).maybeSingle();
+        const r2 = await window._sb.schema('crm').from('user_profiles')
+          .select('user_id, display_name, handle, bio, photo_url, photo_transform')
+          .eq('user_id', authUser.id).maybeSingle();
+        if(r1.data || r2.data){
+          row = Object.assign({}, r1.data || {}, r2.data || {});
+        }
+      } catch(e){ console.warn('[auth] schema fallback error:', e); }
+    }
+
+    const rawRole = (row && row.role) || 'student';
     const role = (rawRole === 'superadmin') ? 'admin' : rawRole;
-    return {
+    const userObj = {
       id:           authUser.id,
-      email:        authUser.email || (appUser && appUser.email) || '',
-      name:         (appUser && appUser.full_name) || authUser.email || 'Usuário',
-      nickname:     (appUser && appUser.nickname) || '',
+      email:        authUser.email || (row && row.email) || '',
+      name:         (row && row.full_name) || authUser.email || 'Usuário',
+      nickname:     (row && row.nickname) || '',
       role:         role,
       landingRoute: role === 'admin' ? '#/admin' : '#/',
-      displayName:  (profile && profile.display_name) || (appUser && appUser.full_name) || '',
-      handle:       (profile && profile.handle) || '',
-      bio:          (profile && profile.bio) || '',
-      photoUrl:     (profile && profile.photo_url) || '',
-      photoTransform: (profile && profile.photo_transform) || { x:0, y:0, scale:1 },
+      displayName:  (row && row.display_name) || (row && row.full_name) || '',
+      handle:       (row && row.handle) || '',
+      bio:          (row && row.bio) || '',
+      photoUrl:     (row && row.photo_url) || '',
+      photoTransform: (row && row.photo_transform) || { x:0, y:0, scale:1 },
       _authSource:  'supabase',
       _rawRole:     rawRole
     };
+    // Espelha pro UbiqueStore.user_profiles local pra que Profile.get/
+    // Profile.needsOnboarding funcionem sem mudanças. Idempotente.
+    _mirrorProfileToLocal(userObj);
+    return userObj;
+  }
+
+  // Sync helper: copia dados do user Supabase pro UbiqueStore local.
+  // Importante pq Profile.needsOnboarding consulta local; sem isso,
+  // todo user Supabase é tratado como "precisa onboarding" → redirect
+  // infinito pra /conta.
+  function _mirrorProfileToLocal(user){
+    if(!user || !user.id || !window.UbiqueStore || !window.UbiqueStore.user_profiles) return;
+    try {
+      const list = window.UbiqueStore.user_profiles.list() || [];
+      const existing = list.find(p => p && p.user_id === user.id);
+      const merged = {
+        user_id:     user.id,
+        displayName: user.displayName || user.name || '',
+        nickname:    user.nickname || '',
+        handle:      user.handle || '',
+        bio:         user.bio || '',
+        photoUrl:    user.photoUrl || '',
+        photoTransform: user.photoTransform || { x:0, y:0, scale:1 },
+        role:        user.role || 'student',
+        updated_at:  Date.now()
+      };
+      if(existing){
+        window.UbiqueStore.user_profiles.update(existing.id, merged);
+      } else {
+        window.UbiqueStore.user_profiles.add(Object.assign({ created_at: Date.now() }, merged));
+      }
+    } catch(e){ console.warn('[auth] mirror local profile error:', e); }
   }
 
   // load() agora é async: primeiro tenta Supabase (session), depois cai
@@ -15671,8 +15719,10 @@ Renderers.login.mount = function(stageEl){
     rememberVisual.classList.toggle('active', !!rememberInput.checked);
   }
 
-  emailInput.value = 'aluno@ubique.local';
-  passwordInput.value = '123456';
+  // Prefill removido — usuário precisa digitar credenciais Supabase de verdade.
+  // Demos rápidos continuam disponíveis via "Demo Aluno / Demo Admin" abaixo.
+  emailInput.value = '';
+  passwordInput.value = '';
   rememberInput.checked = true;
   syncRemember();
 
