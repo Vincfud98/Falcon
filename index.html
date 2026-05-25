@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=54"></script>
+<script src="ubique-shared.js?v=55"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -9653,7 +9653,60 @@ const Auth = (function(){
       (remember ? localStorage : sessionStorage).setItem(SESSION_KEY, JSON.stringify({ userId:user.id }));
     }catch(e){}
   }
-  function load(){
+  // ─── Hidrata o `current` a partir de auth.users (Supabase) ────
+  // Faz join lógico com crm.app_users (role, nome) + crm.user_profiles
+  // (display_name, handle, foto). Devolve objeto com mesmo shape
+  // esperado pelo resto da app (id, email, name, role, etc.).
+  async function _hydrateSupabaseUser(authUser){
+    if(!authUser) return null;
+    let appUser = null, profile = null;
+    try {
+      const r1 = await window._sb.schema('crm').from('app_users')
+        .select('id, email, full_name, nickname, role, status, metadata')
+        .eq('id', authUser.id).maybeSingle();
+      appUser = r1.data;
+      const r2 = await window._sb.schema('crm').from('user_profiles')
+        .select('user_id, display_name, handle, bio, photo_url, photo_transform')
+        .eq('user_id', authUser.id).maybeSingle();
+      profile = r2.data;
+    } catch(e){ console.warn('[auth] hydrate fetch error:', e); }
+
+    const rawRole = (appUser && appUser.role) || 'student';
+    // Internamente, superadmin se comporta como admin (mesmo poder de UI).
+    const role = (rawRole === 'superadmin') ? 'admin' : rawRole;
+    return {
+      id:           authUser.id,
+      email:        authUser.email || (appUser && appUser.email) || '',
+      name:         (appUser && appUser.full_name) || authUser.email || 'Usuário',
+      nickname:     (appUser && appUser.nickname) || '',
+      role:         role,
+      landingRoute: role === 'admin' ? '#/admin' : '#/',
+      displayName:  (profile && profile.display_name) || (appUser && appUser.full_name) || '',
+      handle:       (profile && profile.handle) || '',
+      bio:          (profile && profile.bio) || '',
+      photoUrl:     (profile && profile.photo_url) || '',
+      photoTransform: (profile && profile.photo_transform) || { x:0, y:0, scale:1 },
+      _authSource:  'supabase',
+      _rawRole:     rawRole
+    };
+  }
+
+  // load() agora é async: primeiro tenta Supabase (session), depois cai
+  // pro AUTH_USERS legacy via localStorage. Re-dispara App.render quando
+  // a sessão Supabase volta DEPOIS do primeiro render (fluxo async).
+  async function load(){
+    // 1) Tenta Supabase session (refresh do JWT é automático no SDK)
+    if(window._sb){
+      try {
+        const { data } = await window._sb.auth.getSession();
+        if(data && data.session && data.session.user){
+          current = await _hydrateSupabaseUser(data.session.user);
+          syncMockUser();
+          return current;
+        }
+      } catch(e){ console.warn('[auth] load supabase error:', e); }
+    }
+    // 2) Fallback: localStorage + AUTH_USERS (modo dev/mock)
     try{
       const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
       if(!raw){ current = null; syncMockUser(); return null; }
@@ -9668,20 +9721,60 @@ const Auth = (function(){
       return null;
     }
   }
-  function login(email, password, remember){
+
+  // login() async: tenta Supabase primeiro. Se credenciais válidas,
+  // hidrata via app_users + user_profiles. Senão, cai pro AUTH_USERS
+  // (legacy, mantido por compat com demos hardcoded).
+  async function login(email, password, remember){
     const normalizedEmail = String(email||'').trim().toLowerCase();
+
+    // 1) Supabase Auth
+    if(window._sb){
+      try {
+        const { data, error } = await window._sb.auth.signInWithPassword({
+          email: normalizedEmail, password: String(password||'')
+        });
+        if(!error && data && data.user){
+          current = await _hydrateSupabaseUser(data.user);
+          syncMockUser();
+          persist(current, !!remember);
+          if(current.role === 'admin'){
+            try{ localStorage.setItem('ubique.admin.token', JSON.stringify({ email:current.email, name:current.name||'', ts:Date.now() })); }catch(_){}
+          }
+          return { ok:true, user:current };
+        }
+        // Erro explícito de credenciais → NÃO faz fallback (evita ambiguidade
+        // entre "senha errada no Supabase" vs "user só existe local")
+        if(error){
+          const msg = String(error.message||'');
+          if(/invalid|not found|password|credentials/i.test(msg)){
+            return { ok:false, message:'Email ou senha incorretos.' };
+          }
+          // Outros erros (rede, RLS bug, etc.) → tenta legacy abaixo
+          console.warn('[auth] supabase login fail (tentando legacy):', error);
+        }
+      } catch(e){
+        console.warn('[auth] supabase login exception:', e);
+      }
+    }
+
+    // 2) Fallback legacy (AUTH_USERS hardcoded)
     const match = users.find(user => user.email.toLowerCase() === normalizedEmail && user.password === String(password||''));
-    if(!match) return { ok:false, message:'Credenciais inválidas. Use um dos acessos informados ao lado.' };
-    current = publicUser(match);
+    if(!match) return { ok:false, message:'Email ou senha incorretos.' };
+    current = Object.assign({}, publicUser(match), { _authSource:'legacy' });
     syncMockUser();
     persist(current, !!remember);
-    // Se for admin, guarda token de sessão admin para o admin.html usar
     if(current.role === 'admin'){
       try{ localStorage.setItem('ubique.admin.token', JSON.stringify({ email:current.email, name:current.name||'', ts:Date.now() })); }catch(_){}
     }
     return { ok:true, user:current };
   }
-  function logout(){
+
+  // logout() async: signOut no Supabase + limpa state local.
+  async function logout(){
+    if(window._sb){
+      try { await window._sb.auth.signOut(); } catch(_){}
+    }
     current = null;
     syncMockUser();
     persist(null);
@@ -9826,12 +9919,47 @@ const Auth = (function(){
   }
 
   const _origLogout = logout;
-  function logout(){
-    _origLogout();
+  async function logout(){
+    await _origLogout();
     clearAccessData();
   }
 
-  load();
+  // ─── Boot: load() é async — kick off, re-render quando voltar ────
+  // App.render() inicial pode rodar ANTES da load() completar (caso
+  // o usuário tenha session Supabase). Quando a session é restaurada,
+  // disparamos um re-render pra que App.render() detecte current e
+  // pare de redirecionar pro /login.
+  load().then(() => {
+    if(current && typeof window.App !== 'undefined' && typeof window.App.render === 'function'){
+      try { window.App.render(); } catch(_){}
+    }
+  });
+
+  // ─── Auth state changes (login/logout em outras abas, expiração JWT)
+  // Mantém `current` em sync. Útil quando o aluno está em 2 abas e
+  // sai numa — a outra também desloga.
+  if(window._sb && window._sb.auth && !window._authStateBound){
+    window._authStateBound = true;
+    window._sb.auth.onAuthStateChange(async (event, session) => {
+      if(event === 'SIGNED_OUT'){
+        current = null;
+        syncMockUser();
+        if(typeof window.App !== 'undefined' && typeof window.App.render === 'function'){
+          try { window.App.render(); } catch(_){}
+        }
+      } else if(event === 'SIGNED_IN' && session && session.user){
+        // Só repopula se for diferente do atual (evita loop)
+        if(!current || current.id !== session.user.id){
+          current = await _hydrateSupabaseUser(session.user);
+          syncMockUser();
+          if(typeof window.App !== 'undefined' && typeof window.App.render === 'function'){
+            try { window.App.render(); } catch(_){}
+          }
+        }
+      }
+    });
+  }
+
   return {
     login, logout, getUser, isAdmin, canAccess, landingRoute, allUsers, load,
     checkPlatformAccess, storeAccessData, loadAccessData, canAccessModule,
@@ -15419,7 +15547,7 @@ Renderers.login.mount = function(stageEl){
   passwordInput.value = '123456';
   form.addEventListener('submit', async e => {
     e.preventDefault();
-    const result = Auth.login(emailInput.value, passwordInput.value);
+    const result = await Auth.login(emailInput.value, passwordInput.value);
     if(!result.ok){
       errorEl.style.display = 'block';
       errorEl.textContent = result.message;
@@ -15428,7 +15556,7 @@ Renderers.login.mount = function(stageEl){
     if(result.user.role !== 'admin'){
       const access = await Auth.checkPlatformAccess(result.user.email);
       if(!access.allowed){
-        Auth.logout();
+        await Auth.logout();
         errorEl.style.display = 'block';
         errorEl.textContent = access.reason === 'suspended'
           ? 'Conta suspensa. Contate o administrador.'
@@ -15562,7 +15690,7 @@ Renderers.login.mount = function(stageEl){
   // ── Demo Aluno: login direto na área do aluno ──
   demoStudentBtn?.addEventListener('click', async () => {
     demoStudentBtn.disabled = true;
-    const r = Auth.login('aluno@ubique.local', '123456', true);
+    const r = await Auth.login('aluno@ubique.local', '123456', true);
     if(!r.ok){
       errorEl.style.display = 'block';
       errorEl.textContent = r.message || 'Falha ao entrar como aluno demo.';
@@ -15576,9 +15704,9 @@ Renderers.login.mount = function(stageEl){
   });
 
   // ── Demo Admin: login + handoff de sessão para admin.html ──
-  demoAdminBtn?.addEventListener('click', () => {
+  demoAdminBtn?.addEventListener('click', async () => {
     demoAdminBtn.disabled = true;
-    const r = Auth.login('admin@ubique.local', 'admin123', true);
+    const r = await Auth.login('admin@ubique.local', 'admin123', true);
     if(!r.ok){
       errorEl.style.display = 'block';
       errorEl.textContent = r.message || 'Falha ao entrar como admin demo.';
@@ -15598,7 +15726,7 @@ Renderers.login.mount = function(stageEl){
     e.preventDefault();
     submitBtn.disabled = true;
     submitBtn.textContent = 'Verificando...';
-    const result = Auth.login(emailInput.value, passwordInput.value, rememberInput.checked);
+    const result = await Auth.login(emailInput.value, passwordInput.value, rememberInput.checked);
     if(!result.ok){
       errorEl.style.display = 'block';
       errorEl.textContent = result.message;
@@ -23467,7 +23595,12 @@ const App = {
 window.App = App;
 
 // Logout global — bulletproof
-window.doLogout = function(){
+window.doLogout = async function(){
+  // 1) Supabase sign-out (importante pra invalidar JWT do servidor)
+  try {
+    if(window._sb && window._sb.auth) await window._sb.auth.signOut();
+  } catch(_){}
+  // 2) Limpa todos os tokens locais
   ['ubique.auth.session','ubique.platform.access','ubique.panel.handoff','ubique.admin.token'].forEach(function(k){
     try{ localStorage.removeItem(k); }catch(_){}
     try{ sessionStorage.removeItem(k); }catch(_){}
