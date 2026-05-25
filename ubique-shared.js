@@ -211,29 +211,47 @@
     essays: [],                 // pool de discursivas
     platform_access: [], // Portaria — e-mails autorizados a acessar o aluno
     // ── EDITAL ──
+    // Schema (Fase 6 V4):
+    //   editais.exam_id        → FK pra exams.id (ex.: 'cacd'). Liga o
+    //                            edital ao concurso cadastrado na plataforma.
+    //   edital_topics.subject_id → FK pra subjects.id (só faz sentido em
+    //                            tópicos top-level, parent_id=null). Liga
+    //                            o tópico nível-0 à matéria interna.
+    //   edital_topics.alias    → string opcional. Apelido/taxonomia do tema
+    //                            do edital. Aparece ao lado do title.
+    //   (Vínculo unidade↔tópico continua via edital_topic_units.)
     editais: [
       { id: 1, name: 'CACD 2026', year: 2026, slug: 'cacd-2026',
+        exam_id: 'cacd',
         description: 'Concurso de Admissão à Carreira de Diplomata — edital 2026',
         status: 'published', created_at: new Date().toISOString() }
     ],
     edital_topics: [
-      // 1 — Política Internacional
+      // 1 — Política Internacional (top-level, vincula à matéria "Política Internacional")
       { id:1, edital_id:1, parent_id:null, code:'1', title:'Política Internacional',
+        subject_id:3, alias:'',
         description:'Teorias, atores e dinâmicas das relações internacionais', position:0 },
       { id:2, edital_id:1, parent_id:1, code:'1.1', title:'Teorias de RI',
+        alias:'',
         description:'Realismo, liberalismo, construtivismo', position:0 },
       { id:3, edital_id:1, parent_id:2, code:'1.1.1', title:'Realismo clássico',
+        alias:'',
         description:'Hans Morgenthau e o conceito de poder', position:0 },
       { id:4, edital_id:1, parent_id:2, code:'1.1.2', title:'Liberalismo institucional',
+        alias:'',
         description:'Keohane, Nye e a interdependência complexa', position:1 },
       { id:5, edital_id:1, parent_id:1, code:'1.2', title:'Política Externa Brasileira',
+        alias:'PEB',
         description:'PEB do Império aos dias atuais', position:1 },
-      // 2 — História do Brasil
+      // 2 — História do Brasil (top-level, vincula à matéria "História do Brasil")
       { id:6, edital_id:1, parent_id:null, code:'2', title:'História do Brasil',
+        subject_id:1, alias:'',
         description:'Da colonização ao período republicano', position:1 },
       { id:7, edital_id:1, parent_id:6, code:'2.1', title:'Brasil Colônia',
+        alias:'Período Colonial',
         description:'1500–1822', position:0 },
       { id:8, edital_id:1, parent_id:6, code:'2.2', title:'Brasil Império',
+        alias:'',
         description:'1822–1889', position:1 },
     ],
     edital_topic_units: [

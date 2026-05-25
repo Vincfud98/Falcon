@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=46"></script>
+<script src="ubique-shared.js?v=47"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -18426,7 +18426,7 @@ const BankFilters = (function(){
       return String(t.parent_id) === String(parentId);
     });
     return filteredByParent.map(function(t){
-      return { id: t.id, code: t.code || '', title: t.title || ('Tópico '+t.id) };
+      return { id: t.id, code: t.code || '', title: t.title || ('Tópico '+t.id), alias: t.alias || '' };
     }).sort(function(a,b){
       // Ordena por code numérico (1, 1.1, 1.2, 2…)
       const ca = String(a.code||''); const cb = String(b.code||'');
@@ -18574,10 +18574,17 @@ function _bankBuildUnitContext(){
   // Pré-indexa edital_topics por (edital_id + parent_id + título normalizado)
   // pra match por nome de subject (top-level) e module (nível 1).
   const topicsByEditalParentName = {};  // key: edital_id|parent_id|normName → topic
+  // Índice paralelo por subject_id (FK explícito do admin). Quando setado,
+  // tem PRIORIDADE sobre o name-match. Só faz sentido em top-level.
+  const topicsByEditalSubjectId = {};  // key: edital_id|subject_id → top-level topic
   editalTopics.forEach(function(t){
     if(!t) return;
     const key = String(t.edital_id) + '|' + String(t.parent_id || '') + '|' + _norm(t.title);
     topicsByEditalParentName[key] = t;
+    if(t.subject_id != null && t.parent_id == null){
+      const sKey = String(t.edital_id) + '|' + String(t.subject_id);
+      topicsByEditalSubjectId[sKey] = t;
+    }
   });
 
   // edital_id → [exam_id, …] — derivado por:
@@ -18628,18 +18635,26 @@ function _bankBuildUnitContext(){
     // VÍNCULO EXPLÍCITO via edital_topic_units
     const directEdital = (editalByUnit[String(u.id)] || editalByUnit[String(u._origMockId||'')] || []).slice();
 
-    // VÍNCULO IMPLÍCITO por nome (resolve o gap quando admin não popula
-    // edital_topic_units pra cada unidade):
-    //   a) top-level: subject.subject == edital_topic.title  (parent=null)
-    //   b) nível-1:   module.title == edital_topic.title    (parent=top-match)
+    // VÍNCULO IMPLÍCITO (resolve o gap quando admin não popula
+    // edital_topic_units pra cada unidade). Duas camadas, FK > name-match:
+    //   a) top-level: edital_topic.subject_id == unit.subject_id  (PREFERIDO)
+    //                 OU fallback: subject.subject == edital_topic.title
+    //   b) nível-1:   module.title == edital_topic.title (name-match dentro
+    //                 do top match)
     // Aplica em CADA edital cadastrado — uma unidade pode estar vinculada
     // implicitamente a múltiplos editais (concursos diferentes).
     const implicitEdital = [];
-    if(subjectName){
+    if(subjectId != null || subjectName){
       editais.forEach(function(e){
-        // (a) Top-level match: subject.subject == topic.title (parent=null)
-        const topKey = String(e.id) + '|' + '' + '|' + _norm(subjectName);
-        const topTopic = topicsByEditalParentName[topKey];
+        // (a) Top-level match — tenta FK primeiro, fallback pra name match
+        let topTopic = null;
+        if(subjectId != null){
+          topTopic = topicsByEditalSubjectId[String(e.id) + '|' + String(subjectId)] || null;
+        }
+        if(!topTopic && subjectName){
+          const topKey = String(e.id) + '|' + '' + '|' + _norm(subjectName);
+          topTopic = topicsByEditalParentName[topKey] || null;
+        }
         if(topTopic){
           if(directEdital.indexOf(String(topTopic.id)) < 0 && implicitEdital.indexOf(String(topTopic.id)) < 0){
             implicitEdital.push(String(topTopic.id));
@@ -18822,7 +18837,11 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
       '<select class="bf-select" data-bf="'+Util.attr(name)+'"'+disabled+'>'+
         '<option value="">'+Util.esc(placeholder.empty)+'</option>'+
         noneNote+
-        options.map(function(o){ return selOpt(o.id, (o.code? o.code+' · ':'') + (o.name||o.title||o.id), currentValue); }).join('')+
+        options.map(function(o){
+          const base = (o.code? o.code+' · ':'') + (o.name||o.title||o.id);
+          const label = o.alias ? base + '  ·  ' + o.alias : base;
+          return selOpt(o.id, label, currentValue);
+        }).join('')+
       '</select>'+
     '</div>';
   }
@@ -19245,7 +19264,8 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       options.forEach(function(o){
         const opt = document.createElement('option');
         opt.value = o.id;
-        opt.textContent = (o.code ? o.code + ' · ' : '') + (o.name || o.title || o.id);
+        const base = (o.code ? o.code + ' · ' : '') + (o.name || o.title || o.id);
+        opt.textContent = o.alias ? (base + '  ·  ' + o.alias) : base;
         sel.appendChild(opt);
       });
     }
