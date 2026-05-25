@@ -12351,7 +12351,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=69"></script>
+<script src="ubique-shared.js?v=70"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -22124,7 +22124,10 @@
       try{
         const { data, error } = await conteudo().from('units').select('*').order('position').order('id');
         if(!error && Array.isArray(data) && data.length > 0){
-          unitsCache = data;
+          // Mapeia course_chapter_id (Supabase) → chapter_id (esperado pela UI/UbiqueStore)
+          unitsCache = data.map(u => Object.assign({}, u, {
+            chapter_id: u.course_chapter_id != null ? u.course_chapter_id : u.chapter_id,
+          }));
         }
       }catch(_){}
     }
@@ -22548,7 +22551,9 @@
     const chapterId = parseInt(document.getElementById('unit-chapter-id').value);
     const title = document.getElementById('unit-title').value.trim();
     if(!title){ showMsg('unitModalMsg','Título obrigatório.'); return; }
-    const payload = {
+
+    // Payload pro UbiqueStore (usa chapter_id como referência local)
+    const localPayload = {
       chapter_id: chapterId,
       title,
       number: document.getElementById('unit-number').value.trim() || null,
@@ -22559,27 +22564,64 @@
       status: document.getElementById('unit-status').value,
       position: parseInt(document.getElementById('unit-position').value) || null,
     };
+
+    // Payload pro Supabase (course_chapter_id é a FK correta pra nossa hierarquia;
+    // chapter_id legacy fica null pra não confundir com chapters de PDF/livro)
+    const supaPayload = Object.assign({}, localPayload, {
+      course_chapter_id: chapterId,
+      chapter_id: null,
+    });
+
     let savedUnitId = id || null;
-    if(window.UbiqueStore){
-      if(id){
-        const idNum = isNaN(parseInt(id)) ? id : parseInt(id);
-        UbiqueStore.units.update(idNum, payload);
-        savedUnitId = idNum;
-      } else {
-        const created = UbiqueStore.units.add(payload);
+
+    if(id){
+      // UPDATE — Supabase primeiro
+      const idNum = isNaN(parseInt(id)) ? id : parseInt(id);
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          const { error } = await conteudo().from('units').update(supaPayload).eq('id', idNum);
+          if(error){
+            console.error('[Supabase] units.update falhou:', error);
+            showMsg('unitModalMsg', 'Erro ao atualizar no Supabase: ' + error.message);
+            return;
+          }
+        }catch(e){
+          console.error('[Supabase] units.update exception:', e);
+          showMsg('unitModalMsg', 'Erro de rede ao atualizar: ' + e.message);
+          return;
+        }
+      }
+      if(window.UbiqueStore){ UbiqueStore.units.update(idNum, localPayload); }
+      savedUnitId = idNum;
+    } else {
+      // CREATE — Supabase primeiro pra pegar o ID real
+      let supaId = null;
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          const { data, error } = await conteudo()
+            .from('units').insert(supaPayload).select('id').single();
+          if(error){
+            console.error('[Supabase] units.insert falhou:', error);
+            showMsg('unitModalMsg', 'Erro ao salvar no Supabase: ' + error.message);
+            return;
+          }
+          supaId = data && data.id;
+        }catch(e){
+          console.error('[Supabase] units.insert exception:', e);
+          showMsg('unitModalMsg', 'Erro de rede ao salvar: ' + e.message);
+          return;
+        }
+      }
+      if(window.UbiqueStore){
+        const created = UbiqueStore.units.add(
+          supaId != null ? Object.assign({}, localPayload, { id: supaId }) : localPayload
+        );
         savedUnitId = created && created.id ? created.id : savedUnitId;
+      } else if(supaId != null){
+        savedUnitId = supaId;
       }
     }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{
-        if(id){
-          await conteudo().from('units').update(payload).eq('id', id);
-        } else {
-          const { data } = await conteudo().from('units').insert(payload).select().single();
-          if(data && data.id) savedUnitId = data.id;
-        }
-      }catch(_){}
-    }
+
     document.getElementById('unitModal').classList.remove('active');
     await loadUnits();
     renderCurriculumTree();
@@ -22591,12 +22633,24 @@
   async function deleteUnit(id){
     if(!confirm('Apagar esta unidade?')) return;
     const idNum = isNaN(parseInt(id)) ? id : parseInt(id);
-    if(window.UbiqueStore){
-      UbiqueStore.units.remove(idNum);
-    }
+
+    // 1. Supabase primeiro
     if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('units').delete().eq('id', id); }catch(_){}
+      try{
+        const { error } = await conteudo().from('units').delete().eq('id', idNum);
+        if(error){
+          console.error('[Supabase] units.delete falhou:', error);
+          alert('Erro ao apagar no Supabase: ' + error.message);
+          return;
+        }
+      }catch(e){
+        console.error('[Supabase] units.delete exception:', e);
+        alert('Erro de rede ao apagar: ' + e.message);
+        return;
+      }
     }
+
+    if(window.UbiqueStore){ UbiqueStore.units.remove(idNum); }
     await loadUnits();
     renderCurriculumTree();
   }
