@@ -12351,7 +12351,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=70"></script>
+<script src="ubique-shared.js?v=71"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -16315,7 +16315,8 @@
             '<div class="card-foot" style="margin-top:.7rem;border-top:1px solid var(--accent-border-soft);padding-top:.7rem;justify-content:flex-start;gap:.4rem;flex-wrap:wrap">',
               (u.duration_min ? '<span class="card-delta" style="color:var(--text-mute)">' + u.duration_min + ' min</span>' : ''),
               '<span style="flex:1"></span>',
-              '<button class="btn btn-ghost btn-sm" onclick="openUnitEditor(' + JSON.stringify(u.id) + ')">✏ editar</button>',
+              '<button class="btn btn-ghost btn-sm" onclick="openUnitModal(' + JSON.stringify(u.chapter_id) + ',' + JSON.stringify(u.id) + ')" title="Editar nome, descrição, capa, duração, etc">⚙ propriedades</button>',
+              '<button class="btn btn-ghost btn-sm" onclick="openUnitEditor(' + JSON.stringify(u.id) + ')" title="Editor de blocos de aprendizagem">✏ editor</button>',
               '<button class="btn btn-ghost btn-sm" style="color:var(--red)" onclick="cuConfirmDeleteUnit(' + JSON.stringify(u.id) + ',\'' + esc((u.title||'').replace(/\\/g,'\\\\').replace(/\'/g,'\\\'')) + '\')">apagar</button>',
             '</div>',
           '</div>',
@@ -16427,42 +16428,87 @@
     document.getElementById('btnCreateUnitConfirm').disabled = !ok;
   }
 
-  function cuCreateUnit(){
+  async function cuCreateUnit(){
     if(!_cuSelectedChapter){ showMsg('cuModalMsg','Complete os 4 passos.'); return; }
     const title = document.getElementById('cuName').value.trim();
     if(!title){ showMsg('cuModalMsg','Nome da unidade é obrigatório.'); return; }
     const subtitle = document.getElementById('cuSubtitle').value.trim();
     const sameChap = (window.UbiqueStore && window.UbiqueStore.units.list()) || [];
     const position = sameChap.filter(function(u){return u.chapter_id === _cuSelectedChapter.id;}).length;
-    if(window.UbiqueStore){
-      UbiqueStore.units.add({
-        chapter_id: _cuSelectedChapter.id,
-        title: title,
-        subtitle: subtitle || null,
-        number: String(position + 1).padStart(2,'0'),
-        description: null,
-        cover_url: null,
-        duration_min: null,
-        status: 'draft',
-        position: position
-      });
+
+    const localPayload = {
+      chapter_id: _cuSelectedChapter.id,
+      title: title,
+      subtitle: subtitle || null,
+      number: String(position + 1).padStart(2,'0'),
+      description: null,
+      cover_url: null,
+      duration_min: null,
+      status: 'draft',
+      position: position
+    };
+    // No Supabase: course_chapter_id é a FK certa (chapter_id legacy fica null)
+    const supaPayload = Object.assign({}, localPayload, {
+      course_chapter_id: _cuSelectedChapter.id,
+      chapter_id: null,
+    });
+
+    // CREATE — Supabase primeiro pra pegar o ID real
+    let supaId = null;
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { data, error } = await conteudo()
+          .from('units').insert(supaPayload).select('id').single();
+        if(error){
+          console.error('[Supabase] units.insert (cuCreate) falhou:', error);
+          showMsg('cuModalMsg', 'Erro ao salvar no Supabase: ' + error.message);
+          return;
+        }
+        supaId = data && data.id;
+      }catch(e){
+        console.error('[Supabase] units.insert (cuCreate) exception:', e);
+        showMsg('cuModalMsg', 'Erro de rede ao salvar: ' + e.message);
+        return;
+      }
     }
+    if(window.UbiqueStore){
+      UbiqueStore.units.add(
+        supaId != null ? Object.assign({}, localPayload, { id: supaId }) : localPayload
+      );
+    }
+
     document.getElementById('createUnitModal').classList.remove('active');
-    // Reload caches e re-render
-    if(typeof loadUnits === 'function') loadUnits();
+    if(typeof loadUnits === 'function') await loadUnits();
     renderUnitCards();
     showMsg('globalMessageUnits','Unidade "' + title + '" criada.', 'success');
   }
 
-  window.cuConfirmDeleteUnit = function(unitId, title){
+  window.cuConfirmDeleteUnit = async function(unitId, title){
     if(!confirm('Apagar a unidade "' + title + '" e seus blocos? Esta ação não pode ser desfeita.')) return;
+
+    // 1. Supabase primeiro (FK cascade remove blocks/sections)
+    if(window.UBIQUE_USE_SUPABASE){
+      try{
+        const { error } = await conteudo().from('units').delete().eq('id', unitId);
+        if(error){
+          console.error('[Supabase] units.delete (cuConfirm) falhou:', error);
+          alert('Erro ao apagar no Supabase: ' + error.message);
+          return;
+        }
+      }catch(e){
+        console.error('[Supabase] units.delete (cuConfirm) exception:', e);
+        alert('Erro de rede ao apagar: ' + e.message);
+        return;
+      }
+    }
+
+    // 2. UbiqueStore — cascade local (blocks/downloads)
     if(window.UbiqueStore){
-      // Remove blocks/downloads vinculados
       UbiqueStore.unit_blocks.list().filter(function(b){return b.unit_id === unitId;}).forEach(function(b){UbiqueStore.unit_blocks.remove(b.id);});
       UbiqueStore.unit_downloads.list().filter(function(d){return d.unit_id === unitId;}).forEach(function(d){UbiqueStore.unit_downloads.remove(d.id);});
       UbiqueStore.units.remove(unitId);
     }
-    if(typeof loadUnits === 'function') loadUnits();
+    if(typeof loadUnits === 'function') await loadUnits();
     renderUnitCards();
     showMsg('globalMessageUnits','Unidade apagada.', 'success');
   };
