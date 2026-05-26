@@ -12351,7 +12351,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=77"></script>
+<script src="ubique-shared.js?v=78"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -23787,7 +23787,7 @@
   async function loadKnowledgeRecent(){
     const { data, error } = await conteudo()
       .from('knowledge_chunks')
-      .select('id, content, metadata, subject_id, source_id, chapter_id, source_kind, source_name, source_batch_id, token_count, created_at')
+      .select('id, content, metadata, subject_id, source_id, chapter_id, source_name, source_batch_id, token_count, created_at')
       .order('id', { ascending: false })
       .limit(50);
     if(error){ console.error('knowledge_chunks:', error); knowledgeCache = []; return; }
@@ -23797,7 +23797,7 @@
   async function loadKnowledgeIngestions(){
     const { data, error } = await conteudo()
       .from('knowledge_ingestions')
-      .select('id, title, description, subject_id, source_id, chapter_id, source_kind, source_name, source_file_url, source_file_path, raw_text, chunk_count, chunking_config, default_topic_ids, default_tag_ids, default_question_ids, created_at, updated_at')
+      .select('id, title, description, subject_id, source_id, chapter_id, source_name, source_file_url, source_file_path, raw_text, chunk_count, chunking_config, default_topic_ids, default_tag_ids, default_question_ids, created_at, updated_at')
       .order('created_at', { ascending: false });
     if(error){ console.error('knowledge_ingestions:', error); knowledgeIngestionsCache = []; return; }
     knowledgeIngestionsCache = data || [];
@@ -23872,10 +23872,16 @@
   }
 
   // ─── Multi-level admin: loads ───
+  // Helper: confere se ID é UUID válido (não user legacy "local-..." do AUTH_USERS)
+  const _isUUID = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
   // Permissões do usuário atual: o RLS "self read" garante que o usuário sempre
   // vê as próprias permissões, então essa chamada é segura pra qualquer perfil.
   async function loadCurrentUserPermissions(){
-    if(!currentAuthUser){ currentUserPermissions = []; return; }
+    if(!currentAuthUser || !_isUUID(currentAuthUser.id)){
+      // user legacy (AUTH_USERS) não tem UUID Supabase — pula silenciosamente
+      currentUserPermissions = []; return;
+    }
     const { data, error } = await supabase
       .from('user_permissions').select('*')
       .eq('user_id', currentAuthUser.id);
@@ -23884,14 +23890,19 @@
   }
   // Listas globais — só funcionam pra superadmin (RLS bloqueia o resto).
   async function loadAppUsers(){
-    if(!currentIsSuperadmin){ appUsersCache = []; return; }
+    // Só superadmin com UUID Supabase válido (não legacy AUTH_USERS) consegue ler
+    if(!currentIsSuperadmin || !currentAuthUser || !_isUUID(currentAuthUser.id)){
+      appUsersCache = []; return;
+    }
     const { data, error } = await supabase
       .from('app_users').select('*').order('email');
     if(error){ console.warn('app_users:', error); appUsersCache = []; return; }
     appUsersCache = data || [];
   }
   async function loadUserPermissions(){
-    if(!currentIsSuperadmin){ userPermissionsCache = []; return; }
+    if(!currentIsSuperadmin || !currentAuthUser || !_isUUID(currentAuthUser.id)){
+      userPermissionsCache = []; return;
+    }
     const { data, error } = await supabase.from('user_permissions').select('*');
     if(error){ console.warn('user_permissions (all):', error); userPermissionsCache = []; return; }
     userPermissionsCache = data || [];
@@ -23910,19 +23921,24 @@
     }
     return `Erro em bancas: ${msg}`;
   }
+  // Cache: true se já confirmamos que a tabela não existe (não tenta de novo)
+  let _platformAccessTableMissing = false;
   async function loadPlatformAccess(){
     // Modo MOCK: UbiqueStore é a fonte (funciona sem backend)
     if(window.UbiqueStore){
       platformAccessCache = UbiqueStore.platform_access.list()
         .sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
     }
-    if(window.UBIQUE_USE_SUPABASE){
+    if(window.UBIQUE_USE_SUPABASE && !_platformAccessTableMissing){
       try{
         const { data, error } = await supabase
           .from('platform_access')
           .select('*')
           .order('created_at', { ascending: false });
-        if(!error && Array.isArray(data) && data.length > 0){
+        if(error && (error.code === 'PGRST205' || /Could not find the table/i.test(error.message||''))){
+          // Tabela não existe — silencia futuras chamadas
+          _platformAccessTableMissing = true;
+        } else if(!error && Array.isArray(data) && data.length > 0){
           platformAccessCache = data;
         }
       }catch(_){}
