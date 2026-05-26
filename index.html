@@ -10467,6 +10467,92 @@ const Store = (function(){
     }catch(e){ console.warn('[hydrate answers exception]', e); }
   }
 
+  // ────────────────────────────────────────────────────────────────────
+  // Fase 4d — Sync de comentários da Discussão com Supabase
+  // Tabela: questoes.discussion_comments
+  // ────────────────────────────────────────────────────────────────────
+  async function _syncCommentToSupabase(comment, unitId, blockId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    if(!_UUID_RE.test(String(comment.id||''))) return; // só sincroniza comentários com UUID
+    try{
+      const row = {
+        id: comment.id,
+        user_id: userId,
+        unit_id: String(unitId||''),
+        block_id: String(blockId||''),
+        parent_id: (comment.parentId && _UUID_RE.test(comment.parentId)) ? comment.parentId : null,
+        text: String(comment.text||''),
+        metadata: { mentions: comment.mentions || [], author: comment.author || null }
+      };
+      const { error } = await window._sb.schema('questoes').from('discussion_comments').insert(row);
+      if(error) console.warn('[comment sync insert]', error);
+    }catch(e){ console.warn('[comment sync exception]', e); }
+  }
+
+  async function _syncCommentEditToSupabase(commentId, newText){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    if(!_UUID_RE.test(String(commentId||''))) return;
+    try{
+      const { error } = await window._sb.schema('questoes').from('discussion_comments')
+        .update({ text: String(newText||''), edited_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', commentId).eq('user_id', userId);
+      if(error) console.warn('[comment edit sync]', error);
+    }catch(e){ console.warn('[comment edit sync exception]', e); }
+  }
+
+  async function _syncCommentDeleteToSupabase(commentId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    if(!_UUID_RE.test(String(commentId||''))) return;
+    try{
+      const { error } = await window._sb.schema('questoes').from('discussion_comments')
+        .delete().eq('id', commentId).eq('user_id', userId);
+      if(error) console.warn('[comment delete sync]', error);
+    }catch(e){ console.warn('[comment delete sync exception]', e); }
+  }
+
+  /** Hidrata comentários de um bloco específico (forum aberto: lê de TODOS
+   *  os usuários, não apenas o atual). Substitui _state.comments[blockId]
+   *  com a view do Supabase. Mock comments embutidos em block.comments
+   *  continuam sendo renderizados separadamente pelo renderer. */
+  async function _hydrateCommentsForBlock(unitId, blockId){
+    if(!window._sb || !_state || !blockId) return;
+    try{
+      const { data, error } = await window._sb.schema('questoes').from('discussion_comments')
+        .select('id, user_id, unit_id, block_id, parent_id, text, edited_at, deleted_at, metadata, created_at')
+        .eq('block_id', String(blockId))
+        .is('deleted_at', null)
+        .order('created_at', { ascending: true });
+      if(error){ console.warn('[hydrate comments]', error); return; }
+      if(!_state.comments) _state.comments = {};
+      // Mantém só comentários legacy (não-UUID); os UUID são substituídos pelo DB
+      const legacy = (_state.comments[blockId] || []).filter(c => !_UUID_RE.test(String(c.id||'')));
+      const fromDb = (data || []).map(row => {
+        const meta = row.metadata || {};
+        // Resolve nome do autor via UserDirectory (cai pra "Autor" se não achar)
+        let authorName = (meta.author && typeof meta.author === 'string') ? meta.author : '';
+        if(!authorName && typeof window.UserDirectory !== 'undefined'){
+          const u = window.UserDirectory.getById(row.user_id);
+          if(u) authorName = u.nickname || u.displayName || u.handle || 'Autor';
+        }
+        return {
+          id: row.id,
+          author: authorName || 'Autor',
+          authorId: row.user_id,
+          text: row.text || '',
+          mentions: (meta.mentions && Array.isArray(meta.mentions)) ? meta.mentions : [],
+          parentId: row.parent_id || null,
+          createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+          editedAt: row.edited_at ? new Date(row.edited_at).getTime() : null
+        };
+      });
+      _state.comments[blockId] = legacy.concat(fromDb);
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate comments exception]', e); }
+  }
+
   return {
     init(userId, course){
       _key = `ubique.coursePlatform.v3.${userId}.${course.id}`;
@@ -10731,14 +10817,18 @@ const Store = (function(){
       _state.highlights = (_state.highlights||[]).filter(h => h.id !== id);
       _persist(); _emit();
     },
-    addComment(blockId, text, parentId){
+    addComment(blockId, text, parentId, unitId){
       if(!_state.comments) _state.comments = {};
       if(!_state.comments[blockId]) _state.comments[blockId] = [];
       // Resolve menções no texto pra notificar destinatários
       const mentions = (typeof window.parseMentions === 'function') ? window.parseMentions(text).mentions : [];
       const authorId = window.MOCK_USER && window.MOCK_USER.id;
+      // Gera UUID quando possível pra ser compatível com a tabela Supabase
+      const cid = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+        ? crypto.randomUUID()
+        : ('cmt'+Date.now());
       const comment = {
-        id:'cmt'+Date.now(),
+        id: cid,
         author: window.MOCK_USER.nickname || window.MOCK_USER.name,
         authorId,
         text,
@@ -10748,6 +10838,8 @@ const Store = (function(){
       };
       _state.comments[blockId].push(comment);
       _persist(); _emit();
+      // Fase 4d — fire-and-forget sync Supabase
+      _syncCommentToSupabase(comment, unitId, blockId).catch(()=>{});
       // Notifica cada mencionado (não si mesmo) — passa por UbiqueStore
       if(window.Notifications){
         const excerpt = String(text||'').slice(0, 160);
@@ -10771,11 +10863,20 @@ const Store = (function(){
       if(!_state.comments || !_state.comments[blockId]) return;
       _state.comments[blockId] = _state.comments[blockId].filter(c => c.id !== commentId);
       _persist(); _emit();
+      // Fase 4d — fire-and-forget sync Supabase
+      _syncCommentDeleteToSupabase(commentId).catch(()=>{});
     },
     editComment(blockId, commentId, newText){
       if(!_state.comments || !_state.comments[blockId]) return;
       const c = _state.comments[blockId].find(c => c.id === commentId);
-      if(c){ c.text = newText; c.editedAt = Date.now(); _persist(); _emit(); }
+      if(c){
+        c.text = newText; c.editedAt = Date.now(); _persist(); _emit();
+        // Fase 4d — fire-and-forget sync Supabase
+        _syncCommentEditToSupabase(commentId, newText).catch(()=>{});
+      }
+    },
+    hydrateCommentsForBlock(unitId, blockId){
+      return _hydrateCommentsForBlock(unitId, blockId);
     },
     unitProgress(unit){
       // Defensive: _state pode ser null quando catálogo é renderizado antes de Store.init
@@ -14245,12 +14346,18 @@ Blocks.comments = {
       }
     });
 
+    // Fase 4d — hidrata comentários do bloco a partir do Supabase
+    // (fire-and-forget; quando termina, _emit dispara re-render via App.render no listener)
+    if(Store && typeof Store.hydrateCommentsForBlock === 'function'){
+      Store.hydrateCommentsForBlock(ctx && ctx.unitId, block.id).catch(()=>{});
+    }
+
     // Post top-level comment
     wrap.querySelector('[data-action="post-comment"]').addEventListener('click', () => {
       const textarea = wrap.querySelector('.cmt-textarea');
       const text = textarea.value.trim();
       if(!text) return;
-      Store.addComment(block.id, text, null);
+      Store.addComment(block.id, text, null, ctx && ctx.unitId);
       const scrollTarget = block.id;
       App.render();
       setTimeout(() => { const el = document.querySelector('[data-block-id="'+CSS.escape(scrollTarget)+'"]'); if(el) el.scrollIntoView({block:'start'}); }, 50);
@@ -14346,7 +14453,7 @@ Blocks.comments = {
         const form = submitReply.closest('.cmt-reply-compose');
         const text = form.querySelector('.cmt-textarea').value.trim();
         if(!text) return;
-        Store.addComment(block.id, text, parentId);
+        Store.addComment(block.id, text, parentId, ctx && ctx.unitId);
         const scrollTarget2 = block.id;
         App.render();
         setTimeout(() => { const el = document.querySelector('[data-block-id="'+CSS.escape(scrollTarget2)+'"]'); if(el) el.scrollIntoView({block:'start'}); }, 50);
