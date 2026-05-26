@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=82"></script>
+<script src="ubique-shared.js?v=83"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -14849,6 +14849,9 @@ const Profile = (function(){
     }
     return _defaultFor(userId);
   }
+  // Regex pra detectar UUID v4 (user real Supabase, não Manfredo legacy)
+  const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
   function update(userId, patch){
     if(!userId || !window.UbiqueStore || !UbiqueStore.user_profiles) return null;
     const list = UbiqueStore.user_profiles.list() || [];
@@ -14859,7 +14862,37 @@ const Profile = (function(){
     } else {
       UbiqueStore.user_profiles.add(merged);
     }
+    // Fire-and-forget Supabase upsert (só se user_id é UUID Supabase real)
+    if(window.UBIQUE_USE_SUPABASE && window._sb && _UUID_RE.test(userId)){
+      _syncProfileToSupabase(userId, merged).catch(e => console.warn('[profile] supabase sync:', e));
+    }
     return merged;
+  }
+
+  async function _syncProfileToSupabase(userId, profile){
+    if(!window._sb) return;
+    // 1) Upsert em crm.user_profiles
+    const upPayload = {
+      user_id: userId,
+      display_name: profile.display_name || profile.displayName || null,
+      handle: profile.handle || null,
+      bio: profile.bio || null,
+      photo_url: profile.photo_url || profile.photoUrl || null,
+      photo_transform: profile.photo_transform || profile.photoTransform || { x:0, y:0, scale:1 },
+    };
+    const { error: e1 } = await window._sb.schema('crm').from('user_profiles')
+      .upsert(upPayload, { onConflict: 'user_id' });
+    if(e1) console.warn('[profile] user_profiles upsert error:', e1);
+
+    // 2) Atualiza crm.app_users (full_name, nickname) — só campos que mudaram
+    const auPatch = {};
+    if(profile.display_name || profile.displayName) auPatch.full_name = profile.display_name || profile.displayName;
+    if(profile.nickname) auPatch.nickname = profile.nickname;
+    if(Object.keys(auPatch).length){
+      const { error: e2 } = await window._sb.schema('crm').from('app_users')
+        .update(auPatch).eq('id', userId);
+      if(e2) console.warn('[profile] app_users update error:', e2);
+    }
   }
   function normalizeHandle(h){
     return String(h || '').toLowerCase()
@@ -15420,8 +15453,28 @@ Renderers.account.mount = function(stageEl){
   }
 
   // ── Salvar ──
+  // Helper: faz upload de avatar base64 → bucket 'avatars' → URL pública.
+  // Devolve a URL no Supabase Storage, ou null se falhar (cai pra base64 local).
+  async function _uploadAvatarToStorage(dataUrl, userId){
+    if(!window._sb || !window.UBIQUE_USE_SUPABASE) return null;
+    if(!dataUrl || !dataUrl.startsWith('data:')) return null; // só converte base64
+    try{
+      // Converte base64 → Blob
+      const res = await fetch(dataUrl);
+      const blob = await res.blob();
+      const ext = (blob.type.split('/')[1] || 'jpg').replace('jpeg','jpg');
+      // Path único por user: <userId>/avatar.<ext> (sobrescreve a cada upload)
+      const path = `${userId}/avatar.${ext}`;
+      const { error } = await window._sb.storage.from('avatars')
+        .upload(path, blob, { upsert: true, contentType: blob.type });
+      if(error){ console.warn('[avatar upload]', error); return null; }
+      const { data } = window._sb.storage.from('avatars').getPublicUrl(path);
+      return data?.publicUrl || null;
+    }catch(e){ console.warn('[avatar upload exception]', e); return null; }
+  }
+
   if(saveBtn){
-    saveBtn.addEventListener('click', () => {
+    saveBtn.addEventListener('click', async () => {
       const h = checkHandle();
       const dispName = (displayName && displayName.value || '').trim();
       const nick     = (nickname && nickname.value || '').trim();
@@ -15435,31 +15488,44 @@ Renderers.account.mount = function(stageEl){
         if(handleEl) handleEl.focus();
         return;
       }
-      const patch = {
-        displayName: dispName,
-        nickname: nick,
-        handle: h,
-        bio: bioTxt
-      };
-      if(pendingPhoto != null){
-        patch.photoUrl = pendingPhoto;
-        patch.photoTransform = pendingTransform || { x:0, y:0, scale:1 };
-      } else if(pendingPhotoRemove){
-        patch.photoUrl = '';
-        patch.photoTransform = { x:0, y:0, scale:1 };
-      }
-      Profile.update(user.id, patch);
-      pendingPhoto = null;
-      pendingTransform = null;
-      pendingPhotoRemove = false;
-      if(saveFB){
-        saveFB.textContent = '✓ Perfil salvo';
-        saveFB.className = 'account-save-feedback is-ok';
-        setTimeout(() => { if(saveFB){ saveFB.textContent = ''; saveFB.className = 'account-save-feedback'; } }, 2500);
-      }
-      // Atualiza topbar imediatamente
-      if(typeof AppShell !== 'undefined' && AppShell.syncChrome){
-        AppShell.syncChrome(Router.parse());
+      // Loading feedback
+      if(saveFB){ saveFB.textContent = 'Salvando…'; saveFB.className = 'account-save-feedback'; }
+      saveBtn.disabled = true;
+      try{
+        const patch = {
+          displayName: dispName,
+          nickname: nick,
+          handle: h,
+          bio: bioTxt
+        };
+        if(pendingPhoto != null){
+          // Se é base64, tenta upload pro Storage; senão (URL externa), mantém URL
+          let finalPhotoUrl = pendingPhoto;
+          if(pendingPhoto.startsWith('data:')){
+            const uploaded = await _uploadAvatarToStorage(pendingPhoto, user.id);
+            if(uploaded) finalPhotoUrl = uploaded;
+          }
+          patch.photoUrl = finalPhotoUrl;
+          patch.photoTransform = pendingTransform || { x:0, y:0, scale:1 };
+        } else if(pendingPhotoRemove){
+          patch.photoUrl = '';
+          patch.photoTransform = { x:0, y:0, scale:1 };
+        }
+        Profile.update(user.id, patch);
+        pendingPhoto = null;
+        pendingTransform = null;
+        pendingPhotoRemove = false;
+        if(saveFB){
+          saveFB.textContent = '✓ Perfil salvo';
+          saveFB.className = 'account-save-feedback is-ok';
+          setTimeout(() => { if(saveFB){ saveFB.textContent = ''; saveFB.className = 'account-save-feedback'; } }, 2500);
+        }
+        // Atualiza topbar imediatamente
+        if(typeof AppShell !== 'undefined' && AppShell.syncChrome){
+          AppShell.syncChrome(Router.parse());
+        }
+      } finally {
+        saveBtn.disabled = false;
       }
     });
   }
