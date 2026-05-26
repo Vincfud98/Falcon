@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=75"></script>
+<script src="ubique-shared.js?v=76"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -6717,6 +6717,8 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
   const URL = 'https://kluqjqojxzpuiauuidwx.supabase.co';
   const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtsdXFqcW9qeHpwdWlhdXVpZHd4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk2MTU0NDMsImV4cCI6MjA4NTE5MTQ0M30.pY8-vlMFmKAZs5MROg8OJGzsNJGD3Gg0JXbulZmpuS4';
   try { window._sb = supabase.createClient(URL, KEY); } catch(e) { window._sb = null; }
+  // ✅ Aluno também usa Supabase como fonte de conteúdo (Fase 2)
+  window.UBIQUE_USE_SUPABASE = true;
 })();
 </script>
 </head>
@@ -8339,6 +8341,8 @@ window.COURSES = [
    */
   (function seedHierarchyFromMock(){
     try{
+      // Fase 2: quando Supabase é fonte de verdade, não fazemos seed mock
+      if(window.UBIQUE_USE_SUPABASE) return;
       // v4+: a hierarquia mockada agora vem embutida no SEED do
       // ubique-shared.js. Esta função fica como fallback defensivo
       // caso o store esteja completamente vazio (raro).
@@ -8500,6 +8504,7 @@ window.COURSES = [
    * já criadas (idênticas por título) ou cria novas.
    */
   (function seedMockBlocksOnce(){
+    if(window.UBIQUE_USE_SUPABASE) return;
     try{
       if(!window.UbiqueStore || !window.COURSE) return;
 
@@ -8577,6 +8582,7 @@ window.COURSES = [
    * (preserva edições do usuário).
    */
   (function migrateMissingMockContentOnce(){
+    if(window.UBIQUE_USE_SUPABASE) return;
     try{
       if(!window.UbiqueStore || !window.COURSE) return;
 
@@ -8658,6 +8664,7 @@ window.COURSES = [
    * Detecta migração já feita pela existência de g.questions[].
    */
   (function migrateObjectiveQuestionsLegacyOnce(){
+    if(window.UBIQUE_USE_SUPABASE) return;
     try{
       if(!window.UbiqueStore) return;
 
@@ -8982,6 +8989,7 @@ window.COURSES = [
    * Idempotente: só toca em items sem bank_id.
    */
   (function migrateInlineEssaysToBankOnce(){
+    if(window.UBIQUE_USE_SUPABASE) return;
     try{
       if(!window.UbiqueStore || !window.EssayBank || !window.LearningBlocks) return;
       const LB = window.LearningBlocks;
@@ -9055,6 +9063,7 @@ window.COURSES = [
    * em blocos do tipo `text`. Roda só uma vez (quando verbetes está vazio).
    */
   (function seedVerbetesFromMockBlocks(){
+    if(window.UBIQUE_USE_SUPABASE) return;
     try{
       if(!window.UbiqueStore) return;
 
@@ -9326,7 +9335,77 @@ window.COURSES = [
   window._UbqOrigBySlug = ORIG_BY_SLUG;
   window._UbqRebuildCourseHierarchy = rebuildCourseHierarchyFromStore;
 
+  // ────────────────────────────────────────────────────────────────────────
+  // Fase 2: Hidratação do UbiqueStore a partir do Supabase (fonte de verdade)
+  // ────────────────────────────────────────────────────────────────────────
+  async function hydrateFromSupabase(){
+    if(!window.UBIQUE_USE_SUPABASE || !window._sb){
+      return false;
+    }
+    try{
+      console.log('[hydrate] buscando conteúdo do Supabase...');
+      const sb = window._sb.schema('conteudo');
+      const [subjR, modR, chR, unR, secR, blkR, dlR] = await Promise.all([
+        sb.from('subjects').select('*').order('id'),
+        sb.from('modules').select('*').order('position').order('id'),
+        sb.from('course_chapters').select('*').order('position').order('id'),
+        sb.from('units').select('*').order('position').order('id'),
+        sb.from('unit_sections').select('*').order('position').order('id'),
+        sb.from('unit_blocks').select('*').order('position').order('id'),
+        sb.from('unit_downloads').select('*').order('position').order('id'),
+      ]);
+
+      const errs = [subjR.error, modR.error, chR.error, unR.error, secR.error, blkR.error, dlR.error].filter(Boolean);
+      if(errs.length){
+        console.error('[hydrate] erros no fetch:', errs);
+        return false;
+      }
+
+      // Mapeia course_chapters → chapters (UI usa chapter_id legado)
+      const chapters = (chR.data || []).map(c => Object.assign({}, c));
+      // Units: o aluno espera u.chapter_id (legado) — mapeia course_chapter_id
+      const units = (unR.data || []).map(u => Object.assign({}, u, {
+        chapter_id: u.course_chapter_id != null ? u.course_chapter_id : u.chapter_id,
+      }));
+
+      UbiqueStore.subjects.replaceAll(subjR.data || []);
+      UbiqueStore.modules.replaceAll(modR.data || []);
+      UbiqueStore.chapters.replaceAll(chapters);
+      UbiqueStore.units.replaceAll(units);
+      UbiqueStore.unit_sections.replaceAll(secR.data || []);
+      UbiqueStore.unit_blocks.replaceAll(blkR.data || []);
+      if(UbiqueStore.unit_downloads){
+        UbiqueStore.unit_downloads.replaceAll(dlR.data || []);
+      }
+
+      console.log('[hydrate] ✅', {
+        subjects: subjR.data?.length || 0,
+        modules: modR.data?.length || 0,
+        chapters: chR.data?.length || 0,
+        units: unR.data?.length || 0,
+        sections: secR.data?.length || 0,
+        blocks: blkR.data?.length || 0,
+        downloads: dlR.data?.length || 0,
+      });
+      return true;
+    }catch(e){
+      console.error('[hydrate] exception:', e);
+      return false;
+    }
+  }
+
+  // Render inicial com cache local (instantâneo) + re-render após hydrate
   rebuildCourses();
+
+  // Dispara hydrate em paralelo. Quando termina, re-popula e re-renderiza.
+  hydrateFromSupabase().then(ok => {
+    if(ok){
+      rebuildCourses();
+      try{
+        if(window.App && typeof window.App.render === 'function') window.App.render();
+      }catch(_){}
+    }
+  });
 
   // Re-renderiza ao receber mudanças do store (mesma aba ou outra aba).
   // Reage a qualquer alteração em entidades de catálogo/hierarquia, para
