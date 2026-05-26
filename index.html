@@ -10527,6 +10527,39 @@ const Store = (function(){
         .order('created_at', { ascending: true });
       if(error){ console.warn('[hydrate comments]', error); return; }
       if(!_state.comments) _state.comments = {};
+
+      // Batch-fetch perfis dos autores que não temos local (pra ter foto + nome)
+      const uniqUserIds = [...new Set((data||[]).map(r => r.user_id).filter(Boolean))];
+      const missingIds = uniqUserIds.filter(uid => {
+        const u = (typeof window.UserDirectory !== 'undefined') ? window.UserDirectory.getById(uid) : null;
+        return !u;
+      });
+      if(missingIds.length && window.UbiqueStore && window.UbiqueStore.user_profiles){
+        try{
+          const { data: profs, error: pErr } = await window._sb.schema('crm').from('user_profiles')
+            .select('user_id, display_name, handle, bio, photo_url, photo_transform')
+            .in('user_id', missingIds);
+          if(!pErr && Array.isArray(profs)){
+            const list = window.UbiqueStore.user_profiles.list() || [];
+            profs.forEach(p => {
+              const merged = {
+                user_id:        p.user_id,
+                displayName:    p.display_name || '',
+                nickname:       '',
+                handle:         p.handle || '',
+                bio:            p.bio || '',
+                photoUrl:       p.photo_url || '',
+                photoTransform: p.photo_transform || { x:0, y:0, scale:1 },
+                updated_at:     Date.now()
+              };
+              const existing = list.find(x => x && x.user_id === p.user_id);
+              if(existing) window.UbiqueStore.user_profiles.update(existing.id, merged);
+              else window.UbiqueStore.user_profiles.add(Object.assign({ created_at: Date.now() }, merged));
+            });
+          }
+        }catch(pe){ console.warn('[hydrate comments profiles]', pe); }
+      }
+
       // Mantém só comentários legacy (não-UUID); os UUID são substituídos pelo DB
       const legacy = (_state.comments[blockId] || []).filter(c => !_UUID_RE.test(String(c.id||'')));
       const fromDb = (data || []).map(row => {
@@ -15022,9 +15055,23 @@ const UserDirectory = (function(){
     return (window.AUTH_USERS || []).map(u => _publicShape(u, _profileForUserId(u.id)));
   }
   function getById(userId){
+    if(!userId) return null;
     const u = (window.AUTH_USERS || []).find(x => x.id === userId);
-    if(!u) return null;
-    return _publicShape(u, _profileForUserId(userId));
+    if(u) return _publicShape(u, _profileForUserId(userId));
+    // Fallback: usuário Supabase espelhado em UbiqueStore.user_profiles
+    // (caso típico após Fase 4b — auth Supabase, sem entrada em AUTH_USERS)
+    const p = _profileForUserId(userId);
+    if(p){
+      const pseudoAuth = {
+        id: userId,
+        email: p.email || '',
+        role: p.role || 'student',
+        name: p.displayName || p.nickname || '',
+        nickname: p.nickname || ''
+      };
+      return _publicShape(pseudoAuth, p);
+    }
+    return null;
   }
   function getByHandle(handle){
     const norm = String(handle || '').toLowerCase().replace(/^@+/, '').trim();
