@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=95"></script>
+<script src="ubique-shared.js?v=96"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -13007,24 +13007,56 @@ Blocks.essay = {
       const ta = itemEl.querySelector('.essay-textarea');
       const submitBtn = itemEl.querySelector('.essay-submit');
       if(submitBtn && ta){
-        submitBtn.addEventListener('click', () => {
+        submitBtn.addEventListener('click', async () => {
           const text = ta.value.trim();
           if(!text){ ta.focus(); return; }
-          // Garante o payload enriquecido (overallComment, strengths,
-          // weaknesses, wordCount, ratio, isMocked) — payload antigo
-          // sem esses campos seria re-gerado.
-          let payload = generateMockEssayFeedback(item, text);
+
+          // Loading state
+          const originalLabel = submitBtn.textContent;
+          submitBtn.disabled = true;
+          submitBtn.textContent = '⏳ Corrigindo via IA…';
+
+          let payload = null;
+          let usedAI = false;
+
+          // 1) Tenta IA real via Edge Function correct-essay
+          //    (timeout 30s; se falhar, cai pro mock)
+          if(window._sb && window.UBIQUE_USE_SUPABASE){
+            try{
+              const racing = await Promise.race([
+                window._sb.functions.invoke('correct-essay', { body: { item, essay_text: text } }),
+                new Promise(r => setTimeout(() => r({ error: { message: 'timeout 30s' } }), 30000))
+              ]);
+              if(!racing.error && racing.data && !racing.data.error){
+                payload = racing.data;
+                usedAI = true;
+                console.log('[essay AI] ✅ corrigido via', payload.aiProvider, payload.aiModel);
+              } else {
+                console.warn('[essay AI] indisponível, fallback mock:', racing.error || racing.data?.error);
+              }
+            }catch(e){ console.warn('[essay AI] exception:', e); }
+          }
+
+          // 2) Fallback mock se IA não respondeu
+          if(!payload){
+            payload = generateMockEssayFeedback(item, text);
+          }
+
           ctx.store.updateEssay(ctx.unitId, block.id, itemId, payload);
           injectEssayEvaluation(itemEl, item, payload);
+
+          submitBtn.disabled = false;
+          submitBtn.textContent = originalLabel;
+
           if(typeof window.ueToast === 'function'){
-            window.ueToast('Resposta enviada para correção por IA (simulado): ' + payload.score + ' pts', 'success');
+            const scoreStr = (typeof payload.score === 'number') ? payload.score.toFixed(1) : payload.score;
+            const msg = usedAI
+              ? `✓ Corrigido por IA (${payload.aiProvider || 'google'}): ${scoreStr} pts`
+              : `✓ Corrigido (mock — IA indisponível): ${scoreStr} pts`;
+            window.ueToast(msg, 'success');
           }
-          // Notifica o aluno que a correção (mock-IA) foi concluída.
-          // Quando a IA real for plugada aqui, o evento de notificação
-          // continua válido — basta substituir generateMockEssayFeedback
-          // pela chamada real e disparar Notifications.create no callback
-          // de sucesso. Roda em setTimeout para simular o atraso da IA
-          // e dar tempo do UI atualizar antes do toast/badge da topbar.
+
+          // Notificação de essay corrigida (badge do sino)
           try {
             const user = (typeof Auth !== 'undefined') ? Auth.getUser() : null;
             if(user && window.Notifications && payload){
@@ -13037,13 +13069,13 @@ Blocks.essay = {
                   unit_id: ctx.unitId,
                   module_id: ctx.moduleId || null,
                   chapter_id: ctx.chapterId || null,
-                  unitTitle: ctx.unitTitle || null
+                  unitTitle: ctx.unitTitle || null,
+                  isAI: usedAI
                 });
-                // Atualiza o badge do sino na topbar
                 if(window.AppShell && typeof AppShell.syncChrome === 'function'){
                   AppShell.syncChrome(Router.parse());
                 }
-              }, 800);
+              }, 400);
             }
           } catch(_){}
         });
