@@ -10586,6 +10586,231 @@ const Store = (function(){
     }catch(e){ console.warn('[hydrate comments exception]', e); }
   }
 
+  // ────────────────────────────────────────────────────────────────────
+  // Fase 4e — Sync de notes, reading_list, highlights (schema aluno)
+  // ────────────────────────────────────────────────────────────────────
+  function _genUuid(){
+    return (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID() : null;
+  }
+
+  // ─── Notes ───────────────────────────────────────────────────────────
+  async function _syncNoteInsertToSupabase(note){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    if(!_UUID_RE.test(String(note.id||''))) return;
+    try{
+      const row = {
+        id: note.id,
+        user_id: userId,
+        type: note.type || 'note',
+        module_id:   note.moduleId  || null,
+        chapter_id:  note.chapterId || null,
+        unit_id:     note.unitId    || null,
+        unit_title:  note.unitTitle || null,
+        block_id:    note.blockId   || null,
+        block_title: note.blockTitle|| null,
+        block_type:  note.blockType || null,
+        quote:       note.quote     || null,
+        body:        note.body      || null,
+        topics:      Array.isArray(note.topics) ? note.topics : [],
+        tags:        Array.isArray(note.tags)   ? note.tags   : [],
+        metadata:    {}
+      };
+      const { error } = await window._sb.schema('aluno').from('notes').insert(row);
+      if(error) console.warn('[note sync insert]', error);
+    }catch(e){ console.warn('[note sync insert exception]', e); }
+  }
+
+  async function _syncNoteUpdateToSupabase(note){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    if(!_UUID_RE.test(String(note.id||''))) return;
+    try{
+      const patch = {
+        type: note.type || 'note',
+        module_id:   note.moduleId  || null,
+        chapter_id:  note.chapterId || null,
+        unit_id:     note.unitId    || null,
+        unit_title:  note.unitTitle || null,
+        block_id:    note.blockId   || null,
+        block_title: note.blockTitle|| null,
+        block_type:  note.blockType || null,
+        quote:       note.quote     || null,
+        body:        note.body      || null,
+        topics:      Array.isArray(note.topics) ? note.topics : [],
+        tags:        Array.isArray(note.tags)   ? note.tags   : [],
+        updated_at:  new Date().toISOString()
+      };
+      const { error } = await window._sb.schema('aluno').from('notes')
+        .update(patch).eq('id', note.id).eq('user_id', userId);
+      if(error) console.warn('[note sync update]', error);
+    }catch(e){ console.warn('[note sync update exception]', e); }
+  }
+
+  async function _syncNoteDeleteToSupabase(noteId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    if(!_UUID_RE.test(String(noteId||''))) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('notes')
+        .delete().eq('id', noteId).eq('user_id', userId);
+      if(error) console.warn('[note sync delete]', error);
+    }catch(e){ console.warn('[note sync delete exception]', e); }
+  }
+
+  async function _hydrateNotesFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('notes')
+        .select('id, type, module_id, chapter_id, unit_id, unit_title, block_id, block_title, block_type, quote, body, topics, tags, created_at, updated_at')
+        .eq('user_id', userId);
+      if(error){ console.warn('[hydrate notes]', error); return; }
+      if(!Array.isArray(_state.notes)) _state.notes = [];
+      // Mantém legacy (id não-UUID) + substitui os UUID pela view do DB
+      const legacy = _state.notes.filter(n => !_UUID_RE.test(String(n.id||'')));
+      const fromDb = (data || []).map(row => ({
+        id: row.id,
+        type: row.type || 'note',
+        moduleId:   row.module_id  || null,
+        chapterId:  row.chapter_id || null,
+        unitId:     row.unit_id    || null,
+        unitTitle:  row.unit_title || '',
+        blockId:    row.block_id   || null,
+        blockTitle: row.block_title|| '',
+        blockType:  row.block_type || '',
+        quote:      row.quote      || '',
+        body:       row.body       || '',
+        topics:     row.topics || [],
+        tags:       row.tags   || [],
+        createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+        updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now()
+      }));
+      _state.notes = legacy.concat(fromDb);
+      if(fromDb.length) console.log('[Store] hydrated notes:', fromDb.length);
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate notes exception]', e); }
+  }
+
+  // ─── Reading list ────────────────────────────────────────────────────
+  async function _syncReadingListAddToSupabase(entry){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !entry || !entry.unitId || !entry.blockId) return;
+    try{
+      const row = {
+        user_id: userId,
+        module_id:  entry.moduleId  || null,
+        chapter_id: entry.chapterId || null,
+        unit_id:    String(entry.unitId),
+        block_id:   String(entry.blockId),
+        metadata:   {}
+      };
+      const { error } = await window._sb.schema('aluno').from('reading_list')
+        .upsert(row, { onConflict: 'user_id,unit_id,block_id' });
+      if(error) console.warn('[reading_list sync insert]', error);
+    }catch(e){ console.warn('[reading_list sync insert exception]', e); }
+  }
+
+  async function _syncReadingListRemoveToSupabase(unitId, blockId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('reading_list')
+        .delete().eq('user_id', userId).eq('unit_id', String(unitId)).eq('block_id', String(blockId));
+      if(error) console.warn('[reading_list sync delete]', error);
+    }catch(e){ console.warn('[reading_list sync delete exception]', e); }
+  }
+
+  async function _hydrateReadingListFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('reading_list')
+        .select('module_id, chapter_id, unit_id, block_id, added_at')
+        .eq('user_id', userId);
+      if(error){ console.warn('[hydrate reading_list]', error); return; }
+      if(!Array.isArray(_state.readingList)) _state.readingList = [];
+      // Merge sem duplicar (chave: unitId+blockId)
+      const existing = new Set(_state.readingList.map(e => e.unitId+'::'+e.blockId));
+      let n = 0;
+      (data || []).forEach(row => {
+        const key = row.unit_id+'::'+row.block_id;
+        if(existing.has(key)) return;
+        _state.readingList.push({
+          moduleId:  row.module_id  || null,
+          chapterId: row.chapter_id || null,
+          unitId:    row.unit_id,
+          blockId:   row.block_id,
+          addedAt:   row.added_at ? new Date(row.added_at).getTime() : Date.now()
+        });
+        existing.add(key);
+        n++;
+      });
+      if(n){ console.log('[Store] hydrated reading_list:', n); _persist(); _emit(); }
+    }catch(e){ console.warn('[hydrate reading_list exception]', e); }
+  }
+
+  // ─── Highlights ──────────────────────────────────────────────────────
+  async function _syncHighlightInsertToSupabase(hl){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !hl) return;
+    if(!_UUID_RE.test(String(hl.id||''))) return;
+    try{
+      const row = {
+        id: hl.id,
+        user_id: userId,
+        unit_id:  String(hl.unitId || ''),
+        block_id: String(hl.blockId || ''),
+        text:     String(hl.text || ''),
+        color:    String(hl.color || 'yellow'),
+        hint:     hl.hint || null,
+        metadata: {}
+      };
+      const { error } = await window._sb.schema('aluno').from('highlights').insert(row);
+      if(error) console.warn('[highlight sync insert]', error);
+    }catch(e){ console.warn('[highlight sync insert exception]', e); }
+  }
+
+  async function _syncHighlightDeleteToSupabase(hlId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    if(!_UUID_RE.test(String(hlId||''))) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('highlights')
+        .delete().eq('id', hlId).eq('user_id', userId);
+      if(error) console.warn('[highlight sync delete]', error);
+    }catch(e){ console.warn('[highlight sync delete exception]', e); }
+  }
+
+  async function _hydrateHighlightsFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('highlights')
+        .select('id, unit_id, block_id, text, color, hint, created_at')
+        .eq('user_id', userId);
+      if(error){ console.warn('[hydrate highlights]', error); return; }
+      if(!Array.isArray(_state.highlights)) _state.highlights = [];
+      const legacy = _state.highlights.filter(h => !_UUID_RE.test(String(h.id||'')));
+      const fromDb = (data || []).map(row => {
+        const hl = {
+          id: row.id,
+          unitId:  row.unit_id,
+          blockId: row.block_id,
+          text:    row.text || '',
+          color:   row.color || 'yellow',
+          createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
+        };
+        if(row.hint) hl.hint = row.hint;
+        return hl;
+      });
+      _state.highlights = legacy.concat(fromDb);
+      if(fromDb.length) console.log('[Store] hydrated highlights:', fromDb.length);
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate highlights exception]', e); }
+  }
+
   return {
     init(userId, course){
       _key = `ubique.coursePlatform.v3.${userId}.${course.id}`;
@@ -10607,6 +10832,10 @@ const Store = (function(){
       _hydrateUnitProgressFromSupabase().catch(()=>{});
       // Fase 4f+ — hidrata bookmarks (checks de bloco) do Supabase
       _hydrateBookmarksFromSupabase().catch(()=>{});
+      // Fase 4e — hidrata notes, reading_list, highlights do Supabase
+      _hydrateNotesFromSupabase().catch(()=>{});
+      _hydrateReadingListFromSupabase().catch(()=>{});
+      _hydrateHighlightsFromSupabase().catch(()=>{});
       return _state;
     },
     get(){ return _state; },
@@ -10731,11 +10960,15 @@ const Store = (function(){
       if(!Array.isArray(_state.readingList)) _state.readingList = [];
       if(Store.isInReadingList(entry.unitId, entry.blockId)) return;
       _state.readingList.push(Object.assign({ addedAt:Date.now() }, entry));
+      // Fase 4e — fire-and-forget sync Supabase
+      _syncReadingListAddToSupabase(entry).catch(()=>{});
       _persist(); _emit();
     },
     removeFromReadingList(unitId, blockId){
       if(!Array.isArray(_state.readingList)) return;
       _state.readingList = _state.readingList.filter(e => !(e.unitId === unitId && e.blockId === blockId));
+      // Fase 4e — fire-and-forget sync Supabase
+      _syncReadingListRemoveToSupabase(unitId, blockId).catch(()=>{});
       _persist(); _emit();
     },
     toggleReadingList(entry){
@@ -10750,10 +10983,13 @@ const Store = (function(){
     },
     addNote(payload){
       const now = Date.now();
-      const note = Object.assign({ id:'n'+now, createdAt:now, updatedAt:now }, payload);
+      const nid = _genUuid() || ('n'+now);
+      const note = Object.assign({ id:nid, createdAt:now, updatedAt:now }, payload);
       if(!Array.isArray(_state.notes)) _state.notes = [];
       _state.notes.push(note);
       _persist(); _emit();
+      // Fase 4e — fire-and-forget sync Supabase
+      _syncNoteInsertToSupabase(note).catch(()=>{});
       return note;
     },
     updateNote(id, patch){
@@ -10761,12 +10997,16 @@ const Store = (function(){
       if(idx < 0) return null;
       _state.notes[idx] = Object.assign({}, _state.notes[idx], patch, { updatedAt:Date.now() });
       _persist(); _emit();
+      // Fase 4e — fire-and-forget sync Supabase
+      _syncNoteUpdateToSupabase(_state.notes[idx]).catch(()=>{});
       return _state.notes[idx];
     },
     deleteNote(id){
       if(!Array.isArray(_state.notes)) return;
       _state.notes = _state.notes.filter(n => n.id !== id);
       _persist(); _emit();
+      // Fase 4e — fire-and-forget sync Supabase
+      _syncNoteDeleteToSupabase(id).catch(()=>{});
     },
     listNotes(filters){
       filters = filters || {};
@@ -10837,10 +11077,14 @@ const Store = (function(){
     },
     addHighlight(unitId, blockId, text, color, hint){
       if(!_state.highlights) _state.highlights = [];
-      const entry = { id:'hl'+Date.now(), unitId, blockId, text, color, createdAt:Date.now() };
+      const hid = _genUuid() || ('hl'+Date.now());
+      const entry = { id:hid, unitId, blockId, text, color, createdAt:Date.now() };
       if(hint) entry.hint = hint;
       _state.highlights.push(entry);
       _persist(); _emit();
+      // Fase 4e — fire-and-forget sync Supabase
+      _syncHighlightInsertToSupabase(entry).catch(()=>{});
+      return entry;
     },
     getHighlights(unitId, blockId){
       if(!unitId) return (_state.highlights||[]).slice();
@@ -10849,6 +11093,8 @@ const Store = (function(){
     removeHighlight(id){
       _state.highlights = (_state.highlights||[]).filter(h => h.id !== id);
       _persist(); _emit();
+      // Fase 4e — fire-and-forget sync Supabase
+      _syncHighlightDeleteToSupabase(id).catch(()=>{});
     },
     addComment(blockId, text, parentId, unitId){
       if(!_state.comments) _state.comments = {};
