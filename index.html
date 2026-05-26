@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=97"></script>
+<script src="ubique-shared.js?v=98"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -10350,6 +10350,60 @@ const Store = (function(){
     }catch(e){ console.warn('[unit_progress sync exception]', e); }
   }
 
+  // Fase 4f+ — Sync de bookmarks (checks de bloco) com Supabase
+  async function _syncBlockBookmarkToSupabase(unitId, blockId, marked){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      if(marked){
+        const { error } = await window._sb.schema('questoes').from('block_bookmarks')
+          .upsert({ user_id: userId, unit_id: String(unitId), block_id: String(blockId), marked_at: new Date().toISOString() },
+                  { onConflict: 'user_id,unit_id,block_id' });
+        if(error) console.warn('[block_bookmark sync insert]', error);
+      } else {
+        const { error } = await window._sb.schema('questoes').from('block_bookmarks')
+          .delete().eq('user_id', userId).eq('unit_id', String(unitId)).eq('block_id', String(blockId));
+        if(error) console.warn('[block_bookmark sync delete]', error);
+      }
+    }catch(e){ console.warn('[block_bookmark sync exception]', e); }
+  }
+
+  /** Bulk insert pra cascade do completeUnit (marca todos os blocks de uma vez) */
+  async function _syncBlockBookmarksBulkToSupabase(unitId, blockIds){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !blockIds.length) return;
+    try{
+      const now = new Date().toISOString();
+      const rows = blockIds.map(bid => ({
+        user_id: userId, unit_id: String(unitId), block_id: String(bid), marked_at: now
+      }));
+      const { error } = await window._sb.schema('questoes').from('block_bookmarks')
+        .upsert(rows, { onConflict: 'user_id,unit_id,block_id' });
+      if(error) console.warn('[block_bookmark bulk sync]', error);
+    }catch(e){ console.warn('[block_bookmark bulk sync exception]', e); }
+  }
+
+  /** Hidrata _state.bookmarks a partir do Supabase. */
+  async function _hydrateBookmarksFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('questoes').from('block_bookmarks')
+        .select('unit_id, block_id').eq('user_id', userId);
+      if(error){ console.warn('[hydrate bookmarks]', error); return; }
+      let n = 0;
+      (data || []).forEach(row => {
+        _state.bookmarks[row.unit_id] = _state.bookmarks[row.unit_id] || {};
+        _state.bookmarks[row.unit_id][row.block_id] = true;
+        n++;
+      });
+      if(n){
+        console.log('[Store] hydrated bookmarks:', n);
+        _persist(); _emit();
+      }
+    }catch(e){ console.warn('[hydrate bookmarks exception]', e); }
+  }
+
   /** Hidrata _state.unitViews a partir do Supabase. */
   async function _hydrateUnitProgressFromSupabase(){
     const userId = _currentSupaUserId();
@@ -10432,6 +10486,8 @@ const Store = (function(){
       _hydrateAnswersFromSupabase().catch(()=>{});
       // Fase 4f — hidrata progresso de unidade (unitViews, completed) do Supabase
       _hydrateUnitProgressFromSupabase().catch(()=>{});
+      // Fase 4f+ — hidrata bookmarks (checks de bloco) do Supabase
+      _hydrateBookmarksFromSupabase().catch(()=>{});
       return _state;
     },
     get(){ return _state; },
@@ -10457,19 +10513,23 @@ const Store = (function(){
       v.lastSeenAt = Date.now();
       _state.unitViews[unitId] = v;
       // Cascade: mark every block inside the unit as finished (bookmarks)
+      const cascadeBlockIds = [];
       for(const m of window.COURSE.modules){
         const found = Util.findUnit(m.id, unitId);
         if(found){
           _state.bookmarks[unitId] = _state.bookmarks[unitId] || {};
           (found.unit.groups||[]).forEach(g => (g.blocks||[]).forEach(b => {
             _state.bookmarks[unitId][b.id] = true;
+            cascadeBlockIds.push(b.id);
           }));
           break;
         }
       }
       _persist(); _emit();
-      // Fase 4f
+      // Fase 4f — unit progress
       _syncUnitProgressToSupabase(unitId, { firstSeenAt: v.firstSeenAt, viewCount: v.viewCount, completed: true }).catch(()=>{});
+      // Fase 4f+ — bulk bookmark dos blocks vinculados
+      _syncBlockBookmarksBulkToSupabase(unitId, cascadeBlockIds).catch(()=>{});
     },
     uncompleteUnit(unitId){
       const v = _state.unitViews[unitId];
@@ -10537,9 +10597,12 @@ const Store = (function(){
     },
     toggleBookmark(unitId, blockId){
       _state.bookmarks[unitId] = _state.bookmarks[unitId] || {};
-      if(_state.bookmarks[unitId][blockId]) delete _state.bookmarks[unitId][blockId];
+      const wasMarked = !!_state.bookmarks[unitId][blockId];
+      if(wasMarked) delete _state.bookmarks[unitId][blockId];
       else _state.bookmarks[unitId][blockId] = true;
       _persist(); _emit();
+      // Fase 4f+ — fire-and-forget sync Supabase (insere se marcou, deleta se desmarcou)
+      _syncBlockBookmarkToSupabase(unitId, blockId, !wasMarked).catch(()=>{});
     },
     /* Reading list — ordered, insertion-order-preserving */
     isInReadingList(unitId, blockId){
@@ -18825,7 +18888,11 @@ Renderers.unit.mount = function(stageEl, route){
       if(mark) mark.innerHTML = isBmk ? Icons.check : '';
     });
     // Re-render current block so its header action states refresh
-    if(currentBlock) showBlock(currentBlock.id);
+    // (currentBlock pode não estar em escopo dependendo do path de mount —
+    // guard pra evitar ReferenceError)
+    try {
+      if(typeof currentBlock !== 'undefined' && currentBlock) showBlock(currentBlock.id);
+    } catch(_){}
   });
   stageEl.querySelector('#addNoteBtn').addEventListener('click', () => {
     const selection = NoteModal.captureSelection();
