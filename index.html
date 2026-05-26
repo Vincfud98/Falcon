@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=89"></script>
+<script src="ubique-shared.js?v=90"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -10242,9 +10242,138 @@ const Store = (function(){
   }
   function _emit(){ _subs.forEach(fn => { try{ fn(_state); }catch(e){ console.error(e); } }); }
 
+  // ────────────────────────────────────────────────────────────────────
+  // Fase 4c — Supabase sync de respostas Quiz/Essay
+  // ────────────────────────────────────────────────────────────────────
+  const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let _studySessionId = null; // cache da session "study" do user atual
+
+  /** Gera UUID determinístico (RFC 4122 v5-like) a partir de string.
+   *  Mesmo input → mesmo UUID. Usado pra mapear itemId local → question_id (uuid). */
+  async function _uuidFromString(str){
+    const enc = new TextEncoder().encode(String(str));
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    const arr = new Uint8Array(buf);
+    // Toma os primeiros 16 bytes e seta version (5) + variant (RFC 4122)
+    const b = Array.from(arr.slice(0, 16));
+    b[6] = (b[6] & 0x0f) | 0x50; // v5
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+    const hex = b.map(x => x.toString(16).padStart(2,'0')).join('');
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+  }
+
+  function _currentSupaUserId(){
+    try{
+      const u = (window.Auth && typeof Auth.getUser === 'function') ? Auth.getUser() : null;
+      return (u && u.id && _UUID_RE.test(u.id)) ? u.id : null;
+    }catch(_){ return null; }
+  }
+
+  /** Garante 1 session "study" pro user — cria se não existir. */
+  async function _ensureStudySession(userId){
+    if(_studySessionId) return _studySessionId;
+    if(!window._sb || !userId) return null;
+    try{
+      const sb = window._sb.schema('questoes');
+      // Procura existente
+      const { data: existing } = await sb.from('response_sessions')
+        .select('id').eq('client_id', userId).eq('context','study')
+        .order('created_at', { ascending:false }).limit(1);
+      if(existing && existing[0]){ _studySessionId = existing[0].id; return _studySessionId; }
+      // Cria nova
+      const { data: created, error } = await sb.from('response_sessions')
+        .insert({ client_id: userId, context: 'study', status: 'in_progress' })
+        .select('id').single();
+      if(error){ console.warn('[study session] create:', error); return null; }
+      _studySessionId = created.id;
+      return _studySessionId;
+    }catch(e){ console.warn('[study session] exception:', e); return null; }
+  }
+
+  async function _syncQuizAnswerToSupabase(unitId, blockId, itemId, payload){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const sessionId = await _ensureStudySession(userId);
+      const questionId = await _uuidFromString(`quiz:${unitId}:${blockId}:${itemId}`);
+      const row = {
+        session_id: sessionId,
+        client_id: userId,
+        question_id: questionId,
+        question_type: 'quiz',
+        answer_value: typeof payload.choice === 'string' ? payload.choice
+                    : (payload.choice != null ? String(payload.choice) : null),
+        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, payload: payload }
+      };
+      // Upsert por (client_id, question_id): apaga e insere (Supabase JS não tem upsert nativo nesses)
+      await window._sb.schema('questoes').from('question_responses')
+        .delete().eq('client_id', userId).eq('question_id', questionId);
+      const { error } = await window._sb.schema('questoes').from('question_responses').insert(row);
+      if(error) console.warn('[quiz sync]', error);
+    }catch(e){ console.warn('[quiz sync exception]', e); }
+  }
+
+  async function _syncEssayAnswerToSupabase(unitId, blockId, itemId, payload){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const sessionId = await _ensureStudySession(userId);
+      const questionId = await _uuidFromString(`essay:${unitId}:${blockId}:${itemId}`);
+      const row = {
+        session_id: sessionId,
+        client_id: userId,
+        question_id: questionId,
+        question_type: 'essay',
+        answer_value: typeof payload.text === 'string' ? payload.text.slice(0, 8000) : null,
+        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, payload: payload }
+      };
+      await window._sb.schema('questoes').from('question_responses')
+        .delete().eq('client_id', userId).eq('question_id', questionId);
+      const { error } = await window._sb.schema('questoes').from('question_responses').insert(row);
+      if(error) console.warn('[essay sync]', error);
+    }catch(e){ console.warn('[essay sync exception]', e); }
+  }
+
+  /** Hidrata _state.quizAnswers e _state.essays a partir do Supabase. */
+  async function _hydrateAnswersFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('questoes').from('question_responses')
+        .select('question_type, answer_value, metadata, answered_at').eq('client_id', userId);
+      if(error){ console.warn('[hydrate answers]', error); return; }
+      let qCount = 0, eCount = 0;
+      (data || []).forEach(row => {
+        const meta = row.metadata || {};
+        const unitId = meta.unit_id, blockId = meta.block_id, itemId = meta.item_id;
+        if(unitId == null || blockId == null || itemId == null) return;
+        const payload = (meta.payload && typeof meta.payload === 'object') ? meta.payload :
+                        { choice: row.answer_value, text: row.answer_value };
+        if(row.question_type === 'quiz'){
+          _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
+          _state.quizAnswers[unitId][blockId] = _state.quizAnswers[unitId][blockId] || {};
+          _state.quizAnswers[unitId][blockId][itemId] = Object.assign({}, payload,
+            { answeredAt: row.answered_at ? new Date(row.answered_at).getTime() : Date.now() });
+          qCount++;
+        } else if(row.question_type === 'essay'){
+          _state.essays[unitId] = _state.essays[unitId] || {};
+          _state.essays[unitId][blockId] = _state.essays[unitId][blockId] || {};
+          _state.essays[unitId][blockId][itemId] = Object.assign({}, payload,
+            { submittedAt: row.answered_at ? new Date(row.answered_at).getTime() : Date.now() });
+          eCount++;
+        }
+      });
+      if(qCount || eCount){
+        console.log('[Store] hydrated answers:', { quiz:qCount, essay:eCount });
+        _persist(); _emit();
+      }
+    }catch(e){ console.warn('[hydrate answers exception]', e); }
+  }
+
   return {
     init(userId, course){
       _key = `ubique.coursePlatform.v3.${userId}.${course.id}`;
+      _studySessionId = null; // reset cache pra novo user/course
       const existing = _load();
       if(existing && existing.version === 3){
         _state = existing;
@@ -10256,6 +10385,9 @@ const Store = (function(){
         Object.assign(_state, window.MOCK_INITIAL_PROGRESS || {});
         _persist();
       }
+      // Fase 4c — hidrata respostas Quiz/Essay do Supabase (assíncrono,
+      // fire-and-forget; quando termina, _emit dispara re-render)
+      _hydrateAnswersFromSupabase().catch(()=>{});
       return _state;
     },
     get(){ return _state; },
@@ -10317,6 +10449,8 @@ const Store = (function(){
         _state.quizAnswers[unitId][blockId][itemId] = Object.assign({ answeredAt: Date.now() }, payload);
       }
       _persist(); _emit();
+      // Fase 4c — fire-and-forget sync Supabase (questoes.question_responses)
+      _syncQuizAnswerToSupabase(unitId, blockId, itemId, payload).catch(()=>{});
     },
     updateEssay(unitId, blockId, itemId, payload){
       // Y3 Fase I (espelho do quiz): se itemId é bank_id, grava também no
@@ -10333,6 +10467,8 @@ const Store = (function(){
       _state.essays[unitId][blockId] = _state.essays[unitId][blockId] || {};
       _state.essays[unitId][blockId][itemId] = merged;
       _persist(); _emit();
+      // Fase 4c — fire-and-forget sync Supabase
+      _syncEssayAnswerToSupabase(unitId, blockId, itemId, payload).catch(()=>{});
     },
     updateFlashcard(unitId, blockId, cardId, status){
       _state.flashcards[unitId] = _state.flashcards[unitId] || {};
