@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=96"></script>
+<script src="ubique-shared.js?v=97"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -10324,6 +10324,58 @@ const Store = (function(){
     }catch(e){ console.warn('[essay sync exception]', e); }
   }
 
+  // ────────────────────────────────────────────────────────────────────
+  // Fase 4f — Supabase sync de progresso de unidade
+  // ────────────────────────────────────────────────────────────────────
+  async function _syncUnitProgressToSupabase(unitId, patch){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const row = {
+        user_id: userId,
+        unit_id: String(unitId),
+        last_seen_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      if(patch.firstSeenAt) row.first_seen_at = new Date(patch.firstSeenAt).toISOString();
+      if(typeof patch.viewCount === 'number') row.view_count = patch.viewCount;
+      if(typeof patch.completed === 'boolean'){
+        row.completed = patch.completed;
+        if(patch.completed) row.completed_at = new Date().toISOString();
+        else row.completed_at = null;
+      }
+      const { error } = await window._sb.schema('questoes').from('unit_progress')
+        .upsert(row, { onConflict: 'user_id,unit_id' });
+      if(error) console.warn('[unit_progress sync]', error);
+    }catch(e){ console.warn('[unit_progress sync exception]', e); }
+  }
+
+  /** Hidrata _state.unitViews a partir do Supabase. */
+  async function _hydrateUnitProgressFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('questoes').from('unit_progress')
+        .select('unit_id, first_seen_at, last_seen_at, view_count, completed, completed_at').eq('user_id', userId);
+      if(error){ console.warn('[hydrate unit_progress]', error); return; }
+      let n = 0;
+      (data || []).forEach(row => {
+        _state.unitViews[row.unit_id] = {
+          firstSeenAt: row.first_seen_at ? new Date(row.first_seen_at).getTime() : Date.now(),
+          lastSeenAt: row.last_seen_at ? new Date(row.last_seen_at).getTime() : Date.now(),
+          viewCount: row.view_count || 1,
+          completed: !!row.completed,
+          completedAt: row.completed_at ? new Date(row.completed_at).getTime() : null,
+        };
+        n++;
+      });
+      if(n){
+        console.log('[Store] hydrated unit_progress:', n, 'unidades');
+        _persist(); _emit();
+      }
+    }catch(e){ console.warn('[hydrate unit_progress exception]', e); }
+  }
+
   /** Hidrata _state.quizAnswers e _state.essays a partir do Supabase. */
   async function _hydrateAnswersFromSupabase(){
     const userId = _currentSupaUserId();
@@ -10378,6 +10430,8 @@ const Store = (function(){
       // Fase 4c — hidrata respostas Quiz/Essay do Supabase (assíncrono,
       // fire-and-forget; quando termina, _emit dispara re-render)
       _hydrateAnswersFromSupabase().catch(()=>{});
+      // Fase 4f — hidrata progresso de unidade (unitViews, completed) do Supabase
+      _hydrateUnitProgressFromSupabase().catch(()=>{});
       return _state;
     },
     get(){ return _state; },
@@ -10393,10 +10447,13 @@ const Store = (function(){
       if(!v.firstSeenAt) v.firstSeenAt = Date.now();
       _state.unitViews[unitId] = v;
       _persist(); _emit();
+      // Fase 4f — fire-and-forget sync Supabase
+      _syncUnitProgressToSupabase(unitId, { firstSeenAt: v.firstSeenAt, viewCount: v.viewCount }).catch(()=>{});
     },
     completeUnit(unitId){
       const v = _state.unitViews[unitId] || { firstSeenAt:Date.now(), viewCount:1 };
       v.completed = true;
+      v.completedAt = Date.now();
       v.lastSeenAt = Date.now();
       _state.unitViews[unitId] = v;
       // Cascade: mark every block inside the unit as finished (bookmarks)
@@ -10411,11 +10468,19 @@ const Store = (function(){
         }
       }
       _persist(); _emit();
+      // Fase 4f
+      _syncUnitProgressToSupabase(unitId, { firstSeenAt: v.firstSeenAt, viewCount: v.viewCount, completed: true }).catch(()=>{});
     },
     uncompleteUnit(unitId){
       const v = _state.unitViews[unitId];
-      if(v){ v.completed = false; _state.unitViews[unitId] = v; }
+      if(v){
+        v.completed = false;
+        v.completedAt = null;
+        _state.unitViews[unitId] = v;
+      }
       _persist(); _emit();
+      // Fase 4f
+      _syncUnitProgressToSupabase(unitId, { completed: false }).catch(()=>{});
     },
     updateQuizAnswer(unitId, blockId, itemId, payload){
       // Y3 Fase I — Stats compartilhadas por bank_id.
