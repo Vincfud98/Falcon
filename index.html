@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=80"></script>
+<script src="ubique-shared.js?v=81"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -9831,15 +9831,27 @@ const Auth = (function(){
   // a sessão Supabase volta DEPOIS do primeiro render (fluxo async).
   async function load(){
     // 1) Tenta Supabase session (refresh do JWT é automático no SDK)
+    // ⚠️ Timeout de 3s: se token salvo está corrompido, getSession trava infinitamente
+    // sem rejeitar — bloqueando toda a UI no "Verificando..."
     if(window._sb){
       try {
-        const { data } = await window._sb.auth.getSession();
+        const result = await Promise.race([
+          window._sb.auth.getSession(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('getSession timeout 3s')), 3000))
+        ]);
+        const { data } = result || {};
         if(data && data.session && data.session.user){
           current = await _hydrateSupabaseUser(data.session.user);
           syncMockUser();
           return current;
         }
-      } catch(e){ console.warn('[auth] load supabase error:', e); }
+      } catch(e){
+        console.warn('[auth] load supabase error/timeout — pulando pra fallback:', e.message);
+        // Se o token salvo está fazendo o SDK travar, limpa pra não travar de novo
+        try{
+          Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
+        }catch(_){}
+      }
     }
     // 2) Fallback: localStorage + AUTH_USERS (modo dev/mock)
     try{
@@ -9916,10 +9928,20 @@ const Auth = (function(){
   }
 
   // logout() async: signOut no Supabase + limpa state local.
+  // Timeout de 2s pra evitar travar quando signOut não responde.
   async function logout(){
     if(window._sb){
-      try { await window._sb.auth.signOut(); } catch(_){}
+      try {
+        await Promise.race([
+          window._sb.auth.signOut(),
+          new Promise(r => setTimeout(r, 2000))
+        ]);
+      } catch(_){}
     }
+    // Limpa qualquer token Supabase residual (mesmo se signOut travou)
+    try{
+      Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
+    }catch(_){}
     current = null;
     syncMockUser();
     persist(null);
