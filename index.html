@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=92"></script>
+<script src="ubique-shared.js?v=93"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -10244,20 +10244,20 @@ const Store = (function(){
 
   // ────────────────────────────────────────────────────────────────────
   // Fase 4c — Supabase sync de respostas Quiz/Essay
+  // Usa tabela questoes.student_responses (própria, simples, decopladar
+  // do legacy response_sessions/question_responses que tem FK pra clients).
   // ────────────────────────────────────────────────────────────────────
   const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  let _studySessionId = null; // cache da session "study" do user atual
 
   /** Gera UUID determinístico (RFC 4122 v5-like) a partir de string.
-   *  Mesmo input → mesmo UUID. Usado pra mapear itemId local → question_id (uuid). */
+   *  Mesmo input → mesmo UUID. Usado pra mapear itemId local → question_ref (uuid). */
   async function _uuidFromString(str){
     const enc = new TextEncoder().encode(String(str));
     const buf = await crypto.subtle.digest('SHA-256', enc);
     const arr = new Uint8Array(buf);
-    // Toma os primeiros 16 bytes e seta version (5) + variant (RFC 4122)
     const b = Array.from(arr.slice(0, 16));
     b[6] = (b[6] & 0x0f) | 0x50; // v5
-    b[8] = (b[8] & 0x3f) | 0x80; // variant 10xx
+    b[8] = (b[8] & 0x3f) | 0x80;
     const hex = b.map(x => x.toString(16).padStart(2,'0')).join('');
     return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
   }
@@ -10269,46 +10269,22 @@ const Store = (function(){
     }catch(_){ return null; }
   }
 
-  /** Garante 1 session "study" pro user — cria se não existir. */
-  async function _ensureStudySession(userId){
-    if(_studySessionId) return _studySessionId;
-    if(!window._sb || !userId) return null;
-    try{
-      const sb = window._sb.schema('questoes');
-      // Procura existente
-      const { data: existing } = await sb.from('response_sessions')
-        .select('id').eq('client_id', userId).eq('context','lesson')
-        .order('created_at', { ascending:false }).limit(1);
-      if(existing && existing[0]){ _studySessionId = existing[0].id; return _studySessionId; }
-      // Cria nova
-      const { data: created, error } = await sb.from('response_sessions')
-        .insert({ client_id: userId, context: 'lesson', status: 'in_progress' })
-        .select('id').single();
-      if(error){ console.warn('[study session] create:', error); return null; }
-      _studySessionId = created.id;
-      return _studySessionId;
-    }catch(e){ console.warn('[study session] exception:', e); return null; }
-  }
-
   async function _syncQuizAnswerToSupabase(unitId, blockId, itemId, payload){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb) return;
     try{
-      const sessionId = await _ensureStudySession(userId);
-      const questionId = await _uuidFromString(`quiz:${unitId}:${blockId}:${itemId}`);
+      const questionRef = await _uuidFromString(`quiz:${unitId}:${blockId}:${itemId}`);
       const row = {
-        session_id: sessionId,
-        client_id: userId,
-        question_id: questionId,
+        user_id: userId,
+        question_ref: questionRef,
         question_type: 'quiz',
         answer_value: typeof payload.choice === 'string' ? payload.choice
                     : (payload.choice != null ? String(payload.choice) : null),
-        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, payload: payload }
+        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, payload: payload },
+        updated_at: new Date().toISOString()
       };
-      // Upsert por (client_id, question_id): apaga e insere (Supabase JS não tem upsert nativo nesses)
-      await window._sb.schema('questoes').from('question_responses')
-        .delete().eq('client_id', userId).eq('question_id', questionId);
-      const { error } = await window._sb.schema('questoes').from('question_responses').insert(row);
+      const { error } = await window._sb.schema('questoes').from('student_responses')
+        .upsert(row, { onConflict: 'user_id,question_ref' });
       if(error) console.warn('[quiz sync]', error);
     }catch(e){ console.warn('[quiz sync exception]', e); }
   }
@@ -10317,19 +10293,17 @@ const Store = (function(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb) return;
     try{
-      const sessionId = await _ensureStudySession(userId);
-      const questionId = await _uuidFromString(`essay:${unitId}:${blockId}:${itemId}`);
+      const questionRef = await _uuidFromString(`essay:${unitId}:${blockId}:${itemId}`);
       const row = {
-        session_id: sessionId,
-        client_id: userId,
-        question_id: questionId,
+        user_id: userId,
+        question_ref: questionRef,
         question_type: 'essay',
         answer_value: typeof payload.text === 'string' ? payload.text.slice(0, 8000) : null,
-        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, payload: payload }
+        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, payload: payload },
+        updated_at: new Date().toISOString()
       };
-      await window._sb.schema('questoes').from('question_responses')
-        .delete().eq('client_id', userId).eq('question_id', questionId);
-      const { error } = await window._sb.schema('questoes').from('question_responses').insert(row);
+      const { error } = await window._sb.schema('questoes').from('student_responses')
+        .upsert(row, { onConflict: 'user_id,question_ref' });
       if(error) console.warn('[essay sync]', error);
     }catch(e){ console.warn('[essay sync exception]', e); }
   }
@@ -10339,8 +10313,8 @@ const Store = (function(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state) return;
     try{
-      const { data, error } = await window._sb.schema('questoes').from('question_responses')
-        .select('question_type, answer_value, metadata, answered_at').eq('client_id', userId);
+      const { data, error } = await window._sb.schema('questoes').from('student_responses')
+        .select('question_type, answer_value, metadata, created_at, updated_at').eq('user_id', userId);
       if(error){ console.warn('[hydrate answers]', error); return; }
       let qCount = 0, eCount = 0;
       (data || []).forEach(row => {
@@ -10349,17 +10323,18 @@ const Store = (function(){
         if(unitId == null || blockId == null || itemId == null) return;
         const payload = (meta.payload && typeof meta.payload === 'object') ? meta.payload :
                         { choice: row.answer_value, text: row.answer_value };
+        const ts = row.updated_at || row.created_at;
         if(row.question_type === 'quiz'){
           _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
           _state.quizAnswers[unitId][blockId] = _state.quizAnswers[unitId][blockId] || {};
           _state.quizAnswers[unitId][blockId][itemId] = Object.assign({}, payload,
-            { answeredAt: row.answered_at ? new Date(row.answered_at).getTime() : Date.now() });
+            { answeredAt: ts ? new Date(ts).getTime() : Date.now() });
           qCount++;
         } else if(row.question_type === 'essay'){
           _state.essays[unitId] = _state.essays[unitId] || {};
           _state.essays[unitId][blockId] = _state.essays[unitId][blockId] || {};
           _state.essays[unitId][blockId][itemId] = Object.assign({}, payload,
-            { submittedAt: row.answered_at ? new Date(row.answered_at).getTime() : Date.now() });
+            { submittedAt: ts ? new Date(ts).getTime() : Date.now() });
           eCount++;
         }
       });
@@ -10373,7 +10348,6 @@ const Store = (function(){
   return {
     init(userId, course){
       _key = `ubique.coursePlatform.v3.${userId}.${course.id}`;
-      _studySessionId = null; // reset cache pra novo user/course
       const existing = _load();
       if(existing && existing.version === 3){
         _state = existing;
