@@ -12334,7 +12334,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=99"></script>
+<script src="ubique-shared.js?v=100"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -15875,6 +15875,62 @@
   }
 
   // ═══════════════════════════════════════════════════════════
+  // FASE 4n — Sync helpers pra tags do conteúdo (conteudo.tags)
+  // Supabase é source-of-truth: id integer auto-gerado, shape mínimo
+  // { id, tag, description, created_at, updated_at }.
+  // ═══════════════════════════════════════════════════════════
+  const TagsSync = (function(){
+    const conteudo = () => window._sb && window._sb.schema('conteudo');
+    async function insert(payload){
+      if(!conteudo()) return null;
+      try{
+        const { data, error } = await conteudo().from('tags')
+          .insert({ tag: payload.tag, description: payload.description || null })
+          .select().single();
+        if(error){ console.warn('[tags sync insert]', error); return null; }
+        return data;
+      }catch(e){ console.warn('[tags sync insert exception]', e); return null; }
+    }
+    async function update(id, patch){
+      if(!conteudo()) return null;
+      try{
+        const clean = {};
+        if(patch.tag !== undefined) clean.tag = patch.tag;
+        if(patch.description !== undefined) clean.description = patch.description || null;
+        clean.updated_at = new Date().toISOString();
+        const { data, error } = await conteudo().from('tags')
+          .update(clean).eq('id', id).select().single();
+        if(error){ console.warn('[tags sync update]', error); return null; }
+        return data;
+      }catch(e){ console.warn('[tags sync update exception]', e); return null; }
+    }
+    async function remove(id){
+      if(!conteudo()) return false;
+      try{
+        const { error } = await conteudo().from('tags').delete().eq('id', id);
+        if(error){ console.warn('[tags sync delete]', error); return false; }
+        return true;
+      }catch(e){ console.warn('[tags sync delete exception]', e); return false; }
+    }
+    return { insert, update, remove };
+  })();
+  window.TagsSync = TagsSync;
+
+  // ═══════════════════════════════════════════════════════════
+  // FASE 4n — Hidrata tags do Supabase → UbiqueStore
+  // ═══════════════════════════════════════════════════════════
+  async function _hydrateTagsFromSupabase(){
+    if(!window._sb || !window.UbiqueStore) return;
+    try{
+      const csb = window._sb.schema('conteudo');
+      const { data, error } = await csb.from('tags').select('*').order('id');
+      if(error){ console.warn('[hydrate tags admin] erro:', error); return; }
+      if(UbiqueStore.tags) UbiqueStore.tags.replaceAll(data || []);
+      console.log('[hydrate tags admin] ✅', { tags: data?.length || 0 });
+    }catch(e){ console.warn('[hydrate tags admin] exception:', e); }
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // FASE 4l — Sync helpers pra glossário/verbetes (conteudo.*)
   // ═══════════════════════════════════════════════════════════
   const GlossarioSync = (function(){
@@ -16004,11 +16060,12 @@
   // LOAD ALL
   // ═══════════════════════════════════════════════════════════
   async function loadAll(){
-    // Hidrata concursos.* + glossário primeiro (UbiqueStore vira espelho do Supabase)
+    // Hidrata concursos.* + glossário + avatares + tags (UbiqueStore vira espelho do Supabase)
     await Promise.all([
       _hydrateConcursosFromSupabase(),
       _hydrateGlossarioFromSupabase(),
       _hydrateAvataresFromSupabase(),
+      _hydrateTagsFromSupabase(),
     ]);
     await Promise.all([
       loadSubjects(), loadTopics(), loadTopicAliases(), loadTags(),
@@ -18201,21 +18258,10 @@
   // TAGS
   // ═══════════════════════════════════════════════════════════
   async function loadTags(){
-    if(window.UbiqueStore){
-      tagsCache = UbiqueStore.tags.list();
-      renderTags();
-    }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{
-        const { data, error } = await conteudo().from('tags').select('*').order('id');
-        if(!error && Array.isArray(data) && data.length > 0){
-          const byId = Object.fromEntries(tagsCache.map(t => [t.id, t]));
-          data.forEach(d => { byId[d.id] = Object.assign({}, byId[d.id] || {}, d); });
-          tagsCache = Object.values(byId);
-          renderTags();
-        }
-      }catch(_){}
-    }
+    // Supabase é source-of-truth: hidrata e renderiza a partir do UbiqueStore atualizado.
+    await _hydrateTagsFromSupabase();
+    if(window.UbiqueStore) tagsCache = UbiqueStore.tags.list();
+    renderTags();
   }
 
   // Subscreve a mudanças vindas de outra aba (tags)
@@ -18294,9 +18340,14 @@
         tag: tr.querySelector('[data-ef="tag"]').value.trim(),
         description: tr.querySelector('[data-ef="description"]').value.trim() || null,
       };
-      if(window.UbiqueStore){ UbiqueStore.tags.update(id, updates); }
-      if(window.UBIQUE_USE_SUPABASE){
-        try{ await conteudo().from('tags').update(updates).eq('id', id); }catch(_){}
+      if(!updates.tag){
+        showMsg('globalMessage', 'O nome da tag é obrigatório.', 'error');
+        return;
+      }
+      const row = await TagsSync.update(id, updates);
+      if(!row){
+        showMsg('globalMessage', 'Erro ao atualizar a tag no banco.', 'error');
+        return;
       }
       showMsg('globalMessage', 'Tag atualizada.', 'success');
       await loadTags();
@@ -18306,9 +18357,10 @@
 
   async function deleteTag(id){
     if(!confirm('Apagar esta tag?')) return;
-    if(window.UbiqueStore){ UbiqueStore.tags.remove(id); }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('tags').delete().eq('id', id); }catch(_){}
+    const ok = await TagsSync.remove(id);
+    if(!ok){
+      showMsg('globalMessage', 'Erro ao apagar a tag no banco.', 'error');
+      return;
     }
     showMsg('globalMessage', 'Tag apagada.', 'success');
     await loadTags();
@@ -18318,12 +18370,10 @@
     const tag = document.getElementById('tag-name').value.trim();
     const description = document.getElementById('tag-description').value.trim();
     if(!tag){ showMsg('globalMessage', 'O nome da tag é obrigatório.'); return; }
-    const slug = tag.toLowerCase()
-      .normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
-    const payload = { id: 'tg_' + slug, tag, label: tag, slug, description: description || null };
-    if(window.UbiqueStore){ UbiqueStore.tags.add(payload); }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('tags').insert({ tag, description: description || null }); }catch(_){}
+    const row = await TagsSync.insert({ tag, description });
+    if(!row){
+      showMsg('globalMessage', 'Erro ao salvar a tag no banco.', 'error');
+      return;
     }
     document.getElementById('tag-name').value = '';
     document.getElementById('tag-description').value = '';
@@ -42936,7 +42986,7 @@
 
   function _ueGetAllTags(){
     if(!(window.UbiqueStore && UbiqueStore.tags && UbiqueStore.tags.list)) return [];
-    return (UbiqueStore.tags.list() || []).map(function(t){ return t.name || t.id || ''; }).filter(Boolean);
+    return (UbiqueStore.tags.list() || []).map(function(t){ return t.tag || ''; }).filter(Boolean);
   }
 
   function _ueRefreshTagChips(bid){
@@ -42964,10 +43014,15 @@
     // Espelha em ueAllBlocksCache
     const allIdx = ueAllBlocksCache.findIndex(function(x){ return x.id === bid; });
     if(allIdx >= 0) ueAllBlocksCache[allIdx].tags = b.tags;
-    // Cria a tag em UbiqueStore.tags se não existir (para virar sugestão pros próximos blocos)
+    // Cria a tag no catálogo (Supabase source-of-truth) se ainda não existir,
+    // pra virar sugestão pros próximos blocos.
     if(window.UbiqueStore && UbiqueStore.tags){
-      const exists = UbiqueStore.tags.list().some(function(t){ return (t.name || t.id) === name; });
-      if(!exists) UbiqueStore.tags.add({ name: name, id: name.toLowerCase().replace(/\s+/g, '-') });
+      const exists = UbiqueStore.tags.list().some(function(t){ return String(t.tag||'').toLowerCase() === name.toLowerCase(); });
+      if(!exists && window.TagsSync){
+        TagsSync.insert({ tag: name, description: null }).then(function(row){
+          if(row && UbiqueStore.tags) UbiqueStore.tags.add(row);
+        });
+      }
     }
     _ueRefreshTagChips(bid);
     const input = document.getElementById('ue-tag-input-' + bid);
@@ -45328,7 +45383,7 @@
           const knownTagsList = tagsList.length
             ? '<div style="display:flex;gap:.25rem;flex-wrap:wrap;margin-top:.25rem">' +
                 tagsList.slice(0, 12).map(function(t){
-                  return '<span class="card-label" style="background:var(--accent-lo);border:1px solid var(--accent-border-soft);padding:.05rem .35rem;border-radius:999px;font-size:.55rem;cursor:pointer" onclick="(function(el){var i=document.getElementById(\'' + tagsInputId + '\');var v=i.value.trim();v=v?v.replace(/,\\s*$/,\'\')+\', \'+el.textContent:el.textContent;i.value=v;i.dispatchEvent(new Event(\'input\'));})(this)">' + esc(t.name || t.id) + '</span>';
+                  return '<span class="card-label" style="background:var(--accent-lo);border:1px solid var(--accent-border-soft);padding:.05rem .35rem;border-radius:999px;font-size:.55rem;cursor:pointer" onclick="(function(el){var i=document.getElementById(\'' + tagsInputId + '\');var v=i.value.trim();v=v?v.replace(/,\\s*$/,\'\')+\', \'+el.textContent:el.textContent;i.value=v;i.dispatchEvent(new Event(\'input\'));})(this)">' + esc(t.tag || '') + '</span>';
                 }).join('') +
               '</div>'
             : '';
@@ -45552,7 +45607,7 @@
           const knownTagsList = tagsList.length
             ? '<div style="display:flex;gap:.25rem;flex-wrap:wrap;margin-top:.25rem">' +
                 tagsList.slice(0, 12).map(function(t){
-                  const name = t.name || t.id;
+                  const name = t.tag || '';
                   return '<span class="card-label" style="background:var(--accent-lo);border:1px solid var(--accent-border-soft);padding:.05rem .35rem;border-radius:999px;font-size:.55rem;cursor:pointer" onmousedown="event.preventDefault();(function(el){var i=document.getElementById(\'' + tagsInputId + '\');var v=i.value.trim();v=v?v.replace(/,\\s*$/,\'\')+\', \'+el.textContent:el.textContent;i.value=v;ueEssayTagsUpdate(' + bid + ',' + idx + ',v);})(this)">' + esc(name) + '</span>';
                 }).join('') +
               '</div>'

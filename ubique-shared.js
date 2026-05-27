@@ -111,9 +111,8 @@
         rating: 4.3, totalHours: 30, quizCount: 20, essayCount: 4, videoCount: 10 },
     ],
     topics: [],
-    tags: [
-      { id: 'tg_cacd', slug: 'cacd', label: 'CACD', description: 'Concurso de Admissão à Carreira de Diplomata' },
-    ],
+    // Fase 4n: tags vêm do Supabase (conteudo.tags) — shape { id, tag, description }
+    tags: [],
     modules: [],
     // ── HIERARQUIA MOCKADA (História do Brasil) ──
     // Embutida aqui para que QUALQUER página (admin ou aluno) tenha
