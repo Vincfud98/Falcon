@@ -13743,7 +13743,15 @@
           <input class="field-input" type="text" id="pt-name" placeholder="opcional" autocomplete="off">
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;margin-bottom:1rem">
+        <div class="field" style="margin-bottom:0">
+          <label for="pt-role">Papel</label>
+          <select class="field-input" id="pt-role">
+            <option value="student">Aluno</option>
+            <option value="admin">Admin</option>
+            <option value="superadmin">Superadmin</option>
+          </select>
+        </div>
         <div class="field" style="margin-bottom:0">
           <label for="pt-status">Status</label>
           <select class="field-input" id="pt-status">
@@ -24087,26 +24095,78 @@
     return `Erro em bancas: ${msg}`;
   }
   async function loadPlatformAccess(){
-    // Fase 4j — Supabase é fonte de verdade (crm.platform_access)
+    // Fase 4j+ — merge crm.platform_access (whitelist) + crm.app_users
+    // (já cadastrados). Cada linha = 1 e-mail. Status:
+    //   - 'suspended' (admin suspendeu)
+    //   - 'active' (whitelist + tem conta = aluno entrou)
+    //   - 'pending' (whitelist mas ainda não fez 1º acesso)
     if(window.UBIQUE_USE_SUPABASE && window._sb){
       try{
-        const { data, error } = await crm()
-          .from('platform_access')
-          .select('*')
-          .order('created_at', { ascending: false });
-        if(error){
-          console.warn('[platform_access load]', error.message);
-        } else {
-          platformAccessCache = data || [];
-          // Espelha pro UbiqueStore (cross-tab sync + leitura síncrona)
-          if(window.UbiqueStore && UbiqueStore.platform_access){
-            UbiqueStore.platform_access.replaceAll(platformAccessCache);
-          }
-          return;
+        const [paR, auR] = await Promise.all([
+          crm().from('platform_access').select('*').order('created_at', { ascending: false }),
+          crm().from('app_users').select('id, email, full_name, nickname, role, status, created_at')
+        ]);
+        if(paR.error) console.warn('[platform_access load]', paR.error.message);
+        if(auR.error) console.warn('[app_users load]', auR.error.message);
+
+        const paList = paR.data || [];
+        const auList = auR.data || [];
+        const auByEmail = new Map();
+        auList.forEach(u => { if(u.email) auByEmail.set(u.email.toLowerCase(), u); });
+
+        const merged = [];
+        const seen = new Set();
+
+        // 1) Cada entrada da whitelist (com ou sem conta)
+        paList.forEach(pa => {
+          const email = (pa.email || '').toLowerCase();
+          const au = auByEmail.get(email);
+          seen.add(email);
+          merged.push({
+            id: pa.id,                              // PK da view = whitelist id
+            _whitelist_id: pa.id,
+            _app_user_id: au ? au.id : null,
+            _has_account: !!au,
+            email: pa.email,
+            full_name: (au && au.full_name) || pa.full_name || '',
+            notes: pa.notes,
+            access_type: pa.access_type,
+            subject_ids: pa.subject_ids,
+            role: (au && au.role) || pa.role || 'student',
+            status: pa.status === 'suspended' ? 'suspended' : (au ? 'active' : 'pending'),
+            created_at: pa.created_at
+          });
+        });
+
+        // 2) Usuários que existem em app_users mas não estão na whitelist
+        //    (caso anômalo — defensivo, mostra mesmo assim)
+        auList.forEach(au => {
+          const email = (au.email || '').toLowerCase();
+          if(seen.has(email)) return;
+          merged.push({
+            id: 'au_' + au.id,                      // prefixo pra não colidir
+            _whitelist_id: null,
+            _app_user_id: au.id,
+            _has_account: true,
+            email: au.email,
+            full_name: au.full_name || '',
+            notes: null,
+            access_type: 'full',
+            subject_ids: [],
+            role: au.role || 'student',
+            status: 'active',
+            created_at: au.created_at
+          });
+        });
+
+        platformAccessCache = merged;
+        if(window.UbiqueStore && UbiqueStore.platform_access){
+          UbiqueStore.platform_access.replaceAll(platformAccessCache);
         }
+        return;
       }catch(e){ console.warn('[platform_access load ex]', e); }
     }
-    // Fallback: UbiqueStore local
+    // Fallback: UbiqueStore local (sem Supabase)
     if(window.UbiqueStore){
       platformAccessCache = UbiqueStore.platform_access.list()
         .sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
@@ -41173,6 +41233,7 @@
       <table class="data-table" style="width:100%">
         <thead><tr>
           <th>E-mail / Nome</th>
+          <th>Papel</th>
           <th>Status</th>
           <th>Acesso</th>
           <th>Observações</th>
@@ -41186,15 +41247,21 @@
             const accessChip = isCustom
               ? `<span style="display:inline-block;font-family:var(--mono);font-size:.65rem;font-weight:500;letter-spacing:.04em;padding:.2rem .55rem;border-radius:3px;background:var(--green-lo);color:var(--green);border:1px solid var(--green)">${subIds.length} matéria${subIds.length !== 1 ? 's' : ''}</span>`
               : `<span style="display:inline-block;font-family:var(--mono);font-size:.65rem;font-weight:500;letter-spacing:.04em;padding:.2rem .55rem;border-radius:3px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">Completo</span>`;
-            const statusChip = r.status === 'active'
-              ? chip('Ativo', 'green')
-              : chip('Suspenso', 'red');
+            let statusChip;
+            if(r.status === 'active')      statusChip = chip('Ativo', 'green');
+            else if(r.status === 'pending') statusChip = chip('Aguardando 1º acesso', 'amber');
+            else                            statusChip = chip('Suspenso', 'red');
+            const roleChip = (r.role === 'admin' || r.role === 'superadmin')
+              ? `<span style="display:inline-block;font-family:var(--mono);font-size:.65rem;font-weight:500;letter-spacing:.04em;padding:.2rem .55rem;border-radius:3px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">${esc(r.role === 'superadmin' ? 'super' : 'admin')}</span>`
+              : `<span style="display:inline-block;font-family:var(--mono);font-size:.65rem;font-weight:500;letter-spacing:.04em;padding:.2rem .55rem;border-radius:3px;background:transparent;color:var(--text-dim);border:1px solid var(--accent-border-soft, rgba(200,169,126,.2))">aluno</span>`;
+            const isPending = r.status === 'pending';
             return `
               <tr data-id="${esc(r.id)}">
                 <td>
                   <div style="font-family:var(--serif);font-weight:400;font-size:.95rem;color:var(--text)">${esc(r.email)}</div>
                   ${r.full_name ? `<div style="font-family:var(--mono);font-size:.72rem;color:var(--text-mute);margin-top:.15rem">${esc(r.full_name)}</div>` : ''}
                 </td>
+                <td>${roleChip}</td>
                 <td>${statusChip}</td>
                 <td>${accessChip}</td>
                 <td style="font-size:.82rem;color:var(--text-mute);max-width:180px">${esc(r.notes || '—')}</td>
@@ -41204,11 +41271,14 @@
                 <td>
                   <div style="display:flex;gap:.3rem;flex-wrap:nowrap;align-items:center">
                     <button class="btn btn-ghost btn-sm" data-act="edit" data-id="${esc(r.id)}">editar</button>
-                    ${r.status === 'active'
-                      ? `<button class="btn btn-ghost btn-sm" style="color:var(--amber);border-color:var(--amber);background:var(--amber-lo)" data-act="suspend" data-id="${esc(r.id)}">suspender</button>`
-                      : `<button class="btn btn-ghost btn-sm" style="color:var(--green);border-color:var(--green);background:var(--green-lo)" data-act="activate" data-id="${esc(r.id)}">ativar</button>`
+                    ${r.status === 'suspended'
+                      ? `<button class="btn btn-ghost btn-sm" style="color:var(--green);border-color:var(--green);background:var(--green-lo)" data-act="activate" data-id="${esc(r.id)}">ativar</button>`
+                      : `<button class="btn btn-ghost btn-sm" style="color:var(--amber);border-color:var(--amber);background:var(--amber-lo)" data-act="suspend" data-id="${esc(r.id)}">suspender</button>`
                     }
-                    <button class="btn btn-ghost btn-sm" data-act="reset-pw" data-id="${esc(r.id)}" data-email="${esc(r.email)}" title="Enviar e-mail de redefinição de senha">senha</button>
+                    ${isPending
+                      ? ''
+                      : `<button class="btn btn-ghost btn-sm" data-act="reset-pw" data-id="${esc(r.id)}" data-email="${esc(r.email)}" title="Enviar e-mail de redefinição de senha">senha</button>`
+                    }
                     <button class="btn btn-ghost btn-sm btn-danger" data-act="delete" data-id="${esc(r.id)}" data-email="${esc(r.email)}">excluir</button>
                   </div>
                 </td>
@@ -41231,21 +41301,35 @@
   async function portariaSetStatus(id, newStatus){
     const r = platformAccessCache.find(x => String(x.id) === String(id));
     if(!r) return;
+    // Quando ativar de novo, restaura pra 'active' na whitelist (mesmo se
+    // user não tem conta ainda — o load() recalcula pra 'pending')
+    const wlStatus = newStatus === 'suspended' ? 'suspended' : 'active';
     const label = newStatus === 'suspended' ? 'Suspender' : 'Ativar';
     if(!confirm(`${label} o acesso de "${r.email}"?`)) return;
 
-    if(window.UbiqueStore){
-      UbiqueStore.platform_access.update(id, { status: newStatus });
+    if(window.UbiqueStore && r._whitelist_id){
+      UbiqueStore.platform_access.update(r._whitelist_id, { status: wlStatus });
     }
-    // Fase 4j — crm.platform_access
     if(window.UBIQUE_USE_SUPABASE && window._sb){
       try{
-        const { error } = await crm()
-          .from('platform_access')
-          .update({ status: newStatus, updated_at: new Date().toISOString() })
-          .eq('id', id);
-        if(error) console.warn('[platform_access.status]', error.message);
-      }catch(e){ console.warn('[platform_access.status ex]', e); }
+        // Atualiza whitelist (sempre que existir)
+        if(r._whitelist_id){
+          const { error } = await crm()
+            .from('platform_access')
+            .update({ status: wlStatus, updated_at: new Date().toISOString() })
+            .eq('id', r._whitelist_id);
+          if(error) console.warn('[platform_access.status]', error.message);
+        }
+        // Atualiza app_users (se já cadastrado) — usa 'inactive' pro app_users
+        if(r._app_user_id){
+          const auStatus = newStatus === 'suspended' ? 'inactive' : 'active';
+          const { error } = await crm()
+            .from('app_users')
+            .update({ status: auStatus })
+            .eq('id', r._app_user_id);
+          if(error) console.warn('[app_users.status]', error.message);
+        }
+      }catch(e){ console.warn('[portariaSetStatus ex]', e); }
     }
     await loadPlatformAccess();
     renderPortariaTable();
@@ -41299,9 +41383,23 @@
     confirmBtn.disabled = true;
     confirmBtn.textContent = 'Excluindo…';
 
-    if(window.UbiqueStore){ UbiqueStore.platform_access.remove(portariaDeleteTargetId); }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await supabase.from('platform_access').delete().eq('id', portariaDeleteTargetId); }catch(_){}
+    // Fase 4k — remove de ambas (whitelist + app_users)
+    if(window.UbiqueStore && r && r._whitelist_id){
+      UbiqueStore.platform_access.remove(r._whitelist_id);
+    }
+    if(window.UBIQUE_USE_SUPABASE && window._sb && r){
+      try{
+        if(r._whitelist_id){
+          const { error } = await crm().from('platform_access').delete().eq('id', r._whitelist_id);
+          if(error) console.warn('[platform_access delete]', error);
+        }
+        if(r._app_user_id){
+          const { error } = await crm().from('app_users').delete().eq('id', r._app_user_id);
+          if(error) console.warn('[app_users delete]', error);
+        }
+        // ⚠️ auth.users só pode ser apagado via service_role (Edge Function);
+        // por ora fica órfão (sem efeito prático, mas pode acumular).
+      }catch(e){ console.warn('[portaria delete ex]', e); }
     }
 
     confirmBtn.disabled = false;
@@ -41328,7 +41426,10 @@
       document.getElementById('portariaModalTitle').textContent   = r.email;
       document.getElementById('pt-email').value  = r.email || '';
       document.getElementById('pt-name').value   = r.full_name || '';
-      document.getElementById('pt-status').value = r.status || 'active';
+      // Status 'pending' (aguardando 1º acesso) na UI exibe como 'active' pq
+      // não é admin que controla isso — é estado natural pré-signup
+      document.getElementById('pt-status').value = (r.status === 'suspended') ? 'suspended' : 'active';
+      document.getElementById('pt-role').value   = r.role || 'student';
       document.getElementById('pt-notes').value  = r.notes || '';
 
       const accessType = r.access_type || 'full';
@@ -41345,6 +41446,7 @@
       document.getElementById('pt-email').value  = '';
       document.getElementById('pt-name').value   = '';
       document.getElementById('pt-status').value = 'active';
+      document.getElementById('pt-role').value   = 'student';
       document.getElementById('pt-notes').value  = '';
       document.querySelector('input[name="pt-access-type"][value="full"]').checked = true;
       document.querySelectorAll('.decide-option[data-access]').forEach(b => {
@@ -41426,6 +41528,7 @@
     const email      = document.getElementById('pt-email').value.trim().toLowerCase();
     const fullName   = document.getElementById('pt-name').value.trim();
     const status     = document.getElementById('pt-status').value;
+    const role       = document.getElementById('pt-role').value || 'student';
     const notes      = document.getElementById('pt-notes').value.trim();
     const accessType = ptGetAccessType();
     const subjectIds = accessType === 'custom' ? ptGetSelectedSubjectIds() : [];
@@ -41441,38 +41544,57 @@
     const saveBtn = document.getElementById('portariaModalSaveBtn');
     saveBtn.disabled = true;
 
-    const payload = {
+    // Acha registro em edição pra saber se já tem app_user vinculado
+    const existing = editingPortariaId
+      ? platformAccessCache.find(x => String(x.id) === String(editingPortariaId))
+      : null;
+
+    const wlPayload = {
       email,
       full_name:   fullName || null,
       status,
       notes:       notes || null,
       access_type: accessType,
       subject_ids: accessType === 'custom' ? subjectIds : null,
+      role,
     };
 
-    // 1. UbiqueStore (sempre — espelha imediatamente no aluno)
+    // 1. UbiqueStore (espelho local imediato)
     if(window.UbiqueStore){
-      if(editingPortariaId){
-        UbiqueStore.platform_access.update(editingPortariaId, payload);
-      } else {
-        UbiqueStore.platform_access.add(Object.assign({}, payload, {
+      if(existing && existing._whitelist_id){
+        UbiqueStore.platform_access.update(existing._whitelist_id, wlPayload);
+      } else if(!existing){
+        UbiqueStore.platform_access.add(Object.assign({}, wlPayload, {
           created_at: new Date().toISOString(),
         }));
       }
     }
-    // 2. Supabase — Fase 4j (agora crm.platform_access)
+    // 2. Supabase — crm.platform_access (upsert por email garante idempotência)
     if(window.UBIQUE_USE_SUPABASE && window._sb){
       try{
-        if(editingPortariaId){
+        if(existing && existing._whitelist_id){
           const { error } = await crm().from('platform_access')
-            .update(Object.assign({}, payload, { updated_at: new Date().toISOString() }))
-            .eq('id', editingPortariaId);
+            .update(Object.assign({}, wlPayload, { updated_at: new Date().toISOString() }))
+            .eq('id', existing._whitelist_id);
           if(error) console.warn('[platform_access update]', error);
         } else {
-          const { error } = await crm().from('platform_access').insert(payload);
-          if(error) console.warn('[platform_access insert]', error);
+          // upsert por email — recria whitelist caso user só exista em app_users
+          const { error } = await crm().from('platform_access')
+            .upsert(wlPayload, { onConflict: 'email' });
+          if(error) console.warn('[platform_access upsert]', error);
         }
-      }catch(e){ console.warn('[platform_access save ex]', e); }
+        // 3. Se usuário já cadastrado, atualiza role/full_name/status em app_users
+        if(existing && existing._app_user_id){
+          const auPatch = {
+            role,
+            status: status === 'suspended' ? 'inactive' : 'active',
+          };
+          if(fullName) auPatch.full_name = fullName;
+          const { error } = await crm().from('app_users')
+            .update(auPatch).eq('id', existing._app_user_id);
+          if(error) console.warn('[app_users update]', error);
+        }
+      }catch(e){ console.warn('[portaria save ex]', e); }
     }
 
     saveBtn.disabled = false;
