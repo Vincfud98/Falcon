@@ -23899,7 +23899,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if(sel) try{ sel.removeAllRanges(); }catch(e){}
     // Persist (passa o anchor pra ser persistido em metadata.anchor)
     if(ctx.unitId && ctx.blockId){
-      Store.addHighlight(ctx.unitId, ctx.blockId, text, color, hint, anchor);
+      const entry = Store.addHighlight(ctx.unitId, ctx.blockId, text, color, hint, anchor);
+      // Marca o span ao vivo com o id pra que "X" (clear-format) saiba qual
+      // highlight remover do Store sem precisar de matching por texto.
+      if(entry && entry.id) mark.setAttribute('data-hl-id', String(entry.id));
     }
     hideToolbar();
   }
@@ -23982,17 +23985,37 @@ document.addEventListener('DOMContentLoaded', () => {
     const container = range.commonAncestorContainer.nodeType === 1
       ? range.commonAncestorContainer
       : range.commonAncestorContainer.parentElement;
-    const marks = container.querySelectorAll ? Array.from(container.querySelectorAll('.hl-mark')) : [];
-    // Also check if the container itself is a mark
+    // Considera só marks que intersectam o range — não toda a página
+    const marks = container.querySelectorAll
+      ? Array.from(container.querySelectorAll('.hl-mark')).filter(m => range.intersectsNode(m))
+      : [];
     const allMarks = container.closest && container.closest('.hl-mark')
       ? [container.closest('.hl-mark'), ...marks]
       : marks;
+    // Descobre o block/unit ATUAL pra fallback por texto (caso o mark
+    // não tenha data-hl-id — highlights legacy criados antes da v2)
+    const ctx = getBlockContext();
     allMarks.forEach(mark => {
-      // Unwrap: replace the span with its children
+      const hlId = mark.getAttribute('data-hl-id');
+      const markText = (mark.textContent || '').trim();
+      // 1) Remove do Store (persistência) — sync pro Supabase já está
+      //    embutido no Store.removeHighlight via _syncHighlightDeleteToSupabase
+      if(hlId && window.Store && typeof Store.removeHighlight === 'function'){
+        Store.removeHighlight(hlId);
+      } else if(markText && ctx.unitId && window.Store && typeof Store.getHighlights === 'function'){
+        // Fallback p/ marks sem id: acha o highlight com mesmo (blockId,text)
+        const candidates = Store.getHighlights(ctx.unitId)
+          .filter(h => (!ctx.blockId || h.blockId === ctx.blockId) && (h.text||'').trim() === markText);
+        if(candidates.length){
+          Store.removeHighlight(candidates[0].id);
+        }
+      }
+      // 2) Unwrap visual: substitui o span pelos filhos
       const parent = mark.parentNode;
+      if(!parent) return;
       while(mark.firstChild) parent.insertBefore(mark.firstChild, mark);
       parent.removeChild(mark);
-      parent.normalize(); // merge adjacent text nodes
+      parent.normalize();
     });
     sel.removeAllRanges();
     hideToolbar();
