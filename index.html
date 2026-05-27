@@ -17129,7 +17129,7 @@ Renderers.login.mount = function(stageEl){
   if(faCloseBtn) faCloseBtn.addEventListener('click', faClose);
   if(faModal) faModal.addEventListener('click', e => { if(e.target === faModal) faClose(); });
 
-  // Step 1 — verifica email na whitelist
+  // Step 1 — verifica email na whitelist via RPC (security definer)
   if(faCheckBtn) faCheckBtn.addEventListener('click', async () => {
     faClearMsgs();
     const email = (faEmailEl.value || '').trim().toLowerCase();
@@ -17137,32 +17137,39 @@ Renderers.login.mount = function(stageEl){
       faShowErr('E-mail inválido.'); return;
     }
     if(!window._sb){
-      faShowErr('Backend indisponível. Tente novamente.'); return;
+      faShowErr('Não foi possível conectar ao servidor. Tente novamente em alguns instantes.'); return;
     }
     faCheckBtn.disabled = true;
     faShowStat('Verificando…');
     try{
-      const { data, error } = await window._sb.schema('crm').from('platform_access')
-        .select('email, role, full_name, status').eq('email', email).maybeSingle();
-      if(error){ faShowErr('Erro ao verificar: ' + error.message); faCheckBtn.disabled = false; return; }
-      if(!data){
-        faShowErr('Este e-mail não está autorizado a acessar a plataforma. Fale com o administrador.');
+      // RPC bypass RLS — anon pode checar 1 email por vez sem expor lista
+      const { data, error } = await window._sb.schema('crm').rpc('check_email_authorized', { p_email: email });
+      if(error){
+        faShowErr('Não foi possível verificar agora. Tente novamente em alguns instantes.');
+        console.warn('[check_email_authorized]', error);
         faCheckBtn.disabled = false;
         return;
       }
-      if(data.status === 'suspended'){
-        faShowErr('Seu acesso está suspenso. Fale com o administrador.');
+      const row = Array.isArray(data) ? data[0] : data;
+      if(!row || !row.found){
+        faShowErr('Este e-mail não está autorizado. Se você acha que deveria ter acesso, fale com o suporte.');
         faCheckBtn.disabled = false;
         return;
       }
-      _faAuthorizedEntry = { email, role: data.role || 'student', full_name: data.full_name || '' };
+      if(row.status === 'suspended'){
+        faShowErr('Seu acesso foi suspenso. Fale com o suporte para reativar.');
+        faCheckBtn.disabled = false;
+        return;
+      }
+      _faAuthorizedEntry = { email, role: row.role || 'student', full_name: row.full_name || '' };
       faShowStep(2);
       faSubtitle.textContent = `Olá! Crie sua conta para ${email}.`;
       if(_faAuthorizedEntry.full_name) faNameEl.value = _faAuthorizedEntry.full_name;
       faClearMsgs();
       setTimeout(() => faNameEl.focus(), 80);
     }catch(e){
-      faShowErr('Erro de rede: ' + e.message);
+      faShowErr('Erro de rede. Verifique sua conexão e tente novamente.');
+      console.warn('[check email ex]', e);
     }
     faCheckBtn.disabled = false;
   });
