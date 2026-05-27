@@ -15348,17 +15348,54 @@ const UserDirectory = (function(){
 })();
 window.UserDirectory = UserDirectory;
 
-/* Notifications — central simples no UbiqueStore. Tipos:
+/* Notifications — central no UbiqueStore (local-first) + sync com Supabase
+   (aluno.notifications). Tipos:
    - 'mention'         { from_user_id, comment_id, block_id, text_excerpt, unit_id?, module_id? }
    - 'follow_request'  { from_user_id, follow_id }
-   - 'follow_accepted' { from_user_id, follow_id } */
+   - 'follow_accepted' { from_user_id, follow_id }
+   - 'essay_corrected' { unit_id?, block_id?, score? } */
 const Notifications = (function(){
+  const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   function _t(){ return window.UbiqueStore && UbiqueStore.notifications; }
+  function _genId(){
+    return (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ('ntf_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7));
+  }
+  function _isUuid(s){ return typeof s === 'string' && _UUID_RE.test(s); }
+
+  // Fase 4g — fire-and-forget sync pro Supabase
+  async function _syncCreate(row){
+    if(!window._sb || !_isUuid(row.id) || !_isUuid(row.user_id)) return;
+    try{
+      const dbRow = {
+        id: row.id,
+        user_id: row.user_id,
+        type: row.type,
+        payload: row.payload || {},
+        read: !!row.read,
+        created_at: new Date(row.created_at || Date.now()).toISOString()
+      };
+      const { error } = await window._sb.schema('aluno').from('notifications').insert(dbRow);
+      if(error) console.warn('[notif sync insert]', error);
+    }catch(e){ console.warn('[notif sync insert ex]', e); }
+  }
+  async function _syncMarkRead(id){
+    if(!window._sb || !_isUuid(id)) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('notifications')
+        .update({ read: true, read_at: new Date().toISOString() })
+        .eq('id', id);
+      if(error) console.warn('[notif sync read]', error);
+    }catch(e){ console.warn('[notif sync read ex]', e); }
+  }
+
   function create(userId, type, payload){
     if(!_t() || !userId) return null;
-    const id = 'ntf_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7);
+    const id = _genId();
     const row = { id, user_id: userId, type, payload: payload || {}, read: false, created_at: Date.now() };
     UbiqueStore.notifications.add(row);
+    _syncCreate(row).catch(()=>{});
     return row;
   }
   function listFor(userId){
@@ -15373,21 +15410,101 @@ const Notifications = (function(){
   function markRead(notifId){
     if(!_t()) return;
     UbiqueStore.notifications.update(notifId, { read: true });
+    _syncMarkRead(notifId).catch(()=>{});
   }
   function markAllRead(userId){
-    listFor(userId).forEach(n => { if(!n.read) UbiqueStore.notifications.update(n.id, { read: true }); });
+    listFor(userId).forEach(n => {
+      if(!n.read){
+        UbiqueStore.notifications.update(n.id, { read: true });
+        _syncMarkRead(n.id).catch(()=>{});
+      }
+    });
   }
-  return { create, listFor, unreadCount, markRead, markAllRead };
+  /* Hidrata as notificações do usuário a partir do Supabase. Mescla com
+   * legacy locais (não-UUID), evita duplicatas via id. */
+  async function hydrate(userId){
+    if(!_t() || !window._sb || !_isUuid(userId)) return 0;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('notifications')
+        .select('id, user_id, type, payload, read, read_at, created_at')
+        .eq('user_id', userId).order('created_at', { ascending: false });
+      if(error){ console.warn('[notif hydrate]', error); return 0; }
+      const existing = UbiqueStore.notifications.list() || [];
+      const existingIds = new Set(existing.map(n => n.id));
+      let added = 0;
+      (data || []).forEach(row => {
+        const local = {
+          id: row.id, user_id: row.user_id, type: row.type,
+          payload: row.payload || {}, read: !!row.read,
+          created_at: row.created_at ? new Date(row.created_at).getTime() : Date.now()
+        };
+        if(existingIds.has(row.id)){
+          UbiqueStore.notifications.update(row.id, local);
+        } else {
+          UbiqueStore.notifications.add(local);
+          added++;
+        }
+      });
+      if(added) console.log('[Notifications] hydrated:', added);
+      return added;
+    }catch(e){ console.warn('[notif hydrate ex]', e); return 0; }
+  }
+  return { create, listFor, unreadCount, markRead, markAllRead, hydrate };
 })();
 window.Notifications = Notifications;
 
-/* Follows — gerencia relações de seguir entre usuários. Status:
+/* Follows — relações de seguir entre usuários (local-first + Supabase).
+   Status:
    - 'pending'  → pedido enviado, aguardando aceite
    - 'accepted' → seguindo de fato
    - 'declined' → recusado (mantemos pra evitar spam de re-pedidos) */
 const Follows = (function(){
+  const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   function _t(){ return window.UbiqueStore && UbiqueStore.follows; }
   function _all(){ return (_t() ? UbiqueStore.follows.list() : []) || []; }
+  function _genId(){
+    return (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ('flw_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7));
+  }
+  function _isUuid(s){ return typeof s === 'string' && _UUID_RE.test(s); }
+
+  // Fase 4g — fire-and-forget sync pro Supabase
+  async function _syncInsert(row){
+    if(!window._sb || !_isUuid(row.id) || !_isUuid(row.follower_id) || !_isUuid(row.following_id)) return;
+    try{
+      const dbRow = {
+        id: row.id,
+        follower_id: row.follower_id,
+        following_id: row.following_id,
+        status: row.status || 'pending',
+        created_at: new Date(row.created_at || Date.now()).toISOString()
+      };
+      // upsert porque pode existir edge antiga (status='declined') reaberta
+      const { error } = await window._sb.schema('aluno').from('follows')
+        .upsert(dbRow, { onConflict: 'follower_id,following_id' });
+      if(error) console.warn('[follows sync insert]', error);
+    }catch(e){ console.warn('[follows sync insert ex]', e); }
+  }
+  async function _syncUpdate(id, patch){
+    if(!window._sb || !_isUuid(id)) return;
+    try{
+      const dbPatch = Object.assign({}, patch);
+      if(patch.responded_at) dbPatch.responded_at = new Date(patch.responded_at).toISOString();
+      if(patch.created_at) dbPatch.created_at = new Date(patch.created_at).toISOString();
+      const { error } = await window._sb.schema('aluno').from('follows')
+        .update(dbPatch).eq('id', id);
+      if(error) console.warn('[follows sync update]', error);
+    }catch(e){ console.warn('[follows sync update ex]', e); }
+  }
+  async function _syncDelete(id){
+    if(!window._sb || !_isUuid(id)) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('follows').delete().eq('id', id);
+      if(error) console.warn('[follows sync delete]', error);
+    }catch(e){ console.warn('[follows sync delete ex]', e); }
+  }
+
   function findEdge(followerId, followingId){
     return _all().find(f => f && f.follower_id === followerId && f.following_id === followingId) || null;
   }
@@ -15398,12 +15515,15 @@ const Follows = (function(){
     let row;
     if(existing){
       // Antes 'declined' → reabre pedido
-      UbiqueStore.follows.update(existing.id, { status: 'pending', created_at: Date.now() });
-      row = Object.assign({}, existing, { status:'pending', created_at: Date.now() });
+      const patch = { status: 'pending', created_at: Date.now() };
+      UbiqueStore.follows.update(existing.id, patch);
+      row = Object.assign({}, existing, patch);
+      _syncUpdate(existing.id, patch).catch(()=>{});
     } else {
-      const id = 'flw_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7);
+      const id = _genId();
       row = { id, follower_id: fromId, following_id: toId, status:'pending', created_at: Date.now() };
       UbiqueStore.follows.add(row);
+      _syncInsert(row).catch(()=>{});
     }
     // Notifica o destinatário
     Notifications.create(toId, 'follow_request', { from_user_id: fromId, follow_id: row.id });
@@ -15412,17 +15532,55 @@ const Follows = (function(){
   function accept(followId){
     if(!_t()) return;
     const f = UbiqueStore.follows.get(followId); if(!f) return;
-    UbiqueStore.follows.update(followId, { status:'accepted', responded_at: Date.now() });
+    const patch = { status:'accepted', responded_at: Date.now() };
+    UbiqueStore.follows.update(followId, patch);
+    _syncUpdate(followId, patch).catch(()=>{});
     Notifications.create(f.follower_id, 'follow_accepted', { from_user_id: f.following_id, follow_id: followId });
   }
   function decline(followId){
     if(!_t()) return;
-    UbiqueStore.follows.update(followId, { status:'declined', responded_at: Date.now() });
+    const patch = { status:'declined', responded_at: Date.now() };
+    UbiqueStore.follows.update(followId, patch);
+    _syncUpdate(followId, patch).catch(()=>{});
   }
   function unfollow(fromId, toId){
     if(!_t()) return;
     const edge = findEdge(fromId, toId);
-    if(edge) UbiqueStore.follows.remove(edge.id);
+    if(edge){
+      UbiqueStore.follows.remove(edge.id);
+      _syncDelete(edge.id).catch(()=>{});
+    }
+  }
+  /* Hidrata edges onde o usuário é follower OU following. */
+  async function hydrate(userId){
+    if(!_t() || !window._sb || !_isUuid(userId)) return 0;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('follows')
+        .select('id, follower_id, following_id, status, created_at, responded_at')
+        .or(`follower_id.eq.${userId},following_id.eq.${userId}`);
+      if(error){ console.warn('[follows hydrate]', error); return 0; }
+      const existing = _all();
+      const existingIds = new Set(existing.map(f => f.id));
+      let n = 0;
+      (data || []).forEach(row => {
+        const local = {
+          id: row.id,
+          follower_id: row.follower_id,
+          following_id: row.following_id,
+          status: row.status,
+          created_at: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+          responded_at: row.responded_at ? new Date(row.responded_at).getTime() : null
+        };
+        if(existingIds.has(row.id)){
+          UbiqueStore.follows.update(row.id, local);
+        } else {
+          UbiqueStore.follows.add(local);
+          n++;
+        }
+      });
+      if(n) console.log('[Follows] hydrated:', n);
+      return n;
+    }catch(e){ console.warn('[follows hydrate ex]', e); return 0; }
   }
   // Conveniências pra UI:
   function pendingIncoming(userId){ return _all().filter(f => f.following_id === userId && f.status === 'pending'); }
@@ -15448,7 +15606,7 @@ const Follows = (function(){
   return {
     request, accept, decline, unfollow,
     pendingIncoming, pendingOutgoing, followers, following, mutual,
-    relationshipWith, findEdge
+    relationshipWith, findEdge, hydrate
   };
 })();
 window.Follows = Follows;
@@ -24809,6 +24967,14 @@ const App = {
 
     const user = Auth.getUser();
     if(user) Store.init(user.id, window.COURSE);
+    // Fase 4g — hidrata notifications + follows do Supabase (fire-and-forget,
+    // mescla com legacy local; entries com UUID são source-of-truth do DB)
+    if(user && window.Notifications && typeof Notifications.hydrate === 'function'){
+      Notifications.hydrate(user.id).catch(()=>{});
+    }
+    if(user && window.Follows && typeof Follows.hydrate === 'function'){
+      Follows.hydrate(user.id).catch(()=>{});
+    }
     if(force){
       App.render();
       return;
