@@ -15822,6 +15822,76 @@
   window.ConcursosSync = ConcursosSync;
 
   // ═══════════════════════════════════════════════════════════
+  // FASE 4m — Sync helpers pra banco de avatares (crm.*)
+  // ═══════════════════════════════════════════════════════════
+  const AvataresSync = (function(){
+    const crmFn = () => window._sb && window._sb.schema('crm');
+    function _wrap(p, label){
+      if(!p) return null;
+      return Promise.resolve(p).then(res => {
+        if(res && res.error) console.warn('[avatares sync '+label+']', res.error);
+        return res;
+      }).catch(e => console.warn('[avatares sync '+label+' exception]', e));
+    }
+    function _toIso(v){
+      if(v == null) return null;
+      if(typeof v === 'number') return new Date(v).toISOString();
+      if(v instanceof Date) return v.toISOString();
+      return v;
+    }
+    return {
+      categoryUpsert(row){
+        if(!crmFn()) return;
+        const patched = Object.assign({}, row, {
+          created_at: _toIso(row.created_at) || new Date().toISOString()
+        });
+        return _wrap(crmFn().from('avatar_categories')
+          .upsert(patched, { onConflict: 'id' }), 'category upsert');
+      },
+      categoryDelete(id){
+        if(!crmFn()) return;
+        return _wrap(crmFn().from('avatar_categories').delete().eq('id', id), 'category delete');
+      },
+      avatarUpsert(row){
+        if(!crmFn()) return;
+        const patched = Object.assign({}, row, {
+          created_at: _toIso(row.created_at) || new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        });
+        return _wrap(crmFn().from('avatars')
+          .upsert(patched, { onConflict: 'id' }), 'avatar upsert');
+      },
+      avatarDelete(id){
+        if(!crmFn()) return;
+        return _wrap(crmFn().from('avatars').delete().eq('id', id), 'avatar delete');
+      }
+    };
+  })();
+  window.AvataresSync = AvataresSync;
+
+  // ═══════════════════════════════════════════════════════════
+  // FASE 4m — Hidrata avatares do Supabase → UbiqueStore
+  // ═══════════════════════════════════════════════════════════
+  async function _hydrateAvataresFromSupabase(){
+    if(!window._sb || !window.UbiqueStore) return;
+    try{
+      const csb = window._sb.schema('crm');
+      const [cat, av] = await Promise.all([
+        csb.from('avatar_categories').select('*').order('position'),
+        csb.from('avatars').select('*'),
+      ]);
+      const errs = [cat.error, av.error].filter(Boolean);
+      if(errs.length){ console.warn('[hydrate avatares admin] erros:', errs); return; }
+      if(UbiqueStore.avatar_categories) UbiqueStore.avatar_categories.replaceAll(cat.data || []);
+      if(UbiqueStore.avatars)           UbiqueStore.avatars.replaceAll(av.data || []);
+      console.log('[hydrate avatares admin] ✅', {
+        categorias: cat.data?.length || 0,
+        avatares: av.data?.length || 0,
+      });
+    }catch(e){ console.warn('[hydrate avatares admin] exception:', e); }
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // FASE 4l — Sync helpers pra glossário/verbetes (conteudo.*)
   // ═══════════════════════════════════════════════════════════
   const GlossarioSync = (function(){
@@ -15955,6 +16025,7 @@
     await Promise.all([
       _hydrateConcursosFromSupabase(),
       _hydrateGlossarioFromSupabase(),
+      _hydrateAvataresFromSupabase(),
     ]);
     await Promise.all([
       loadSubjects(), loadTopics(), loadTopicAliases(), loadTags(),
@@ -49571,14 +49642,15 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       if(existing){ msg.textContent = 'Já existe uma categoria com esse nome.'; return; }
       if(_editingCategoryId){
         UbiqueStore.avatar_categories.update(_editingCategoryId, { name: name });
+        AvataresSync.categoryUpsert({ id: _editingCategoryId, name: name });
       } else {
         const slug = name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
           .replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || ('cat-' + Date.now().toString(36));
         const id = 'avcat_' + slug + '_' + Date.now().toString(36);
         const pos = _cats().length;
-        UbiqueStore.avatar_categories.add({
-          id, name, position: pos, created_at: Date.now()
-        });
+        const catRow = { id, name, position: pos, created_at: Date.now() };
+        UbiqueStore.avatar_categories.add(catRow);
+        AvataresSync.categoryUpsert(catRow);
       }
       document.getElementById('avatarCategoryModal').classList.remove('active');
       render();
@@ -49588,11 +49660,16 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       const list = _avsByCat(_editingCategoryId);
       if(list.length > 0){
         if(!confirm('Esta categoria tem ' + list.length + ' avatar(es). Apagar a categoria TAMBÉM apagará os avatares dela. Continuar?')) return;
-        list.forEach(av => UbiqueStore.avatars.remove(av.id));
+        list.forEach(av => {
+          UbiqueStore.avatars.remove(av.id);
+          AvataresSync.avatarDelete(av.id);
+        });
       } else {
         if(!confirm('Apagar esta categoria?')) return;
       }
-      UbiqueStore.avatar_categories.remove(_editingCategoryId);
+      const catIdToDelete = _editingCategoryId;
+      UbiqueStore.avatar_categories.remove(catIdToDelete);
+      AvataresSync.categoryDelete(catIdToDelete);
       document.getElementById('avatarCategoryModal').classList.remove('active');
       render();
     }
@@ -49758,11 +49835,14 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       };
       if(_editingAvatarId){
         UbiqueStore.avatars.update(_editingAvatarId, payload);
+        AvataresSync.avatarUpsert(Object.assign({ id: _editingAvatarId }, payload));
       } else {
         const slug = (name || 'avatar').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
           .replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || ('av-' + Date.now().toString(36));
         const id = 'av_' + slug + '_' + Date.now().toString(36);
-        UbiqueStore.avatars.add(Object.assign({ id, created_at: Date.now() }, payload));
+        const avRow = Object.assign({ id, created_at: Date.now() }, payload);
+        UbiqueStore.avatars.add(avRow);
+        AvataresSync.avatarUpsert(avRow);
       }
       closeAvatarModal();
       render();
@@ -49770,7 +49850,9 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     function _deleteAvatar(){
       if(!_editingAvatarId) return;
       if(!confirm('Apagar este avatar do banco?')) return;
-      UbiqueStore.avatars.remove(_editingAvatarId);
+      const avIdToDelete = _editingAvatarId;
+      UbiqueStore.avatars.remove(avIdToDelete);
+      AvataresSync.avatarDelete(avIdToDelete);
       closeAvatarModal();
       render();
     }
