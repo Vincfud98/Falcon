@@ -15822,6 +15822,80 @@
   window.ConcursosSync = ConcursosSync;
 
   // ═══════════════════════════════════════════════════════════
+  // FASE 4l — Sync helpers pra glossário/verbetes (conteudo.*)
+  // ═══════════════════════════════════════════════════════════
+  const GlossarioSync = (function(){
+    const conteudo = () => window._sb && window._sb.schema('conteudo');
+    function _wrap(p, label){
+      if(!p) return null;
+      return Promise.resolve(p).then(res => {
+        if(res && res.error) console.warn('[glossario sync '+label+']', res.error);
+        return res;
+      }).catch(e => console.warn('[glossario sync '+label+' exception]', e));
+    }
+    return {
+      // glossary_word_classes
+      wordClassUpsert(row){
+        if(!conteudo()) return;
+        return _wrap(conteudo().from('glossary_word_classes')
+          .upsert(row, { onConflict: 'id' }), 'word_class upsert');
+      },
+      wordClassDelete(id){
+        if(!conteudo()) return;
+        return _wrap(conteudo().from('glossary_word_classes').delete().eq('id', id), 'word_class delete');
+      },
+      // glossary_terms
+      termUpsert(row){
+        if(!conteudo()) return;
+        const patched = Object.assign({}, row, { updated_at: new Date().toISOString() });
+        return _wrap(conteudo().from('glossary_terms')
+          .upsert(patched, { onConflict: 'id' }), 'term upsert');
+      },
+      termDelete(id){
+        if(!conteudo()) return;
+        return _wrap(conteudo().from('glossary_terms').delete().eq('id', id), 'term delete');
+      },
+      // verbetes (inline)
+      verbeteUpsert(row){
+        if(!conteudo()) return;
+        const patched = Object.assign({}, row, { updated_at: new Date().toISOString() });
+        return _wrap(conteudo().from('verbetes')
+          .upsert(patched, { onConflict: 'id' }), 'verbete upsert');
+      },
+      verbeteDelete(id){
+        if(!conteudo()) return;
+        return _wrap(conteudo().from('verbetes').delete().eq('id', id), 'verbete delete');
+      }
+    };
+  })();
+  window.GlossarioSync = GlossarioSync;
+
+  // ═══════════════════════════════════════════════════════════
+  // FASE 4l — Hidrata glossário do Supabase → UbiqueStore
+  // ═══════════════════════════════════════════════════════════
+  async function _hydrateGlossarioFromSupabase(){
+    if(!window._sb || !window.UbiqueStore) return;
+    try{
+      const csb = window._sb.schema('conteudo');
+      const [wc, gt, vb] = await Promise.all([
+        csb.from('glossary_word_classes').select('*'),
+        csb.from('glossary_terms').select('*'),
+        csb.from('verbetes').select('*'),
+      ]);
+      const errs = [wc.error, gt.error, vb.error].filter(Boolean);
+      if(errs.length){ console.warn('[hydrate glossario admin] erros:', errs); return; }
+      if(UbiqueStore.glossary_word_classes) UbiqueStore.glossary_word_classes.replaceAll(wc.data || []);
+      if(UbiqueStore.glossary_terms)        UbiqueStore.glossary_terms.replaceAll(gt.data || []);
+      if(UbiqueStore.verbetes)              UbiqueStore.verbetes.replaceAll(vb.data || []);
+      console.log('[hydrate glossario admin] ✅', {
+        word_classes: wc.data?.length || 0,
+        terms: gt.data?.length || 0,
+        verbetes: vb.data?.length || 0,
+      });
+    }catch(e){ console.warn('[hydrate glossario admin] exception:', e); }
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // FASE 4i — Hidrata concursos.* do Supabase → UbiqueStore
   // Roda ANTES de loadAll pra que loadExams/loadEditais/etc leiam
   // dados do Supabase (não mais lixo legacy do localStorage).
@@ -15858,8 +15932,11 @@
   // LOAD ALL
   // ═══════════════════════════════════════════════════════════
   async function loadAll(){
-    // Hidrata concursos.* primeiro (UbiqueStore vira espelho do Supabase)
-    await _hydrateConcursosFromSupabase();
+    // Hidrata concursos.* + glossário primeiro (UbiqueStore vira espelho do Supabase)
+    await Promise.all([
+      _hydrateConcursosFromSupabase(),
+      _hydrateGlossarioFromSupabase(),
+    ]);
     await Promise.all([
       loadSubjects(), loadTopics(), loadTopicAliases(), loadTags(),
       loadBancas(), loadExams(), loadExamSubjects(), loadExamBancas(),
@@ -48711,11 +48788,13 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
 
     if(_vbEditingId){
       UbiqueStore.verbetes.update(_vbEditingId, payload);
+      GlossarioSync.verbeteUpsert(payload);
     } else {
       // Conflito por id? Avisa.
       const exists = (UbiqueStore.verbetes.list() || []).find(function(v){ return v.id === id; });
       if(exists){ _showMsg('vbModalMsg', 'Já existe um verbete com termo "' + term + '". Edite o existente.'); return; }
       UbiqueStore.verbetes.add(payload);
+      GlossarioSync.verbeteUpsert(payload);
     }
 
     closeVerbeteModal();
@@ -48726,7 +48805,9 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   function deleteVerbete(){
     if(!_vbEditingId) return;
     if(!confirm('Apagar este verbete? Os blocos que o referenciam continuam funcionando, mas o tooltip ficará vazio.')) return;
-    UbiqueStore.verbetes.remove(_vbEditingId);
+    const idToDelete = _vbEditingId;
+    UbiqueStore.verbetes.remove(idToDelete);
+    GlossarioSync.verbeteDelete(idToDelete);
     closeVerbeteModal();
     renderVerbeteCards();
     _showMsg('globalMessageVerbetes', 'Verbete apagado.', 'success');
@@ -49128,7 +49209,9 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       alert('Já existe uma classe com esse nome.');
       return;
     }
-    UbiqueStore.glossary_word_classes.add({ id: slug, name: trimmed });
+    const wcRow = { id: slug, name: trimmed };
+    UbiqueStore.glossary_word_classes.add(wcRow);
+    GlossarioSync.wordClassUpsert(wcRow);
     glPopulateSelectors();
     const sel = document.getElementById('glClass');
     if(sel) sel.value = slug;
@@ -49822,7 +49905,9 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       const slug = nv.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || ('cls-' + Date.now().toString(36));
       const newId = 'cls_' + slug;
       try{
-        UbiqueStore.glossary_word_classes.add({ id: newId, name: sv });
+        const wcRow = { id: newId, name: sv };
+        UbiqueStore.glossary_word_classes.add(wcRow);
+        GlossarioSync.wordClassUpsert(wcRow);
         return newId;
       }catch(_){ /* fallback */ }
     }
@@ -49932,6 +50017,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
         };
 
         UbiqueStore.glossary_terms.add(payload);
+        GlossarioSync.termUpsert(payload);
         // Atualiza index local pra detectar dups dentro do mesmo batch
         existingByNormTerm[normTerm] = payload;
         imported.push({ term: term, id: id });
@@ -50024,9 +50110,11 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
 
     if(_glEditingId){
       UbiqueStore.glossary_terms.update(_glEditingId, payload);
+      GlossarioSync.termUpsert(Object.assign({ id: _glEditingId }, payload));
     } else {
       payload.created_at = Date.now();
       UbiqueStore.glossary_terms.add(payload);
+      GlossarioSync.termUpsert(payload);
     }
 
     // Attach pendente: criamos esse termo a partir de um LB Glossário.
@@ -50048,7 +50136,9 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   window.glDeleteTerm = function(){
     if(!_glEditingId) return;
     if(!confirm('Apagar este item lexical do glossário?')) return;
-    UbiqueStore.glossary_terms.remove(_glEditingId);
+    const idToDelete = _glEditingId;
+    UbiqueStore.glossary_terms.remove(idToDelete);
+    GlossarioSync.termDelete(idToDelete);
     window.glCloseModal();
     glRenderList();
     if(typeof window.ueToast === 'function') window.ueToast('Item lexical apagado.', 'success');
@@ -50056,6 +50146,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   window.glDeleteTermById = function(id){
     if(!confirm('Apagar este item lexical do glossário?')) return;
     UbiqueStore.glossary_terms.remove(id);
+    GlossarioSync.termDelete(id);
     glRenderList();
   };
 
