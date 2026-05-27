@@ -12334,7 +12334,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=101"></script>
+<script src="ubique-shared.js?v=102"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -15940,6 +15940,137 @@
       console.log('[hydrate tags admin] ✅', { tags: data?.length || 0 });
     }catch(e){ console.warn('[hydrate tags admin] exception:', e); }
   }
+
+  // ═══════════════════════════════════════════════════════════
+  // ETAPA 1 — Sync de unit_downloads + bucket Storage 'unit-downloads'
+  // Upload real de arquivo (PDF/zip/áudio/slides) com progresso e
+  // delete em cascata (apaga linha + arquivo do Storage).
+  // ═══════════════════════════════════════════════════════════
+  const DownloadsSync = (function(){
+    const conteudo = () => window._sb && window._sb.schema('conteudo');
+    const bucket   = () => window._sb && window._sb.storage.from('unit-downloads');
+    const MAX_BYTES = 50 * 1024 * 1024; // 50 MB
+
+    function _slugify(s){
+      return String(s||'').toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g,'')
+        .replace(/[^a-z0-9.]+/g,'-').replace(/^-+|-+$/g,'') || 'arquivo';
+    }
+    function formatBytes(n){
+      if(n == null || isNaN(n)) return '';
+      n = Number(n);
+      if(n < 1024) return n + ' B';
+      if(n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+      if(n < 1024*1024*1024) return (n/(1024*1024)).toFixed(1) + ' MB';
+      return (n/(1024*1024*1024)).toFixed(2) + ' GB';
+    }
+    function mimeToKind(mime){
+      const m = String(mime||'').toLowerCase();
+      if(m === 'application/pdf') return 'pdf';
+      if(m.startsWith('audio/')) return 'audio';
+      if(m === 'application/zip' || m === 'application/x-zip-compressed' || m === 'application/x-7z-compressed' || m === 'application/x-rar-compressed') return 'zip';
+      if(m === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        || m === 'application/vnd.ms-powerpoint'
+        || m === 'application/x-iwork-keynote-sffkey'
+        || m === 'application/vnd.apple.keynote') return 'slides';
+      return 'file';
+    }
+
+    // Upload via XHR pra ter progresso real (Supabase JS v2 não expõe progresso).
+    function uploadFile(file, unitId, onProgress){
+      return new Promise(function(resolve){
+        if(!file){ resolve(null); return; }
+        if(file.size > MAX_BYTES){
+          console.warn('[downloads sync] arquivo maior que 50MB');
+          resolve({ error: 'O arquivo é maior que 50 MB. Comprima ou hospede externamente.' });
+          return;
+        }
+        if(typeof window._sb === 'undefined' || !window._sb){ resolve(null); return; }
+        (async function(){
+          try{
+            const sess = await window._sb.auth.getSession();
+            const token = sess && sess.data && sess.data.session && sess.data.session.access_token;
+            if(!token){ resolve({ error: 'Sem sessão ativa. Faça login novamente.' }); return; }
+            const ts = Date.now();
+            const safeName = _slugify(file.name);
+            const path = String(unitId) + '/' + ts + '-' + safeName;
+            const url = SUPABASE_URL + '/storage/v1/object/unit-downloads/' + encodeURI(path);
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', url);
+            xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+            xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
+            xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+            xhr.setRequestHeader('x-upsert', 'false');
+            xhr.upload.onprogress = function(evt){
+              if(evt.lengthComputable && typeof onProgress === 'function'){
+                onProgress(Math.round((evt.loaded / evt.total) * 100));
+              }
+            };
+            xhr.onload = function(){
+              if(xhr.status >= 200 && xhr.status < 300){
+                const pub = bucket().getPublicUrl(path);
+                resolve({
+                  url: (pub && pub.data && pub.data.publicUrl) || null,
+                  storage_path: path,
+                  size_bytes: file.size,
+                  mime_type: file.type || 'application/octet-stream',
+                });
+              } else {
+                console.warn('[downloads sync upload]', xhr.status, xhr.responseText);
+                let msg = 'Erro ao enviar arquivo (' + xhr.status + ').';
+                try{ const j = JSON.parse(xhr.responseText); if(j && j.message) msg = j.message; }catch(_){}
+                resolve({ error: msg });
+              }
+            };
+            xhr.onerror = function(){
+              console.warn('[downloads sync upload] network error');
+              resolve({ error: 'Erro de rede ao enviar arquivo.' });
+            };
+            xhr.send(file);
+          }catch(e){
+            console.warn('[downloads sync upload exception]', e);
+            resolve({ error: String(e && e.message || e) });
+          }
+        })();
+      });
+    }
+
+    async function insertRow(payload){
+      if(!conteudo()) return null;
+      try{
+        const { data, error } = await conteudo().from('unit_downloads')
+          .insert({
+            unit_id: payload.unit_id,
+            title: payload.title,
+            url: payload.url,
+            mime_type: payload.mime_type || null,
+            size_bytes: payload.size_bytes || null,
+            storage_path: payload.storage_path || null,
+            position: payload.position || 0,
+          })
+          .select().single();
+        if(error){ console.warn('[downloads sync insert]', error); return null; }
+        return data;
+      }catch(e){ console.warn('[downloads sync insert exception]', e); return null; }
+    }
+
+    // delete em cascata: storage primeiro (best-effort), depois linha (autoritativo).
+    async function deleteRow(id, storagePath){
+      if(!conteudo()) return false;
+      try{
+        if(storagePath && bucket()){
+          const { error: sErr } = await bucket().remove([storagePath]);
+          if(sErr) console.warn('[downloads sync storage delete]', sErr);
+        }
+        const { error } = await conteudo().from('unit_downloads').delete().eq('id', id);
+        if(error){ console.warn('[downloads sync row delete]', error); return false; }
+        return true;
+      }catch(e){ console.warn('[downloads sync delete exception]', e); return false; }
+    }
+
+    return { uploadFile, insertRow, deleteRow, formatBytes, mimeToKind, MAX_BYTES };
+  })();
+  window.DownloadsSync = DownloadsSync;
 
   // ═══════════════════════════════════════════════════════════
   // FASE 4l — Sync helpers pra glossário/verbetes (conteudo.*)
@@ -42154,17 +42285,25 @@
 
   // ── Downloads ─────────────────────────────────────────────
   async function ueLoadDownloads(){
-    if(window.UbiqueStore){
+    // Supabase é source-of-truth: sempre busca do banco.
+    if(window.UBIQUE_USE_SUPABASE){
+      const { data, error } = await conteudo().from('unit_downloads')
+        .select('*').eq('unit_id', ueCurrentUnitId).order('position').order('id');
+      if(error){
+        console.warn('[unit_downloads load]', error);
+        ueDownloadsCache = [];
+        return;
+      }
+      ueDownloadsCache = data || [];
+      if(window.UbiqueStore && UbiqueStore.unit_downloads){
+        // espelha local pra outras telas que ainda lêem do cache
+        const others = UbiqueStore.unit_downloads.list().filter(d => d.unit_id !== ueCurrentUnitId);
+        UbiqueStore.unit_downloads.replaceAll(others.concat(ueDownloadsCache));
+      }
+    } else if(window.UbiqueStore){
       ueDownloadsCache = UbiqueStore.unit_downloads.list()
         .filter(d => d.unit_id === ueCurrentUnitId)
         .sort((a,b) => (a.position||0) - (b.position||0));
-    }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{
-        const { data, error } = await conteudo().from('unit_downloads')
-          .select('*').eq('unit_id', ueCurrentUnitId).order('position').order('id');
-        if(!error && Array.isArray(data) && data.length > 0) ueDownloadsCache = data;
-      }catch(_){}
     }
   }
 
@@ -42175,44 +42314,138 @@
       return;
     }
     el.innerHTML = ueDownloadsCache.map(function(d){
-      const icon = d.kind==='pdf' ? 'PDF' : d.kind==='slides' ? 'SLIDES' : d.kind==='audio' ? 'ÁUDIO' : 'ARQ';
-      return '<div data-dl-id="' + d.id + '" style="display:flex;align-items:center;gap:.5rem;padding:.45rem .5rem;border-radius:var(--radius);background:var(--bg-elev);border:1px solid var(--accent-border-soft)">' +
-        '<span style="font-size:.9rem">' + icon + '</span>' +
-        '<span style="flex:1;font-size:.82rem;color:var(--text);font-family:var(--sans)">' + esc(d.label) + '</span>' +
+      const kind = DownloadsSync.mimeToKind(d.mime_type);
+      const kindLabel = kind === 'pdf' ? 'PDF' : kind === 'slides' ? 'SLIDES' : kind === 'audio' ? 'ÁUDIO' : kind === 'zip' ? 'ZIP' : 'ARQ';
+      const sizeTxt = DownloadsSync.formatBytes(d.size_bytes);
+      return '<div data-dl-id="' + d.id + '" style="display:flex;align-items:center;gap:.5rem;padding:.45rem .6rem;border-radius:var(--radius);background:var(--bg-elev);border:1px solid var(--accent-border-soft)">' +
+        '<span class="card-label" style="background:var(--accent-lo);padding:.1rem .4rem;border-radius:var(--radius);border:1px solid var(--accent-border-soft);font-size:.6rem;font-family:var(--mono);min-width:46px;text-align:center">' + kindLabel + '</span>' +
+        '<a href="' + esc(d.url||'#') + '" target="_blank" rel="noopener" style="flex:1;font-size:.82rem;color:var(--text);font-family:var(--sans);text-decoration:none">' + esc(d.title) + '</a>' +
+        (sizeTxt ? '<span style="font-size:.68rem;color:var(--text-mute);font-family:var(--mono)">' + esc(sizeTxt) + '</span>' : '') +
         '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.2rem .5rem" onclick="ueDeleteDownload(' + d.id + ')">✕</button>' +
         '</div>';
     }).join('');
   }
 
-  async function ueAddDownload(){
-    const label = prompt('Nome do arquivo (ex: Slides do Módulo I):');
-    if(!label) return;
-    const url = prompt('URL do arquivo:');
-    if(!url) return;
-    const kind = prompt('Tipo (pdf / slides / audio / zip):', 'pdf') || 'pdf';
-    const size = prompt('Tamanho (ex: 2.4 MB):', '') || null;
-    const payload = {
-      unit_id: ueCurrentUnitId, label, url, kind, size_label: size,
-      position: ueDownloadsCache.length,
-    };
-    if(window.UbiqueStore){ UbiqueStore.unit_downloads.add(payload); }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('unit_downloads').insert(payload); }catch(_){}
-    }
-    await ueLoadDownloads();
-    ueRenderDownloads();
+  // ueAddDownload — abre o modal de upload (substitui os 4 prompts antigos).
+  function ueAddDownload(){
+    if(window.UnitDownloads) UnitDownloads.openModal(ueCurrentUnitId);
   }
 
   async function ueDeleteDownload(id){
-    if(!confirm('Remover este arquivo?')) return;
-    if(window.UbiqueStore){ UbiqueStore.unit_downloads.remove(id); }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await conteudo().from('unit_downloads').delete().eq('id', id); }catch(_){}
+    if(!confirm('Remover este arquivo? Isso apaga o arquivo do servidor também.')) return;
+    const row = ueDownloadsCache.find(d => d.id === id);
+    const ok = await DownloadsSync.deleteRow(id, row && row.storage_path);
+    if(!ok){
+      alert('Erro ao apagar o arquivo. Tente de novo.');
+      return;
     }
     await ueLoadDownloads();
     ueRenderDownloads();
   }
   window.ueDeleteDownload = ueDeleteDownload;
+
+  // ═══════════════════════════════════════════════════════════
+  // ETAPA 1 — Modal de upload de Download da Unidade
+  // ═══════════════════════════════════════════════════════════
+  const UnitDownloads = (function(){
+    let _unitId = null;
+    let _busy = false;
+    function _$(id){ return document.getElementById(id); }
+    function _setMsg(text, isError){
+      const el = _$('udlMsg'); if(!el) return;
+      el.textContent = text || '';
+      el.style.color = isError ? 'var(--red)' : 'var(--text-mute)';
+    }
+    function _setBusy(b){
+      _busy = b;
+      const s = _$('udlSaveBtn'); const c = _$('udlCancelBtn'); const f = _$('udlFile'); const t = _$('udlTitle');
+      if(s){ s.disabled = b; s.textContent = b ? 'Enviando…' : 'Salvar e enviar'; }
+      if(c) c.disabled = b;
+      if(f) f.disabled = b;
+      if(t) t.disabled = b;
+    }
+    function _setProgress(pct){
+      const wrap = _$('udlProgressWrap'); const bar = _$('udlProgressBar'); const lbl = _$('udlProgressPct');
+      if(!wrap) return;
+      wrap.style.display = pct == null ? 'none' : '';
+      if(bar) bar.style.width = (pct||0) + '%';
+      if(lbl) lbl.textContent = (pct||0) + '%';
+    }
+    function _renderFileInfo(file){
+      const el = _$('udlFileInfo'); if(!el) return;
+      if(!file){ el.style.display = 'none'; el.textContent = ''; return; }
+      el.style.display = '';
+      const kind = DownloadsSync.mimeToKind(file.type).toUpperCase();
+      el.textContent = file.name + '  ·  ' + (kind || 'ARQ') + '  ·  ' + DownloadsSync.formatBytes(file.size);
+    }
+    function openModal(unitId){
+      _unitId = unitId;
+      const m = _$('unitDownloadModal'); if(!m) return;
+      _$('udlTitle').value = '';
+      _$('udlFile').value = '';
+      _renderFileInfo(null);
+      _setProgress(null);
+      _setMsg('');
+      _setBusy(false);
+      m.classList.add('active');
+      setTimeout(() => _$('udlTitle').focus(), 100);
+    }
+    function closeModal(){
+      if(_busy) return; // não fecha durante upload
+      const m = _$('unitDownloadModal'); if(m) m.classList.remove('active');
+    }
+    async function save(){
+      if(_busy) return;
+      const title = (_$('udlTitle').value || '').trim();
+      const file = _$('udlFile').files[0];
+      if(!title){ _setMsg('Informe um nome pro arquivo.', true); return; }
+      if(!file){ _setMsg('Escolha um arquivo do seu computador.', true); return; }
+      if(file.size > DownloadsSync.MAX_BYTES){
+        _setMsg('Arquivo maior que 50 MB. Comprima ou hospede externamente.', true);
+        return;
+      }
+      _setMsg('');
+      _setBusy(true);
+      _setProgress(0);
+      const up = await DownloadsSync.uploadFile(file, _unitId, p => _setProgress(p));
+      if(!up || up.error){
+        _setMsg((up && up.error) || 'Erro ao enviar o arquivo.', true);
+        _setBusy(false);
+        _setProgress(null);
+        return;
+      }
+      const row = await DownloadsSync.insertRow({
+        unit_id: _unitId,
+        title: title,
+        url: up.url,
+        mime_type: up.mime_type,
+        size_bytes: up.size_bytes,
+        storage_path: up.storage_path,
+        position: ueDownloadsCache.length,
+      });
+      if(!row){
+        _setMsg('Arquivo enviado, mas erro ao salvar registro. Tente de novo.', true);
+        _setBusy(false);
+        _setProgress(null);
+        return;
+      }
+      _setBusy(false);
+      _setProgress(null);
+      const m = _$('unitDownloadModal'); if(m) m.classList.remove('active');
+      await ueLoadDownloads();
+      ueRenderDownloads();
+      if(typeof window.ueToast === 'function') window.ueToast('Arquivo "' + title + '" enviado.', 'success');
+    }
+    function init(){
+      const file = _$('udlFile');
+      if(file) file.addEventListener('change', e => _renderFileInfo(e.target.files[0] || null));
+      const btn = _$('udlSaveBtn');
+      if(btn) btn.addEventListener('click', save);
+    }
+    return { openModal, closeModal, init };
+  })();
+  window.UnitDownloads = UnitDownloads;
+  document.addEventListener('DOMContentLoaded', () => UnitDownloads.init());
 
   // ── Sections ──────────────────────────────────────────────
   async function ueLoadSections(){
@@ -47691,7 +47924,7 @@
         <div>
           <div class="sub-h"><span class="sub-h-text">Downloads da unidade</span><span class="sub-h-rule"></span></div>
           <div id="ueDownloadsList" style="display:flex;flex-direction:column;gap:.4rem"></div>
-          <button class="btn btn-ghost btn-sm" style="margin-top:.5rem;width:100%" onclick="ueAddDownload()">+ Adicionar PDF</button>
+          <button class="btn btn-ghost btn-sm" style="margin-top:.5rem;width:100%" onclick="ueAddDownload()">+ Adicionar arquivo</button>
         </div>
       </aside>
 
@@ -48508,6 +48741,52 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
           <button class="btn" id="avatarSaveBtn">Salvar avatar</button>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ─── Modal: Upload de Material da Unidade ─── -->
+<div class="modal-backdrop" id="unitDownloadModal">
+  <div class="modal" style="max-width:560px;display:flex;flex-direction:column">
+    <div class="modal-header">
+      <div>
+        <span class="s-label">Unidade · Material de apoio</span>
+        <h2>Adicionar arquivo</h2>
+      </div>
+      <button class="modal-close" onclick="window.UnitDownloads && UnitDownloads.closeModal()">×</button>
+    </div>
+    <div class="modal-body" style="padding:1.4rem 1.6rem;display:flex;flex-direction:column;gap:1.1rem">
+
+      <div class="field">
+        <label>Nome do arquivo *</label>
+        <input class="field-input" id="udlTitle" type="text" maxlength="120" placeholder="ex: Slides do Módulo I">
+        <span class="field-help">Como o aluno vê na lista de materiais da unidade.</span>
+      </div>
+
+      <div class="field">
+        <label>Arquivo *</label>
+        <input class="field-input" id="udlFile" type="file" accept=".pdf,.zip,.7z,.rar,.mp3,.wav,.ogg,.m4a,.aac,.ppt,.pptx,.key,.doc,.docx,.txt,.csv,.xlsx,.xls">
+        <span class="field-help">Limite: 50 MB. PDF, slides, áudio, planilha, documento ou pacote zipado.</span>
+      </div>
+
+      <div id="udlFileInfo" style="display:none;font-size:.78rem;color:var(--text-mute);font-family:var(--mono);padding:.55rem .8rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid var(--accent-border-soft)"></div>
+
+      <div id="udlProgressWrap" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:.72rem;color:var(--text-mute);margin-bottom:.35rem;font-family:var(--mono);letter-spacing:.05em">
+          <span>ENVIANDO</span><span id="udlProgressPct">0%</span>
+        </div>
+        <div style="height:4px;background:var(--bg-elev);border-radius:2px;overflow:hidden;border:1px solid var(--accent-border-soft)">
+          <div id="udlProgressBar" style="height:100%;width:0;background:var(--accent);transition:width .25s ease"></div>
+        </div>
+      </div>
+
+      <div id="udlMsg" style="font-size:.78rem;color:var(--red);min-height:1em"></div>
+
+      <div style="display:flex;justify-content:flex-end;gap:.5rem;padding-top:.4rem;border-top:1px solid var(--accent-border-soft)">
+        <button class="btn btn-ghost btn-sm" id="udlCancelBtn" onclick="window.UnitDownloads && UnitDownloads.closeModal()">Cancelar</button>
+        <button class="btn" id="udlSaveBtn">Salvar e enviar</button>
+      </div>
+
     </div>
   </div>
 </div>
