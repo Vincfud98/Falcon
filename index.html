@@ -10075,15 +10075,39 @@ const Auth = (function(){
     }catch(e){}
   }
 
-  // Consulta acesso à plataforma. Prioriza UbiqueStore (modo mock).
+  // Consulta acesso à plataforma. Prioriza Supabase (source-of-truth);
+  // só cai pro UbiqueStore se Supabase indisponível.
   // Retorna { allowed, access_type, subject_ids, reason? }
   async function checkPlatformAccess(email){
     const normEmail = email.trim().toLowerCase();
 
-    // 1ª fonte: UbiqueStore (Portaria)
+    // 1ª fonte: Supabase (crm.platform_access) — fresca, atualizada em tempo real
+    if(window.UBIQUE_USE_SUPABASE && window._sb){
+      try{
+        const { data, error } = await window._sb.schema('crm')
+          .from('platform_access')
+          .select('status, access_type, subject_ids')
+          .eq('email', normEmail)
+          .maybeSingle();
+        if(!error){
+          if(!data) return { allowed: false, reason: 'not_found' };
+          if(data.status === 'suspended') return { allowed: false, reason: 'suspended' };
+          return {
+            allowed: true,
+            access_type: data.access_type || 'full',
+            subject_ids: Array.isArray(data.subject_ids) ? data.subject_ids : [],
+          };
+        }
+        // Se error (rede/RLS), cai pro fallback UbiqueStore abaixo
+        console.warn('[checkPlatformAccess] supabase error, falling back:', error.message);
+      }catch(e){
+        console.warn('[checkPlatformAccess] supabase ex:', e.message);
+      }
+    }
+
+    // 2ª fonte (fallback): UbiqueStore local
     if(window.UbiqueStore){
       const list = window.UbiqueStore.platform_access.list();
-      // Se a Portaria estiver vazia → libera tudo (modo "sem controle")
       if(list.length === 0){
         return { allowed: true, access_type: 'full', subject_ids: [] };
       }
@@ -10095,27 +10119,6 @@ const Auth = (function(){
         access_type: found.access_type || 'full',
         subject_ids: Array.isArray(found.subject_ids) ? found.subject_ids : [],
       };
-    }
-
-    // 2ª fonte: Supabase (Fase 4j — crm.platform_access)
-    if(window.UBIQUE_USE_SUPABASE && window._sb){
-      try{
-        const { data, error } = await window._sb.schema('crm')
-          .from('platform_access')
-          .select('status, access_type, subject_ids')
-          .eq('email', normEmail)
-          .maybeSingle();
-        if(error) return { allowed: true, access_type: 'full', subject_ids: [] };
-        if(!data)  return { allowed: false, reason: 'not_found' };
-        if(data.status === 'suspended') return { allowed: false, reason: 'suspended' };
-        return {
-          allowed: true,
-          access_type: data.access_type || 'full',
-          subject_ids: Array.isArray(data.subject_ids) ? data.subject_ids : [],
-        };
-      }catch(e){
-        return { allowed: true, access_type: 'full', subject_ids: [] };
-      }
     }
 
     // Sem store nem Supabase → libera (fallback seguro)
