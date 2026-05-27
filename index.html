@@ -10765,7 +10765,9 @@ const Store = (function(){
         text:     String(hl.text || ''),
         color:    String(hl.color || 'yellow'),
         hint:     hl.hint || null,
-        metadata: {}
+        // anchor (W3C TextPosition + TextQuote) vai em metadata pra restaurar
+        // o highlight com precisão ao re-renderizar a unidade.
+        metadata: hl.anchor ? { anchor: hl.anchor } : {}
       };
       const { error } = await window._sb.schema('aluno').from('highlights').insert(row);
       if(error) console.warn('[highlight sync insert]', error);
@@ -10788,7 +10790,7 @@ const Store = (function(){
     if(!userId || !window._sb || !_state) return;
     try{
       const { data, error } = await window._sb.schema('aluno').from('highlights')
-        .select('id, unit_id, block_id, text, color, hint, created_at')
+        .select('id, unit_id, block_id, text, color, hint, metadata, created_at')
         .eq('user_id', userId);
       if(error){ console.warn('[hydrate highlights]', error); return; }
       if(!Array.isArray(_state.highlights)) _state.highlights = [];
@@ -10803,6 +10805,9 @@ const Store = (function(){
           createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
         };
         if(row.hint) hl.hint = row.hint;
+        // Reidrata o anchor (W3C) salvo em metadata.anchor pra restauração precisa
+        const meta = row.metadata || {};
+        if(meta.anchor && typeof meta.anchor === 'object') hl.anchor = meta.anchor;
         return hl;
       });
       _state.highlights = legacy.concat(fromDb);
@@ -11075,11 +11080,15 @@ const Store = (function(){
     getSimuladoState(simId){
       return (_state.simulados||{})[simId] || null;
     },
-    addHighlight(unitId, blockId, text, color, hint){
+    addHighlight(unitId, blockId, text, color, hint, anchor){
       if(!_state.highlights) _state.highlights = [];
       const hid = _genUuid() || ('hl'+Date.now());
       const entry = { id:hid, unitId, blockId, text, color, createdAt:Date.now() };
       if(hint) entry.hint = hint;
+      // Anchor (W3C Web Annotation): {startOffset,endOffset,exact,prefix,suffix}
+      // — usado pra restaurar com precisão em cruzamento de elementos
+      // e texto repetido. Veja _restoreHighlightsForUnit no index.html.
+      if(anchor && typeof anchor === 'object') entry.anchor = anchor;
       _state.highlights.push(entry);
       _persist(); _emit();
       // Fase 4e — fire-and-forget sync Supabase
@@ -23627,67 +23636,221 @@ document.addEventListener('DOMContentLoaded', () => {
     return _restoreHighlightsForUnit(unitId, stageEl, groupBlocks);
   };
 
-  /* Re-aplica todos os highlights salvos em uma unidade ao DOM recém-renderizado.
-   * Estratégia: pra cada highlight, encontra a 1ª ocorrência exata de hl.text
-   * num text node dentro do bloco correspondente e o envolve num <span.hl-mark>.
-   * Limitações conhecidas: não restaura highlights cujo texto cruze múltiplos
-   * elementos (ex: pegue parte de <strong>) — esses ficam invisíveis até o
-   * usuário fazer scroll/recriar. v1 aceita esse trade-off pra ficar simples. */
+  /* === ANCHOR (W3C Web Annotation Data Model) =====================
+   * Cada highlight é ancorado por DOIS seletores complementares:
+   *  - TextPositionSelector: { startOffset, endOffset } em caracteres da
+   *    raiz do bloco. Rápido e preciso. Falha se o conteúdo mudou.
+   *  - TextQuoteSelector: { exact, prefix, suffix } pra disambig.
+   *    Tolera mudanças menores e diferencia ocorrências repetidas.
+   * O wrap usa Range.extractContents+insertNode, que lida nativamente
+   * com seleções cruzando múltiplos elementos (<strong>, <a>, etc).
+   * ================================================================ */
+
+  /* Calcula o anchor de um Range antes de wrappar — precisa ser chamada
+   * com o texto AINDA não marcado, senão os offsets ficam zoados. */
+  function _computeHighlightAnchor(root, range){
+    if(!root || !range) return null;
+    const startOffset = _rangeTextOffset(root, range.startContainer, range.startOffset);
+    const endOffset   = _rangeTextOffset(root, range.endContainer,   range.endOffset);
+    const fullText = root.textContent || '';
+    const CTX = 32; // chars de contexto pra prefix/suffix
+    return {
+      startOffset,
+      endOffset,
+      exact:  fullText.substring(startOffset, endOffset),
+      prefix: fullText.substring(Math.max(0, startOffset - CTX), startOffset),
+      suffix: fullText.substring(endOffset, Math.min(fullText.length, endOffset + CTX))
+    };
+  }
+
+  /* Conta caracteres de texto do root até (container, offset). Funciona
+   * pra container = text node OU element (Range.toString() resolve ambos). */
+  function _rangeTextOffset(root, container, offsetInNode){
+    const r = document.createRange();
+    r.setStart(root, 0);
+    r.setEnd(container, offsetInNode);
+    return r.toString().length;
+  }
+
+  /* Resolve (root, textOffset) → (node, offsetInNode). DFS dos text nodes. */
+  function _findTextPositionInRoot(root, targetOffset){
+    if(targetOffset < 0) return null;
+    let count = 0;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n;
+    while((n = walker.nextNode())){
+      const len = n.textContent.length;
+      if(count + len >= targetOffset){
+        return { node: n, offset: targetOffset - count };
+      }
+      count += len;
+    }
+    // Edge case: offset == total length → último text node, no fim
+    if(targetOffset === count){
+      const all = [];
+      const w2 = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let nn; while((nn = w2.nextNode())) all.push(nn);
+      const last = all[all.length - 1];
+      if(last) return { node: last, offset: last.textContent.length };
+    }
+    return null;
+  }
+
+  /* Re-aplica todos os highlights salvos da unidade ao DOM recém-renderizado.
+   * Tenta primeiro position-selector, cai pra quote-selector com contexto. */
   function _restoreHighlightsForUnit(unitId, stageEl, groupBlocks){
     if(!unitId || !stageEl || !window.Store || typeof Store.getHighlights !== 'function') return;
     const blockStage = stageEl.querySelector('#blockStage') || stageEl;
     if(!blockStage) return;
-    // Pega só highlights de blocks visíveis no grupo ativo (perf + semântica)
     const visibleIds = new Set((groupBlocks||[]).map(b => String(b.id)));
     const all = Store.getHighlights(unitId) || [];
     const list = visibleIds.size
       ? all.filter(h => visibleIds.has(String(h.blockId || '')))
       : all;
     if(!list.length) return;
-    // Aplica os mais longos primeiro pra evitar matches parciais que comeriam
-    // o início de uma string maior
-    list.slice().sort((a,b) => (b.text||'').length - (a.text||'').length).forEach(hl => {
-      const txt = (hl.text || '').trim();
-      if(!txt || txt.length < 2) return;
-      const blockEl = hl.blockId
-        ? blockStage.querySelector('#block-' + CSS.escape(String(hl.blockId)))
+
+    // Agrupa por bloco e aplica em DESC order de startOffset dentro de cada
+    // bloco — assim wraps posteriores não afetam offsets de wraps anteriores
+    // (cada wrap preserva total de chars, mas adiciona elementos no caminho).
+    const byBlock = new Map();
+    list.forEach(hl => {
+      const bid = String(hl.blockId || '');
+      if(!byBlock.has(bid)) byBlock.set(bid, []);
+      byBlock.get(bid).push(hl);
+    });
+
+    byBlock.forEach((hls, bid) => {
+      const blockEl = bid
+        ? blockStage.querySelector('#block-' + CSS.escape(bid))
         : blockStage;
       if(!blockEl) return;
       const root = blockEl.querySelector('.tb-body') || blockEl;
-      _wrapFirstOccurrence(root, hl.text, hl.color || 'yellow', hl.hint, hl.id);
+      // DESC por startOffset (posições maiores primeiro)
+      hls.sort((a,b) => {
+        const aOff = _anchorOf(a).startOffset;
+        const bOff = _anchorOf(b).startOffset;
+        return bOff - aOff;
+      }).forEach(hl => _applyHighlightAnchored(root, hl));
     });
   }
 
-  /* Envolve a primeira ocorrência de `searchText` em um <span.hl-mark>,
-   * pulando text nodes que já estão dentro de outro hl-mark (evita re-wrap). */
-  function _wrapFirstOccurrence(root, searchText, color, hint, hlId){
-    if(!root || !searchText) return;
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-      acceptNode(node){
-        if(!node.textContent || !node.textContent.length) return NodeFilter.FILTER_REJECT;
-        if(node.parentElement && node.parentElement.closest('.hl-mark')) return NodeFilter.FILTER_REJECT;
-        return NodeFilter.FILTER_ACCEPT;
+  function _anchorOf(hl){
+    const m = hl && (hl.anchor || (hl.metadata && hl.metadata.anchor)) || {};
+    return {
+      startOffset: typeof m.startOffset === 'number' ? m.startOffset : -1,
+      endOffset:   typeof m.endOffset   === 'number' ? m.endOffset   : -1,
+      exact:  m.exact  || hl.text || '',
+      prefix: m.prefix || '',
+      suffix: m.suffix || ''
+    };
+  }
+
+  function _applyHighlightAnchored(root, hl){
+    const a = _anchorOf(hl);
+    // Estratégia 1: TextPositionSelector
+    if(a.startOffset >= 0 && a.endOffset > a.startOffset){
+      const range = _rangeFromOffsets(root, a.startOffset, a.endOffset);
+      if(range && (!a.exact || range.toString() === a.exact)){
+        return _wrapRange(range, hl);
       }
+    }
+    // Estratégia 2: TextQuoteSelector (prefix + exact + suffix)
+    if(a.exact){
+      const range = _rangeFromQuoteSelector(root, a.exact, a.prefix, a.suffix);
+      if(range) return _wrapRange(range, hl);
+    }
+    // Estratégia 3 (último recurso): primeira ocorrência exata
+    if(hl.text){
+      const range = _rangeFromQuoteSelector(root, hl.text, '', '');
+      if(range) return _wrapRange(range, hl);
+    }
+  }
+
+  function _rangeFromOffsets(root, start, end){
+    const startPos = _findTextPositionInRoot(root, start);
+    const endPos   = _findTextPositionInRoot(root, end);
+    if(!startPos || !endPos) return null;
+    try {
+      const range = document.createRange();
+      range.setStart(startPos.node, startPos.offset);
+      range.setEnd(endPos.node, endPos.offset);
+      return range;
+    } catch(e){ return null; }
+  }
+
+  function _rangeFromQuoteSelector(root, exact, prefix, suffix){
+    if(!exact) return null;
+    const fullText = root.textContent || '';
+    if(!fullText) return null;
+    // Acha TODAS as ocorrências, escolhe a melhor pelo contexto
+    const positions = [];
+    let from = 0;
+    while(from <= fullText.length){
+      const i = fullText.indexOf(exact, from);
+      if(i < 0) break;
+      positions.push(i);
+      from = i + 1;
+    }
+    if(!positions.length) return null;
+    if(positions.length === 1) return _rangeFromOffsets(root, positions[0], positions[0] + exact.length);
+    // Mais de uma ocorrência: ranqueia por overlap com prefix/suffix
+    let bestPos = positions[0], bestScore = -1;
+    positions.forEach(pos => {
+      const actualPrefix = fullText.substring(Math.max(0, pos - 64), pos);
+      const actualSuffix = fullText.substring(pos + exact.length, pos + exact.length + 64);
+      let score = 0;
+      if(prefix){
+        const overlap = _suffixOverlap(actualPrefix, prefix);
+        score += overlap;
+      }
+      if(suffix){
+        const overlap = _prefixOverlap(actualSuffix, suffix);
+        score += overlap;
+      }
+      if(score > bestScore){ bestScore = score; bestPos = pos; }
     });
-    let node;
-    while((node = walker.nextNode())){
-      const idx = node.textContent.indexOf(searchText);
-      if(idx < 0) continue;
+    return _rangeFromOffsets(root, bestPos, bestPos + exact.length);
+  }
+
+  /* Conta quantos chars do FIM de `a` batem com o FIM de `b`. */
+  function _suffixOverlap(a, b){
+    const max = Math.min(a.length, b.length);
+    let n = 0;
+    while(n < max && a[a.length - 1 - n] === b[b.length - 1 - n]) n++;
+    return n;
+  }
+
+  /* Conta quantos chars do INÍCIO de `a` batem com o INÍCIO de `b`. */
+  function _prefixOverlap(a, b){
+    const max = Math.min(a.length, b.length);
+    let n = 0;
+    while(n < max && a[n] === b[n]) n++;
+    return n;
+  }
+
+  /* Envolve um Range num <span.hl-mark>, lidando nativamente com cruzamento
+   * de elementos via extractContents + insertNode. Idempotente: não re-wrap
+   * se o range já está totalmente dentro de outro hl-mark. */
+  function _wrapRange(range, hl){
+    try {
+      const ancestor = range.commonAncestorContainer;
+      const el = ancestor.nodeType === 1 ? ancestor : ancestor.parentElement;
+      if(el && el.closest('.hl-mark')) return; // já marcado
+    } catch(e){}
+    const mark = document.createElement('span');
+    mark.className = 'hl-mark';
+    mark.setAttribute('data-hl-color', hl.color || 'yellow');
+    if(hl.color === 'veil' && hl.hint) mark.setAttribute('data-hl-hint', hl.hint);
+    if(hl.id) mark.setAttribute('data-hl-id', String(hl.id));
+    try {
+      range.surroundContents(mark);
+    } catch(e){
       try {
-        const matchNode = node.splitText(idx);
-        matchNode.splitText(searchText.length);
-        const mark = document.createElement('span');
-        mark.className = 'hl-mark';
-        mark.setAttribute('data-hl-color', color);
-        if(color === 'veil' && hint) mark.setAttribute('data-hl-hint', hint);
-        if(hlId) mark.setAttribute('data-hl-id', String(hlId));
-        const parent = matchNode.parentNode;
-        if(!parent) return;
-        parent.insertBefore(mark, matchNode);
-        mark.appendChild(matchNode);
-        return; // só aplica 1×
-      } catch(e){
-        // splitText pode falhar em casos raros — segue procurando próximo node
+        const frag = range.extractContents();
+        mark.appendChild(frag);
+        range.insertNode(mark);
+      } catch(e2){
+        console.warn('[wrap range failed]', e2);
       }
     }
   }
@@ -23703,6 +23866,23 @@ document.addEventListener('DOMContentLoaded', () => {
     } else { return; }
     const text = _pendingSel || range.toString().trim();
     if(!text) return;
+
+    // ⚠️ Calcula o anchor ANTES de wrappar (precisa do texto não-marcado pra
+    // que os offsets sejam estáveis). Padrão W3C Web Annotation Data Model:
+    // TextPositionSelector (start/end offsets) + TextQuoteSelector (prefix/
+    // exact/suffix). Restauração futura usa o primeiro, cai pro segundo se
+    // o conteúdo mudou minimamente.
+    const ctx = getBlockContext();
+    let anchor = null;
+    if(ctx.unitId && ctx.blockId){
+      const blockSection = document.querySelector('#block-' + CSS.escape(ctx.blockId));
+      const root = blockSection ? (blockSection.querySelector('.tb-body') || blockSection) : null;
+      if(root){
+        try { anchor = _computeHighlightAnchor(root, range); }
+        catch(e){ console.warn('[anchor compute]', e); }
+      }
+    }
+
     const mark = document.createElement('span');
     mark.className = 'hl-mark';
     mark.setAttribute('data-hl-color', color);
@@ -23717,12 +23897,9 @@ document.addEventListener('DOMContentLoaded', () => {
       range.insertNode(mark);
     }
     if(sel) try{ sel.removeAllRanges(); }catch(e){}
-    // Persist
-    const ctx = getBlockContext();
+    // Persist (passa o anchor pra ser persistido em metadata.anchor)
     if(ctx.unitId && ctx.blockId){
-      const hlPayload = { unitId:ctx.unitId, blockId:ctx.blockId, text, color };
-      if(hint) hlPayload.hint = hint;
-      Store.addHighlight(hlPayload.unitId, hlPayload.blockId, hlPayload.text, hlPayload.color, hlPayload.hint);
+      Store.addHighlight(ctx.unitId, ctx.blockId, text, color, hint, anchor);
     }
     hideToolbar();
   }
