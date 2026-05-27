@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=113"></script>
+<script src="ubique-shared.js?v=114"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -15103,18 +15103,53 @@ function blockHeader(block, typeLabel, icon, ctx){
 }
 
 /* ───────── Portal ───────── */
+// Cada card mapeia pra um ou mais tipos de bloco no banco (conteudo.unit_blocks).
+// 'blockTypes' = array pra tolerar nomenclaturas variantes (ex: 'quote'/'citations').
+// 'extract' diz onde os items vivem dentro de b.content de cada bloco.
 const Portal = {
   cards: {
-    questions:  { label:'Questões objetivas', hint:'Provas compiladas de todas as unidades do módulo.', icon:Icons.quiz, source:'blocks',    blockType:'quiz' },
-    essays:     { label:'Questões discursivas', hint:'Todas as discursivas do módulo em um só lugar.', icon:Icons.essay, source:'blocks',    blockType:'essay' },
-    flashcards: { label:'Flashcards', hint:'Conceitos-chave de cada unidade.', icon:Icons.flashcards, source:'blocks',    blockType:'flashcards' },
-    bios:       { label:'Biografias', hint:'Personagens centrais do módulo.', icon:Icons.bio, source:'unitArray', key:'bios', blockType:'bio' },
-    glossary:   { label:'Glossário', hint:'Termos e definições agrupados por unidade.', icon:Icons.glossary, source:'unitArray', key:'glossary', blockType:'glossary' },
-    quotes:     { label:'Citações', hint:'Trechos de fontes primárias e secundárias.', icon:Icons.quote, source:'unitArray', key:'quotes', blockType:'quote' },
-    timelines:  { label:'Linhas do tempo', hint:'Cronologias temáticas de cada unidade.', icon:Icons.timeline, source:'unitArray', key:'timelines', blockType:'timeline' },
-    figures:    { label:'Tópico em figuras', hint:'Iconografia histórica com legendas.', icon:Icons.figure, source:'unitArray', key:'figures' },
-    tables:     { label:'Tabelas de referência', hint:'Quadros de apoio rápido.', icon:Icons.table, source:'unitArray', key:'tables', blockType:'table' },
-    sources:    { label:'Fontes e referências', hint:'Bibliografia e fontes primárias.', icon:Icons.source, source:'unitArray', key:'references' }
+    questions:  { label:'Questões objetivas', hint:'Provas compiladas de todas as unidades do módulo.', icon:Icons.quiz, blockTypes:['quiz','objective_questions'], extract:'quiz' },
+    essays:     { label:'Questões discursivas', hint:'Todas as discursivas do módulo em um só lugar.', icon:Icons.essay, blockTypes:['essay'], extract:'items' },
+    flashcards: { label:'Flashcards', hint:'Conceitos-chave de cada unidade.', icon:Icons.flashcards, blockTypes:['flashcards'], extract:'concepts' },
+    bios:       { label:'Biografias', hint:'Personagens centrais do módulo.', icon:Icons.bio, blockTypes:['bio','biography'], extract:'items' },
+    glossary:   { label:'Glossário', hint:'Termos e definições agrupados por unidade.', icon:Icons.glossary, blockTypes:['glossary'], extract:'items' },
+    quotes:     { label:'Citações', hint:'Trechos de fontes primárias e secundárias.', icon:Icons.quote, blockTypes:['quote','quotes','citations'], extract:'items' },
+    timelines:  { label:'Linhas do tempo', hint:'Cronologias temáticas de cada unidade.', icon:Icons.timeline, blockTypes:['timeline'], extract:'items' },
+    figures:    { label:'Tópico em figuras', hint:'Iconografia histórica com legendas.', icon:Icons.figure, blockTypes:['gallery','figures'], extract:'items' },
+    tables:     { label:'Tabelas de referência', hint:'Quadros de apoio rápido.', icon:Icons.table, blockTypes:['table','tables'], extract:'items' },
+    sources:    { label:'Fontes e referências', hint:'Bibliografia e fontes primárias.', icon:Icons.source, blockTypes:['sources','references'], extract:'items' }
+  },
+
+  // Normaliza unit.id ('u6' do aluno) pro unit_id integer do banco (6),
+  // ou usa unit._storeId se disponível.
+  _unitDbId(unit){
+    if(!unit) return null;
+    if(unit._storeId != null) return String(unit._storeId);
+    return String(unit.id || '').replace(/^u/, '');
+  },
+
+  // Extrai os items de um bloco conforme o tipo do card.
+  // Volta um array — vazio se shape não bate.
+  _extractItemsFromBlock(block, card){
+    const content = (block && block.content) || {};
+    if(card.extract === 'concepts'){
+      return Array.isArray(content.concepts) ? content.concepts.map(c => Object.assign({}, c)) : [];
+    }
+    if(card.extract === 'quiz'){
+      // Questões objetivas: cada group tem enunciado + items[]
+      const out = [];
+      (content.groups || []).forEach(qg => {
+        (qg.items || []).forEach(it => {
+          out.push(Object.assign({}, it, {
+            __enunciado: qg.enunciado || '',
+            __reference: qg.reference || null
+          }));
+        });
+      });
+      return out;
+    }
+    // default: items[]
+    return Array.isArray(content.items) ? content.items.map(it => Object.assign({}, it)) : [];
   },
 
   aggregate(moduleId, cardKey, filters){
@@ -15125,59 +15160,24 @@ const Portal = {
     if(filters.chapter) entries = entries.filter(e => e.chapterId === filters.chapter);
     if(filters.unit)    entries = entries.filter(e => e.unit.id === filters.unit);
 
+    const allBlocks = (window.UbiqueStore && window.UbiqueStore.unit_blocks && window.UbiqueStore.unit_blocks.list()) || [];
+    const blockTypes = new Set(card.blockTypes || []);
+
     let items = [];
-    if(card.source === 'blocks'){
-      entries.forEach(e => {
-        (e.unit.groups||[]).forEach(g => (g.blocks||[]).forEach(b => {
-          if(b.type !== card.blockType) return;
-          if(card.blockType === 'flashcards'){
-            (b.concepts||[]).forEach(c => items.push(Object.assign({}, c, { __unitId:e.unit.id, __unit:e.unit, __chapterId:e.chapterId, __blockId:b.id, __blockTitle:b.title })));
-          } else if(card.blockType === 'quiz'){
-            // Quiz blocks now always use groups[].items structure
-            (b.groups||[]).forEach(qg => {
-              (qg.items||[]).forEach(it => items.push(Object.assign({}, it, {
-                __unitId:e.unit.id, __unit:e.unit, __chapterId:e.chapterId,
-                __blockId:b.id, __blockTitle:b.title,
-                __enunciado: qg.enunciado || '',
-                __reference: qg.reference || null
-              })));
-            });
-          } else {
-            (b.items||[]).forEach(it => items.push(Object.assign({}, it, { __unitId:e.unit.id, __unit:e.unit, __chapterId:e.chapterId, __blockId:b.id, __blockTitle:b.title })));
-          }
-        }));
+    entries.forEach(e => {
+      const dbUnitId = Portal._unitDbId(e.unit);
+      if(!dbUnitId) return;
+      const blocksHere = allBlocks
+        .filter(b => String(b.unit_id) === dbUnitId && blockTypes.has(b.type))
+        .sort((a,b) => (a.position||0) - (b.position||0));
+      blocksHere.forEach(b => {
+        const extracted = Portal._extractItemsFromBlock(b, card);
+        extracted.forEach(it => items.push(Object.assign({}, it, {
+          __unitId: e.unit.id, __unit: e.unit, __chapterId: e.chapterId,
+          __blockId: b.id, __blockTitle: b.title || ''
+        })));
       });
-    } else {
-      // unit-level arrays (e.g. unit.bios[])
-      entries.forEach(e => {
-        (e.unit[card.key]||[]).forEach(it => items.push(Object.assign({}, it, { __unitId:e.unit.id, __unit:e.unit, __chapterId:e.chapterId })));
-      });
-      // Also pull in matching carousel learning blocks (e.g. type:'bio').
-      // Deep-walks compound blocks too, so nested parts contribute.
-      if(card.blockType){
-        const seen = new Set(items.map(it => it.id).filter(Boolean));
-        const walk = (blocks, unit, chapterId) => {
-          (blocks||[]).forEach(b => {
-            if(b.type === card.blockType){
-              (b.items||[]).forEach(it => {
-                if(it.id && seen.has(it.id)) return;
-                if(it.id) seen.add(it.id);
-                items.push(Object.assign({}, it, {
-                  __unitId:unit.id, __unit:unit, __chapterId:chapterId,
-                  __blockId:b.id, __blockTitle:b.title
-                }));
-              });
-            }
-            if(b.type === 'compound' && Array.isArray(b.parts)){
-              walk(b.parts, unit, chapterId);
-            }
-          });
-        };
-        entries.forEach(e => {
-          (e.unit.groups||[]).forEach(g => walk(g.blocks, e.unit, e.chapterId));
-        });
-      }
-    }
+    });
 
     if(filters.topic){
       // expand topic with descendants
