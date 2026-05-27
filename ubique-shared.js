@@ -439,7 +439,12 @@
       add(data){
         let id = data.id;
         if(!id){
-          if(idType === 'string'){
+          if(idType === 'uuid'){
+            // Gera UUID estável — compatível com PK uuid no Supabase
+            id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+              ? crypto.randomUUID()
+              : ('uuid-' + Date.now() + '-' + Math.random().toString(36).slice(2,8));
+          } else if(idType === 'string'){
             id = (data.slug || data.title || 'item-') + '-' + Date.now();
           }else{
             const ids = (_state[entity] || []).map(x => Number(x.id) || 0);
@@ -494,9 +499,9 @@
     question_groups: makeCRUD('question_groups', 'number'),
     essays:          makeCRUD('essays',          'number'),
     platform_access: makeCRUD('platform_access', 'number'),
-    editais:           makeCRUD('editais',           'number'),
-    edital_topics:     makeCRUD('edital_topics',     'number'),
-    edital_topic_units: makeCRUD('edital_topic_units','number'),
+    editais:           makeCRUD('editais',           'uuid'),
+    edital_topics:     makeCRUD('edital_topics',     'uuid'),
+    edital_topic_units: makeCRUD('edital_topic_units','uuid'),
     edital_progress:   makeCRUD('edital_progress',   'number'),
     verbetes:          makeCRUD('verbetes',          'string'),
     glossary_terms:        makeCRUD('glossary_terms',        'string'),

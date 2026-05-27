@@ -12351,7 +12351,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=98"></script>
+<script src="ubique-shared.js?v=99"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -15726,9 +15726,124 @@
   });
 
   // ═══════════════════════════════════════════════════════════
+  // FASE 4i — Sync helpers: cada add/update/remove local também
+  // espelha pro Supabase (fire-and-forget, não bloqueia UI).
+  // ═══════════════════════════════════════════════════════════
+  const ConcursosSync = (function(){
+    const concursos = () => window._sb && window._sb.schema('concursos');
+    function _wrap(p, label){ return p && p.then ? p.catch(e => console.warn('[concursos sync '+label+']', e)) : null; }
+    return {
+      // exams
+      examInsert(row){
+        if(!concursos()) return;
+        return _wrap(concursos().from('exams').insert(row), 'exam insert');
+      },
+      examUpdate(id, patch){
+        if(!concursos()) return;
+        return _wrap(concursos().from('exams').update(patch).eq('id', id), 'exam update');
+      },
+      examDelete(id){
+        if(!concursos()) return;
+        return _wrap(concursos().from('exams').delete().eq('id', id), 'exam delete');
+      },
+      // exam_subjects (M2M)
+      examSubjectInsert(row){
+        if(!concursos()) return;
+        return _wrap(concursos().from('exam_subjects')
+          .upsert(row, { onConflict: 'exam_id,subject_id' }), 'exam_subj insert');
+      },
+      examSubjectDeleteByPair(examId, subjectId){
+        if(!concursos()) return;
+        return _wrap(concursos().from('exam_subjects')
+          .delete().eq('exam_id', examId).eq('subject_id', subjectId), 'exam_subj delete');
+      },
+      examSubjectDeleteByExam(examId){
+        if(!concursos()) return;
+        return _wrap(concursos().from('exam_subjects')
+          .delete().eq('exam_id', examId), 'exam_subj delete by exam');
+      },
+      // editais
+      editalInsert(row){
+        if(!concursos()) return;
+        return _wrap(concursos().from('editais').insert(row), 'edital insert');
+      },
+      editalUpdate(id, patch){
+        if(!concursos()) return;
+        return _wrap(concursos().from('editais').update(patch).eq('id', id), 'edital update');
+      },
+      editalDelete(id){
+        if(!concursos()) return;
+        return _wrap(concursos().from('editais').delete().eq('id', id), 'edital delete');
+      },
+      // edital_topics
+      topicInsert(row){
+        if(!concursos()) return;
+        return _wrap(concursos().from('edital_topics').insert(row), 'topic insert');
+      },
+      topicUpdate(id, patch){
+        if(!concursos()) return;
+        return _wrap(concursos().from('edital_topics').update(patch).eq('id', id), 'topic update');
+      },
+      topicDelete(id){
+        if(!concursos()) return;
+        return _wrap(concursos().from('edital_topics').delete().eq('id', id), 'topic delete');
+      },
+      // edital_topic_units
+      topicUnitInsert(row){
+        if(!concursos()) return;
+        return _wrap(concursos().from('edital_topic_units').insert(row), 'topic_unit insert');
+      },
+      topicUnitDelete(id){
+        if(!concursos()) return;
+        return _wrap(concursos().from('edital_topic_units').delete().eq('id', id), 'topic_unit delete');
+      },
+      topicUnitDeleteByTopic(topicId){
+        if(!concursos()) return;
+        return _wrap(concursos().from('edital_topic_units').delete().eq('topic_id', topicId), 'topic_unit delete by topic');
+      }
+    };
+  })();
+  window.ConcursosSync = ConcursosSync;
+
+  // ═══════════════════════════════════════════════════════════
+  // FASE 4i — Hidrata concursos.* do Supabase → UbiqueStore
+  // Roda ANTES de loadAll pra que loadExams/loadEditais/etc leiam
+  // dados do Supabase (não mais lixo legacy do localStorage).
+  // ═══════════════════════════════════════════════════════════
+  async function _hydrateConcursosFromSupabase(){
+    if(!window._sb || !window.UbiqueStore) return;
+    try{
+      const csb = window._sb.schema('concursos');
+      const [ex, es, ed, et, etu] = await Promise.all([
+        csb.from('exams').select('*'),
+        csb.from('exam_subjects').select('*'),
+        csb.from('editais').select('*'),
+        csb.from('edital_topics').select('*'),
+        csb.from('edital_topic_units').select('*'),
+      ]);
+      const errs = [ex.error, es.error, ed.error, et.error, etu.error].filter(Boolean);
+      if(errs.length){ console.warn('[hydrate concursos admin] erros:', errs); return; }
+      if(UbiqueStore.exams)              UbiqueStore.exams.replaceAll(ex.data || []);
+      if(UbiqueStore.exam_subjects)      UbiqueStore.exam_subjects.replaceAll(es.data || []);
+      if(UbiqueStore.editais)            UbiqueStore.editais.replaceAll(ed.data || []);
+      if(UbiqueStore.edital_topics)      UbiqueStore.edital_topics.replaceAll(et.data || []);
+      if(UbiqueStore.edital_topic_units) UbiqueStore.edital_topic_units.replaceAll(etu.data || []);
+      console.log('[hydrate concursos admin] ✅', {
+        exams: ex.data?.length || 0,
+        exam_subjects: es.data?.length || 0,
+        editais: ed.data?.length || 0,
+        edital_topics: et.data?.length || 0,
+        edital_topic_units: etu.data?.length || 0,
+      });
+    }catch(e){ console.warn('[hydrate concursos admin] exception:', e); }
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // LOAD ALL
   // ═══════════════════════════════════════════════════════════
   async function loadAll(){
+    // Hidrata concursos.* primeiro (UbiqueStore vira espelho do Supabase)
+    await _hydrateConcursosFromSupabase();
     await Promise.all([
       loadSubjects(), loadTopics(), loadTopicAliases(), loadTags(),
       loadBancas(), loadExams(), loadExamSubjects(), loadExamBancas(),
@@ -18409,13 +18524,16 @@
         showMsg('globalMessage2', 'Store indisponível.'); return;
       }
       // Atualiza no UbiqueStore. id permanece estável (nunca trocamos)
-      window.UbiqueStore.exams.update(exam.id, {
+      const examPatch = {
         exam: examName,
         sigla: sigla || null,
         carreira: carreira || null,
         description: desc || null,
         name: sigla || examName  // mantém compat com BankFilters do aluno
-      });
+      };
+      window.UbiqueStore.exams.update(exam.id, examPatch);
+      // Fase 4i — espelha pro Supabase
+      ConcursosSync.examUpdate(exam.id, examPatch);
       showMsg('globalMessage2', 'Concurso atualizado.', 'success');
       await loadExams();
       renderExamsList();
@@ -18435,6 +18553,9 @@
         }
       } catch(_){}
       window.UbiqueStore.exams.remove(exam.id);
+      // Fase 4i — cascade pro Supabase (exam + todos exam_subjects do exam)
+      ConcursosSync.examSubjectDeleteByExam(exam.id);
+      ConcursosSync.examDelete(exam.id);
       showMsg('globalMessage2', 'Concurso apagado.', 'success');
       selectedExamId = null;
       await Promise.all([loadExams(), loadExamSubjects(), loadExamBancas()]);
@@ -18455,8 +18576,13 @@
           const existing = (window.UbiqueStore.exam_subjects.list() || [])
             .find(r => r && String(r.exam_id) === String(exam.id) && r.subject_id === subjectId);
           if(existing) window.UbiqueStore.exam_subjects.remove(existing.id);
+          // Fase 4i — espelha pro Supabase (delete por par exam_id/subject_id)
+          ConcursosSync.examSubjectDeleteByPair(exam.id, subjectId);
         } else {
-          window.UbiqueStore.exam_subjects.add({ exam_id: exam.id, subject_id: subjectId });
+          const newRow = { exam_id: exam.id, subject_id: subjectId };
+          window.UbiqueStore.exam_subjects.add(newRow);
+          // Fase 4i — espelha pro Supabase
+          ConcursosSync.examSubjectInsert(newRow);
         }
         loadExamSubjects().then(() => {
           renderExamsList();
@@ -18657,14 +18783,17 @@
       showMsg('globalMessage2', `Já existe um concurso com a sigla "${sigla||examName}" (id=${id}). Escolha outra sigla.`);
       return;
     }
-    const created = window.UbiqueStore.exams.add({
+    const examRow = {
       id,
       exam: examName,
       sigla: sigla || null,
       carreira: carreira || null,
       description: description || null,
       name: sigla || examName  // compat com BankFilters do aluno
-    });
+    };
+    const created = window.UbiqueStore.exams.add(examRow);
+    // Fase 4i — espelha pro Supabase
+    ConcursosSync.examInsert(examRow);
     document.getElementById('ex-exam').value = '';
     document.getElementById('ex-sigla').value = '';
     document.getElementById('ex-carreira').value = '';
@@ -46655,9 +46784,16 @@
     if(!window.UbiqueStore){ msgEl.innerHTML = '<div class="message error">Store indisponível.</div>'; return; }
     const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     if(id){
-      window.UbiqueStore.editais.update(parseInt(id), { name, year, description, slug, exam_id });
+      // ⚠️ id já é UUID string (não parseInt) — UbiqueStore.editais agora é idType='uuid'
+      const patch = { name, year, description, slug, exam_id };
+      window.UbiqueStore.editais.update(id, patch);
+      // Fase 4i — espelha pro Supabase
+      ConcursosSync.editalUpdate(id, patch);
     } else {
-      window.UbiqueStore.editais.add({ name, year, description, slug, exam_id, status: 'published', created_at: new Date().toISOString() });
+      const newRow = { name, year, description, slug, exam_id, status: 'published', created_at: new Date().toISOString() };
+      const created = window.UbiqueStore.editais.add(newRow);
+      // Fase 4i — usa o UUID gerado localmente (created.id) pra que Supabase fique consistente
+      ConcursosSync.editalInsert(Object.assign({ id: created.id }, newRow));
     }
     document.getElementById('editalModal').classList.remove('active');
     document.body.style.overflow = '';
@@ -46671,10 +46807,18 @@
     // remove tópicos do edital + vínculos
     const topics = (window.UbiqueStore.edital_topics.list() || []).filter(t => t.edital_id === editalId);
     topics.forEach(t => {
-      (window.UbiqueStore.edital_topic_units.list() || []).filter(l => l.topic_id === t.id).forEach(l => window.UbiqueStore.edital_topic_units.remove(l.id));
+      (window.UbiqueStore.edital_topic_units.list() || []).filter(l => l.topic_id === t.id).forEach(l => {
+        window.UbiqueStore.edital_topic_units.remove(l.id);
+      });
+      // Fase 4i — cascata Supabase (topic_units e topic)
+      ConcursosSync.topicUnitDeleteByTopic(t.id);
       window.UbiqueStore.edital_topics.remove(t.id);
+      ConcursosSync.topicDelete(t.id);
     });
     window.UbiqueStore.editais.remove(editalId);
+    // Fase 4i — espelha pro Supabase (ON DELETE CASCADE no banco já cuida
+    // de topics/topic_units, mas mandamos delete pra garantir consistência)
+    ConcursosSync.editalDelete(editalId);
     backToEditais();
     showMsg('globalMessageEdital', 'Edital apagado.', 'success');
   }
@@ -46779,7 +46923,8 @@
   function saveEditalTopic(){
     const id = document.getElementById('tp-id').value;
     const parentRaw = document.getElementById('tp-parent-id').value;
-    const parent_id = parentRaw === '' ? null : parseInt(parentRaw);
+    // ⚠️ parent_id agora é UUID string (não parseInt) — pks viraram uuid pra match com Supabase
+    const parent_id = parentRaw === '' ? null : parentRaw;
     const code = (document.getElementById('tp-code').value || '').trim();
     const title = (document.getElementById('tp-title').value || '').trim();
     const description = (document.getElementById('tp-description').value || '').trim();
@@ -46795,11 +46940,15 @@
     if(!title){ msgEl.innerHTML = '<div class="message error">Título é obrigatório.</div>'; return; }
     if(!window.UbiqueStore){ msgEl.innerHTML = '<div class="message error">Store indisponível.</div>'; return; }
     if(id){
-      window.UbiqueStore.edital_topics.update(parseInt(id), { code, title, description, position, alias, subject_id });
+      const patch = { code, title, description, position, alias, subject_id };
+      window.UbiqueStore.edital_topics.update(id, patch);
+      // Fase 4i — espelha pro Supabase
+      ConcursosSync.topicUpdate(id, patch);
     } else {
-      window.UbiqueStore.edital_topics.add({
-        edital_id: _currentEditalId, parent_id, code, title, description, position, alias, subject_id
-      });
+      const newRow = { edital_id: _currentEditalId, parent_id, code, title, description, position, alias, subject_id };
+      const created = window.UbiqueStore.edital_topics.add(newRow);
+      // Fase 4i — manda com o UUID gerado localmente pra consistência
+      ConcursosSync.topicInsert(Object.assign({ id: created.id }, newRow));
     }
     document.getElementById('topicModal').classList.remove('active');
     document.body.style.overflow = '';
@@ -46821,8 +46970,14 @@
     const all = window.UbiqueStore.edital_topics.list() || [];
     const ids = gatherDescendants(topicId, all);
     ids.forEach(tid => {
-      (window.UbiqueStore.edital_topic_units.list() || []).filter(l => l.topic_id === tid).forEach(l => window.UbiqueStore.edital_topic_units.remove(l.id));
+      (window.UbiqueStore.edital_topic_units.list() || []).filter(l => l.topic_id === tid).forEach(l => {
+        window.UbiqueStore.edital_topic_units.remove(l.id);
+      });
+      // Fase 4i — cascade no Supabase (topic_units + topic) — ON DELETE CASCADE
+      // do banco cuida, mas mandamos pra garantir consistência imediata
+      ConcursosSync.topicUnitDeleteByTopic(tid);
       window.UbiqueStore.edital_topics.remove(tid);
+      ConcursosSync.topicDelete(tid);
     });
     renderEditalTree();
     renderEditaisCards();
@@ -46954,9 +47109,12 @@
     // Wire remove
     wrap.querySelectorAll('[data-remove-link-id]').forEach(function(btn){
       btn.addEventListener('click', function(){
-        const lid = parseInt(btn.dataset.removeLinkId);
-        if(!isNaN(lid) && window.UbiqueStore && window.UbiqueStore.edital_topic_units){
+        // ⚠️ lid agora é UUID string (não parseInt) — edital_topic_units virou uuid
+        const lid = btn.dataset.removeLinkId;
+        if(lid && window.UbiqueStore && window.UbiqueStore.edital_topic_units){
           window.UbiqueStore.edital_topic_units.remove(lid);
+          // Fase 4i — espelha pro Supabase
+          ConcursosSync.topicUnitDelete(lid);
           renderCurrentLinks();
           renderEditalTree();
         }
@@ -47038,7 +47196,9 @@
       const newRow = { topic_id: tid, target_type, target_id };
       // Mantém unit_id duplicado pra compat com código legacy que lê unit_id
       if(target_type === 'unit') newRow.unit_id = target_id;
-      window.UbiqueStore.edital_topic_units.add(newRow);
+      const created = window.UbiqueStore.edital_topic_units.add(newRow);
+      // Fase 4i — espelha pro Supabase com UUID gerado
+      ConcursosSync.topicUnitInsert(Object.assign({ id: created.id }, newRow));
       msg.innerHTML = '<div class="message success" style="font-size:.8rem">Vínculo adicionado.</div>';
       setTimeout(() => { msg.innerHTML = ''; }, 2500);
       // Reset dropdowns pra próximo
