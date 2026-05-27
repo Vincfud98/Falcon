@@ -9386,6 +9386,25 @@ window.COURSES = [
         UbiqueStore.unit_downloads.replaceAll(dlR.data || []);
       }
 
+      // Fase 4j — hidrata edital_progress do aluno logado
+      try {
+        const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+        if(u && u.id){
+          const { data: epData, error: epErr } = await window._sb.schema('aluno').from('edital_progress')
+            .select('user_id, topic_id, viewed_at').eq('user_id', u.id);
+          if(!epErr && UbiqueStore.edital_progress){
+            const rows = (epData || []).map(r => ({
+              user_id: r.user_id, topic_id: r.topic_id,
+              viewed_at: r.viewed_at || new Date().toISOString()
+            }));
+            UbiqueStore.edital_progress.replaceAll(rows);
+            console.log('[hydrate edital_progress] ✅', rows.length, 'tópicos marcados');
+          } else if(epErr){
+            console.warn('[hydrate edital_progress]', epErr);
+          }
+        }
+      } catch(e){ console.warn('[hydrate edital_progress] ex:', e); }
+
       // Fase 4i — hidrata também estrutura de concursos (exams, editais, topics, links)
       try {
         const csb = window._sb.schema('concursos');
@@ -10055,10 +10074,10 @@ const Auth = (function(){
       };
     }
 
-    // 2ª fonte: Supabase (se ativado)
+    // 2ª fonte: Supabase (Fase 4j — crm.platform_access)
     if(window.UBIQUE_USE_SUPABASE && window._sb){
       try{
-        const { data, error } = await window._sb
+        const { data, error } = await window._sb.schema('crm')
           .from('platform_access')
           .select('status, access_type, subject_ids')
           .eq('email', normEmail)
@@ -17560,16 +17579,35 @@ Renderers.edital.mount = function(stage){
       if(chevron) chevron.textContent = open ? '▸' : '▾';
     });
   });
-  // Progresso (checkboxes)
+  // Progresso (checkboxes) — local + Supabase
   stage.querySelectorAll('[data-progress]').forEach(cb => {
-    cb.addEventListener('change', e => {
-      const tid = parseInt(cb.getAttribute('data-progress'));
+    cb.addEventListener('change', async e => {
+      // ⚠️ tid agora é UUID string (topic_id em concursos.edital_topics é UUID)
+      const tid = cb.getAttribute('data-progress');
       const userId = window.MOCK_USER ? window.MOCK_USER.id : 'guest';
       const existing = (window.UbiqueStore && window.UbiqueStore.edital_progress.list().find(p => p.user_id === userId && p.topic_id === tid));
+      const isUserUUID = typeof userId === 'string' && /^[0-9a-f-]{36}$/i.test(userId);
+      const isTopicUUID = typeof tid === 'string' && /^[0-9a-f-]{36}$/i.test(tid);
       if(cb.checked && !existing){
         window.UbiqueStore.edital_progress.add({ user_id: userId, topic_id: tid, viewed_at: new Date().toISOString() });
+        // Fase 4j — sync Supabase (só se ambos IDs forem UUID válidos)
+        if(window._sb && isUserUUID && isTopicUUID){
+          try{
+            const { error } = await window._sb.schema('aluno').from('edital_progress')
+              .upsert({ user_id: userId, topic_id: tid }, { onConflict: 'user_id,topic_id' });
+            if(error) console.warn('[edital_progress insert]', error);
+          }catch(_){}
+        }
       } else if(!cb.checked && existing){
         window.UbiqueStore.edital_progress.remove(existing.id);
+        // Fase 4j — sync Supabase
+        if(window._sb && isUserUUID && isTopicUUID){
+          try{
+            const { error } = await window._sb.schema('aluno').from('edital_progress')
+              .delete().eq('user_id', userId).eq('topic_id', tid);
+            if(error) console.warn('[edital_progress delete]', error);
+          }catch(_){}
+        }
       }
     });
   });
@@ -17577,7 +17615,8 @@ Renderers.edital.mount = function(stage){
   stage.querySelectorAll('[data-show-aulas]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      const tid = parseInt(btn.getAttribute('data-show-aulas'));
+      // ⚠️ tid agora é UUID string (topic_id é UUID)
+      const tid = btn.getAttribute('data-show-aulas');
       const links = ((window.UbiqueStore && window.UbiqueStore.edital_topic_units.list()) || []).filter(l => l.topic_id === tid);
       if(!links.length){ App._showAccessToast('Nenhuma aula vinculada ainda.'); return; }
       const unitId = links[0].unit_id;

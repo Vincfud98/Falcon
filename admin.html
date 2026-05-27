@@ -24086,27 +24086,30 @@
     }
     return `Erro em bancas: ${msg}`;
   }
-  // Cache: true se já confirmamos que a tabela não existe (não tenta de novo)
-  let _platformAccessTableMissing = false;
   async function loadPlatformAccess(){
-    // Modo MOCK: UbiqueStore é a fonte (funciona sem backend)
-    if(window.UbiqueStore){
-      platformAccessCache = UbiqueStore.platform_access.list()
-        .sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
-    }
-    if(window.UBIQUE_USE_SUPABASE && !_platformAccessTableMissing){
+    // Fase 4j — Supabase é fonte de verdade (crm.platform_access)
+    if(window.UBIQUE_USE_SUPABASE && window._sb){
       try{
-        const { data, error } = await supabase
+        const { data, error } = await crm()
           .from('platform_access')
           .select('*')
           .order('created_at', { ascending: false });
-        if(error && (error.code === 'PGRST205' || /Could not find the table/i.test(error.message||''))){
-          // Tabela não existe — silencia futuras chamadas
-          _platformAccessTableMissing = true;
-        } else if(!error && Array.isArray(data) && data.length > 0){
-          platformAccessCache = data;
+        if(error){
+          console.warn('[platform_access load]', error.message);
+        } else {
+          platformAccessCache = data || [];
+          // Espelha pro UbiqueStore (cross-tab sync + leitura síncrona)
+          if(window.UbiqueStore && UbiqueStore.platform_access){
+            UbiqueStore.platform_access.replaceAll(platformAccessCache);
+          }
+          return;
         }
-      }catch(_){}
+      }catch(e){ console.warn('[platform_access load ex]', e); }
+    }
+    // Fallback: UbiqueStore local
+    if(window.UbiqueStore){
+      platformAccessCache = UbiqueStore.platform_access.list()
+        .sort((a,b) => (b.created_at||'').localeCompare(a.created_at||''));
     }
   }
 
@@ -41234,12 +41237,15 @@
     if(window.UbiqueStore){
       UbiqueStore.platform_access.update(id, { status: newStatus });
     }
-    if(window.UBIQUE_USE_SUPABASE){
+    // Fase 4j — crm.platform_access
+    if(window.UBIQUE_USE_SUPABASE && window._sb){
       try{
-        const { error } = await supabase
-          .from('platform_access').update({ status: newStatus }).eq('id', id);
-        if(error) console.warn('[platform_access.status] Supabase:', error.message);
-      }catch(_){}
+        const { error } = await crm()
+          .from('platform_access')
+          .update({ status: newStatus, updated_at: new Date().toISOString() })
+          .eq('id', id);
+        if(error) console.warn('[platform_access.status]', error.message);
+      }catch(e){ console.warn('[platform_access.status ex]', e); }
     }
     await loadPlatformAccess();
     renderPortariaTable();
@@ -41454,15 +41460,19 @@
         }));
       }
     }
-    // 2. Supabase (best-effort)
-    if(window.UBIQUE_USE_SUPABASE){
+    // 2. Supabase — Fase 4j (agora crm.platform_access)
+    if(window.UBIQUE_USE_SUPABASE && window._sb){
       try{
         if(editingPortariaId){
-          await supabase.from('platform_access').update(payload).eq('id', editingPortariaId);
+          const { error } = await crm().from('platform_access')
+            .update(Object.assign({}, payload, { updated_at: new Date().toISOString() }))
+            .eq('id', editingPortariaId);
+          if(error) console.warn('[platform_access update]', error);
         } else {
-          await supabase.from('platform_access').insert(payload);
+          const { error } = await crm().from('platform_access').insert(payload);
+          if(error) console.warn('[platform_access insert]', error);
         }
-      }catch(_){}
+      }catch(e){ console.warn('[platform_access save ex]', e); }
     }
 
     saveBtn.disabled = false;
@@ -41480,8 +41490,12 @@
     if(!confirm(`Remover acesso de "${r?.email}"?\n\nO usuário será bloqueado no próximo login.`)) return;
 
     if(window.UbiqueStore){ UbiqueStore.platform_access.remove(editingPortariaId); }
-    if(window.UBIQUE_USE_SUPABASE){
-      try{ await supabase.from('platform_access').delete().eq('id', editingPortariaId); }catch(_){}
+    // Fase 4j — crm.platform_access
+    if(window.UBIQUE_USE_SUPABASE && window._sb){
+      try{
+        const { error } = await crm().from('platform_access').delete().eq('id', editingPortariaId);
+        if(error) console.warn('[platform_access delete]', error);
+      }catch(e){ console.warn('[platform_access delete ex]', e); }
     }
     await loadPlatformAccess();
     renderPortariaTable();
