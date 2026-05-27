@@ -10816,6 +10816,95 @@ const Store = (function(){
     }catch(e){ console.warn('[hydrate highlights exception]', e); }
   }
 
+  // ────────────────────────────────────────────────────────────────────
+  // Fase 4h — Flashcards (aluno.flashcard_state) + Simulados (aluno.simulado_attempts)
+  // ────────────────────────────────────────────────────────────────────
+  async function _syncFlashcardToSupabase(unitId, blockId, cardId, st){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !st) return;
+    try{
+      const row = {
+        user_id: userId,
+        unit_id: String(unitId),
+        block_id: String(blockId),
+        card_id: String(cardId),
+        status: st.status || 'new',
+        reps: st.reps || 0,
+        last_reviewed_at: st.lastReviewedAt ? new Date(st.lastReviewedAt).toISOString() : new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+      const { error } = await window._sb.schema('aluno').from('flashcard_state')
+        .upsert(row, { onConflict: 'user_id,unit_id,block_id,card_id' });
+      if(error) console.warn('[flashcard sync]', error);
+    }catch(e){ console.warn('[flashcard sync ex]', e); }
+  }
+
+  async function _hydrateFlashcardsFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('flashcard_state')
+        .select('unit_id, block_id, card_id, status, reps, last_reviewed_at')
+        .eq('user_id', userId);
+      if(error){ console.warn('[hydrate flashcards]', error); return; }
+      let n = 0;
+      (data || []).forEach(row => {
+        _state.flashcards = _state.flashcards || {};
+        _state.flashcards[row.unit_id] = _state.flashcards[row.unit_id] || {};
+        _state.flashcards[row.unit_id][row.block_id] = _state.flashcards[row.unit_id][row.block_id] || {};
+        _state.flashcards[row.unit_id][row.block_id][row.card_id] = {
+          status: row.status,
+          reps: row.reps || 0,
+          lastReviewedAt: row.last_reviewed_at ? new Date(row.last_reviewed_at).getTime() : Date.now()
+        };
+        n++;
+      });
+      if(n){ console.log('[Store] hydrated flashcards:', n); _persist(); _emit(); }
+    }catch(e){ console.warn('[hydrate flashcards ex]', e); }
+  }
+
+  async function _syncSimuladoToSupabase(simId, st){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !st) return;
+    try{
+      const row = {
+        user_id: userId,
+        simulado_id: String(simId),
+        score: st.score || 0,
+        total: st.total || 0,
+        pct: st.pct || 0,
+        submitted_at: st.submittedAt ? new Date(st.submittedAt).toISOString() : new Date().toISOString()
+      };
+      const { error } = await window._sb.schema('aluno').from('simulado_attempts')
+        .upsert(row, { onConflict: 'user_id,simulado_id' });
+      if(error) console.warn('[simulado sync]', error);
+    }catch(e){ console.warn('[simulado sync ex]', e); }
+  }
+
+  async function _hydrateSimuladosFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('simulado_attempts')
+        .select('simulado_id, score, total, pct, submitted_at')
+        .eq('user_id', userId);
+      if(error){ console.warn('[hydrate simulados]', error); return; }
+      let n = 0;
+      _state.simulados = _state.simulados || {};
+      (data || []).forEach(row => {
+        _state.simulados[row.simulado_id] = {
+          score: row.score,
+          total: row.total,
+          pct: row.pct,
+          submittedAt: row.submitted_at ? new Date(row.submitted_at).getTime() : Date.now(),
+          userName: (window.MOCK_USER && window.MOCK_USER.name) || ''
+        };
+        n++;
+      });
+      if(n){ console.log('[Store] hydrated simulados:', n); _persist(); _emit(); }
+    }catch(e){ console.warn('[hydrate simulados ex]', e); }
+  }
+
   return {
     init(userId, course){
       _key = `ubique.coursePlatform.v3.${userId}.${course.id}`;
@@ -10841,6 +10930,9 @@ const Store = (function(){
       _hydrateNotesFromSupabase().catch(()=>{});
       _hydrateReadingListFromSupabase().catch(()=>{});
       _hydrateHighlightsFromSupabase().catch(()=>{});
+      // Fase 4h — hidrata flashcards + simulados do Supabase
+      _hydrateFlashcardsFromSupabase().catch(()=>{});
+      _hydrateSimuladosFromSupabase().catch(()=>{});
       return _state;
     },
     get(){ return _state; },
@@ -10947,6 +11039,8 @@ const Store = (function(){
       cur.lastReviewedAt = Date.now();
       _state.flashcards[unitId][blockId][cardId] = cur;
       _persist(); _emit();
+      // Fase 4h — fire-and-forget sync Supabase
+      _syncFlashcardToSupabase(unitId, blockId, cardId, cur).catch(()=>{});
     },
     toggleBookmark(unitId, blockId){
       _state.bookmarks[unitId] = _state.bookmarks[unitId] || {};
@@ -11074,8 +11168,11 @@ const Store = (function(){
     },
     submitSimulado(simId, score, total){
       _state.simulados = _state.simulados || {};
-      _state.simulados[simId] = { submittedAt:Date.now(), score, total, pct:total?(score/total):0, userName:window.MOCK_USER.name };
+      const st = { submittedAt:Date.now(), score, total, pct:total?(score/total):0, userName:window.MOCK_USER.name };
+      _state.simulados[simId] = st;
       _persist(); _emit();
+      // Fase 4h — fire-and-forget sync Supabase
+      _syncSimuladoToSupabase(simId, st).catch(()=>{});
     },
     getSimuladoState(simId){
       return (_state.simulados||{})[simId] || null;
