@@ -19119,6 +19119,14 @@ Renderers.unit.mount = function(stageEl, route){
     }
   });
 
+  // Restore saved highlights (yellow/red/etc + underline + veil) ao re-renderizar
+  // a unidade. addHighlight só fazia o wrap no DOM ao vivo; ao navegar entre
+  // grupos/unidades o HTML era re-gerado e os marks somiam.
+  if(typeof window._restoreHighlightsForUnit === 'function'){
+    try { window._restoreHighlightsForUnit(unit.id, stageEl, groupBlocks); }
+    catch(e){ console.warn('[restore highlights]', e); }
+  }
+
   // Inline note indicators — show a small icon beside text that was quoted in a note
   groupBlocks.forEach(b => {
     const notes = Store.notesForBlock(unit.id, b.id).filter(n => n.quote);
@@ -23614,6 +23622,76 @@ document.addEventListener('DOMContentLoaded', () => {
       : null;
     return { unitId, blockId, moduleId, chapterId, unit, block };
   }
+  // Expõe globalmente — chamada do Renderers.unit.mount (escopo externo)
+  window._restoreHighlightsForUnit = function(unitId, stageEl, groupBlocks){
+    return _restoreHighlightsForUnit(unitId, stageEl, groupBlocks);
+  };
+
+  /* Re-aplica todos os highlights salvos em uma unidade ao DOM recém-renderizado.
+   * Estratégia: pra cada highlight, encontra a 1ª ocorrência exata de hl.text
+   * num text node dentro do bloco correspondente e o envolve num <span.hl-mark>.
+   * Limitações conhecidas: não restaura highlights cujo texto cruze múltiplos
+   * elementos (ex: pegue parte de <strong>) — esses ficam invisíveis até o
+   * usuário fazer scroll/recriar. v1 aceita esse trade-off pra ficar simples. */
+  function _restoreHighlightsForUnit(unitId, stageEl, groupBlocks){
+    if(!unitId || !stageEl || !window.Store || typeof Store.getHighlights !== 'function') return;
+    const blockStage = stageEl.querySelector('#blockStage') || stageEl;
+    if(!blockStage) return;
+    // Pega só highlights de blocks visíveis no grupo ativo (perf + semântica)
+    const visibleIds = new Set((groupBlocks||[]).map(b => String(b.id)));
+    const all = Store.getHighlights(unitId) || [];
+    const list = visibleIds.size
+      ? all.filter(h => visibleIds.has(String(h.blockId || '')))
+      : all;
+    if(!list.length) return;
+    // Aplica os mais longos primeiro pra evitar matches parciais que comeriam
+    // o início de uma string maior
+    list.slice().sort((a,b) => (b.text||'').length - (a.text||'').length).forEach(hl => {
+      const txt = (hl.text || '').trim();
+      if(!txt || txt.length < 2) return;
+      const blockEl = hl.blockId
+        ? blockStage.querySelector('#block-' + CSS.escape(String(hl.blockId)))
+        : blockStage;
+      if(!blockEl) return;
+      const root = blockEl.querySelector('.tb-body') || blockEl;
+      _wrapFirstOccurrence(root, hl.text, hl.color || 'yellow', hl.hint, hl.id);
+    });
+  }
+
+  /* Envolve a primeira ocorrência de `searchText` em um <span.hl-mark>,
+   * pulando text nodes que já estão dentro de outro hl-mark (evita re-wrap). */
+  function _wrapFirstOccurrence(root, searchText, color, hint, hlId){
+    if(!root || !searchText) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node){
+        if(!node.textContent || !node.textContent.length) return NodeFilter.FILTER_REJECT;
+        if(node.parentElement && node.parentElement.closest('.hl-mark')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    let node;
+    while((node = walker.nextNode())){
+      const idx = node.textContent.indexOf(searchText);
+      if(idx < 0) continue;
+      try {
+        const matchNode = node.splitText(idx);
+        matchNode.splitText(searchText.length);
+        const mark = document.createElement('span');
+        mark.className = 'hl-mark';
+        mark.setAttribute('data-hl-color', color);
+        if(color === 'veil' && hint) mark.setAttribute('data-hl-hint', hint);
+        if(hlId) mark.setAttribute('data-hl-id', String(hlId));
+        const parent = matchNode.parentNode;
+        if(!parent) return;
+        parent.insertBefore(mark, matchNode);
+        mark.appendChild(matchNode);
+        return; // só aplica 1×
+      } catch(e){
+        // splitText pode falhar em casos raros — segue procurando próximo node
+      }
+    }
+  }
+
   function applyHighlightToSelection(color, hint){
     // Use saved range if current selection is collapsed (e.g. after hint input)
     let sel = window.getSelection();
