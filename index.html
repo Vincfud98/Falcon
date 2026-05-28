@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=119"></script>
+<script src="ubique-shared.js?v=120"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -9205,16 +9205,56 @@ window.COURSES = [
   });
 
   /**
+   * Conta blocos de tipos específicos dentro de TODOS os blocos das units
+   * que pertencem a um subject. Usado pros contadores do catálogo
+   * (vídeos, questões objetivas, discursivas) — refletem dado real do
+   * Supabase em vez de números mockados.
+   */
+  function _countSubjectContent(subjectId){
+    const out = { videos: 0, quiz: 0, essay: 0 };
+    if(!window.UbiqueStore || subjectId == null) return out;
+    const modules = (UbiqueStore.modules.list() || []).filter(m => m.subject_id === subjectId);
+    if(!modules.length) return out;
+    const moduleIds = new Set(modules.map(m => m.id));
+    const chapters = (UbiqueStore.chapters.list() || []).filter(c => moduleIds.has(c.module_id));
+    const chapterIds = new Set(chapters.map(c => c.id));
+    const units = (UbiqueStore.units.list() || []).filter(u => chapterIds.has(u.chapter_id));
+    const unitIds = new Set(units.map(u => u.id));
+    const blocks = (UbiqueStore.unit_blocks.list() || []).filter(b => unitIds.has(b.unit_id));
+    blocks.forEach(b => {
+      if(b.type === 'video'){ out.videos++; return; }
+      const content = b.content || {};
+      if(b.type === 'objective_questions' || b.type === 'quiz'){
+        (content.groups || []).forEach(g => {
+          out.quiz += ((g.questions && g.questions.length) || (g.items && g.items.length) || 0);
+        });
+        return;
+      }
+      if(b.type === 'essay'){
+        out.essay += Array.isArray(content.items) ? content.items.length : 0;
+        return;
+      }
+    });
+    return out;
+  }
+
+  /**
    * Constrói um objeto "course" a partir de um subject do UbiqueStore
    * (= Supabase). Refatorado em 3b.4: sem dependência de orig mockado.
    * Campos que não existem em conteudo.subjects ficam com defaults
    * sensatos. Estrutura modules/chapters/units é populada depois por
-   * rebuildCourseHierarchyFromStore().
+   * rebuildCourseHierarchyFromStore(). Contadores (vídeos/quiz/essay)
+   * são computados de UbiqueStore.unit_blocks — reflete a realidade
+   * do banco, não números fixos do mock.
+   * contractIncluded é derivado de status==='published' (= "LIBERADO"
+   * no admin): aluno tem acesso aos cursos publicados; rascunhos ficam
+   * "indisponíveis" no catálogo.
    */
   function buildCourse(subject){
     const slug = subject.slug || normName(subject.subject);
     const status = subject.status || 'published';
     const scheduledAt = subject.scheduled_at || null;
+    const counts = _countSubjectContent(subject.id);
     return {
       id: 'curso-' + slug,
       slug: slug,
@@ -9230,13 +9270,14 @@ window.COURSES = [
       authors: Array.isArray(subject.authors) ? subject.authors : [],
       rating: subject.rating || 4.5,
       totalHours: subject.totalHours != null ? subject.totalHours : 0,
-      quizCount: subject.quizCount || 0,
-      essayCount: subject.essayCount || 0,
-      videoCount: subject.videoCount || 0,
-      tier: subject.tier || 'basic',
+      quizCount: subject.quizCount != null ? subject.quizCount : counts.quiz,
+      essayCount: subject.essayCount != null ? subject.essayCount : counts.essay,
+      videoCount: subject.videoCount != null ? subject.videoCount : counts.videos,
+      tier: subject.tier || 'full',
       status: status,
       scheduled_at: scheduledAt,
       releaseAt: status === 'scheduled' ? scheduledAt : null,
+      contractIncluded: status === 'published',
       topics: [],
       tags: [],
       modules: [],
@@ -25621,7 +25662,10 @@ const App = {
     }
 
     App.render();
-    console.log('[Ubique Course Platform] booted', { user:user ? user.id : null, course:window.COURSE.id });
+    console.log('[Ubique Course Platform] booted', {
+      user: user ? user.id : null,
+      course: (window.COURSE && window.COURSE.id) || null
+    });
   }
 };
 window.App = App;
