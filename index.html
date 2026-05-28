@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=125"></script>
+<script src="ubique-shared.js?v=126"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -7524,21 +7524,27 @@ window.TAG_REGISTRY = {
     }catch(e){ console.warn('[boot] Store.init defer error:', e); }
   }
 
+  // Helper: chama App._scheduleRender se existir (coalesce em rAF), senão
+  // cai pra App.render direto. Tolera carga assíncrona de scripts.
+  function _renderSoon(){
+    if(window.App){
+      if(typeof window.App._scheduleRender === 'function') window.App._scheduleRender();
+      else if(typeof window.App.render === 'function') window.App.render();
+    }
+  }
+
   // Dispara hydrate em paralelo. Quando termina, re-popula e re-renderiza.
   hydrateFromSupabase().then(ok => {
     if(ok){
       rebuildCourses();
       _ensureStoreInit();
-      try{
-        if(window.App && typeof window.App.render === 'function') window.App.render();
-      }catch(_){}
+      _renderSoon();
     }
   });
 
   // Re-renderiza ao receber mudanças do store (mesma aba ou outra aba).
-  // Reage a qualquer alteração em entidades de catálogo/hierarquia, para
-  // que mudanças do admin (módulos novos, status, blocos editados) reflitam
-  // imediatamente no aluno.
+  // Durante a hidratação inicial, vários eventos disparam em rajada —
+  // o rAF coalesce em 1 paint.
   UbiqueStore.subscribe(function(evt){
     if(!evt || !evt.type) return;
     const triggers = ['sync','reset','subjects','modules','chapters','units','unit_blocks','unit_sections'];
@@ -7548,11 +7554,7 @@ window.TAG_REGISTRY = {
     if(shouldRebuild){
       rebuildCourses();
       _ensureStoreInit();
-      try{
-        if(window.App && typeof window.App.render === 'function'){
-          window.App.render();
-        }
-      }catch(_){}
+      _renderSoon();
     }
   });
 })();
@@ -8347,15 +8349,22 @@ const Auth = (function(){
     clearAccessData();
   }
 
+  // Helper: render coalescido (App._scheduleRender → rAF) ou direto se App
+  // não estiver pronto ainda no boot.
+  function _renderSoon(){
+    if(typeof window.App !== 'undefined'){
+      if(typeof window.App._scheduleRender === 'function') window.App._scheduleRender();
+      else if(typeof window.App.render === 'function') window.App.render();
+    }
+  }
+
   // ─── Boot: load() é async — kick off, re-render quando voltar ────
   // App.render() inicial pode rodar ANTES da load() completar (caso
   // o usuário tenha session Supabase). Quando a session é restaurada,
   // disparamos um re-render pra que App.render() detecte current e
   // pare de redirecionar pro /login.
   load().then(() => {
-    if(current && typeof window.App !== 'undefined' && typeof window.App.render === 'function'){
-      try { window.App.render(); } catch(_){}
-    }
+    if(current) _renderSoon();
   });
 
   // ─── Auth state changes (login/logout em outras abas, expiração JWT)
@@ -8367,17 +8376,12 @@ const Auth = (function(){
       if(event === 'SIGNED_OUT'){
         current = null;
         syncMockUser();
-        if(typeof window.App !== 'undefined' && typeof window.App.render === 'function'){
-          try { window.App.render(); } catch(_){}
-        }
+        _renderSoon();
       } else if(event === 'SIGNED_IN' && session && session.user){
-        // Só repopula se for diferente do atual (evita loop)
         if(!current || current.id !== session.user.id){
           current = await _hydrateSupabaseUser(session.user);
           syncMockUser();
-          if(typeof window.App !== 'undefined' && typeof window.App.render === 'function'){
-            try { window.App.render(); } catch(_){}
-          }
+          _renderSoon();
         }
       }
     });
@@ -15329,9 +15333,11 @@ Renderers.login.mount = function(stageEl){
         }catch(_){}
         location.href = 'admin.html';
       } else {
-        location.hash = user.landingRoute || '#/';
+        // location.hash → hashchange listener → App.render() (UM render).
+        // Antes a gente também chamava App.boot(true) que = outro App.render(),
+        // gerando flicker. Removido — o hashchange já faz o trabalho.
         setBusy(false);
-        App.boot(true);
+        location.hash = user.landingRoute || '#/';
       }
     }, 400);
   }
@@ -23544,6 +23550,19 @@ const AppShell = {
 };
 
 const App = {
+  // Render coalescido via requestAnimationFrame. Vários callers (hydrate,
+  // subscribe do UbiqueStore, listeners do Store) podem disparar render
+  // em rajada milisegundos após o login — sem isso, a tela "flicka"
+  // (10+ paints em sequência). _scheduleRender colapsa múltiplas chamadas
+  // do mesmo frame numa só.
+  _scheduleRender(){
+    if(this._renderPending) return;
+    this._renderPending = true;
+    requestAnimationFrame(() => {
+      this._renderPending = false;
+      try{ this.render(); }catch(e){ console.warn('[App._scheduleRender]', e); }
+    });
+  },
   render(){
     let route = Router.parse();
     const user = Auth.getUser();
