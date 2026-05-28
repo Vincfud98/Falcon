@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=124"></script>
+<script src="ubique-shared.js?v=125"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -7509,10 +7509,26 @@ window.TAG_REGISTRY = {
   // Render inicial com cache local (instantâneo) + re-render após hydrate
   rebuildCourses();
 
+  // Helper: garante que Store.init rode quando window.COURSE ficar disponível.
+  // App.boot pode rodar ANTES da hidratação (com COURSE=null) — o Store.init
+  // lá é skipped. Quando rebuildCourses popular COURSE, re-inicializamos.
+  function _ensureStoreInit(){
+    try{
+      if(window.Store && typeof window.Store.init === 'function'
+         && window.Auth && typeof window.Auth.getUser === 'function'){
+        const u = window.Auth.getUser();
+        if(u && window.COURSE){
+          window.Store.init(u.id, window.COURSE);
+        }
+      }
+    }catch(e){ console.warn('[boot] Store.init defer error:', e); }
+  }
+
   // Dispara hydrate em paralelo. Quando termina, re-popula e re-renderiza.
   hydrateFromSupabase().then(ok => {
     if(ok){
       rebuildCourses();
+      _ensureStoreInit();
       try{
         if(window.App && typeof window.App.render === 'function') window.App.render();
       }catch(_){}
@@ -7531,6 +7547,7 @@ window.TAG_REGISTRY = {
     });
     if(shouldRebuild){
       rebuildCourses();
+      _ensureStoreInit();
       try{
         if(window.App && typeof window.App.render === 'function'){
           window.App.render();
@@ -8070,6 +8087,10 @@ const Auth = (function(){
     if(cached){
       current = cached;
       syncMockUser();
+      // Espelha pro UbiqueStore.user_profiles — sem isso, Profile.needsOnboarding
+      // retorna true (perfil "fantasma") a cada render e o app entra em loop
+      // forçando o user pra /conta, mesmo o user tendo handle já cadastrado.
+      _mirrorProfileToLocal(current);
       // 2) Em background: renova JWT sem bloquear UI
       _revalidateInBackground();
       return current;
@@ -23618,7 +23639,11 @@ const App = {
     }catch(_){}
 
     const user = Auth.getUser();
-    if(user) Store.init(user.id, window.COURSE);
+    // Guard: Store.init lê course.id — crashava quando hidratação Supabase
+    // ainda não tinha rodado (window.COURSE === null). Quando o rebuild
+    // popula COURSE depois, o subscribe re-chama Store.init (ver IIFE
+    // course-builder).
+    if(user && window.COURSE) Store.init(user.id, window.COURSE);
     // Fase 4g — hidrata notifications + follows do Supabase (fire-and-forget,
     // mescla com legacy local; entries com UUID são source-of-truth do DB)
     if(user && window.Notifications && typeof Notifications.hydrate === 'function'){
