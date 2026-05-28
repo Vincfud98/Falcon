@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=131"></script>
+<script src="ubique-shared.js?v=132"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -18577,6 +18577,32 @@ function _bankBuildUnitContext(){
   const editalTopicById = {}; editalTopics.forEach(function(t){ editalTopicById[t.id] = t; });
   const subjectById = {}; subjects.forEach(function(s){ subjectById[s.id] = s; });
 
+  // PONTO 2 — Hierarquia: pré-calcula descendentes de cada tópico.
+  // Quando uma unidade é vinculada a um tópico "alto" (ex: Período Colonial),
+  // a semântica do admin é que ela cobre TUDO abaixo (Configuração
+  // territorial, Dimensões econômicas, etc.). Então o índice editalByUnit
+  // precisa carregar TODOS esses tópicos descendentes — assim o filtro do
+  // aluno por qualquer subtópico encontra a unidade.
+  const childrenByTopic = {};
+  editalTopics.forEach(function(t){
+    if(!t || t.parent_id == null) return;
+    const pk = String(t.parent_id);
+    (childrenByTopic[pk] = childrenByTopic[pk] || []).push(String(t.id));
+  });
+  function _descendantsOfTopic(topicId){
+    const root = String(topicId);
+    const out = [root];
+    const stack = [root];
+    while(stack.length){
+      const cur = stack.pop();
+      const kids = childrenByTopic[cur] || [];
+      kids.forEach(function(kid){
+        if(out.indexOf(kid) < 0){ out.push(kid); stack.push(kid); }
+      });
+    }
+    return out;
+  }
+
   // Normaliza string pra match por nome (lowercase + sem acentos + trim)
   function _norm(s){
     return String(s||'').toLowerCase()
@@ -18623,14 +18649,24 @@ function _bankBuildUnitContext(){
   //   - (legacy: sem target_type, usa unit_id como 'unit')
   const editalByUnit = {};
   const examIdsByUnit = {};
+  // Helper: adiciona um único topic_id ao índice da unidade.
+  function _addOneTopicToUnit(unitKey, topicIdStr, examIdsForTopic){
+    (editalByUnit[unitKey] = editalByUnit[unitKey] || []);
+    if(editalByUnit[unitKey].indexOf(topicIdStr) < 0) editalByUnit[unitKey].push(topicIdStr);
+    (examIdsForTopic || []).forEach(function(xid){
+      const arr = (examIdsByUnit[unitKey] = examIdsByUnit[unitKey] || []);
+      if(arr.indexOf(xid) < 0) arr.push(xid);
+    });
+  }
+  // Helper: dado um link {unitId, topicId}, expande o topic em TODOS os
+  // descendentes (incluindo ele) e adiciona cada um ao índice da unidade.
+  // É essa expansão que faz "vincular a Período Colonial" cobrir filtros
+  // por Configuração territorial, Dimensões econômicas, etc.
   function _addEditalUnitLink(unitId, topicId, examIdsForTopic){
     if(unitId == null) return;
-    const key = String(unitId);
-    (editalByUnit[key] = editalByUnit[key] || []);
-    if(editalByUnit[key].indexOf(String(topicId)) < 0) editalByUnit[key].push(String(topicId));
-    (examIdsForTopic || []).forEach(function(xid){
-      const arr = (examIdsByUnit[key] = examIdsByUnit[key] || []);
-      if(arr.indexOf(xid) < 0) arr.push(xid);
+    const unitKey = String(unitId);
+    _descendantsOfTopic(topicId).forEach(function(tid){
+      _addOneTopicToUnit(unitKey, tid, examIdsForTopic);
     });
   }
   topicUnits.forEach(function(tu){
@@ -18645,18 +18681,18 @@ function _bankBuildUnitContext(){
     if(ttype === 'unit'){
       _addEditalUnitLink(targetId, tu.topic_id, examsForEdital);
     } else if(ttype === 'chapter'){
-      // Todas as unidades do capítulo recebem o link
+      // Todas as unidades do capítulo recebem o link (com expansão hierárquica)
       units.forEach(function(u){
-        if(u && u.chapter_id === targetId) _addEditalUnitLink(u.id, tu.topic_id, examsForEdital);
+        if(u && String(u.chapter_id) === String(targetId)) _addEditalUnitLink(u.id, tu.topic_id, examsForEdital);
       });
     } else if(ttype === 'module'){
       // Todas as unidades dos capítulos desse módulo (+ units direto no módulo)
-      const chapsOfMod = chapters.filter(function(c){ return c.module_id === targetId; });
-      const chapIds = new Set(chapsOfMod.map(function(c){ return c.id; }));
+      const chapsOfMod = chapters.filter(function(c){ return String(c.module_id) === String(targetId); });
+      const chapIds = new Set(chapsOfMod.map(function(c){ return String(c.id); }));
       units.forEach(function(u){
         if(!u) return;
-        const matchesByChapter = chapIds.has(u.chapter_id);
-        const matchesByDirectModule = u.module_id === targetId;
+        const matchesByChapter = chapIds.has(String(u.chapter_id));
+        const matchesByDirectModule = String(u.module_id) === String(targetId);
         if(matchesByChapter || matchesByDirectModule) _addEditalUnitLink(u.id, tu.topic_id, examsForEdital);
       });
     }
@@ -18685,7 +18721,16 @@ function _bankBuildUnitContext(){
     //                 do top match)
     // Aplica em CADA edital cadastrado — uma unidade pode estar vinculada
     // implicitamente a múltiplos editais (concursos diferentes).
+    // PONTO 2 — Expansão hierárquica também no implícito: se a unidade casa
+    // na matéria top-level, cobre TODOS os descendentes dela.
     const implicitEdital = [];
+    function _addImplicit(topicId){
+      _descendantsOfTopic(topicId).forEach(function(tid){
+        if(directEdital.indexOf(tid) < 0 && implicitEdital.indexOf(tid) < 0){
+          implicitEdital.push(tid);
+        }
+      });
+    }
     if(subjectId != null || subjectName){
       editais.forEach(function(e){
         // (a) Top-level match — tenta FK primeiro, fallback pra name match
@@ -18698,17 +18743,16 @@ function _bankBuildUnitContext(){
           topTopic = topicsByEditalParentName[topKey] || null;
         }
         if(topTopic){
-          if(directEdital.indexOf(String(topTopic.id)) < 0 && implicitEdital.indexOf(String(topTopic.id)) < 0){
-            implicitEdital.push(String(topTopic.id));
-          }
-          // (b) Nível-1 match dentro do top: module.title == topic.title
+          _addImplicit(topTopic.id);
+          // (b) Nível-1 match dentro do top: module.title == topic.title.
+          //     Aqui não expandimos descendentes de novo porque _addImplicit
+          //     do topTopic já cobriu — apenas garantimos que o module-level
+          //     entre também (alguns filtros podem checar lv1 diretamente).
           if(moduleName){
             const lv1Key = String(e.id) + '|' + String(topTopic.id) + '|' + _norm(moduleName);
             const lv1Topic = topicsByEditalParentName[lv1Key];
             if(lv1Topic){
-              if(directEdital.indexOf(String(lv1Topic.id)) < 0 && implicitEdital.indexOf(String(lv1Topic.id)) < 0){
-                implicitEdital.push(String(lv1Topic.id));
-              }
+              _addImplicit(lv1Topic.id);
             }
           }
         }
