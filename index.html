@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=117"></script>
+<script src="ubique-shared.js?v=118"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -11206,7 +11206,8 @@ const Store = (function(){
       _state.unitViews[unitId] = v;
       // Cascade: mark every block inside the unit as finished (bookmarks)
       const cascadeBlockIds = [];
-      for(const m of window.COURSE.modules){
+      const courseModules = (window.COURSE && Array.isArray(window.COURSE.modules)) ? window.COURSE.modules : [];
+      for(const m of courseModules){
         const found = Util.findUnit(m.id, unitId);
         if(found){
           _state.bookmarks[unitId] = _state.bookmarks[unitId] || {};
@@ -11800,7 +11801,7 @@ function renderBreadcrumb(route){
   }
   const bc = [];
   if(route.section === 'admin'){
-    bc.push(`<a href="#/course">${Util.esc(window.COURSE.title)}</a>`);
+    bc.push(`<a href="#/course">${Util.esc((window.COURSE && window.COURSE.title) || 'Curso')}</a>`);
     bc.push('<span class="bc-sep">â€º</span>');
     bc.push('<span class="bc-current">Admin</span>');
     document.getElementById('breadcrumb').innerHTML = bc.join(' ');
@@ -14634,37 +14635,51 @@ const BioBankModal = (function(){
     if(root) root.innerHTML = '';
     document.body.style.overflow = '';
   }
+  // Refatorado em 3b.3: lê direto de UbiqueStore.unit_blocks (Supabase) em
+  // vez de andar window.COURSE.modules. Faz lookup módulo/capítulo/unidade
+  // por _storeId integer.
   function findUnitsWhereAppears(bankBio){
     const results = [];
-    if(!window.COURSE || !window.COURSE.modules) return results;
+    if(!window.UbiqueStore) return results;
     const targetName = (bankBio.name||'').trim().toLowerCase();
     if(!targetName) return results;
-    window.COURSE.modules.forEach(m => (m.chapters||[]).forEach(c => (c.units||[]).forEach(u => {
-      const blocks = [];
-      function walk(arr){ (arr||[]).forEach(b => { if(b){ blocks.push(b); if(Array.isArray(b.parts)) walk(b.parts); if(Array.isArray(b.blocks)) walk(b.blocks); }}); }
-      walk(u.blocks);
-      (u.sections||[]).forEach(s => walk(s.blocks));
-      blocks.forEach(b => {
-        if(!b || !Array.isArray(b.items)) return;
-        const isBio = (b.type === 'biography' || b.type === 'bio' || b.type === 'bios');
-        const isCit = (b.type === 'citations' || b.type === 'quote' || b.type === 'quotes');
-        if(!isBio && !isCit) return;
-        b.items.forEach(it => {
-          if(!it) return;
-          const matchBio = isBio && (it.name||'').trim().toLowerCase() === targetName;
-          const matchCit = isCit && (it.bioBankId === bankBio.id || (it.author||'').trim().toLowerCase() === targetName);
-          if(matchBio || matchCit){
-            results.push({
-              moduleId: m.id, moduleTitle: m.title,
-              chapterId: c.id, chapterTitle: c.title,
-              unitId: u.id, unitTitle: u.title,
-              kind: isBio ? 'biografia' : 'citação',
-              blockTitle: b.title || (isBio ? 'Biografias' : 'Citações')
-            });
-          }
+
+    const allBlocks   = UbiqueStore.unit_blocks.list() || [];
+    const allUnits    = UbiqueStore.units.list() || [];
+    const allChapters = UbiqueStore.chapters.list() || [];
+    const allModules  = UbiqueStore.modules.list() || [];
+    const unitById    = Object.fromEntries(allUnits.map(u => [u.id, u]));
+    const chapterById = Object.fromEntries(allChapters.map(c => [c.id, c]));
+    const moduleById  = Object.fromEntries(allModules.map(m => [m.id, m]));
+
+    allBlocks.forEach(b => {
+      const isBio = (b.type === 'biography' || b.type === 'bio' || b.type === 'bios');
+      const isCit = (b.type === 'citations'  || b.type === 'quote' || b.type === 'quotes');
+      if(!isBio && !isCit) return;
+      const items = (b.content && Array.isArray(b.content.items)) ? b.content.items : [];
+      items.forEach(it => {
+        if(!it) return;
+        const matchBio = isBio && (it.name||'').trim().toLowerCase() === targetName;
+        const matchCit = isCit && (it.bioBankId === bankBio.id || (it.author||'').trim().toLowerCase() === targetName);
+        if(!matchBio && !matchCit) return;
+        const u = unitById[b.unit_id];
+        if(!u) return;
+        const chKey = u.chapter_id != null ? u.chapter_id : u.course_chapter_id;
+        const c = chKey != null ? chapterById[chKey] : null;
+        const m = c ? moduleById[c.module_id] : null;
+        results.push({
+          moduleId:  m ? ('m' + m.id) : null,
+          moduleTitle: m ? (m.title || '') : '',
+          chapterId: c ? ('c' + c.id) : null,
+          chapterTitle: c ? (c.title || '') : '',
+          unitId:    'u' + u.id,
+          unitTitle: u.title || '',
+          kind: isBio ? 'biografia' : 'citação',
+          blockTitle: b.title || (isBio ? 'Biografias' : 'Citações')
         });
       });
-    })));
+    });
+
     // dedup por unidade
     const seen = new Set();
     return results.filter(r => { const k = r.unitId; if(seen.has(k)) return false; seen.add(k); return true; });
@@ -15281,11 +15296,13 @@ const Portal = {
     Object.keys(Portal.cards).forEach(k => { out[k] = Portal.aggregate(moduleId, k, {}).length; });
     return out;
   },
-  // Course-wide aggregation (all modules)
+  // Course-wide aggregation (all modules). Defensive contra window.COURSE
+  // undefined durante race boot↔hydrate.
   aggregateAll(cardKey, filters){
     filters = filters || {};
     let allItems = [];
-    window.COURSE.modules.forEach(mod => {
+    const modules = (window.COURSE && Array.isArray(window.COURSE.modules)) ? window.COURSE.modules : [];
+    modules.forEach(mod => {
       const modItems = Portal.aggregate(mod.id, cardKey, Object.assign({}, filters, { module: undefined }));
       modItems.forEach(it => { it.__moduleId = mod.id; it.__moduleLabel = mod.label; });
       if(filters.module && mod.id !== filters.module) return;
@@ -18546,7 +18563,9 @@ function recommendedUnitsFor(unit, moduleRef){
 }
 
 Renderers.catalog = function(){
-  const courses = window.COURSES || [window.COURSE];
+  // Filtra null/undefined: pode acontecer durante boot pré-hidratação.
+  const courses = (window.COURSES || []).filter(Boolean);
+  if(!courses.length && window.COURSE) courses.push(window.COURSE);
   const starSvg = '<svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
   const cards = courses.map((c,i) => {
     const hasContent = c.modules && c.modules.length > 0;
