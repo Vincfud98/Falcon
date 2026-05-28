@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=122"></script>
+<script src="ubique-shared.js?v=123"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -7669,27 +7669,11 @@ window.SIMULADOS = [
 </script>
 
 <script id="data-user">
-window.AUTH_USERS = [
-  {
-    id:'manf',
-    email:'aluno@ubique.local',
-    password:'123456',
-    role:'student',
-    name:'Manfredo McLoving',
-    nickname:'Manf',
-    landingRoute:'#/'
-  },
-  {
-    id:'carol-admin',
-    email:'admin@ubique.local',
-    password:'admin123',
-    role:'admin',
-    name:'Carol Andrade',
-    nickname:'Carol',
-    landingRoute:'#/admin'
-  }
-];
-window.MOCK_USER = Object.assign({}, window.AUTH_USERS[0]);
+// AUTH_USERS legacy removido — toda autenticação é via Supabase agora.
+// Mantemos a propriedade como array vazio só pra UserDirectory não quebrar
+// nos lookups (todos usam `|| []` defensivamente).
+window.AUTH_USERS = [];
+window.MOCK_USER = null;
 window.defaultUserState = function(course){
   return {
     version:3,
@@ -7912,6 +7896,80 @@ const Auth = (function(){
       (remember ? localStorage : sessionStorage).setItem(SESSION_KEY, JSON.stringify({ userId:user.id }));
     }catch(e){}
   }
+
+  // ── Cache local de sessão (TTL 8h) ─────────────────────────────────────
+  // Mesmo padrão do ubique.admin.token: salva snapshot do user pra sobreviver
+  // a timeouts/falhas do getSession Supabase. Aluno e admin agora têm o mesmo
+  // grau de resiliência ao recarregar a página.
+  const USER_CACHE_KEY = 'ubique.user.session';
+  const USER_CACHE_TTL = 8 * 3600 * 1000; // 8 horas
+
+  function _saveCachedSession(user){
+    if(!user) return;
+    try{
+      localStorage.setItem(USER_CACHE_KEY, JSON.stringify({
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        nickname: user.nickname || '',
+        role: user.role,
+        landingRoute: user.landingRoute || '#/',
+        displayName: user.displayName || '',
+        handle: user.handle || '',
+        bio: user.bio || '',
+        photoUrl: user.photoUrl || '',
+        photoTransform: user.photoTransform || { x:0, y:0, scale:1 },
+        _authSource: user._authSource || 'supabase',
+        _rawRole: user._rawRole || user.role,
+        ts: Date.now()
+      }));
+    }catch(_){}
+  }
+  function _loadCachedSession(){
+    try{
+      const raw = localStorage.getItem(USER_CACHE_KEY);
+      if(!raw) return null;
+      const cached = JSON.parse(raw);
+      if(!cached || !cached.id || !cached.email) return null;
+      if(Date.now() - (cached.ts || 0) > USER_CACHE_TTL){
+        localStorage.removeItem(USER_CACHE_KEY);
+        return null;
+      }
+      return cached;
+    }catch(_){ return null; }
+  }
+  function _clearCachedSession(){
+    try{ localStorage.removeItem(USER_CACHE_KEY); }catch(_){}
+  }
+
+  // Revalida JWT do Supabase em background. NÃO bloqueia UI.
+  // Se sucesso, atualiza cache com dados frescos. Se falha, mantém cache atual
+  // (não desloga o user — eles podem continuar usando a app offline-ish).
+  function _revalidateInBackground(){
+    if(!window._sb) return;
+    Promise.race([
+      window._sb.auth.getSession(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('background revalidate timeout 5s')), 5000))
+    ])
+    .then(async result => {
+      const { data } = result || {};
+      if(data && data.session && data.session.user){
+        const fresh = await _hydrateSupabaseUser(data.session.user);
+        if(fresh){
+          current = fresh;
+          _saveCachedSession(current);
+          syncMockUser();
+          console.log('[auth] sessão revalidada em background');
+        }
+      } else {
+        console.warn('[auth] revalidação retornou sem sessão — JWT pode estar expirado, mas cache local mantém o user logado.');
+      }
+    })
+    .catch(e => {
+      console.warn('[auth] revalidação em background falhou:', e.message);
+      // NÃO desloga — cache local segue funcionando
+    });
+  }
   // ─── Hidrata o `current` a partir de auth.users (Supabase) ────
   // Faz join lógico com crm.app_users (role, nome) + crm.user_profiles
   // (display_name, handle, foto). Devolve objeto com mesmo shape
@@ -7998,13 +8056,25 @@ const Auth = (function(){
     } catch(e){ console.warn('[auth] mirror local profile error:', e); }
   }
 
-  // load() agora é async: primeiro tenta Supabase (session), depois cai
-  // pro AUTH_USERS legacy via localStorage. Re-dispara App.render quando
-  // a sessão Supabase volta DEPOIS do primeiro render (fluxo async).
+  // load() — recupera sessão do user no boot. Estratégia cache-first:
+  // 1. Cache local (TTL 8h) → hidrata instantâneo, dispara revalidação em background
+  // 2. Sem cache → tenta getSession() com timeout (modelo antigo)
+  // 3. Falhou tudo → null (tela de login)
+  //
+  // Por que cache-first? getSession() com JWT expirado pode travar até o
+  // timeout (3s). Em cada page refresh isso descontinuava o aluno (admin
+  // sobrevivia porque tem cache próprio em ubique.admin.token).
   async function load(){
-    // 1) Tenta Supabase session (refresh do JWT é automático no SDK)
-    // ⚠️ Timeout de 3s: se token salvo está corrompido, getSession trava infinitamente
-    // sem rejeitar — bloqueando toda a UI no "Verificando..."
+    // 1) Cache local primeiro
+    const cached = _loadCachedSession();
+    if(cached){
+      current = cached;
+      syncMockUser();
+      // 2) Em background: renova JWT sem bloquear UI
+      _revalidateInBackground();
+      return current;
+    }
+    // 3) Sem cache: tenta Supabase JWT (login pode estar persistido em sb-*)
     if(window._sb){
       try {
         const result = await Promise.race([
@@ -8014,102 +8084,78 @@ const Auth = (function(){
         const { data } = result || {};
         if(data && data.session && data.session.user){
           current = await _hydrateSupabaseUser(data.session.user);
+          _saveCachedSession(current); // hidrata cache pra próximos refreshes
           syncMockUser();
           return current;
         }
       } catch(e){
-        console.warn('[auth] load supabase error/timeout — pulando pra fallback:', e.message);
-        // Se o token salvo está fazendo o SDK travar, limpa pra não travar de novo
+        console.warn('[auth] load getSession timeout — resetando SDK:', e.message);
+        // Reset agressivo: signOut local pra zerar estado interno do SDK
+        // + limpa tokens corrompidos. Próximo signInWithPassword vai começar
+        // do zero, sem promises pendentes contaminando.
+        try {
+          await Promise.race([
+            window._sb.auth.signOut({ scope: 'local' }),
+            new Promise(r => setTimeout(r, 1500))
+          ]);
+        } catch(_){}
         try{
           Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
         }catch(_){}
       }
     }
-    // 2) Fallback: localStorage + AUTH_USERS (modo dev/mock)
-    try{
-      const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
-      if(!raw){ current = null; syncMockUser(); return null; }
-      const parsed = JSON.parse(raw);
-      const match = users.find(user => user.id === parsed.userId);
-      current = match ? publicUser(match) : null;
-      syncMockUser();
-      return current;
-    }catch(e){
-      current = null;
-      syncMockUser();
-      return null;
-    }
+    current = null;
+    syncMockUser();
+    return null;
   }
 
-  // login() — testa AUTH_USERS legacy PRIMEIRO (instantâneo, offline).
-  // Só tenta Supabase se o email NÃO bate com nenhum mock. Garante que
-  // admin@ubique.local / aluno@ubique.local entrem sem chamada de rede,
-  // sem hangs, sem latência.
+  // login() — sempre via Supabase Auth. Sem caminho legacy (AUTH_USERS
+  // foi removido). Retorna { ok, user } ou { ok:false, message, kind }
+  // onde `kind` indica timeout/credenciais (usado pela UI pra mensagem).
   async function login(email, password, remember){
     const normalizedEmail = String(email||'').trim().toLowerCase();
-
-    // 0) LEGACY FIRST (instantâneo, sem rede)
-    const localMatch = users.find(user =>
-      user.email.toLowerCase() === normalizedEmail &&
-      user.password === String(password||'')
-    );
-    if(localMatch){
-      current = Object.assign({}, publicUser(localMatch), { _authSource:'legacy' });
+    if(!window._sb){
+      return { ok:false, kind:'no-supabase', message:'Supabase indisponível. Recarregue a página.' };
+    }
+    try {
+      const result = await Promise.race([
+        window._sb.auth.signInWithPassword({
+          email: normalizedEmail, password: String(password||'')
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('signInWithPassword timeout 8s')), 8000))
+      ]);
+      const { data, error } = result || {};
+      if(error){
+        return { ok:false, kind:'invalid-credentials', message:'Email ou senha incorretos.' };
+      }
+      if(!data || !data.user){
+        return { ok:false, kind:'unknown', message:'Resposta vazia do servidor. Tente de novo.' };
+      }
+      current = await _hydrateSupabaseUser(data.user);
       syncMockUser();
       persist(current, !!remember);
+      _saveCachedSession(current);
       if(current.role === 'admin'){
         try{ localStorage.setItem('ubique.admin.token', JSON.stringify({ email:current.email, name:current.name||'', ts:Date.now() })); }catch(_){}
       }
-      console.log('[auth] login via AUTH_USERS legacy:', current.email);
       return { ok:true, user:current };
+    } catch(e){
+      console.warn('[auth] login timeout/erro:', e.message);
+      // Timeout = SDK pode estar travado por sessão antiga corrompida.
+      // Limpa estado e sugere reset visível pro user.
+      try{
+        Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
+      }catch(_){}
+      return {
+        ok:false,
+        kind:'timeout',
+        message:'Problema de conexão. Clique em "Resetar sessão" e tente de novo.'
+      };
     }
-
-    // 1) Supabase Auth (só pra emails que NÃO são mock)
-    // ⚠️ Timeout de 8s: se Supabase não respondeu em 8s, abandona e cai pro fallback
-    if(window._sb){
-      try {
-        const result = await Promise.race([
-          window._sb.auth.signInWithPassword({
-            email: normalizedEmail, password: String(password||'')
-          }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('signInWithPassword timeout 8s')), 8000))
-        ]);
-        const { data, error } = result || {};
-        if(!error && data && data.user){
-          current = await _hydrateSupabaseUser(data.user);
-          syncMockUser();
-          persist(current, !!remember);
-          if(current.role === 'admin'){
-            try{ localStorage.setItem('ubique.admin.token', JSON.stringify({ email:current.email, name:current.name||'', ts:Date.now() })); }catch(_){}
-          }
-          return { ok:true, user:current };
-        }
-        if(error){
-          console.warn('[auth] supabase rejeitou:', error.message);
-        }
-      } catch(e){
-        console.warn('[auth] supabase login error/timeout:', e.message);
-        // Limpa tokens corrompidos pra evitar travar o boot na próxima
-        try{
-          Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
-        }catch(_){}
-      }
-    }
-
-    // 2) Fallback legacy (AUTH_USERS hardcoded)
-    const match = users.find(user => user.email.toLowerCase() === normalizedEmail && user.password === String(password||''));
-    if(!match) return { ok:false, message:'Email ou senha incorretos.' };
-    current = Object.assign({}, publicUser(match), { _authSource:'legacy' });
-    syncMockUser();
-    persist(current, !!remember);
-    if(current.role === 'admin'){
-      try{ localStorage.setItem('ubique.admin.token', JSON.stringify({ email:current.email, name:current.name||'', ts:Date.now() })); }catch(_){}
-    }
-    return { ok:true, user:current };
   }
 
-  // logout() async: signOut no Supabase + limpa state local.
-  // Timeout de 2s pra evitar travar quando signOut não responde.
+  // logout() — signOut no Supabase + limpa state local + cache.
+  // Timeout de 2s no signOut pra não travar se Supabase não responder.
   async function logout(){
     if(window._sb){
       try {
@@ -8119,13 +8165,13 @@ const Auth = (function(){
         ]);
       } catch(_){}
     }
-    // Limpa qualquer token Supabase residual (mesmo se signOut travou)
     try{
       Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
     }catch(_){}
     current = null;
     syncMockUser();
     persist(null);
+    _clearCachedSession();
     try{ localStorage.removeItem('ubique.admin.token'); }catch(_){}
   }
   function getUser(){
@@ -15007,13 +15053,6 @@ Renderers.login = function(){
 
       <button type="button" id="loginFirstAccess" class="btn-ghost" style="width:100%">Primeiro acesso · criar conta</button>
 
-      <div class="auth-divider"><span>ou acesso rápido</span></div>
-
-      <div class="auth-demo">
-        <button type="button" id="loginDemoStudent" class="btn-ghost">Aluno demo</button>
-        <button type="button" id="loginDemoAdmin" class="btn-ghost">Admin demo</button>
-      </div>
-
       <button type="button" id="loginReset" class="auth-reset" hidden>Resetar sessão (limpar tokens travados)</button>
     </div>
 
@@ -15103,17 +15142,11 @@ Renderers.login.mount = function(stageEl){
 
       .auth-submit{ width:100%; justify-content:center; margin-top:1.4rem; padding:.7rem 1.2rem; font-size:.9rem; }
 
-      .auth-divider{ display:flex; align-items:center; gap:.7rem; margin:1.8rem 0 1rem; color:var(--text-mute); font-family:var(--sans); font-weight:300; font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; }
-      .auth-divider::before,.auth-divider::after{ content:''; flex:1; height:1px; background:var(--border,rgba(255,255,255,.08)); }
-
-      .auth-demo{ display:grid; grid-template-columns:1fr 1fr; gap:.5rem; }
-      .auth-demo .btn-ghost{ width:100%; justify-content:center; font-size:.78rem; padding:.55rem .8rem; font-weight:300; letter-spacing:.05em; text-transform:uppercase; }
-
       .auth-reset{ display:block; margin-top:1.2rem; width:100%; background:transparent; border:0; color:var(--text-mute); font-family:var(--sans); font-weight:300; font-size:.72rem; cursor:pointer; padding:.4rem 0; text-decoration:underline; }
       .auth-reset[hidden]{ display:none !important; }
       .auth-reset:hover{ color:#d47973; }
 
-      @media (max-width:480px){ .auth-card{ padding:1.8rem 1.4rem; } .auth-demo{ grid-template-columns:1fr; } }
+      @media (max-width:480px){ .auth-card{ padding:1.8rem 1.4rem; } }
 
       /* Modal de Primeiro acesso (Fase 4k) */
       .auth-modal-backdrop{ position:fixed; inset:0; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; z-index:9999; padding:1.25rem; }
@@ -15142,19 +15175,16 @@ Renderers.login.mount = function(stageEl){
   const rememberInput= stageEl.querySelector('#loginRemember');
   const togglePass   = stageEl.querySelector('#loginTogglePassword');
   const submitBtn    = stageEl.querySelector('#loginSubmit');
-  const demoStudent  = stageEl.querySelector('#loginDemoStudent');
-  const demoAdmin    = stageEl.querySelector('#loginDemoAdmin');
   const forgotBtn    = stageEl.querySelector('#loginForgot');
   const resetBtn     = stageEl.querySelector('#loginReset');
 
   // Estado vazio (sem prefill) — força user a digitar credenciais reais.
-  // O Demo Aluno/Admin estão como fallback rápido.
   rememberInput.checked = true;
 
   function showError(msg){
     errorEl.hidden = false; errorEl.textContent = msg;
     statusEl.hidden = true;
-    resetBtn.hidden = false; // oferece reset se algo deu errado
+    // Reset só aparece em casos específicos (timeout). Não mais por default.
   }
   function showStatus(msg){
     statusEl.hidden = false; statusEl.textContent = msg;
@@ -15165,8 +15195,6 @@ Renderers.login.mount = function(stageEl){
   }
   function setBusy(busy, label){
     submitBtn.disabled = busy;
-    demoStudent.disabled = busy;
-    demoAdmin.disabled = busy;
     if(label) submitBtn.textContent = label;
     else submitBtn.textContent = busy ? 'Entrando…' : 'Entrar';
   }
@@ -15185,7 +15213,11 @@ Renderers.login.mount = function(stageEl){
   resetBtn.addEventListener('click', () => {
     try{
       Object.keys(localStorage)
-        .filter(k => k.startsWith('sb-') || k === 'ubique:auth:current' || k === 'ubique:auth:session')
+        .filter(k => k.startsWith('sb-')
+                  || k === 'ubique:auth:current'
+                  || k === 'ubique:auth:session'
+                  || k === 'ubique.user.session'
+                  || k === 'ubique.admin.token')
         .forEach(k => localStorage.removeItem(k));
     }catch(_){}
     showStatus('Sessão limpa. Recarregando…');
@@ -15249,27 +15281,7 @@ Renderers.login.mount = function(stageEl){
     }, 400);
   }
 
-  // ── Demo Aluno ──
-  demoStudent.addEventListener('click', async () => {
-    clearMsgs();
-    setBusy(true, 'Entrando como aluno demo…');
-    showStatus('Entrando como aluno demo (sessão local)…');
-    const r = await Auth.login('aluno@ubique.local', '123456', true);
-    if(!r.ok){ showError(r.message || 'Falha ao entrar como aluno demo.'); setBusy(false); return; }
-    await _finishLogin(r.user);
-  });
-
-  // ── Demo Admin ──
-  demoAdmin.addEventListener('click', async () => {
-    clearMsgs();
-    setBusy(true, 'Entrando como admin demo…');
-    showStatus('Entrando como admin demo (sessão local)…');
-    const r = await Auth.login('admin@ubique.local', 'admin123', true);
-    if(!r.ok){ showError(r.message || 'Falha ao entrar como admin demo.'); setBusy(false); return; }
-    await _finishLogin(r.user);
-  });
-
-  // ── Submit do form (login real) ──
+  // ── Submit do form (login real via Supabase) ──
   form.addEventListener('submit', async e => {
     e.preventDefault();
     clearMsgs();
@@ -15283,6 +15295,11 @@ Renderers.login.mount = function(stageEl){
     const result = await Auth.login(email, pass, rememberInput.checked);
     if(!result.ok){
       showError(result.message || 'Credenciais inválidas.');
+      // Mostra botão "Resetar sessão" automaticamente em caso de timeout —
+      // dá ao usuário o atalho visível em vez de adivinhar.
+      if(result.kind === 'timeout' && resetBtn){
+        resetBtn.hidden = false;
+      }
       setBusy(false);
       return;
     }
