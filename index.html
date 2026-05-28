@@ -18486,8 +18486,24 @@ const BankFilters = (function(){
       return ca.localeCompare(cb, 'pt-BR', { numeric:true });
     });
   }
-  // Tags: lista TODAS as tags do registry global (não só as em uso).
+  // Tags: lista TODAS as tags cadastradas no Supabase (UbiqueStore.tags),
+  // que é a fonte da verdade hoje. O TAG_REGISTRY legado fica só como
+  // fallback enquanto o catálogo não hidratou (race no boot).
+  // Schema das tags: { id:int, tag:string, description }.
+  // O id usado no filtro é o NOME da tag (campo `tag`), porque é assim que
+  // as questões armazenam suas tags nos blocos — string nome, não id int.
+  // Isso casa com chipTag (que também resolve por nome case-insensitive).
   function availableTags(){
+    if(window.UbiqueStore && UbiqueStore.tags && typeof UbiqueStore.tags.list === 'function'){
+      const all = UbiqueStore.tags.list() || [];
+      if(all.length > 0){
+        return all
+          .map(function(t){ return { id: t.tag, name: t.tag }; })
+          .filter(function(t){ return !!t.id; })
+          .sort(function(a,b){ return String(a.name).localeCompare(String(b.name), 'pt-BR'); });
+      }
+    }
+    // Fallback: catálogo ainda não hidratou
     const reg = window.TAG_REGISTRY || {};
     return Object.keys(reg).map(function(id){
       return { id: id, name: (reg[id] && reg[id].name) || id };
@@ -18859,13 +18875,21 @@ function _buildQuestionBankFromBlocks(){
       const list = (g.questions && g.questions.length ? g.questions : (g.items || []));
       list.forEach(function(q){
         if(!q) return;
-        // Item sintético com tudo que _bankApplyFilters precisa
+        // Item sintético com tudo que _bankApplyFilters precisa.
+        // NÃO herdamos reference_text/reference_image do grupo — a referência
+        // (enunciado de apoio + imagem) vive no header do grupo no bloco
+        // sintético renderizado. Se herdar aqui, o resolver pelo
+        // QuestionBank.getById devolve item com referência, e o render do
+        // quiz duplica (header do grupo + dentro da questão).
+        // Mantém keyword-search funcional: a referência continua sendo
+        // varrida pelo grupo (g.reference_text é puxado em _bankBuildSynthQuizBlock).
         const item = Object.assign({}, q);
-        // Herda referência do grupo (enunciado, imagem de apoio)
-        if(!item.reference_text) item.reference_text = g.reference_text || g.enunciado || g.description || '';
-        if(!item.reference_image) item.reference_image = g.reference_image || '';
         // appears_in pra cadeia indireta funcionar
         item.appears_in = [{ unit_id: b.unit_id, block_id: b.id, group_id: g.id }];
+        // _refTextForSearch: campo INTERNO usado só pelo filtro de keyword,
+        // pra continuar batendo em texto do enunciado de apoio sem poluir
+        // o render. _bankApplyFilters lê isso adicionalmente ao statement.
+        item._refTextForSearch = g.reference_text || g.enunciado || g.description || '';
         out.push(item);
       });
     });
@@ -18934,7 +18958,7 @@ function _bankApplyFilters(items, f, opts){
   if(f.keyword){
     const needle = f.keyword.toLowerCase();
     out = out.filter(function(q){
-      const pieces = [q.statement, q.assertion, q.comment, q.command, q.prompt, q.reference_text];
+      const pieces = [q.statement, q.assertion, q.comment, q.command, q.prompt, q.reference_text, q._refTextForSearch];
       if(Array.isArray(q.options)){
         q.options.forEach(function(o){
           pieces.push(typeof o === 'string' ? o : (o && (o.text || o.label)));
