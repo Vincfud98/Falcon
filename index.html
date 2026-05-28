@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=132"></script>
+<script src="ubique-shared.js?v=133"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -18797,6 +18797,90 @@ function _bankQuestionUnitIds(q){
   return q.appears_in.map(function(u){ return String(u && u.unit_id); }).filter(Boolean);
 }
 
+/* PORTAL FILTER FIX — bankItems eram puxados de QuestionBank.list() que
+   ficava vazio porque _bankRescanQuestions nunca foi implementado. O bank
+   só era populado quando alguém editava questão inline (cenário raro).
+   Resultado: filtro sempre 0 questões.
+
+   Solução: derivar items direto de UbiqueStore.unit_blocks. Cada questão
+   inline em blocos objective_questions/quiz/essay vira um item sintético
+   com appears_in apontando pra unit do bloco. Idempotente e sem mutar
+   nada — só compõe o snapshot consultado pelo filtro. */
+function _buildQuestionBankFromBlocks(){
+  if(!window.UbiqueStore || !UbiqueStore.unit_blocks) return [];
+  const blocks = UbiqueStore.unit_blocks.list() || [];
+  const out = [];
+  blocks.forEach(function(b){
+    if(!b || !b.content) return;
+    if(b.type !== 'objective_questions' && b.type !== 'quiz') return;
+    const groups = b.content.groups || [];
+    groups.forEach(function(g){
+      const list = (g.questions && g.questions.length ? g.questions : (g.items || []));
+      list.forEach(function(q){
+        if(!q) return;
+        // Item sintético com tudo que _bankApplyFilters precisa
+        const item = Object.assign({}, q);
+        // Herda referência do grupo (enunciado, imagem de apoio)
+        if(!item.reference_text) item.reference_text = g.reference_text || g.enunciado || g.description || '';
+        if(!item.reference_image) item.reference_image = g.reference_image || '';
+        // appears_in pra cadeia indireta funcionar
+        item.appears_in = [{ unit_id: b.unit_id, block_id: b.id, group_id: g.id }];
+        out.push(item);
+      });
+    });
+  });
+  return out;
+}
+
+function _buildEssayBankFromBlocks(){
+  if(!window.UbiqueStore || !UbiqueStore.unit_blocks) return [];
+  const blocks = UbiqueStore.unit_blocks.list() || [];
+  const out = [];
+  blocks.forEach(function(b){
+    if(!b || !b.content) return;
+    if(b.type !== 'essay') return;
+    const items = b.content.items || [];
+    items.forEach(function(it){
+      if(!it) return;
+      const item = Object.assign({}, it);
+      item.appears_in = [{ unit_id: b.unit_id, block_id: b.id }];
+      out.push(item);
+    });
+  });
+  return out;
+}
+
+// Helper unificado: une QuestionBank.list() (legacy) com derivação dos
+// blocks (fonte de verdade hoje). Dedup por id pra evitar duplicatas.
+function _bankItemsForQuestions(){
+  const fromBank = (window.QuestionBank && QuestionBank.list) ? QuestionBank.list() : [];
+  const fromBlocks = _buildQuestionBankFromBlocks();
+  const seen = new Set();
+  const out = [];
+  fromBlocks.concat(fromBank).forEach(function(q){
+    if(!q || !q.id) return;
+    const key = String(q.id);
+    if(seen.has(key)) return;
+    seen.add(key);
+    out.push(q);
+  });
+  return out;
+}
+function _bankItemsForEssays(){
+  const fromBank = (window.EssayBank && EssayBank.list) ? EssayBank.list() : [];
+  const fromBlocks = _buildEssayBankFromBlocks();
+  const seen = new Set();
+  const out = [];
+  fromBlocks.concat(fromBank).forEach(function(q){
+    if(!q || !q.id) return;
+    const key = String(q.id);
+    if(seen.has(key)) return;
+    seen.add(key);
+    out.push(q);
+  });
+  return out;
+}
+
 /* Engine: aplica todos os filtros a uma lista de items (bank questions ou
    bank essays). Retorna a sublista que passa em TODOS os filtros. */
 function _bankApplyFilters(items, f, opts){
@@ -19032,7 +19116,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
    Renderers.questionBank — /portal/questions com gate de filtros
    ────────────────────────────────────────────────────────────────── */
 Renderers.questionBank = function(route){
-  const bankItems = (window.QuestionBank && QuestionBank.list) ? QuestionBank.list() : [];
+  const bankItems = _bankItemsForQuestions();
   const f = _bankParseFilters(route.query);
   const panelHtml = _renderBankFilterPanel(bankItems, f, false);
 
@@ -19172,7 +19256,7 @@ Renderers.questionBank.mount = function(stageEl, route){
   const f = _bankParseFilters(route.query);
   if(!f.applied) return;
   // Hidrata o quiz interativo: monta o bloco sintético com Blocks.quiz.mount
-  const bankItems = (window.QuestionBank && QuestionBank.list) ? QuestionBank.list() : [];
+  const bankItems = _bankItemsForQuestions();
   const results = _bankApplyFilters(bankItems, f, { isEssay:false });
   const PAGE_SIZE = 20;
   const page = parseInt(route.query.p, 10) || 1;
@@ -19198,7 +19282,7 @@ Renderers.questionBank.mount = function(stageEl, route){
    Renderers.essayBank — /portal/essays com gate de filtros
    ────────────────────────────────────────────────────────────────── */
 Renderers.essayBank = function(route){
-  const bankItems = (window.EssayBank && EssayBank.list) ? EssayBank.list() : [];
+  const bankItems = _bankItemsForEssays();
   const f = _bankParseFilters(route.query);
   const panelHtml = _renderBankFilterPanel(bankItems, f, true);
 
@@ -19263,7 +19347,7 @@ Renderers.essayBank.mount = function(stageEl, route){
   _wireBankFilterPanel(stageEl, route, true);
   const f = _bankParseFilters(route.query);
   if(!f.applied) return;
-  const bankItems = (window.EssayBank && EssayBank.list) ? EssayBank.list() : [];
+  const bankItems = _bankItemsForEssays();
   const results = _bankApplyFilters(bankItems, f, { isEssay:true });
   const PAGE_SIZE = 5;
   const page = parseInt(route.query.p, 10) || 1;
