@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=118"></script>
+<script src="ubique-shared.js?v=119"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -9205,46 +9205,16 @@ window.COURSES = [
   });
 
   /**
-   * Constrói um objeto "course" a partir de um subject do store.
-   * Se houver match com curso original, USA O ORIGINAL como base
-   * e só sobrescreve os campos que o admin pode editar.
+   * Constrói um objeto "course" a partir de um subject do UbiqueStore
+   * (= Supabase). Refatorado em 3b.4: sem dependência de orig mockado.
+   * Campos que não existem em conteudo.subjects ficam com defaults
+   * sensatos. Estrutura modules/chapters/units é populada depois por
+   * rebuildCourseHierarchyFromStore().
    */
   function buildCourse(subject){
-    // Tenta achar o original por slug primeiro, depois por nome
     const slug = subject.slug || normName(subject.subject);
-    const orig = ORIG_BY_SLUG[slug] || ORIG_BY_NAME[normName(subject.subject)] || null;
-
-    if(orig){
-      // CASO 1: matéria existente nos mocks — preserva TUDO do original
-      // e só patcha os campos editáveis vindos do admin.
-      const status = subject.status || orig.status || 'published';
-      const scheduledAt = subject.scheduled_at || orig.scheduled_at || null;
-      // totalHours: aceita 0 do admin (não cair no fallback do orig)
-      const hours = subject.totalHours != null ? subject.totalHours : orig.totalHours;
-      return Object.assign({}, orig, {
-        title: subject.subject || orig.title,
-        description: subject.description || orig.description,
-        cover: subject.cover || orig.cover,
-        sigla: subject.sigla || orig.sigla,
-        totalHours: hours,
-        status: status,
-        scheduled_at: scheduledAt,
-        // Compatibilidade com o sistema legacy de releaseAt do catálogo
-        releaseAt: status === 'scheduled' ? scheduledAt : (orig.releaseAt || null),
-        coordinator: subject.coordinator || orig.coordinator,
-        coordinatorPhoto: subject.coordinatorPhoto || orig.coordinatorPhoto,
-        coordinatorRole: subject.coordinatorRole || orig.coordinatorRole || '',
-        bioSummary: subject.bioSummary || orig.bioSummary || '',
-        bioBody: subject.bioBody || orig.bioBody || '',
-        // Apelidos e concursos vinculados (cadastrados no admin)
-        aliases: Array.isArray(subject.aliases) ? subject.aliases : (orig.aliases || []),
-        concurso_ids: Array.isArray(subject.concurso_ids) ? subject.concurso_ids : (orig.concurso_ids || []),
-        _subjectId: subject.id,
-      });
-    }
-
-    // CASO 2: matéria NOVA criada no admin — sem mock original
-    const status = subject.status || 'coming-soon';
+    const status = subject.status || 'published';
+    const scheduledAt = subject.scheduled_at || null;
     return {
       id: 'curso-' + slug,
       slug: slug,
@@ -9257,7 +9227,7 @@ window.COURSES = [
       coordinatorRole: subject.coordinatorRole || '',
       bioSummary: subject.bioSummary || '',
       bioBody: subject.bioBody || '',
-      authors: subject.authors || [],
+      authors: Array.isArray(subject.authors) ? subject.authors : [],
       rating: subject.rating || 4.5,
       totalHours: subject.totalHours != null ? subject.totalHours : 0,
       quizCount: subject.quizCount || 0,
@@ -9265,10 +9235,10 @@ window.COURSES = [
       videoCount: subject.videoCount || 0,
       tier: subject.tier || 'basic',
       status: status,
-      scheduled_at: subject.scheduled_at || null,
-      releaseAt: status === 'scheduled' ? subject.scheduled_at : null,
+      scheduled_at: scheduledAt,
+      releaseAt: status === 'scheduled' ? scheduledAt : null,
       topics: [],
-      tags: ['tg_cacd'],
+      tags: [],
       modules: [],
       sigla: subject.sigla || '',
       aliases: Array.isArray(subject.aliases) ? subject.aliases : [],
@@ -9278,83 +9248,81 @@ window.COURSES = [
   }
 
   /**
-   * Reconstrói os módulos/capítulos/unidades de window.COURSE a partir do
-   * UbiqueStore para o subject_id informado. Preserva grupos/blocos legados
-   * da unidade original (matched por _origMockId) para que o estudante
-   * continue vendo o conteúdo enquanto o admin não migrar tudo.
+   * Reconstrói modules/chapters/units de um course a partir do UbiqueStore
+   * (= Supabase). Refatorado em 3b.4: SEM merge com mock — só dados do banco.
+   * O 3º parâmetro `_originalCourse` é mantido por compat de assinatura
+   * (call site em 18656 ainda passa) mas é IGNORADO.
+   *
+   * unit.topics é populado a partir de edital_topic_units (substitui o
+   * que vinha do mock no campo unit.topics legacy). Outros campos antes
+   * vindos do mock (unit.tags, unit.bios, etc.) ficam vazios/undefined —
+   * já não são lidos (3b.1 e 3b.2 cortaram esses caminhos).
    */
-  function rebuildCourseHierarchyFromStore(course, subjectId, originalCourse){
+  function rebuildCourseHierarchyFromStore(course, subjectId, _originalCourse){
     if(!window.UbiqueStore || !subjectId) return course;
     const storeModules = UbiqueStore.modules.list()
       .filter(function(m){ return m.subject_id === subjectId; })
       .sort(function(a,b){ return (a.position||0) - (b.position||0); });
-    if(!storeModules.length) return course;
 
-    const origModules  = (originalCourse && originalCourse.modules) || [];
-    const origChapters = {};
-    const origUnits = {};
-    origModules.forEach(function(m){
-      origChapters[m.id] = m.chapters || [];
-      (m.chapters || []).forEach(function(c){
-        (c.units || []).forEach(function(u){
-          origUnits[u.id] = u;
-        });
-      });
+    const allChapters = UbiqueStore.chapters.list() || [];
+    const allUnits    = UbiqueStore.units.list() || [];
+    const topicLinks  = (UbiqueStore.edital_topic_units && UbiqueStore.edital_topic_units.list()) || [];
+
+    // Index: topics por unit_id (pra herança bloco-unidade em renderers)
+    const topicsByUnit = {};
+    topicLinks.forEach(function(l){
+      if(!l || l.unit_id == null) return;
+      if(!topicsByUnit[l.unit_id]) topicsByUnit[l.unit_id] = [];
+      topicsByUnit[l.unit_id].push(l.topic_id);
     });
-
-    const allChapters = UbiqueStore.chapters.list();
-    const allUnits    = UbiqueStore.units.list();
 
     course.modules = storeModules.map(function(sm){
       const mid = sm._origMockId || ('m' + sm.id);
-      const origMod = origModules.find(function(om){ return om.id === mid; }) || null;
       const storeCh = allChapters
         .filter(function(c){ return c.module_id === sm.id; })
         .sort(function(a,b){ return (a.position||0) - (b.position||0); });
 
-      return Object.assign({}, origMod || {}, {
+      return {
         id: mid,
-        number: sm.number || (origMod && origMod.number) || '',
-        title:  sm.title  || (origMod && origMod.title)  || '',
-        subtitle: sm.subtitle || (origMod && origMod.subtitle) || '',
-        description: sm.description || (origMod && origMod.description) || '',
-        cover:  sm.cover_url || (origMod && origMod.cover) || '',
-        label:  (origMod && origMod.label) || 'Módulo',
         _storeId: sm.id,
         _subjectId: subjectId,
+        number: sm.number || '',
+        title:  sm.title  || '',
+        subtitle: sm.subtitle || '',
+        description: sm.description || '',
+        cover:  sm.cover_url || '',
+        label:  'Módulo',
         chapters: storeCh.map(function(sc){
           const cid = sc._origMockId || ('c' + sc.id);
-          const origCh = (origMod && (origMod.chapters||[]).find(function(oc){ return oc.id === cid; })) || null;
           const storeU = allUnits
             .filter(function(u){ return u.chapter_id === sc.id; })
             .sort(function(a,b){ return (a.position||0) - (b.position||0); });
 
-          return Object.assign({}, origCh || {}, {
+          return {
             id: cid,
-            number: sc.number || (origCh && origCh.number) || '',
-            title:  sc.title  || (origCh && origCh.title)  || '',
-            description: sc.description || (origCh && origCh.description) || '',
             _storeId: sc.id,
+            number: sc.number || '',
+            title:  sc.title  || '',
+            description: sc.description || '',
             units: storeU.map(function(su){
               const uid = su._origMockId || ('u' + su.id);
-              const origU = origUnits[uid] || null;
-              return Object.assign({}, origU || {}, {
+              return {
                 id: uid,
-                number: su.number || (origU && origU.number) || '',
-                title:  su.title  || (origU && origU.title)  || '',
-                subtitle: su.subtitle || (origU && origU.subtitle) || '',
-                description: su.description || (origU && origU.description) || '',
-                cover:  su.cover_url || (origU && origU.cover) || '',
-                duration: su.duration_min || (origU && origU.duration) || null,
-                label:  (origU && origU.label) || 'Unidade',
                 _storeId: su.id,
-                // Preserve legacy groups/blocks if present, else default to []
-                groups: (origU && origU.groups) || []
-              });
+                number: su.number || '',
+                title:  su.title  || '',
+                subtitle: su.subtitle || '',
+                description: su.description || '',
+                cover:  su.cover_url || '',
+                duration: su.duration_min || null,
+                label:  'Unidade',
+                topics: topicsByUnit[su.id] || [],
+                tags: []
+              };
             })
-          });
+          };
         })
-      });
+      };
     });
     return course;
   }
@@ -9362,46 +9330,38 @@ window.COURSES = [
   function rebuildCourses(){
     const subjects = UbiqueStore.subjects.list();
 
-    // Se o store estiver vazio (caso raríssimo), mantém os mockados intactos
+    // Se store vazio (pré-hidratação): COURSES vazio. Telas têm fallback
+    // gracioso (3b.3) e re-renderizam quando o subscribe da hidratação dispara.
     if(!subjects.length){
-      window.COURSES = ORIGINAL_COURSES.slice();
+      window.COURSES = [];
+      window.COURSE = null;
       return;
     }
 
     window.COURSES = subjects.map(buildCourse);
 
-    // Hidrata módulos/capítulos/unidades de CADA curso a partir do store
-    // (matched por _subjectId). Assim qualquer mudança do admin reflete no aluno.
+    // Hidrata módulos/capítulos/unidades de CADA curso a partir do UbiqueStore.
     window.COURSES.forEach(function(course){
       if(course && course._subjectId){
-        const origForCourse = ORIG_BY_SLUG[course.slug]
-                           || ORIG_BY_NAME[normName(course.title || '')]
-                           || null;
-        rebuildCourseHierarchyFromStore(course, course._subjectId, origForCourse);
+        rebuildCourseHierarchyFromStore(course, course._subjectId);
       }
     });
 
-    // window.COURSE é o curso "ativo" (História do Brasil por padrão)
-    // SEMPRE preserva o objeto original com seus módulos completos.
-    const orig = ORIG_BY_SLUG['historia-brasil'];
-    if(orig){
-      // Acha o subject correspondente no store (se renomeado)
-      const subj = subjects.find(s => (s.slug || normName(s.subject)) === 'historia-brasil')
-                || subjects.find(s => normName(s.subject) === normName(orig.title));
-      if(subj){
-        window.COURSE = Object.assign({}, orig, {
-          title: subj.subject || orig.title,
-          description: subj.description || orig.description,
-          cover: subj.cover || orig.cover,
-          _subjectId: subj.id,
-        });
-        // Hidrata módulos/capítulos/unidades a partir do store
-        rebuildCourseHierarchyFromStore(window.COURSE, subj.id, orig);
-      } else {
-        // Matéria foi apagada — mantém o original como fallback
-        window.COURSE = Object.assign({}, orig);
-      }
+    // window.COURSE = curso "ativo". Preserva se já foi setado (ex: usuário
+    // navegou pra outro curso pelo catálogo) E ainda existe no UbiqueStore.
+    // Senão, default pra História do Brasil (ou primeiro disponível).
+    const prevActiveId = window.COURSE && window.COURSE._subjectId;
+    let active = null;
+    if(prevActiveId){
+      active = window.COURSES.find(c => c._subjectId === prevActiveId) || null;
     }
+    if(!active){
+      active = window.COURSES.find(c => (c.slug || '') === 'historia-brasil')
+            || window.COURSES.find(c => normName(c.title || '').indexOf('historia do brasil') >= 0)
+            || window.COURSES[0]
+            || null;
+    }
+    window.COURSE = active;
   }
 
   // Expõe utilidades para handlers globais (ex: catálogo navegando entre cursos)
