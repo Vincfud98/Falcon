@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=126"></script>
+<script src="ubique-shared.js?v=127"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -15258,6 +15258,39 @@ Renderers.login.mount = function(stageEl){
     else submitBtn.textContent = busy ? 'Entrando…' : 'Entrar';
   }
 
+  // Overlay que cobre a tela durante a transição login → home. Mascara
+  // os 3 estados visuais sequenciais (login card → topbar aparecendo →
+  // catalog renderiza no stage) que o usuário percebia como flicker.
+  function _showLoginTransitionOverlay(){
+    if(document.getElementById('alunoLoginOverlay')) return;
+    const ov = document.createElement('div');
+    ov.id = 'alunoLoginOverlay';
+    ov.style.cssText = [
+      'position:fixed','inset:0','z-index:9999',
+      'background:var(--bg)',
+      'display:flex','align-items:center','justify-content:center',
+      'opacity:0','transition:opacity .2s ease',
+      'pointer-events:auto'
+    ].join(';');
+    ov.innerHTML = `
+      <div style="display:flex;flex-direction:column;align-items:center;gap:1rem;font-family:var(--sans);font-weight:300;color:var(--text-mute);font-size:.78rem;letter-spacing:.18em;text-transform:uppercase">
+        <div style="width:1.6rem;height:1.6rem;border-radius:50%;border:2px solid var(--accent-border-soft,rgba(200,169,126,.2));border-top-color:var(--accent);animation:loginSpin .8s linear infinite"></div>
+        <span>Entrando</span>
+      </div>
+      <style>@keyframes loginSpin{ to{ transform:rotate(360deg); } }</style>
+    `;
+    document.body.appendChild(ov);
+    // Force reflow pra animar opacity
+    requestAnimationFrame(() => { ov.style.opacity = '1'; });
+  }
+  function _hideLoginTransitionOverlay(){
+    const ov = document.getElementById('alunoLoginOverlay');
+    if(!ov) return;
+    ov.style.opacity = '0';
+    ov.style.pointerEvents = 'none';
+    setTimeout(() => { try{ ov.remove(); }catch(_){} }, 250);
+  }
+
   // Toggle de mostrar senha (SVGs em vez de emojis pra estética saas)
   const SVG_EYE_OPEN  = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
   const SVG_EYE_CLOSED= '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a19.77 19.77 0 0 1 4.22-5.32"/><path d="M9.9 4.24A10.94 10.94 0 0 1 12 4c7 0 11 7 11 7a19.77 19.77 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
@@ -15324,6 +15357,8 @@ Renderers.login.mount = function(stageEl){
       Auth.storeAccessData(access, !!rememberInput.checked);
     }
     showStatus('Tudo certo. Redirecionando…');
+    // Overlay mascarando o flash de transição (login-card → topbar → catalog).
+    _showLoginTransitionOverlay();
     setTimeout(() => {
       if(user.role === 'admin'){
         try{
@@ -15331,13 +15366,19 @@ Renderers.login.mount = function(stageEl){
             email: user.email, name: user.name || '', role: 'admin', ts: Date.now()
           }));
         }catch(_){}
+        // Não esconde overlay aqui — navegação pra admin.html descarta o DOM.
         location.href = 'admin.html';
       } else {
-        // location.hash → hashchange listener → App.render() (UM render).
-        // Antes a gente também chamava App.boot(true) que = outro App.render(),
-        // gerando flicker. Removido — o hashchange já faz o trabalho.
+        // location.hash → hashchange listener → App.render() (1 render).
         setBusy(false);
         location.hash = user.landingRoute || '#/';
+        // Espera 2 rAFs pra garantir que App.render terminou de pintar,
+        // aí remove o overlay com fade suave (.25s).
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            setTimeout(_hideLoginTransitionOverlay, 80);
+          });
+        });
       }
     }, 400);
   }
@@ -23566,6 +23607,20 @@ const App = {
   render(){
     let route = Router.parse();
     const user = Auth.getUser();
+
+    // Rota legada #/admin mockada: redireciona pro painel real (admin.html).
+    // Antes Auth.landingRoute(admin) caía aqui, deixando admin no index.html
+    // numa página antiga cheia de dados fake.
+    if(route.view === 'admin' && user && (user.role === 'admin' || user.role === 'superadmin')){
+      try{
+        sessionStorage.setItem('ubique.panel.handoff', JSON.stringify({
+          email: user.email, name: user.name || '', role: 'admin', ts: Date.now()
+        }));
+      }catch(_){}
+      location.href = 'admin.html';
+      return;
+    }
+
     if(!user && route.view !== 'login'){
       location.hash = '#/login';
       route = Router.parse();
