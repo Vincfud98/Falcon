@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=121"></script>
+<script src="ubique-shared.js?v=122"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -12319,33 +12319,38 @@ function renderGlossarySlide(g){
 }
 
 /* Resolve um item do LB Glossário em sua forma "rica":
-   - Se tem bank_id → puxa do UbiqueStore.glossary_terms
-   - Senão → usa os campos legacy {term, definition, body, image}
-   Retorna {term, definitions[], body, image, callout, classLabel}. */
+   - Se tem bank_id → puxa do UbiqueStore.glossary_terms.
+     Se bank_id existe mas o termo SUMIU do banco (ref órfã) → retorna
+     null. Caller filtra. Defesa em profundidade — mesmo que o cascade
+     do admin (delete_glossary_term_cascade) tenha falhado.
+   - Senão → usa os campos legacy {term, definition, body, image}.
+   Retorna {term, definitions[], body, image, callout, classLabel} OU null. */
 function _resolveGlossaryItem(g){
-  if(g && g.bank_id && window.UbiqueStore && UbiqueStore.glossary_terms){
+  if(g && g.bank_id){
+    if(!window.UbiqueStore || !UbiqueStore.glossary_terms) return null;
     const bank = UbiqueStore.glossary_terms.get(g.bank_id);
-    if(bank){
-      let classLabel = '';
-      if(bank.class_id && UbiqueStore.glossary_word_classes){
-        const cls = (UbiqueStore.glossary_word_classes.list() || []).find(c => c.id === bank.class_id);
-        if(cls) classLabel = cls.name;
-      }
-      return {
-        term: bank.term || '',
-        definitions: Array.isArray(bank.definitions) ? bank.definitions : [],
-        callout: bank.callout || '',
-        // Imagem: prioridade pro override per-bloco; cai pra image_url do banco.
-        image: (g.image || '').trim() || bank.image_url || '',
-        body: '',                                 // legado, não usado no bank flow
-        classLabel: classLabel,
-        __bank: true,
-        __bankId: bank.id,
-        __subject_id: bank.subject_id || null
-      };
+    if(!bank) return null; // ref órfã — pula no render
+    let classLabel = '';
+    if(bank.class_id && UbiqueStore.glossary_word_classes){
+      const cls = (UbiqueStore.glossary_word_classes.list() || []).find(c => c.id === bank.class_id);
+      if(cls) classLabel = cls.name;
     }
+    return {
+      term: bank.term || '',
+      definitions: Array.isArray(bank.definitions) ? bank.definitions : [],
+      callout: bank.callout || '',
+      // Imagem: prioridade pro override per-bloco; cai pra image_url do banco.
+      image: (g.image || '').trim() || bank.image_url || '',
+      body: '',                                 // legado, não usado no bank flow
+      classLabel: classLabel,
+      __bank: true,
+      __bankId: bank.id,
+      __subject_id: bank.subject_id || null
+    };
   }
-  // Legacy: usa os campos crus do item
+  // Legacy: usa os campos crus do item (inline term/definition).
+  // Só renderiza se tiver pelo menos um termo — items vazios não viram chip.
+  if(!g || (!g.term && !g.definition && !g.body)) return null;
   return {
     term: g.term || '',
     definitions: g.definition ? [{ html: g.definition, examples: [] }] : [],
@@ -12778,8 +12783,13 @@ Blocks.timeline = {
 Blocks.timelines = Blocks.timeline;
 /* ─── Glossary LIST view (alternativa ao carousel) ─── */
 function renderGlossaryListBlock(block, ctx){
-  const items = block.items || [];
-  if(!items.length){
+  // Filtra items inválidos (bank_id órfão ou inline vazio).
+  // _resolveGlossaryItem retorna null nesses casos.
+  const rawItems = block.items || [];
+  const validPairs = rawItems
+    .map(g => ({ raw: g, resolved: _resolveGlossaryItem(g) }))
+    .filter(p => p.resolved);
+  if(!validPairs.length){
     return `<section class="block-wrap glossary-block glossary-list-block">
       ${blockHeader(block, 'Glossário', Icons.glossary, ctx)}
       ${renderViewToggle(block, 'list')}
@@ -12788,8 +12798,9 @@ function renderGlossaryListBlock(block, ctx){
     </section>`;
   }
   const sanitize = (window.LearningBlocks && window.LearningBlocks.sanitizeRichHTML) || Util.esc;
-  const rows = items.map(g => {
-    const r = _resolveGlossaryItem(g);
+  const rows = validPairs.map(p => {
+    const g = p.raw;
+    const r = p.resolved;
     const termClean = Util.esc(r.term || '').replace(/<[^>]*>/g, '');
     const defsHtml = (Array.isArray(r.definitions) && r.definitions.length)
       ? r.definitions.map((d, i) => {
@@ -12847,7 +12858,12 @@ Blocks.glossary = {
     }
     const view = (block.viewMode === 'list') ? 'list' : 'slides';
     if(view === 'list') return renderGlossaryListBlock(block, ctx);
-    return renderCarouselBlock(block, ctx, {
+    // Slides: filtra items inválidos antes do carousel
+    // (refs órfãs ou inline vazio → _resolveGlossaryItem retorna null).
+    const filteredBlock = Object.assign({}, block, {
+      items: (block.items || []).filter(g => _resolveGlossaryItem(g) != null)
+    });
+    return renderCarouselBlock(filteredBlock, ctx, {
       blockClass:'glossary-block', typeLabel:'Glossário', icon:Icons.glossary,
       renderSlide:renderGlossarySlide, viewToggle:'glossary'
     });
