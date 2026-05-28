@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;500&family=Cormorant+Garamond:wght@300;400;500&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=116"></script>
+<script src="ubique-shared.js?v=117"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -9881,11 +9881,72 @@ const Util = {
     if(mod.chapters && mod.chapters.length){
       return mod.chapters.flatMap(c => (c.units||[]).map(u => ({ unit:u, chapterId:c.id, chapter:c })));
     }
-    return (mod.units||[]).map(u => ({ unit:u, chapterId:null, chapter:null }));
+    // Fallback pra mod.units (legacy do window.COURSE mock): só conta units
+    // que têm _storeId (= existem no Supabase). Units puramente mock são
+    // descartadas — evita inflar "X unidades" no Portal e em outras telas.
+    return (mod.units||[])
+      .filter(u => u && u._storeId != null)
+      .map(u => ({ unit:u, chapterId:null, chapter:null }));
+  },
+  // Constrói um objeto-módulo do zero a partir de UbiqueStore (Supabase).
+  // Usado como fallback quando window.COURSE não tem o módulo pedido
+  // (ex: race entre boot e hidratação). Shape compatível com rebuildCourses.
+  _buildModuleFromStore(moduleId){
+    if(!window.UbiqueStore) return null;
+    const mid = String(moduleId).replace(/^m/, '');
+    const sm = (UbiqueStore.modules.list() || []).find(m => String(m.id) === mid);
+    if(!sm) return null;
+    const allChapters = UbiqueStore.chapters.list() || [];
+    const allUnits = UbiqueStore.units.list() || [];
+    const storeCh = allChapters
+      .filter(c => c.module_id === sm.id)
+      .sort((a,b) => (a.position||0) - (b.position||0));
+    return {
+      id: 'm' + sm.id,
+      _storeId: sm.id,
+      title: sm.title || '',
+      subtitle: sm.subtitle || '',
+      description: sm.description || '',
+      cover: sm.cover_url || '',
+      number: sm.number || '',
+      label: 'Módulo',
+      chapters: storeCh.map(sc => {
+        const storeU = allUnits
+          .filter(u => u.chapter_id === sc.id)
+          .sort((a,b) => (a.position||0) - (b.position||0));
+        return {
+          id: 'c' + sc.id,
+          _storeId: sc.id,
+          title: sc.title || '',
+          description: sc.description || '',
+          number: sc.number || '',
+          units: storeU.map(su => ({
+            id: 'u' + su.id,
+            _storeId: su.id,
+            title: su.title || '',
+            subtitle: su.subtitle || '',
+            description: su.description || '',
+            cover: su.cover_url || '',
+            duration: su.duration_min || null,
+            number: su.number || '',
+            label: 'Unidade'
+          }))
+        };
+      })
+    };
   },
   findModule(courseOrId){
     if(typeof courseOrId !== 'string') return courseOrId;
-    return window.COURSE.modules.find(m => m.id === courseOrId) || null;
+    // 1) Caminho normal: window.COURSE.modules (rebuildCourses já populou
+    //    com dados do Supabase + restos do mock pra campos faltantes).
+    if(window.COURSE && Array.isArray(window.COURSE.modules)){
+      const found = window.COURSE.modules.find(m => m.id === courseOrId);
+      if(found) return found;
+    }
+    // 2) Fallback: constrói o módulo do zero a partir do UbiqueStore.
+    //    Resiliente quando window.COURSE ainda não foi rebuilt
+    //    (race no boot) OU não conhece o módulo pedido.
+    return Util._buildModuleFromStore(courseOrId);
   },
   findUnit(moduleId, unitId){
     const m = Util.findModule(moduleId); if(!m) return null;
