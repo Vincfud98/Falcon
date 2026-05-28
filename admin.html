@@ -11712,9 +11712,30 @@
         <div class="field" style="grid-column:1/-1"><label for="unit-description">Descrição</label><textarea class="field-input" id="unit-description" rows="3" placeholder="opcional"></textarea></div>
         <div class="field" style="grid-column:1/-1"><label for="unit-cover">URL da capa</label><input class="field-input" type="text" id="unit-cover" placeholder="https://..."></div>
       </div>
-      <p class="card-body" style="margin-top:1rem;font-style:italic;color:var(--text-mute);font-size:.85rem">
-        Questões objetivas e discursivas da aula devem ser adicionadas no <strong>Editor da aula</strong>, para já nascerem vinculadas à unidade.
+
+      <!-- Vínculos com edital — multi-tópico, multi-matéria, multi-edital -->
+      <div class="sub-h" style="margin-top:1.6rem"><span class="sub-h-text">Vínculos com edital</span><span class="sub-h-rule"></span></div>
+      <p style="font-size:.78rem;color:var(--text-mute);font-style:italic;line-height:1.5;margin:.4rem 0 .8rem">
+        Vincule essa unidade a tópicos/subtópicos do edital. Pode adicionar vários — uma mesma unidade pode cobrir tópicos de matérias diferentes (ex: era Vargas em História do Brasil + Política Internacional + Economia).
       </p>
+      <div id="unit-topic-links-current" style="display:flex;flex-direction:column;gap:.4rem;margin-bottom:.7rem"></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:.5rem;align-items:flex-end;padding:.6rem .8rem;background:var(--bg-elev);border:1px dashed var(--accent-border-soft);border-radius:4px">
+        <div class="field" style="margin-bottom:0">
+          <label class="field-label" style="font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:.25rem;display:block">Concurso</label>
+          <select id="utl-edital" class="field-input" style="width:100%"><option value="">— escolha —</option></select>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="field-label" style="font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:.25rem;display:block">Matéria</label>
+          <select id="utl-subject" class="field-input" style="width:100%" disabled><option value="">— escolha —</option></select>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="field-label" style="font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);margin-bottom:.25rem;display:block">Tópico</label>
+          <select id="utl-topic" class="field-input" style="width:100%" disabled><option value="">— escolha —</option></select>
+        </div>
+        <button class="btn btn-ghost btn-sm" type="button" id="utl-add-btn" disabled style="white-space:nowrap">+ Adicionar</button>
+      </div>
+      <div id="utl-msg" style="font-size:.78rem;color:var(--accent);margin-top:.4rem;min-height:1em"></div>
+
       <div id="unitModalMsg" class="form-msg" style="margin-top:.75rem"></div>
     </div>
     <div class="modal-footer">
@@ -12334,7 +12355,7 @@
 <!-- SheetJS para import/export de questões via Excel -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
-<script src="ubique-shared.js?v=129"></script>
+<script src="ubique-shared.js?v=130"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
 <script src="learning-blocks-render.js?v=57"></script>
 
@@ -15853,6 +15874,23 @@
       topicUnitDeleteByTopic(topicId){
         if(!concursos()) return;
         return _wrap(concursos().from('edital_topic_units').delete().eq('topic_id', topicId), 'topic_unit delete by topic');
+      },
+      // Cascade quando a unidade é apagada — limpa vínculos órfãos.
+      // 2 deletes pra cobrir os dois esquemas (novo target_type/target_id e
+      // legacy unit_id). target_type='unit' bloqueia colisão com module/chapter
+      // que possam ter o mesmo id integer.
+      async topicUnitDeleteByUnit(unitId){
+        if(!concursos()) return;
+        try{
+          await concursos().from('edital_topic_units').delete()
+            .eq('target_type', 'unit').eq('target_id', unitId);
+          await concursos().from('edital_topic_units').delete()
+            .eq('unit_id', unitId);
+          return true;
+        }catch(e){
+          console.warn('[concursos sync topicUnitDeleteByUnit]', e);
+          return false;
+        }
       }
     };
   })();
@@ -23168,8 +23206,252 @@
     document.getElementById('unitModalTitle').textContent = u ? 'Editar Unidade' : 'Nova Unidade';
     document.getElementById('unitModalOpenEditorBtn').style.display = u ? '' : 'none';
     document.getElementById('unitModalSaveAndEditBtn').textContent = u ? 'Salvar e abrir aula' : 'Criar e abrir aula';
+    // Carrega vínculos com edital pra unidade (vazio se nova)
+    UnitTopicLinks.open(u ? u.id : null);
     document.getElementById('unitModal').classList.add('active');
   }
+
+  // ═══════════════════════════════════════════════════════════
+  // UnitTopicLinks — vínculos edital ↔ unidade no modal de unidade.
+  // Permite vincular a múltiplos tópicos/subtópicos, de múltiplas matérias,
+  // de múltiplos editais. Diff aplicado no save (insert novos, delete removidos).
+  // ═══════════════════════════════════════════════════════════
+  const UnitTopicLinks = (function(){
+    let _current = [];      // [{ id?, topic_id }] — id existente OR undefined p/ novo
+    let _initial = [];      // snapshot pra calcular diff
+    let _unitId = null;
+
+    function _editais(){
+      return (window.UbiqueStore && UbiqueStore.editais && UbiqueStore.editais.list()) || [];
+    }
+    function _topics(){
+      return (window.UbiqueStore && UbiqueStore.edital_topics && UbiqueStore.edital_topics.list()) || [];
+    }
+    function _links(){
+      return (window.UbiqueStore && UbiqueStore.edital_topic_units && UbiqueStore.edital_topic_units.list()) || [];
+    }
+
+    // Resolve cadeia matéria → tópico → ... → tópico atual pra exibir breadcrumb
+    function _topicPath(topicId){
+      const all = _topics();
+      const path = [];
+      let cur = all.find(t => String(t.id) === String(topicId));
+      while(cur){
+        path.unshift(cur);
+        cur = cur.parent_id != null ? all.find(t => String(t.id) === String(cur.parent_id)) : null;
+      }
+      return path;
+    }
+    function _editalOfTopic(topicId){
+      const path = _topicPath(topicId);
+      const top = path[0];
+      if(!top) return null;
+      return _editais().find(e => String(e.id) === String(top.edital_id));
+    }
+
+    function open(unitId){
+      _unitId = unitId;
+      // Carrega vínculos existentes do banco (UbiqueStore espelha) só pra unit
+      // com id (já criada). Nova unidade começa vazio.
+      if(unitId != null){
+        const existing = _links().filter(l => {
+          const tt = l.target_type || (l.unit_id != null ? 'unit' : null);
+          const tid = l.target_id != null ? l.target_id : l.unit_id;
+          return tt === 'unit' && String(tid) === String(unitId);
+        });
+        _current = existing.map(l => ({ id: l.id, topic_id: l.topic_id }));
+      } else {
+        _current = [];
+      }
+      _initial = _current.map(x => ({ id: x.id, topic_id: x.topic_id }));
+      _renderList();
+      _populatePicker();
+      _setMsg('');
+    }
+
+    function _setMsg(t, kind){
+      const el = document.getElementById('utl-msg');
+      if(!el) return;
+      el.textContent = t || '';
+      el.style.color = kind === 'err' ? 'var(--red, #e87878)'
+                     : kind === 'ok'  ? '#7ab47a'
+                     : 'var(--accent)';
+    }
+
+    function _renderList(){
+      const wrap = document.getElementById('unit-topic-links-current');
+      if(!wrap) return;
+      if(!_current.length){
+        wrap.innerHTML = '<div style="padding:.55rem .8rem;color:var(--text-mute);font-style:italic;font-size:.78rem;border:1px dashed var(--accent-border-soft);border-radius:4px">Nenhum vínculo. Adicione tópicos abaixo.</div>';
+        return;
+      }
+      wrap.innerHTML = _current.map((link, idx) => {
+        const path = _topicPath(link.topic_id);
+        const ed = _editalOfTopic(link.topic_id);
+        const segs = path.map(t => esc((t.number ? t.number + ' ' : '') + (t.title || 'tópico')));
+        const label = (ed ? esc(ed.name || ed.title || ('Edital ' + ed.id)) + ' · ' : '')
+                    + segs.join(' › ');
+        return '<div style="display:flex;align-items:center;gap:.6rem;padding:.55rem .8rem;background:var(--bg-elev);border:1px solid var(--accent-border-soft);border-radius:4px">' +
+          '<span class="card-label" style="margin:0;color:var(--accent);font-size:.58rem">Tópico</span>' +
+          '<span style="flex:1;color:var(--text);font-family:var(--serif);font-size:.88rem">' + label + '</span>' +
+          '<button type="button" class="btn btn-ghost btn-sm" data-utl-remove="' + idx + '" style="color:var(--red, #e87878);font-size:.7rem">remover</button>' +
+        '</div>';
+      }).join('');
+      wrap.querySelectorAll('[data-utl-remove]').forEach(b => {
+        b.addEventListener('click', () => {
+          const i = parseInt(b.dataset.utlRemove, 10);
+          _current.splice(i, 1);
+          _renderList();
+        });
+      });
+    }
+
+    function _populatePicker(){
+      const eSel = document.getElementById('utl-edital');
+      const sSel = document.getElementById('utl-subject');
+      const tSel = document.getElementById('utl-topic');
+      const btn  = document.getElementById('utl-add-btn');
+      if(!eSel || !sSel || !tSel || !btn) return;
+      const editais = _editais().slice().sort((a,b) => String(a.name||'').localeCompare(String(b.name||'')));
+      eSel.innerHTML = '<option value="">— escolha o concurso —</option>' +
+        editais.map(e => `<option value="${e.id}">${esc(e.name || e.title || ('Edital ' + e.id))}</option>`).join('');
+      sSel.innerHTML = '<option value="">— escolha a matéria —</option>';
+      sSel.disabled = true;
+      tSel.innerHTML = '<option value="">— escolha o tópico —</option>';
+      tSel.disabled = true;
+      btn.disabled = true;
+    }
+
+    function _onEditalChange(){
+      const sSel = document.getElementById('utl-subject');
+      const tSel = document.getElementById('utl-topic');
+      const btn  = document.getElementById('utl-add-btn');
+      const editalId = document.getElementById('utl-edital').value;
+      sSel.innerHTML = '<option value="">— escolha a matéria —</option>';
+      tSel.innerHTML = '<option value="">— escolha o tópico —</option>';
+      tSel.disabled = true;
+      btn.disabled = true;
+      if(!editalId){ sSel.disabled = true; return; }
+      // Top-level topics do edital (parent_id IS NULL) = "matérias do edital"
+      const all = _topics();
+      const subjects = all
+        .filter(t => String(t.edital_id) === String(editalId) && (t.parent_id == null))
+        .sort((a,b) => (a.position||0) - (b.position||0));
+      sSel.innerHTML = '<option value="">— escolha a matéria —</option>' +
+        subjects.map(s => `<option value="${s.id}">${esc((s.number ? s.number + ' · ' : '') + (s.title || 'matéria'))}</option>`).join('');
+      sSel.disabled = subjects.length === 0;
+    }
+
+    function _onSubjectChange(){
+      const tSel = document.getElementById('utl-topic');
+      const btn  = document.getElementById('utl-add-btn');
+      const subjId = document.getElementById('utl-subject').value;
+      tSel.innerHTML = '<option value="">— escolha o tópico —</option>';
+      btn.disabled = true;
+      if(!subjId){ tSel.disabled = true; return; }
+      // Mostra todos os tópicos descendentes (não só direct children) em árvore plana
+      const all = _topics();
+      const descendants = [];
+      function walk(parentId, depth){
+        const children = all
+          .filter(t => String(t.parent_id) === String(parentId))
+          .sort((a,b) => (a.position||0) - (b.position||0));
+        children.forEach(c => {
+          descendants.push({ topic: c, depth });
+          walk(c.id, depth + 1);
+        });
+      }
+      walk(subjId, 0);
+      tSel.innerHTML = '<option value="">— escolha o tópico —</option>' +
+        descendants.map(d => {
+          const indent = '— '.repeat(d.depth);
+          const lbl = indent + (d.topic.number ? d.topic.number + ' · ' : '') + (d.topic.title || 'tópico');
+          return `<option value="${d.topic.id}">${esc(lbl)}</option>`;
+        }).join('');
+      tSel.disabled = descendants.length === 0;
+    }
+
+    function _onTopicChange(){
+      const btn  = document.getElementById('utl-add-btn');
+      const tId = document.getElementById('utl-topic').value;
+      btn.disabled = !tId;
+    }
+
+    function _onAdd(){
+      const tId = document.getElementById('utl-topic').value;
+      if(!tId){ return; }
+      // Bloqueia duplicata
+      if(_current.some(x => String(x.topic_id) === String(tId))){
+        _setMsg('Esse tópico já está vinculado.', 'err');
+        return;
+      }
+      _current.push({ topic_id: tId, _new: true });
+      _renderList();
+      // Reset picker pra próxima adição
+      document.getElementById('utl-edital').value = '';
+      _populatePicker();
+      _setMsg('Vínculo adicionado. Salve a unidade pra persistir.', 'ok');
+    }
+
+    // Calcula diff e aplica no banco. Recebe o unitId real (que pode ter sido
+    // recém-criado pelo saveUnit).
+    async function persist(unitId){
+      if(unitId == null) return;
+      const initialIds = new Set(_initial.map(x => x.topic_id).map(String));
+      const currentIds = new Set(_current.map(x => x.topic_id).map(String));
+      const toAdd = _current.filter(x => !initialIds.has(String(x.topic_id)));
+      const toRemove = _initial.filter(x => !currentIds.has(String(x.topic_id)));
+      const errors = [];
+      // Inserts
+      for(const link of toAdd){
+        const row = {
+          topic_id: link.topic_id,
+          target_type: 'unit',
+          target_id: unitId,
+          // unit_id mantido por compat com leitura legacy
+          unit_id: unitId
+        };
+        try{
+          const res = await ConcursosSync.topicUnitInsert(row);
+          if(res && res.error) errors.push('insert: ' + (res.error.message || res.error));
+          // Espelha local (UbiqueStore) com id retornado se houver
+        }catch(e){ errors.push('insert ex: ' + (e && e.message || e)); }
+      }
+      // Deletes
+      for(const link of toRemove){
+        if(link.id == null) continue;
+        try{
+          const res = await ConcursosSync.topicUnitDelete(link.id);
+          if(res && res.error) errors.push('delete: ' + (res.error.message || res.error));
+        }catch(e){ errors.push('delete ex: ' + (e && e.message || e)); }
+      }
+      if(errors.length){
+        console.warn('[UnitTopicLinks] erros parciais:', errors);
+      }
+      return errors;
+    }
+
+    function _wire(){
+      const eSel = document.getElementById('utl-edital');
+      const sSel = document.getElementById('utl-subject');
+      const tSel = document.getElementById('utl-topic');
+      const btn  = document.getElementById('utl-add-btn');
+      if(!eSel) return;
+      if(eSel.dataset.utlWired === '1') return;
+      eSel.dataset.utlWired = '1';
+      eSel.addEventListener('change', _onEditalChange);
+      sSel.addEventListener('change', _onSubjectChange);
+      tSel.addEventListener('change', _onTopicChange);
+      btn.addEventListener('click', _onAdd);
+    }
+
+    // Auto-wire quando DOM existir
+    if(document.readyState !== 'loading') _wire();
+    else document.addEventListener('DOMContentLoaded', _wire);
+
+    return { open, persist };
+  })();
+  window.UnitTopicLinks = UnitTopicLinks;
 
   async function saveUnit(openEditorAfterSave = false){
     const id = document.getElementById('unit-id').value;
@@ -23247,6 +23529,24 @@
       }
     }
 
+    // Persiste vínculos com edital (diff insert/delete via RPC) usando o
+    // unitId definitivo (recém-criado ou existente). Erros parciais logam
+    // mas não bloqueiam o fechamento do modal.
+    if(window.UnitTopicLinks && savedUnitId){
+      try{ await UnitTopicLinks.persist(savedUnitId); }
+      catch(e){ console.warn('[saveUnit] persist topic links:', e); }
+      // Refetch local pra refletir os IDs novos
+      try{
+        if(window.UBIQUE_USE_SUPABASE){
+          const { data: etu, error: etuErr } = await window._sb.schema('concursos')
+            .from('edital_topic_units').select('*');
+          if(!etuErr && UbiqueStore.edital_topic_units){
+            UbiqueStore.edital_topic_units.replaceAll(etu || []);
+          }
+        }
+      }catch(_){}
+    }
+
     document.getElementById('unitModal').classList.remove('active');
     await loadUnits();
     renderCurriculumTree();
@@ -23256,8 +23556,12 @@
   }
 
   async function deleteUnit(id){
-    if(!confirm('Apagar esta unidade?')) return;
+    if(!confirm('Apagar esta unidade? Os vínculos com edital também serão removidos.')) return;
     const idNum = isNaN(parseInt(id)) ? id : parseInt(id);
+
+    // Cascade: limpa vínculos edital_topic_units órfãos antes de apagar a unit
+    try{ if(window.ConcursosSync) await ConcursosSync.topicUnitDeleteByUnit(idNum); }
+    catch(e){ console.warn('[deleteUnit] cascade topic_unit:', e); }
 
     // 1. Supabase primeiro
     if(window.UBIQUE_USE_SUPABASE){
@@ -47689,24 +47993,36 @@
 
     // Matéria do tópico — usa effective subject (resolve cadeia de ancestrais)
     const effSubjectId = _resolveEffectiveSubject(topic, allTopics);
+    const effSubjectIdStr = effSubjectId != null ? String(effSubjectId) : null;
     const subjects = (window.UbiqueStore && window.UbiqueStore.subjects && window.UbiqueStore.subjects.list && window.UbiqueStore.subjects.list()) || [];
-    const subj = effSubjectId != null ? subjects.find(s => s.id === effSubjectId) : null;
+    // Normalize com String() — edital_topics.subject_id pode vir como text
+    // do banco e subjects.id é integer; comparação estrita falhava silenciosamente.
+    const subj = effSubjectIdStr ? subjects.find(s => String(s.id) === effSubjectIdStr) : null;
     const subjLabel = subj
       ? (subj.subject || subj.name || ('Matéria ' + subj.id))
       : '— sem matéria vinculada — vincule no topo da árvore primeiro';
     document.getElementById('lk-subject-display').textContent = subjLabel;
 
-    // Popula dropdown Módulo (filtrado pela matéria, se houver)
+    // Popula dropdown Módulo (filtrado pela matéria, se houver).
+    // Normalize String() pra evitar mismatch text↔integer.
     const allModules = (window.UbiqueStore && window.UbiqueStore.modules.list()) || [];
-    const modsForSubject = effSubjectId != null
-      ? allModules.filter(m => m.subject_id === effSubjectId)
-      : allModules;  // sem matéria? mostra todos
+    const modsForSubject = effSubjectIdStr
+      ? allModules.filter(m => String(m.subject_id) === effSubjectIdStr)
+      : allModules;
     const modSel = document.getElementById('lk-module');
+    function _modLabel(m){
+      const num = (m.number || '').trim();
+      const tit = (m.title || '').trim();
+      if(num && tit) return num + ' · ' + tit;
+      if(tit) return tit;
+      if(num) return num;
+      return 'Módulo #' + m.id;
+    }
     modSel.innerHTML = '<option value="">— Escolha um módulo —</option>' +
       modsForSubject
         .slice()
         .sort((a,b) => (a.position||0) - (b.position||0))
-        .map(m => `<option value="${m.id}">${esc((m.number||'') + (m.number?' · ':'') + m.title)}</option>`)
+        .map(m => `<option value="${m.id}">${esc(_modLabel(m))}</option>`)
         .join('');
 
     // Reset chapter + unit
@@ -47825,10 +48141,16 @@
         return;
       }
       const chs = ((window.UbiqueStore && window.UbiqueStore.chapters.list()) || [])
-        .filter(c => c.module_id === modId)
+        .filter(c => String(c.module_id) === String(modId))
         .sort((a,b) => (a.position||0) - (b.position||0));
+      function _chLabel(c){
+        const num = (c.number || '').trim();
+        const tit = (c.title || '').trim();
+        if(num && tit) return num + ' · ' + tit;
+        return tit || num || ('Capítulo #' + c.id);
+      }
       chSel.innerHTML = '<option value="">— Vincular módulo inteiro —</option>' +
-        chs.map(c => `<option value="${c.id}">${esc((c.number||'') + (c.number?' · ':'') + c.title)}</option>`).join('');
+        chs.map(c => `<option value="${c.id}">${esc(_chLabel(c))}</option>`).join('');
       chSel.disabled = chs.length === 0;
     });
     chSel.addEventListener('change', function(){
@@ -47839,10 +48161,16 @@
         return;
       }
       const uns = ((window.UbiqueStore && window.UbiqueStore.units.list()) || [])
-        .filter(u => u.chapter_id === chId)
+        .filter(u => String(u.chapter_id) === String(chId))
         .sort((a,b) => (a.position||0) - (b.position||0));
+      function _unLabel(u){
+        const num = (u.number || '').trim();
+        const tit = (u.title || '').trim();
+        if(num && tit) return num + ' · ' + tit;
+        return tit || num || ('Unidade #' + u.id);
+      }
       unSel.innerHTML = '<option value="">— Vincular capítulo inteiro —</option>' +
-        uns.map(u => `<option value="${u.id}">${esc((u.number||'') + (u.number?' · ':'') + u.title)}</option>`).join('');
+        uns.map(u => `<option value="${u.id}">${esc(_unLabel(u))}</option>`).join('');
       unSel.disabled = uns.length === 0;
     });
     btn.addEventListener('click', function(){
