@@ -7886,8 +7886,24 @@ const Util = {
     }
     return null;
   },
+  // IDs dos blocos de uma unidade. Unidades reais (Supabase) guardam os
+  // blocos em UbiqueStore.unit_blocks por unit_id (= _storeId), NÃO em
+  // unit.groups[].blocks[] (que fica vazio). Daí o "0 blocos"/progresso 0.
+  // Fallback pro formato legacy (mocks sem _storeId).
+  unitBlockIds(unit){
+    if(!unit) return [];
+    if(unit._storeId != null && window.UbiqueStore && UbiqueStore.unit_blocks){
+      const sid = String(unit._storeId);
+      return (UbiqueStore.unit_blocks.list() || [])
+        .filter(b => String(b.unit_id) === sid)
+        .map(b => b.id);
+    }
+    const ids = [];
+    (unit.groups||[]).forEach(g => (g.blocks||[]).forEach(b => ids.push(b.id)));
+    return ids;
+  },
   countBlocks(unit){
-    return (unit.groups||[]).reduce((sum,g)=>sum+(g.blocks||[]).length,0);
+    return Util.unitBlockIds(unit).length;
   }
 };
 window.Util = Util;
@@ -8631,6 +8647,17 @@ const Store = (function(){
     }catch(e){ console.warn('[block_bookmark bulk sync exception]', e); }
   }
 
+  /** Bulk delete — limpa todos os bookmarks de uma unidade (uncompleteUnit). */
+  async function _syncBlockBookmarksClearToSupabase(unitId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('block_bookmarks')
+        .delete().eq('user_id', userId).eq('unit_id', String(unitId));
+      if(error) console.warn('[block_bookmark clear sync]', error);
+    }catch(e){ console.warn('[block_bookmark clear sync exception]', e); }
+  }
+
   /** Hidrata _state.bookmarks a partir do Supabase. */
   async function _hydrateBookmarksFromSupabase(){
     const userId = _currentSupaUserId();
@@ -9228,10 +9255,11 @@ const Store = (function(){
         const found = Util.findUnit(m.id, unitId);
         if(found){
           _state.bookmarks[unitId] = _state.bookmarks[unitId] || {};
-          (found.unit.groups||[]).forEach(g => (g.blocks||[]).forEach(b => {
-            _state.bookmarks[unitId][b.id] = true;
-            cascadeBlockIds.push(b.id);
-          }));
+          // Blocos reais vêm de UbiqueStore.unit_blocks (não de unit.groups).
+          Util.unitBlockIds(found.unit).forEach(bid => {
+            _state.bookmarks[unitId][bid] = true;
+            cascadeBlockIds.push(bid);
+          });
           break;
         }
       }
@@ -9248,9 +9276,14 @@ const Store = (function(){
         v.completedAt = null;
         _state.unitViews[unitId] = v;
       }
+      // Como o progresso agora é por bookmark, "desmarcar unidade" também
+      // limpa os blocos marcados (senão ficaria preso em 100%). Espelha o
+      // cascade do completeUnit.
+      if(_state.bookmarks && _state.bookmarks[unitId]) _state.bookmarks[unitId] = {};
       _persist(); _emit();
       // Fase 4f
       _syncUnitProgressToSupabase(unitId, { completed: false }).catch(()=>{});
+      _syncBlockBookmarksClearToSupabase(unitId).catch(()=>{});
     },
     updateQuizAnswer(unitId, blockId, itemId, payload){
       // Y3 Fase I — Stats compartilhadas por bank_id.
@@ -9549,12 +9582,14 @@ const Store = (function(){
       if(!_state) return { state:'new', pct:0 };
       const v = (_state.unitViews && _state.unitViews[unit.id]) || {};
       if(v.completed) return { state:'completed', pct:1 };
-      const totalBlocks = Util.countBlocks(unit);
+      // Blocos vêm de UbiqueStore.unit_blocks (via Util.unitBlockIds), não
+      // de unit.groups. Conta os marcados como "Concluído" (bookmarks).
+      const ids = Util.unitBlockIds(unit);
+      const totalBlocks = ids.length;
       if(!totalBlocks) return { state:v.viewCount?'seen':'new', pct:0 };
-      // Conta blocos marcados como concluído (bookmarks = botão "Concluído").
       const bm = (_state.bookmarks && _state.bookmarks[unit.id]) || {};
       let done = 0;
-      (unit.groups||[]).forEach(g => (g.blocks||[]).forEach(b => { if(bm[b.id]) done++; }));
+      ids.forEach(id => { if(bm[id]) done++; });
       const pct = Math.min(done, totalBlocks) / totalBlocks;
       return { state: pct>=1?'completed' : ((done>0 || v.viewCount)?'seen':'new'), pct };
     },
