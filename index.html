@@ -8902,7 +8902,14 @@ const Store = (function(){
           editedAt: row.edited_at ? new Date(row.edited_at).getTime() : null
         };
       });
-      _state.comments[blockId] = legacy.concat(fromDb);
+      // Preserva comentários LOCAIS (UUID) que ainda não chegaram ao banco
+      // — otimistas recém-publicados/editados cujo sync fire-and-forget
+      // ainda não completou. Sem isso, re-hidratar apagaria o comentário
+      // até o reload.
+      const dbIds = new Set(fromDb.map(c => String(c.id)));
+      const localPending = (_state.comments[blockId] || []).filter(c =>
+        _UUID_RE.test(String(c.id||'')) && !dbIds.has(String(c.id)));
+      _state.comments[blockId] = legacy.concat(fromDb).concat(localPending);
       _persist(); _emit();
     }catch(e){ console.warn('[hydrate comments exception]', e); }
   }
@@ -13086,42 +13093,47 @@ Blocks.glossary = {
   }
 };
 
+/* Monta o HTML da LISTA de comentários (sem o compose box). Compartilhado
+   entre o render inicial e o refresh cirúrgico (publicar/editar/excluir/
+   responder/hidratar) — pra atualizar só a thread, sem App.render geral. */
+function _buildCommentThread(block, ctx){
+  const userComments = (ctx && ctx.store) ? ctx.store.getComments(block.id) : [];
+  const mockComments = block.comments || [];
+  const allComments = [...mockComments, ...userComments];
+  const topLevel = allComments.filter(c => !c.parentId);
+  const fmtDate = ts => { try { return new Date(ts).toLocaleDateString('pt-BR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); } catch(e){ return ''; } };
+  function renderComment(c){
+    const replies = allComments.filter(r => r.parentId === c.id);
+    const isOwn = c.authorId === (window.MOCK_USER&&window.MOCK_USER.id);
+    return `<div class="cmt-item" data-comment-id="${Util.attr(c.id)}">
+      <div class="cmt-avatar" data-cmt-avatar-uid="${Util.attr(c.authorId||'')}">${Util.esc(Util.initials(c.author||''))}</div>
+      <div class="cmt-item-body">
+        <div class="cmt-item-head">
+          <span class="cmt-author">${Util.esc(c.author||'Anônimo')}</span>
+          <span class="cmt-date">${fmtDate(c.createdAt)}</span>
+          ${c.editedAt ? '<span class="cmt-edited-tag">editado</span>' : ''}
+        </div>
+        <div class="cmt-text">${(typeof window.linkifyMentions === 'function') ? window.linkifyMentions(c.text||'') : Util.esc(c.text||'')}</div>
+        <div class="cmt-actions">
+          <button class="cmt-action-btn" data-action="reply" data-comment-id="${Util.attr(c.id)}">Responder</button>
+          ${isOwn ? `<button class="cmt-action-btn" data-action="edit-comment" data-comment-id="${Util.attr(c.id)}">Editar</button>` : ''}
+          ${isOwn ? `<button class="cmt-action-btn" data-action="delete-comment" data-comment-id="${Util.attr(c.id)}">Excluir</button>` : ''}
+        </div>
+        ${replies.length ? `<div class="cmt-replies">${replies.map(renderComment).join('')}</div>` : ''}
+      </div>
+    </div>`;
+  }
+  const html = topLevel.length
+    ? topLevel.map(renderComment).join('')
+    : '<div class="cmt-empty">Nenhum comentário ainda. Seja o primeiro a participar da discussão.</div>';
+  return { html, count: allComments.length };
+}
+
 /* COMMENTS — forum/discussion block */
 Blocks.comments = {
   render(block, ctx){
-    const userComments = ctx.store ? ctx.store.getComments(block.id) : [];
-    const mockComments = block.comments || [];
-    const allComments = [...mockComments, ...userComments];
-    const topLevel = allComments.filter(c => !c.parentId);
     const initials = window.MOCK_USER ? Util.initials(window.MOCK_USER.name) : '?';
-    const fmtDate = ts => { try { return new Date(ts).toLocaleDateString('pt-BR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}); } catch(e){ return ''; } };
-
-    function renderComment(c){
-      const replies = allComments.filter(r => r.parentId === c.id);
-      const isOwn = c.authorId === (window.MOCK_USER&&window.MOCK_USER.id);
-      return `<div class="cmt-item" data-comment-id="${Util.attr(c.id)}">
-        <div class="cmt-avatar" data-cmt-avatar-uid="${Util.attr(c.authorId||'')}">${Util.esc(Util.initials(c.author||''))}</div>
-        <div class="cmt-item-body">
-          <div class="cmt-item-head">
-            <span class="cmt-author">${Util.esc(c.author||'Anônimo')}</span>
-            <span class="cmt-date">${fmtDate(c.createdAt)}</span>
-            ${c.editedAt ? '<span class="cmt-edited-tag">editado</span>' : ''}
-          </div>
-          <div class="cmt-text">${(typeof window.linkifyMentions === 'function') ? window.linkifyMentions(c.text||'') : Util.esc(c.text||'')}</div>
-          <div class="cmt-actions">
-            <button class="cmt-action-btn" data-action="reply" data-comment-id="${Util.attr(c.id)}">Responder</button>
-            ${isOwn ? `<button class="cmt-action-btn" data-action="edit-comment" data-comment-id="${Util.attr(c.id)}">Editar</button>` : ''}
-            ${isOwn ? `<button class="cmt-action-btn" data-action="delete-comment" data-comment-id="${Util.attr(c.id)}">Excluir</button>` : ''}
-          </div>
-          ${replies.length ? `<div class="cmt-replies">${replies.map(renderComment).join('')}</div>` : ''}
-        </div>
-      </div>`;
-    }
-
-    const commentsHtml = topLevel.length
-      ? topLevel.map(renderComment).join('')
-      : '<div class="cmt-empty">Nenhum comentário ainda. Seja o primeiro a participar da discussão.</div>';
-
+    const thread = _buildCommentThread(block, ctx);
     return `<section class="block-wrap comments-block" data-block-id="${Util.attr(block.id)}">
       ${blockHeader(block, block.title||'Discussão', Icons.comments, ctx)}
       ${block.prompt ? `<div class="cmt-prompt" style="font-family:var(--sans);font-weight:300;font-size:.85rem;color:var(--text-dim);line-height:1.7;margin-bottom:1.4rem">${Util.esc(block.prompt)}</div>` : ''}
@@ -13132,8 +13144,8 @@ Blocks.comments = {
           <button class="cmt-submit" data-action="post-comment">Publicar</button>
         </div>
       </div>
-      <div class="cmt-count">${allComments.length} comentário${allComments.length===1?'':'s'}</div>
-      <div class="cmt-thread" id="cmtThread-${Util.attr(block.id)}">${commentsHtml}</div>
+      <div class="cmt-count">${thread.count} comentário${thread.count===1?'':'s'}</div>
+      <div class="cmt-thread" id="cmtThread-${Util.attr(block.id)}">${thread.html}</div>
     </section>`;
   },
   mount(stageEl, block, ctx){
@@ -13171,6 +13183,19 @@ Blocks.comments = {
     }
     wrap.__hydrateCmtAvatars = hydrateCmtAvatars;  // expor pra reuse no reply/edit
 
+    // Refresh CIRÚRGICO: re-renderiza só a lista (.cmt-thread) + contador,
+    // sem App.render() geral (evita flicker e o re-mount que apagava
+    // comentários otimistas). Compose box e handlers delegados ficam.
+    function refreshThread(){
+      const threadEl = wrap.querySelector('.cmt-thread');
+      if(!threadEl) return;
+      const built = _buildCommentThread(block, ctx);
+      threadEl.innerHTML = built.html;
+      const cntEl = wrap.querySelector('.cmt-count');
+      if(cntEl) cntEl.textContent = built.count + ' comentário' + (built.count===1?'':'s');
+      hydrateCmtAvatars(wrap);
+    }
+
     // Auto-complete @ no textarea principal
     const composeTa = wrap.querySelector('.cmt-textarea');
     if(composeTa && typeof window.attachMentionAutocomplete === 'function'){
@@ -13186,10 +13211,11 @@ Blocks.comments = {
       }
     });
 
-    // Fase 4d — hidrata comentários do bloco a partir do Supabase
-    // (fire-and-forget; quando termina, _emit dispara re-render via App.render no listener)
+    // Fase 4d — hidrata comentários do bloco a partir do Supabase. Ao
+    // terminar, atualiza SÓ a thread (sem reload) — daí os comentários
+    // aparecem assim que o aluno abre a unidade.
     if(Store && typeof Store.hydrateCommentsForBlock === 'function'){
-      Store.hydrateCommentsForBlock(ctx && ctx.unitId, block.id).catch(()=>{});
+      Store.hydrateCommentsForBlock(ctx && ctx.unitId, block.id).then(refreshThread).catch(()=>{});
     }
 
     // Post top-level comment
@@ -13198,9 +13224,8 @@ Blocks.comments = {
       const text = textarea.value.trim();
       if(!text) return;
       Store.addComment(block.id, text, null, ctx && ctx.unitId);
-      const scrollTarget = block.id;
-      App.render();
-      setTimeout(() => { const el = document.querySelector('[data-block-id="'+CSS.escape(scrollTarget)+'"]'); if(el) el.scrollIntoView({block:'start'}); }, 50);
+      textarea.value = '';
+      refreshThread();
     });
 
     // Reply & delete delegation
@@ -13217,9 +13242,7 @@ Blocks.comments = {
         const newText = editWrap.querySelector('.cmt-textarea').value.trim();
         if(!newText) return;
         Store.editComment(block.id, cid, newText);
-        const scrollTarget3 = block.id;
-        App.render();
-        setTimeout(() => { const el = document.querySelector('[data-block-id="'+CSS.escape(scrollTarget3)+'"]'); if(el) el.scrollIntoView({block:'start'}); }, 50);
+        refreshThread();
         return;
       }
 
@@ -13283,7 +13306,7 @@ Blocks.comments = {
         const cid = deleteBtn.getAttribute('data-comment-id');
         if(confirm('Excluir este comentário?')){
           Store.deleteComment(block.id, cid);
-          App.render();
+          refreshThread();
         }
       }
 
@@ -13294,9 +13317,7 @@ Blocks.comments = {
         const text = form.querySelector('.cmt-textarea').value.trim();
         if(!text) return;
         Store.addComment(block.id, text, parentId, ctx && ctx.unitId);
-        const scrollTarget2 = block.id;
-        App.render();
-        setTimeout(() => { const el = document.querySelector('[data-block-id="'+CSS.escape(scrollTarget2)+'"]'); if(el) el.scrollIntoView({block:'start'}); }, 50);
+        refreshThread();
       }
     });
   }
