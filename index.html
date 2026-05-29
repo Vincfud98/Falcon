@@ -2082,6 +2082,12 @@ html[data-theme="light"] .module-overlay{
   padding:.35rem .7rem;border:1px solid var(--border);border-radius:3px;
 }
 .fb-clear:hover{border-color:var(--accent);color:var(--accent)}
+/* Busca da barra: input + botão "Buscar" (segue .btn-primary do saas,
+   compactado pra altura da filter-bar). */
+.fb-search-group .fb-input{min-width:200px}
+.fb-search-btn{
+  padding:.4rem .9rem;font-size:.6rem;letter-spacing:.14em;border-radius:3px;
+}
 
 /* ═══════ Fase 6 — Banco de Questões/Discursivas (painel de filtros) ═══════ */
 .bf-wrap{max-width:1100px;margin:1.5rem auto 3rem;padding:0 1rem}
@@ -18423,6 +18429,48 @@ Renderers.coursePortalDetail = function(route){
       </select></div>`;
   }
 
+  // Tópico + Tag: opções coletadas do ESCOPO atual (só Módulo/Capítulo/
+  // Unidade aplicados, sem tópico/tag/busca) — assim os dropdowns mostram
+  // só o que existe no recorte, sem opções que não levam a nada.
+  const scopeItems = Portal.aggregateAll(cardKey, {
+    module: filters.module, chapter: filters.chapter, unit: filters.unit
+  });
+  const topicsUsed = new Set();
+  const tagsUsed = new Set();
+  scopeItems.forEach(it => {
+    (it.topics||[]).forEach(t => topicsUsed.add(t));
+    (it.tags||[]).forEach(t => tagsUsed.add(t));
+  });
+  let topicOpts = '';
+  if(topicsUsed.size){
+    const opts = Array.from(topicsUsed).map(id => {
+      const t = Util.getTopic(id);
+      const label = t ? (t.number + ' · ' + t.name) : id;
+      return { id, label };
+    }).sort((a,b) => String(a.label).localeCompare(String(b.label), 'pt-BR', { numeric:true }));
+    topicOpts = `<div class="fb-group"><span class="fb-label">Tópico</span>
+      <select class="fb-select" data-filter="topic">
+        <option value="">Todos</option>
+        ${opts.map(o => `<option value="${Util.attr(o.id)}" ${filters.topic===o.id?'selected':''}>${Util.esc(o.label)}</option>`).join('')}
+      </select></div>`;
+  }
+  let tagOpts = '';
+  if(tagsUsed.size){
+    // Tags são gravadas pelo NOME (consistente com a correção das tags do
+    // Supabase); exibimos o valor como está.
+    const tags = Array.from(tagsUsed).sort((a,b) => String(a).localeCompare(String(b), 'pt-BR'));
+    tagOpts = `<div class="fb-group"><span class="fb-label">Tag</span>
+      <select class="fb-select" data-filter="tag">
+        <option value="">Todas</option>
+        ${tags.map(t => `<option value="${Util.attr(t)}" ${filters.tag===t?'selected':''}>${Util.esc(t)}</option>`).join('')}
+      </select></div>`;
+  }
+
+  // Busca: campo + botão "Buscar" (NÃO reativo — só roda ao clicar/Enter).
+  const searchOpts = `<div class="fb-group fb-search-group"><span class="fb-label">Buscar</span>
+    <input class="fb-input" type="text" id="fbSearch" placeholder="Termos, títulos, conteúdo…" value="${Util.attr(filters.q)}">
+    <button class="btn-primary fb-search-btn" id="fbSearchBtn">Buscar</button></div>`;
+
   // Renderização RICA: mesma função da página por-módulo (renderPortalItems).
   // Como os itens já carregam __moduleId/__unitId/__chapterId via
   // Portal.aggregateAll, o renderizador e o portalBacklink funcionam sem
@@ -18441,7 +18489,7 @@ Renderers.coursePortalDetail = function(route){
     </div>
   </div>
   <div class="filter-bar">
-    ${moduleOpts}${chapterOpts}${unitOpts}
+    ${moduleOpts}${chapterOpts}${unitOpts}${topicOpts}${tagOpts}${searchOpts}
     <button class="fb-clear" id="fbClear">Limpar</button>
     <span class="fb-count" id="fbCount">${items.length} resultados</span>
   </div>
@@ -18457,17 +18505,32 @@ Renderers.coursePortalDetail.mount = function(stageEl, route){
     return Renderers.essayBank.mount(stageEl, route);
   }
   // Filter bar delegation (cards de referência — bios/glossary/etc.)
-  // Cascata: trocar Módulo zera Capítulo+Unidade; trocar Capítulo zera
-  // Unidade — senão sobraria um filtro filho órfão do pai antigo.
+  // Cascata: trocar um nível-pai zera os filhos (e Tópico/Tag, que são
+  // escopados pelo recorte) — senão sobraria filtro órfão do pai antigo.
   stageEl.querySelectorAll('[data-filter]').forEach(el => {
     const key = el.getAttribute('data-filter');
     el.addEventListener('change', () => {
       const q = Object.assign({}, route.query);
       q[key] = el.value; if(!q[key]) delete q[key];
-      if(key === 'module'){ delete q.chapter; delete q.unit; }
-      if(key === 'chapter'){ delete q.unit; }
+      if(key === 'module'){ delete q.chapter; delete q.unit; delete q.topic; delete q.tag; }
+      if(key === 'chapter'){ delete q.unit; delete q.topic; delete q.tag; }
+      if(key === 'unit'){ delete q.topic; delete q.tag; }
       Router.go(`/portal/${route.params.cardKey}${Router.querystring(q)}`);
     });
+  });
+  // Busca por palavra-chave: NÃO reativa. Só roda ao clicar "Buscar" ou
+  // apertar Enter no campo — evita recarregar a cada tecla.
+  const searchInput = stageEl.querySelector('#fbSearch');
+  const searchBtn = stageEl.querySelector('#fbSearchBtn');
+  function runSearch(){
+    const q = Object.assign({}, route.query);
+    const val = (searchInput && searchInput.value || '').trim();
+    if(val) q.q = val; else delete q.q;
+    Router.go(`/portal/${route.params.cardKey}${Router.querystring(q)}`);
+  }
+  if(searchBtn) searchBtn.addEventListener('click', runSearch);
+  if(searchInput) searchInput.addEventListener('keydown', (e) => {
+    if(e.key === 'Enter'){ e.preventDefault(); runSearch(); }
   });
   const clear = stageEl.querySelector('#fbClear');
   if(clear) clear.addEventListener('click', () => Router.go(`/portal/${route.params.cardKey}`));
