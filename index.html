@@ -15960,6 +15960,14 @@ Renderers.glossario = function(route){
   if(q.subject != null) st.subject = q.subject;
   if(q.class != null) st.class = q.class;
   if(q.tab === 'saved' || q.tab === 'global') st.tab = q.tab;
+  // Pré-seleciona a matéria ATIVA ao entrar (e limpa no catálogo). Só
+  // aplica quando o CONTEXTO muda — dentro do mesmo contexto, respeita a
+  // escolha do usuário no dropdown.
+  if(q.subject == null){
+    const _subj = activeSubject();
+    const _sid = _subj ? String(_subj._subjectId) : '';
+    if(st._ctxSubj !== _sid){ st._ctxSubj = _sid; st.subject = _sid; }
+  }
 
   const exams    = (window.UbiqueStore && UbiqueStore.exams.list()) || [];
   const classes  = (window.UbiqueStore && UbiqueStore.glossary_word_classes.list()) || [];
@@ -16351,6 +16359,13 @@ Renderers.simulados = function(route){
     category: (route.query && route.query.category) || '',
     topic: (route.query && route.query.topic) || ''
   };
+  // Pré-seleciona a matéria ativa (se houver e se existir simulado dela).
+  // No catálogo (sem matéria ativa) fica em "Todas". Só quando não há
+  // filtro explícito na URL.
+  if(!filters.subject){
+    const _subj = activeSubject();
+    if(_subj && sims.some(s => s.subject === _subj.title)) filters.subject = _subj.title;
+  }
 
   // Apply filters
   let filtered = sims.slice();
@@ -20029,9 +20044,16 @@ Renderers.notes = function(route){
     q: route.query.q || ''
   };
   const sortBy = route.query.sort || 'date-desc';
+  // Escopo: matéria ativa → só notas dos módulos dela; catálogo → todas.
+  const _subj = activeSubject();
+  const _scopeMods = _subj
+    ? (_subj.modules||[])
+    : ((window.COURSES && window.COURSES.filter(Boolean)) || [window.COURSE].filter(Boolean)).reduce((a,c)=>a.concat(c.modules||[]),[]);
+  const _scopeModIds = _subj ? new Set((_subj.modules||[]).map(m=>m.id)) : null;
+  const inScope = n => !_scopeModIds || _scopeModIds.has(n.moduleId);
   // Precompute module/unit order maps for deterministic module/unit sorting
   const modOrder = {}; const unitOrder = {};
-  (window.COURSE.modules||[]).forEach((m, mi) => {
+  _scopeMods.forEach((m, mi) => {
     modOrder[m.id] = mi;
     Util.unitsOfModule(m).forEach((entry, ui) => { unitOrder[entry.unit.id] = ui; });
   });
@@ -20076,11 +20098,11 @@ Renderers.notes = function(route){
     }
     return arr;
   }
-  const notes = applySort(Store.listNotes(filters), sortBy);
-  const total = (Store.get().notes||[]).length;
+  const notes = applySort(Store.listNotes(filters).filter(inScope), sortBy);
+  const total = (Store.get().notes||[]).filter(inScope).length;
 
   // Build filter selects from current notes universe
-  const allNotes = Store.get().notes || [];
+  const allNotes = (Store.get().notes || []).filter(inScope);
   const moduleIds = [...new Set(allNotes.map(n => n.moduleId).filter(Boolean))];
   const unitIds = [...new Set(allNotes.filter(n => !filters.moduleId || n.moduleId===filters.moduleId).map(n => n.unitId).filter(Boolean))];
   const topicIds = [...new Set(allNotes.flatMap(n => n.topics||[]))];
@@ -20100,7 +20122,7 @@ Renderers.notes = function(route){
       <option value="">Todas</option>
       ${unitIds.map(id => {
         let title = id;
-        for(const m of window.COURSE.modules){
+        for(const m of _scopeMods){
           for(const entry of Util.unitsOfModule(m)){
             if(entry.unit.id===id){ title = 'Unid. '+entry.unit.number+' · '+entry.unit.title; break; }
           }
@@ -20741,7 +20763,10 @@ window.NotesCompiler = NotesCompiler;
 
 /* READING LIST PAGE */
 Renderers.reading = function(route){
-  const entries = Store.listReadingList();
+  // Escopo: matéria ativa → só itens dos módulos dela; catálogo → todos.
+  const _subj = activeSubject();
+  const _scopeModIds = _subj ? new Set((_subj.modules||[]).map(m=>m.id)) : null;
+  const entries = Store.listReadingList().filter(e => !_scopeModIds || _scopeModIds.has(e.moduleId));
   // Hydrate each entry with fresh block + unit + module refs
   const rows = entries.map((e,i) => {
     const found = Util.findUnit(e.moduleId, e.unitId);
@@ -21243,7 +21268,7 @@ Renderers.performance = function(route){
   return `<div class="hero">
     <span class="s-label" data-a="1">Desempenho do curso</span>
     <h1 class="s-title hero" data-a="2">Meu desempenho</h1>
-    <p class="s-subtitle" data-a="3">${Util.esc(window.COURSE.title)}</p>
+    <p class="s-subtitle" data-a="3">${Util.esc(activeSubject() ? window.COURSE.title : 'Todas as matérias')}</p>
     <div class="s-divider" data-a="4"></div>
     <p class="s-body" data-a="5">Visão agregada por tópicos e tags. Cada linha mostra objetivas respondidas, percentual de acertos, pontuação em discursivas e conclusão ponderada (blocos marcados, flashcards dominados e unidades concluídas). Clique na seta para abrir uma decomposição por módulo, capítulo e unidade.</p>
     <div class="cta-row" data-a="6" style="margin-top:1rem">
@@ -21428,7 +21453,10 @@ function buildPerformanceReport(){
   // Walk course → aggregate stats per topic id and per tag id, also per module/chapter/unit.
   // For each quiz item count against its topics/tags. For essays, add its scored score/max.
   // For completion we use a weighted combo: blocks completed (bookmarks), flashcards mastered, units completed.
-  const course = window.COURSE;
+  // Escopo: matéria ativa → só os módulos dela; catálogo (global) →
+  // módulos de TODAS as matérias.
+  const scopeCourses = (window.Portal && Portal.scopeCourses) ? Portal.scopeCourses() : [window.COURSE].filter(Boolean);
+  const scopeMods = scopeCourses.reduce((a,c) => a.concat(c.modules||[]), []);
   const state = Store.get();
 
   // Base accumulators
@@ -21455,7 +21483,7 @@ function buildPerformanceReport(){
     });
   }
 
-  course.modules.forEach(m => {
+  scopeMods.forEach(m => {
     (Util.unitsOfModule(m)||[]).forEach(entry => {
       const unit = entry.unit;
       const chapter = entry.chapter;
@@ -23466,7 +23494,9 @@ const App = {
     try{
       const _subj = activeSubject();
       const _sig = _subj ? subjectSigla(_subj) : '';
-      const NAVBASE = { navSimulados:'Simulados', navEdital:'Edital', navPortal:'Portal', navPerformance:'Desempenho', navReading:'Lista de leitura', navNotes:'Notas', navGlossario:'Glossário' };
+      // navEdital fica de fora: o edital é por CONCURSO (cobre várias
+      // matérias), não por matéria — "Edital • HB" seria enganoso.
+      const NAVBASE = { navSimulados:'Simulados', navPortal:'Portal', navPerformance:'Desempenho', navReading:'Lista de leitura', navNotes:'Notas', navGlossario:'Glossário' };
       Object.keys(NAVBASE).forEach(id => {
         const el = document.getElementById(id);
         if(!el) return;
