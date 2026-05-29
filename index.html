@@ -18367,8 +18367,13 @@ Renderers.coursePortalDetail = function(route){
       ${course.modules.map(m => `<option value="${Util.attr(m.id)}" ${filters.module===m.id?'selected':''}>${Util.esc(m.label+' · '+m.title)}</option>`).join('')}
     </select></div>`;
 
-  // Reuse the existing portalDetail rendering logic for items
-  const renderItem = window._portalDetailRenderItem || function(){ return ''; };
+  // Renderização RICA: mesma função da página por-módulo (renderPortalItems).
+  // Como os itens já carregam __moduleId/__unitId/__chapterId via
+  // Portal.aggregateAll, o renderizador e o portalBacklink funcionam sem
+  // precisar de um módulo único — daí passar `null` como m.
+  const itemsHtml = items.length
+    ? renderPortalItems(cardKey, items, null)
+    : '<div class="empty"><div class="empty-title">Nenhum item encontrado</div><div class="empty-sub">Ajuste os filtros para encontrar resultados.</div></div>';
 
   return `<div class="hero">
     <span class="s-label" data-a="1">Portal do curso</span>
@@ -18382,11 +18387,9 @@ Renderers.coursePortalDetail = function(route){
   <div class="filter-bar">
     ${moduleOpts}
     <button class="fb-clear" id="fbClear">Limpar</button>
-    <span class="fb-count">${items.length} resultados</span>
+    <span class="fb-count" id="fbCount">${items.length} resultados</span>
   </div>
-  <div class="portal-detail-grid" id="portalDetailGrid" data-card-key="${Util.attr(cardKey)}">
-    ${items.length ? items.map((it,i) => `<div class="portal-detail-item" data-idx="${i}">${Util.esc(it.name||it.title||it.term||it.text||it.citation||'Item '+(i+1))}</div>`).join('') : '<div class="empty"><div class="empty-title">Nenhum item encontrado</div><div class="empty-sub">Ajuste os filtros para encontrar resultados.</div></div>'}
-  </div>`;
+  <div id="portalItems" data-card-key="${Util.attr(cardKey)}">${itemsHtml}</div>`;
 };
 Renderers.coursePortalDetail.mount = function(stageEl, route){
   // Fase 6 — delega o mount dos cards questions/essays pro novo banco
@@ -18408,6 +18411,27 @@ Renderers.coursePortalDetail.mount = function(stageEl, route){
   });
   const clear = stageEl.querySelector('#fbClear');
   if(clear) clear.addEventListener('click', () => Router.go(`/portal/${route.params.cardKey}`));
+
+  // Interatividade centralizada (mesma fn da página por-módulo). Aqui os
+  // itens vêm de vários módulos, então getModuleId lê o módulo gravado em
+  // cada item (__moduleId) pra o link "Abrir na unidade" apontar certo.
+  const filters = {
+    module: route.query.module || '', chapter: route.query.chapter || '',
+    unit: route.query.unit || '', topic: route.query.topic || '',
+    tag: route.query.tag || '', q: route.query.q || ''
+  };
+  const items = Portal.aggregateAll(cardKey, filters);
+  bindPortalCardInteractivity(
+    stageEl, cardKey, items,
+    function(it){ return it.__moduleId || ''; },
+    route.query.status || ''
+  );
+
+  // scroll-to-item from deep link
+  if(route.query.__item){
+    const el = stageEl.querySelector('#item-'+CSS.escape(route.query.__item));
+    if(el){ el.scrollIntoView({behavior:'smooth', block:'center'}); el.style.outline='2px solid var(--accent)'; setTimeout(()=>el.style.outline='',2000); }
+  }
 };
 
 /* ═════════════════════════════════════════════════════════════════════
@@ -21444,81 +21468,13 @@ Renderers.portalDetail.mount = function(stageEl, route){
   };
   const items = Portal.aggregate(route.params.moduleId, cardKey, filters);
 
-  if(cardKey === 'questions') bindQuizItems(stageEl, items);
-  if(cardKey === 'essays') bindEssayItems(stageEl, items);
-  if(cardKey === 'flashcards') bindFlashcardItems(stageEl, items);
-
-  if(cardKey === 'bios'){
-    stageEl.querySelectorAll('.bio-tile').forEach(tile => {
-      tile.addEventListener('click', () => {
-        const idx = parseInt(tile.getAttribute('data-bio-idx'),10);
-        FSModal.open(items, idx, (it) => renderBioModalBody(it, route.params.moduleId));
-      });
-    });
-  }
-  if(cardKey === 'quotes'){
-    stageEl.querySelectorAll('.quote-tile').forEach(tile => {
-      tile.addEventListener('click', () => {
-        const idx = parseInt(tile.getAttribute('data-quote-idx'),10);
-        FSModal.open(items, idx, (it) => renderQuoteModalBody(it, route.params.moduleId));
-      });
-    });
-  }
-  if(cardKey === 'glossary'){
-    const sideItems = stageEl.querySelectorAll('.gloss-side-item');
-    const panels = stageEl.querySelectorAll('[data-gloss-panel]');
-    sideItems.forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = btn.getAttribute('data-gloss-idx');
-        sideItems.forEach(b => b.classList.toggle('active', b===btn));
-        panels.forEach(p => p.style.display = p.getAttribute('data-gloss-panel')===idx?'block':'none');
-      });
-    });
-  }
-  if(cardKey === 'timelines'){
-    stageEl.querySelectorAll('.tl-fid-item').forEach(it => {
-      it.addEventListener('click', () => it.classList.toggle('active'));
-    });
-  }
-  if(cardKey === 'flashcards'){
-    const statusFilter = route.query.status || '';
-    function applyStatusFilter(){
-      let visible = 0;
-      stageEl.querySelectorAll('.fc-card').forEach(card => {
-        const st = card.classList.contains('mastered') ? 'mastered'
-                 : card.classList.contains('learning') ? 'learning' : 'new';
-        const hide = statusFilter && statusFilter !== st;
-        card.classList.toggle('hidden-by-filter', hide);
-        if(!hide) visible++;
-      });
-      const counter = stageEl.querySelector('#fbCount');
-      if(counter) counter.textContent = visible + ' resultados';
-    }
-    // bindFlashcardItems has already applied state classes by the time we get here
-    applyStatusFilter();
-
-    const shuffleBtn = stageEl.querySelector('#fbShuffle');
-    let shuffled = false;
-    if(shuffleBtn){
-      shuffleBtn.addEventListener('click', () => {
-        const grid = stageEl.querySelector('#fcGrid');
-        if(!grid) return;
-        const cards = Array.from(grid.querySelectorAll('.fc-card'));
-        if(!shuffled){
-          for(let i = cards.length - 1; i > 0; i--){
-            const j = Math.floor(Math.random() * (i+1));
-            [cards[i], cards[j]] = [cards[j], cards[i]];
-          }
-          shuffleBtn.classList.add('active');
-        } else {
-          cards.sort((a,b) => parseInt(a.getAttribute('data-default-order'),10) - parseInt(b.getAttribute('data-default-order'),10));
-          shuffleBtn.classList.remove('active');
-        }
-        shuffled = !shuffled;
-        cards.forEach(c => grid.appendChild(c));
-      });
-    }
-  }
+  // Interatividade centralizada (mesma fn da página do curso inteiro).
+  // getModuleId fixo: nesta página todo item pertence ao módulo da rota.
+  bindPortalCardInteractivity(
+    stageEl, cardKey, items,
+    function(){ return route.params.moduleId; },
+    route.query.status || ''
+  );
 
   // scroll-to-item from deep link
   if(route.query.__item){
@@ -22523,8 +22479,103 @@ function renderQuoteModalBody(q, moduleId){
 
 /* ─ Portal item renderers (by cardKey) ─ */
 function portalBacklink(item, m){
+  // Módulo de origem: na página por-módulo vem em `m`; na página do curso
+  // inteiro os itens carregam `__moduleId` (injetado por Portal.aggregateAll).
+  // Item sempre ganha precedência — assim o mesmo renderizador serve aos
+  // dois contextos sem duplicar lógica.
+  const modId = item.__moduleId || (m && m.id) || '';
   const chapterPart = item.__chapterId ? `/c/${item.__chapterId}` : '';
-  return `<a class="icon-btn" href="#/m/${m.id}${chapterPart}/u/${item.__unitId}?b=${item.__blockId||''}#item=${item.id}">${Icons.chevron} Abrir na unidade</a>`;
+  return `<a class="icon-btn" href="#/m/${modId}${chapterPart}/u/${item.__unitId}?b=${item.__blockId||''}#item=${item.id}">${Icons.chevron} Abrir na unidade</a>`;
+}
+
+/* Liga a interatividade de cada tipo de card do Portal (virar flashcard,
+   abrir modal de biografia/citação, trocar termo no glossário, etc).
+   CENTRALIZADO: usado tanto pela página por-módulo quanto pela do curso
+   inteiro. A diferença entre os contextos (qual módulo usar pro link do
+   modal) é resolvida pelo callback `getModuleId(item)`.
+     · stageEl     — container renderizado
+     · cardKey     — tipo da coleção
+     · items       — itens já agregados (mesma ordem do render)
+     · getModuleId — fn(item) => id do módulo de origem
+     · statusFilter— filtro de status dos flashcards ('new'|'learning'|'mastered'|'') */
+function bindPortalCardInteractivity(stageEl, cardKey, items, getModuleId, statusFilter){
+  getModuleId = getModuleId || function(){ return ''; };
+  statusFilter = statusFilter || '';
+
+  if(cardKey === 'questions') bindQuizItems(stageEl, items);
+  if(cardKey === 'essays') bindEssayItems(stageEl, items);
+  if(cardKey === 'flashcards') bindFlashcardItems(stageEl, items);
+
+  if(cardKey === 'bios'){
+    stageEl.querySelectorAll('.bio-tile').forEach(tile => {
+      tile.addEventListener('click', () => {
+        const idx = parseInt(tile.getAttribute('data-bio-idx'),10);
+        FSModal.open(items, idx, (it) => renderBioModalBody(it, getModuleId(it)));
+      });
+    });
+  }
+  if(cardKey === 'quotes'){
+    stageEl.querySelectorAll('.quote-tile').forEach(tile => {
+      tile.addEventListener('click', () => {
+        const idx = parseInt(tile.getAttribute('data-quote-idx'),10);
+        FSModal.open(items, idx, (it) => renderQuoteModalBody(it, getModuleId(it)));
+      });
+    });
+  }
+  if(cardKey === 'glossary'){
+    const sideItems = stageEl.querySelectorAll('.gloss-side-item');
+    const panels = stageEl.querySelectorAll('[data-gloss-panel]');
+    sideItems.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = btn.getAttribute('data-gloss-idx');
+        sideItems.forEach(b => b.classList.toggle('active', b===btn));
+        panels.forEach(p => p.style.display = p.getAttribute('data-gloss-panel')===idx?'block':'none');
+      });
+    });
+  }
+  if(cardKey === 'timelines'){
+    stageEl.querySelectorAll('.tl-fid-item').forEach(it => {
+      it.addEventListener('click', () => it.classList.toggle('active'));
+    });
+  }
+  if(cardKey === 'flashcards'){
+    function applyStatusFilter(){
+      let visible = 0;
+      stageEl.querySelectorAll('.fc-card').forEach(card => {
+        const st = card.classList.contains('mastered') ? 'mastered'
+                 : card.classList.contains('learning') ? 'learning' : 'new';
+        const hide = statusFilter && statusFilter !== st;
+        card.classList.toggle('hidden-by-filter', hide);
+        if(!hide) visible++;
+      });
+      const counter = stageEl.querySelector('#fbCount');
+      if(counter) counter.textContent = visible + ' resultados';
+    }
+    // bindFlashcardItems já aplicou as classes de estado neste ponto
+    applyStatusFilter();
+
+    const shuffleBtn = stageEl.querySelector('#fbShuffle');
+    let shuffled = false;
+    if(shuffleBtn){
+      shuffleBtn.addEventListener('click', () => {
+        const grid = stageEl.querySelector('#fcGrid');
+        if(!grid) return;
+        const cards = Array.from(grid.querySelectorAll('.fc-card'));
+        if(!shuffled){
+          for(let i = cards.length - 1; i > 0; i--){
+            const j = Math.floor(Math.random() * (i+1));
+            [cards[i], cards[j]] = [cards[j], cards[i]];
+          }
+          shuffleBtn.classList.add('active');
+        } else {
+          cards.sort((a,b) => parseInt(a.getAttribute('data-default-order'),10) - parseInt(b.getAttribute('data-default-order'),10));
+          shuffleBtn.classList.remove('active');
+        }
+        shuffled = !shuffled;
+        cards.forEach(c => grid.appendChild(c));
+      });
+    }
+  }
 }
 function renderPortalItems(cardKey, items, m){
   if(cardKey === 'questions'){
