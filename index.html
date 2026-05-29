@@ -6402,6 +6402,8 @@ html[data-theme="light"] .hl-mark[data-hl-color="veil"]{background:var(--text);c
 .tb-navlink.active{color:var(--accent);border-color:var(--accent);background:var(--accent-lo)}
 .tb-navlink-icon{padding:.4rem .55rem;display:inline-flex;align-items:center}
 .tb-navlink-icon svg{display:block}
+/* Sufixo da matéria ativa na topbar ("• HB") */
+.tb-subj{color:var(--accent);font-weight:400;letter-spacing:.1em;margin-left:.1em}
 
 /* ─── Global search page ─── */
 .search-page{max-width:1000px;margin:0 auto;padding:0 4.5vw 3rem}
@@ -7874,6 +7876,15 @@ const Util = {
       const found = window.COURSE.modules.find(m => m.id === courseOrId);
       if(found) return found;
     }
+    // 1b) Modo global do Portal: procura também nas OUTRAS matérias.
+    if(Array.isArray(window.COURSES)){
+      for(const c of window.COURSES){
+        if(c && Array.isArray(c.modules)){
+          const f = c.modules.find(m => m.id === courseOrId);
+          if(f) return f;
+        }
+      }
+    }
     // 2) Fallback: constrói o módulo do zero a partir do UbiqueStore.
     //    Resiliente quando window.COURSE ainda não foi rebuilt
     //    (race no boot) OU não conhece o módulo pedido.
@@ -7907,6 +7918,32 @@ const Util = {
   }
 };
 window.Util = Util;
+
+/* "Matéria ativa": só existe quando o aluno ENTROU numa matéria. No
+   catálogo ("Seus cursos") não há matéria ativa — daí o Portal/topbar
+   operam em modo GLOBAL (todas as matérias). window._subjectMode é
+   sticky: liga ao entrar numa matéria/módulo, desliga no catálogo
+   (setado no loop de render). window.COURSE continua sendo a última
+   matéria entrada (pro Store e hierarquia), mas só "conta" como ativa
+   quando _subjectMode está ligado. */
+function activeSubject(){
+  return (window._subjectMode && window.COURSE) ? window.COURSE : null;
+}
+window.activeSubject = activeSubject;
+
+/* Sigla curta da matéria pra topbar ("História do Brasil" → "HB").
+   Usa alias/sigla cadastrada se houver; senão monta das iniciais
+   (ignorando conectores). */
+function subjectSigla(subj){
+  if(!subj) return '';
+  if(subj.sigla) return String(subj.sigla).toUpperCase();
+  if(subj.alias) return String(subj.alias).toUpperCase();
+  const stop = new Set(['de','da','do','das','dos','e','a','o','as','os','em','para','por']);
+  const words = String(subj.title||'').trim().split(/\s+/).filter(Boolean);
+  const initials = words.filter(w => !stop.has(w.toLowerCase())).map(w => w[0]).join('');
+  return (initials || (subj.title||'?').slice(0,2)).toUpperCase();
+}
+window.subjectSigla = subjectSigla;
 
 /* ───────── Store ───────── */
 const Auth = (function(){
@@ -9875,42 +9912,40 @@ function renderSidebarDownloads(list){
 
 /* ───────── Breadcrumb ───────── */
 function renderBreadcrumb(route){
-  if(route.view === 'login'){
-    document.getElementById('breadcrumb').innerHTML = '';
+  const el = document.getElementById('breadcrumb');
+  // Catálogo ("Seus cursos") e login: SEM breadcrumb de matéria — o aluno
+  // ainda não entrou em nada. (Resolve o "HISTÓRIA DO BRASIL" indevido.)
+  if(route.view === 'login' || route.view === 'catalog'){
+    el.innerHTML = '';
     return;
   }
   const bc = [];
+  // Só mostra a matéria no breadcrumb quando há matéria ativa (modo dentro).
+  const subj = activeSubject();
+  const sep = () => { if(bc.length) bc.push('<span class="bc-sep">›</span>'); };
   if(route.section === 'admin'){
-    bc.push(`<a href="#/course">${Util.esc((window.COURSE && window.COURSE.title) || 'Curso')}</a>`);
-    bc.push('<span class="bc-sep">â€º</span>');
+    if(subj) bc.push(`<a href="#/course">${Util.esc(subj.title)}</a>`);
+    sep();
     bc.push('<span class="bc-current">Admin</span>');
-    document.getElementById('breadcrumb').innerHTML = bc.join(' ');
+    el.innerHTML = bc.join(' ');
     return;
   }
-  bc.push(`<a href="#/course">${Util.esc((window.COURSE && window.COURSE.title) || 'Curso')}</a>`);
+  if(subj) bc.push(`<a href="#/course">${Util.esc(subj.title)}</a>`);
   if(route.view === 'notes'){
-    bc.push('<span class="bc-sep">›</span>');
-    bc.push('<span class="bc-current">Notas</span>');
-    document.getElementById('breadcrumb').innerHTML = bc.join(' ');
-    return;
+    sep(); bc.push('<span class="bc-current">Notas</span>');
+    el.innerHTML = bc.join(' '); return;
   }
   if(route.view === 'reading'){
-    bc.push('<span class="bc-sep">›</span>');
-    bc.push('<span class="bc-current">Lista de leitura</span>');
-    document.getElementById('breadcrumb').innerHTML = bc.join(' ');
-    return;
+    sep(); bc.push('<span class="bc-current">Lista de leitura</span>');
+    el.innerHTML = bc.join(' '); return;
   }
   if(route.view === 'performance'){
-    bc.push('<span class="bc-sep">›</span>');
-    bc.push('<span class="bc-current">Desempenho</span>');
-    document.getElementById('breadcrumb').innerHTML = bc.join(' ');
-    return;
+    sep(); bc.push('<span class="bc-current">Desempenho</span>');
+    el.innerHTML = bc.join(' '); return;
   }
   if(route.view === 'admin'){
-    bc.push('<span class="bc-sep">›</span>');
-    bc.push('<span class="bc-current">Admin</span>');
-    document.getElementById('breadcrumb').innerHTML = bc.join(' ');
-    return;
+    sep(); bc.push('<span class="bc-current">Admin</span>');
+    el.innerHTML = bc.join(' '); return;
   }
   if(route.params.moduleId){
     const m = Util.findModule(route.params.moduleId);
@@ -13405,17 +13440,42 @@ const Portal = {
     Object.keys(Portal.cards).forEach(k => { out[k] = Portal.aggregate(moduleId, k, {}).length; });
     return out;
   },
-  // Course-wide aggregation (all modules). Defensive contra window.COURSE
-  // undefined durante race boot↔hydrate.
+  // Cursos no ESCOPO atual do Portal: matéria ativa → só ela; catálogo
+  // (modo global) → todas as matérias da plataforma.
+  scopeCourses(){
+    const subj = (typeof activeSubject === 'function') ? activeSubject() : null;
+    if(subj) return [subj];
+    return (window.COURSES && window.COURSES.filter(Boolean)) ||
+           (window.COURSE ? [window.COURSE] : []);
+  },
+  // Set de unit_ids (store) no escopo atual, ou null = sem escopo (todas).
+  // Usado pra escopar o banco de questões/discursivas pela matéria ativa.
+  scopeUnitDbIdSet(){
+    const subj = (typeof activeSubject === 'function') ? activeSubject() : null;
+    if(!subj) return null;
+    const ids = new Set();
+    (subj.modules||[]).forEach(m => Util.unitsOfModule(m).forEach(e => {
+      const sid = Portal._unitDbId(e.unit);
+      if(sid) ids.add(String(sid));
+    }));
+    return ids;
+  },
+  // Agregação no escopo (matéria ativa OU todas). Aceita filters.subject
+  // (id da matéria) pro filtro "Matéria" do modo global.
   aggregateAll(cardKey, filters){
     filters = filters || {};
     let allItems = [];
-    const modules = (window.COURSE && Array.isArray(window.COURSE.modules)) ? window.COURSE.modules : [];
-    modules.forEach(mod => {
-      const modItems = Portal.aggregate(mod.id, cardKey, Object.assign({}, filters, { module: undefined }));
-      modItems.forEach(it => { it.__moduleId = mod.id; it.__moduleLabel = mod.label; });
-      if(filters.module && mod.id !== filters.module) return;
-      allItems = allItems.concat(modItems);
+    Portal.scopeCourses().forEach(course => {
+      if(filters.subject && String(course._subjectId) !== String(filters.subject)) return;
+      (course.modules || []).forEach(mod => {
+        const modItems = Portal.aggregate(mod.id, cardKey, Object.assign({}, filters, { module: undefined }));
+        modItems.forEach(it => {
+          it.__moduleId = mod.id; it.__moduleLabel = mod.label;
+          it.__subjectId = course._subjectId; it.__subjectTitle = course.title;
+        });
+        if(filters.module && mod.id !== filters.module) return;
+        allItems = allItems.concat(modItems);
+      });
     });
     return allItems;
   },
@@ -18399,10 +18459,12 @@ Renderers.portal = function(route){
 
 /* ═══════════ COURSE-WIDE PORTAL ═══════════ */
 Renderers.coursePortal = function(route){
-  const course = window.COURSE;
+  const subj = activeSubject();           // matéria ativa (ou null = global)
+  const courses = Portal.scopeCourses();  // matéria ativa OU todas
   const enabled = Object.keys(Portal.cards);
   const counts = Portal.countsAll();
-  const totalUnits = course.modules.reduce((s,m) => s + Util.unitsOfModule(m).length, 0);
+  const totalUnits = courses.reduce((s,c) => s + (c.modules||[]).reduce((a,m)=>a+Util.unitsOfModule(m).length,0), 0);
+  const totalModules = courses.reduce((s,c) => s + (c.modules||[]).length, 0);
 
   const cards = enabled.map((key,i) => {
     const c = Portal.cards[key]; if(!c) return '';
@@ -18415,14 +18477,23 @@ Renderers.coursePortal = function(route){
     </a>`;
   }).join('');
 
+  // Título: dentro de uma matéria → nome dela; modo global → "Todas as matérias".
+  const title = subj ? subj.title : 'Portal — todas as matérias';
+  const subtitle = subj
+    ? `Compilações e referências · ${totalModules} módulos · ${totalUnits} unidades`
+    : `Compilado da plataforma · ${courses.length} matérias · ${totalModules} módulos · ${totalUnits} unidades`;
+  const body = subj
+    ? 'Explore as questões, flashcards e referências desta matéria reunidas em um só lugar. Filtre por módulo, capítulo, unidade, tópico ou tag.'
+    : 'Tudo da plataforma reunido: filtre por matéria, módulo, capítulo, unidade, tópico ou tag. Entre numa matéria pelo catálogo para ver só o conteúdo dela.';
+
   return `<div class="hero">
     <span class="s-label" data-a="1">Portal do curso</span>
-    <h1 class="s-title hero" data-a="2">${Util.esc(course.title)}</h1>
-    <p class="s-subtitle" data-a="3">Compilações e referências · ${course.modules.length} módulos · ${totalUnits} unidades</p>
+    <h1 class="s-title hero" data-a="2">${Util.esc(title)}</h1>
+    <p class="s-subtitle" data-a="3">${Util.esc(subtitle)}</p>
     <div class="s-divider" data-a="4"></div>
-    <p class="s-body" data-a="5">Explore todas as questões, flashcards e referências do curso reunidas em um só lugar. Filtre por módulo, capítulo, unidade, tópico ou tag.</p>
+    <p class="s-body" data-a="5">${Util.esc(body)}</p>
     <div class="cta-row" data-a="6">
-      <a class="btn-ghost" href="#/course">${Icons.chevron} Voltar ao curso</a>
+      <a class="btn-ghost" href="${subj ? '#/course' : '#/'}">${Icons.chevron} ${subj ? 'Voltar ao curso' : 'Voltar aos cursos'}</a>
     </div>
   </div>
   <div class="portal-grid">${cards}</div>`;
@@ -18436,11 +18507,12 @@ Renderers.coursePortalDetail = function(route){
   const cardKey = route.params.cardKey;
   if(cardKey === 'questions' && Renderers.questionBank) return Renderers.questionBank(route);
   if(cardKey === 'essays' && Renderers.essayBank) return Renderers.essayBank(route);
-  const course = window.COURSE;
   const card = Portal.cards[cardKey];
   if(!card) return `<div class="empty"><div class="empty-title">Seção não encontrada</div></div>`;
 
+  const subj = activeSubject(); // matéria ativa (ou null = modo global)
   const filters = {
+    subject: route.query.subject || '',
     module: route.query.module || '',
     chapter: route.query.chapter || '',
     unit: route.query.unit || '',
@@ -18451,16 +18523,31 @@ Renderers.coursePortalDetail = function(route){
 
   const items = Portal.aggregateAll(cardKey, filters);
 
-  // ── Filtros em cascata: Módulo → Capítulo → Unidade ──
-  // Capítulo só aparece depois de escolher um módulo (e se ele tiver
-  // capítulos). Unidade aparece depois do módulo, filtrada pelo capítulo
-  // quando houver. Cada nível depende do anterior.
+  // ── Filtros em cascata ──
+  // Modo global (sem matéria ativa): começa por MATÉRIA; só depois aparecem
+  // Módulo → Capítulo → Unidade. Modo escopado (dentro de uma matéria): a
+  // matéria já está fixa, então começa direto no Módulo.
+  const allCourses = (window.COURSES && window.COURSES.filter(Boolean)) || [];
+  let subjectOpts = '';
+  if(!subj && allCourses.length > 1){
+    subjectOpts = `<div class="fb-group"><span class="fb-label">Matéria</span>
+      <select class="fb-select" data-filter="subject">
+        <option value="">Todas</option>
+        ${allCourses.map(c => `<option value="${Util.attr(c._subjectId)}" ${String(filters.subject)===String(c._subjectId)?'selected':''}>${Util.esc(c.title)}</option>`).join('')}
+      </select></div>`;
+  }
+  // Curso de referência pra listar Módulos: matéria ativa OU a escolhida.
+  const refCourse = subj || (filters.subject ? allCourses.find(c => String(c._subjectId)===String(filters.subject)) : null);
+
   const selMod = filters.module ? Util.findModule(filters.module) : null;
-  const moduleOpts = `<div class="fb-group"><span class="fb-label">Módulo</span>
-    <select class="fb-select" data-filter="module">
-      <option value="">Todos</option>
-      ${course.modules.map(m => `<option value="${Util.attr(m.id)}" ${filters.module===m.id?'selected':''}>${Util.esc(m.label+' · '+m.title)}</option>`).join('')}
-    </select></div>`;
+  let moduleOpts = '';
+  if(refCourse){
+    moduleOpts = `<div class="fb-group"><span class="fb-label">Módulo</span>
+      <select class="fb-select" data-filter="module">
+        <option value="">Todos</option>
+        ${(refCourse.modules||[]).map(m => `<option value="${Util.attr(m.id)}" ${filters.module===m.id?'selected':''}>${Util.esc(m.label+' · '+m.title)}</option>`).join('')}
+      </select></div>`;
+  }
 
   let chapterOpts = '';
   if(selMod && selMod.chapters && selMod.chapters.length){
@@ -18486,7 +18573,7 @@ Renderers.coursePortalDetail = function(route){
   // Unidade aplicados, sem tópico/tag/busca) — assim os dropdowns mostram
   // só o que existe no recorte, sem opções que não levam a nada.
   const scopeItems = Portal.aggregateAll(cardKey, {
-    module: filters.module, chapter: filters.chapter, unit: filters.unit
+    subject: filters.subject, module: filters.module, chapter: filters.chapter, unit: filters.unit
   });
   const topicsUsed = new Set();
   const tagsUsed = new Set();
@@ -18542,7 +18629,7 @@ Renderers.coursePortalDetail = function(route){
     </div>
   </div>
   <div class="filter-bar">
-    ${moduleOpts}${chapterOpts}${unitOpts}${topicOpts}${tagOpts}${searchOpts}
+    ${subjectOpts}${moduleOpts}${chapterOpts}${unitOpts}${topicOpts}${tagOpts}${searchOpts}
     <button class="fb-clear" id="fbClear">Limpar</button>
     <span class="fb-count" id="fbCount">${items.length} resultados</span>
   </div>
@@ -18565,6 +18652,7 @@ Renderers.coursePortalDetail.mount = function(stageEl, route){
     el.addEventListener('change', () => {
       const q = Object.assign({}, route.query);
       q[key] = el.value; if(!q[key]) delete q[key];
+      if(key === 'subject'){ delete q.module; delete q.chapter; delete q.unit; delete q.topic; delete q.tag; }
       if(key === 'module'){ delete q.chapter; delete q.unit; delete q.topic; delete q.tag; }
       if(key === 'chapter'){ delete q.unit; delete q.topic; delete q.tag; }
       if(key === 'unit'){ delete q.topic; delete q.tag; }
@@ -19125,6 +19213,18 @@ function _buildEssayBankFromBlocks(){
   return out;
 }
 
+// Escopo da matéria ativa no banco: se houver matéria ativa, mantém só os
+// itens cujas appears_in caem nas unidades dela. Sem matéria ativa
+// (catálogo/modo global) → todos. NÃO mexe no resolver getById, que
+// continua global (resolve qualquer questão por id pra renderizar).
+function _bankScopeFilter(items){
+  const scope = (window.Portal && Portal.scopeUnitDbIdSet) ? Portal.scopeUnitDbIdSet() : null;
+  if(!scope) return items;
+  return items.filter(function(q){
+    const ap = q.appears_in || [];
+    return ap.some(function(a){ return a && scope.has(String(a.unit_id)); });
+  });
+}
 // Helper unificado: une QuestionBank.list() (legacy) com derivação dos
 // blocks (fonte de verdade hoje). Dedup por id pra evitar duplicatas.
 function _bankItemsForQuestions(){
@@ -19139,7 +19239,7 @@ function _bankItemsForQuestions(){
     seen.add(key);
     out.push(q);
   });
-  return out;
+  return _bankScopeFilter(out);
 }
 function _bankItemsForEssays(){
   const fromBank = (window.EssayBank && EssayBank.list) ? EssayBank.list() : [];
@@ -19153,7 +19253,7 @@ function _bankItemsForEssays(){
     seen.add(key);
     out.push(q);
   });
-  return out;
+  return _bankScopeFilter(out);
 }
 
 /* Engine: aplica todos os filtros a uma lista de items (bank questions ou
@@ -23332,6 +23432,11 @@ const App = {
     }
     // Marca a rota no body pra CSS condicional (ex: esconder topbar em /login)
     try{ document.body.dataset.route = route.view || ''; }catch(_){}
+    // Modo matéria (STICKY): catálogo SAI do modo; entrar numa matéria/
+    // módulo ENTRA. Demais páginas (portal/desempenho/notas...) mantêm o
+    // modo atual — assim o aluno que entrou em HB segue "dentro de HB".
+    if(route.view === 'catalog'){ window._subjectMode = false; }
+    else if(route.view === 'courseHome' || (route.params && route.params.moduleId)){ window._subjectMode = true; }
     AppShell.syncChrome(route);
     renderBreadcrumb(route);
     const stage = document.getElementById('stage');
@@ -23356,6 +23461,18 @@ const App = {
     if(navEdital) navEdital.classList.toggle('active', route.view === 'edital');
     const navGloss = document.getElementById('navGlossario');
     if(navGloss) navGloss.classList.toggle('active', route.view === 'glossario');
+    // Labels da topbar refletem a matéria ativa: "Portal • HB" quando
+    // dentro de uma matéria; só "Portal" no modo global (catálogo).
+    try{
+      const _subj = activeSubject();
+      const _sig = _subj ? subjectSigla(_subj) : '';
+      const NAVBASE = { navSimulados:'Simulados', navEdital:'Edital', navPortal:'Portal', navPerformance:'Desempenho', navReading:'Lista de leitura', navNotes:'Notas', navGlossario:'Glossário' };
+      Object.keys(NAVBASE).forEach(id => {
+        const el = document.getElementById(id);
+        if(!el) return;
+        el.innerHTML = Util.esc(NAVBASE[id]) + (_sig ? ` <span class="tb-subj">• ${Util.esc(_sig)}</span>` : '');
+      });
+    }catch(_){}
     window.scrollTo(0,0);
   },
   _showAccessToast(msg){
