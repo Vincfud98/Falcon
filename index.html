@@ -9741,14 +9741,30 @@ const Store = (function(){
       // Notifica cada mencionado (não si mesmo) — passa por UbiqueStore
       if(window.Notifications){
         const excerpt = String(text||'').slice(0, 160);
+        // Resolve módulo/capítulo a partir da unidade (via UbiqueStore) para
+        // montar a rota real no clique da notificação — sem depender só do
+        // hash atual (que pode estar vazio em alguns contextos).
+        let modId = null, chapId = null;
+        try{
+          if(unitId && window.UbiqueStore){
+            const unit = (UbiqueStore.units.list() || []).find(u => u && String(u.id) === String(unitId));
+            if(unit){
+              const ch = (UbiqueStore.chapters.list() || []).find(c => c && String(c.id) === String(unit.chapter_id));
+              if(ch){ chapId = ch.id; const mod = (UbiqueStore.modules.list() || []).find(mm => mm && String(mm.id) === String(ch.module_id)); if(mod) modId = mod.id; }
+            }
+          }
+        }catch(_){}
         mentions.forEach(m => {
           if(m.user_id && m.user_id !== authorId){
             Notifications.create(m.user_id, 'mention', {
               from_user_id: authorId,
               comment_id: comment.id,
               block_id: blockId,
+              unit_id: unitId || null,
+              module_id: modId,
+              chapter_id: chapId,
               text_excerpt: excerpt,
-              // Leva o usuário exatamente até onde o comentário foi feito.
+              // Atalho secundário: hash atual no momento da criação.
               target_hash: (typeof location !== 'undefined' ? location.hash : '') || ''
             });
           }
@@ -14044,11 +14060,50 @@ const UserAvatarCrop = (function(){
 })();
 window.UserAvatarCrop = UserAvatarCrop;
 
+/* Busca UM perfil sob demanda no Supabase (crm.user_profiles) e mescla no
+   UbiqueStore, pra quando o perfil ainda não foi pré-carregado. Evita que o
+   clique no autor/menção "não faça nada" silenciosamente. */
+async function _ensureProfileLoaded(userId){
+  if(!userId || !window._sb || !window.UbiqueStore || !UbiqueStore.user_profiles) return;
+  if(UserDirectory.getById(userId)) return; // já temos em memória
+  try{
+    const { data, error } = await window._sb.schema('crm').from('user_profiles')
+      .select('user_id, display_name, handle, bio, photo_url, photo_transform')
+      .eq('user_id', userId).maybeSingle();
+    if(error || !data) return;
+    const merged = {
+      user_id:        data.user_id,
+      displayName:    data.display_name || '',
+      nickname:       '',
+      handle:         data.handle || '',
+      bio:            data.bio || '',
+      photoUrl:       data.photo_url || '',
+      photoTransform: data.photo_transform || { x:0, y:0, scale:1 },
+      updated_at:     Date.now()
+    };
+    const list = UbiqueStore.user_profiles.list() || [];
+    const existing = list.find(x => x && x.user_id === data.user_id);
+    if(existing) UbiqueStore.user_profiles.update(existing.id, merged);
+    else UbiqueStore.user_profiles.add(Object.assign({ created_at: Date.now() }, merged));
+  }catch(e){ console.warn('[ensureProfileLoaded]', e); }
+}
+window._ensureProfileLoaded = _ensureProfileLoaded;
+
 /* openUserProfile — abre o modal de perfil. Reaproveitado em:
    busca por @, click em menção em comentário, listas de colegas. */
 function openUserProfile(userId){
   const u = UserDirectory.getById(userId);
-  if(!u) return;
+  if(!u){
+    // Perfil ainda não carregado → busca sob demanda e reabre quando chegar,
+    // em vez de falhar em silêncio.
+    if(userId && typeof _ensureProfileLoaded === 'function'){
+      _ensureProfileLoaded(userId).then(() => {
+        if(UserDirectory.getById(userId)) openUserProfile(userId);
+        else console.warn('[openUserProfile] perfil não encontrado:', userId);
+      });
+    }
+    return;
+  }
   const modal = document.getElementById('userProfileModal');
   if(!modal) return;
   const me = Auth.getUser();
@@ -14341,7 +14396,10 @@ const Notifications = (function(){
         .on('postgres_changes',
           { event: 'INSERT', schema: 'aluno', table: 'notifications', filter: 'user_id=eq.' + userId },
           () => { try{ cb && cb(); }catch(_){} })
-        .subscribe();
+        .subscribe((status) => {
+          if(status === 'SUBSCRIBED') console.log('%c[notif] antena conectada ✅ (realtime ativo)', 'color:#7bbf7b');
+          else if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') console.warn('[notif] realtime indisponível:', status, '— usando fallback de 45s');
+        });
     }catch(e){ console.warn('[notif realtime]', e); }
   }
   function unsubscribeRealtime(){
@@ -15313,6 +15371,43 @@ function _notifTimeAgo(ts){
   catch(_){ return ''; }
 }
 
+/* Monta a rota real (#/m/.../c/.../u/...) de uma notificação de menção.
+ * Ordem de robustez:
+ *   1) IDs reais salvos no payload (module_id/chapter_id/unit_id) — melhor;
+ *   2) descobre a unidade pelo block_id (notificações antigas) via UbiqueStore;
+ *   3) target_hash salvo na criação (atalho secundário).
+ * Retorna '' quando não dá pra resolver com segurança (evita mandar pra
+ * página errada — melhor não mostrar o botão do que enganar). */
+function _resolveNotifTargetHash(p){
+  if(!p) return '';
+  function hashFor(unitId){
+    if(!unitId || !window.UbiqueStore) return '';
+    const unit = (UbiqueStore.units.list() || []).find(u => u && String(u.id) === String(unitId));
+    if(!unit) return '';
+    const ch = (UbiqueStore.chapters.list() || []).find(c => c && String(c.id) === String(unit.chapter_id));
+    if(!ch) return '';
+    const mod = (UbiqueStore.modules.list() || []).find(m => m && String(m.id) === String(ch.module_id));
+    if(!mod) return '';
+    return '#/m/' + encodeURIComponent(mod.id) + '/c/' + encodeURIComponent(ch.id) + '/u/' + encodeURIComponent(unit.id);
+  }
+  // 1) IDs reais no payload
+  if(p.module_id && p.chapter_id && p.unit_id){
+    return '#/m/' + encodeURIComponent(p.module_id) + '/c/' + encodeURIComponent(p.chapter_id) + '/u/' + encodeURIComponent(p.unit_id);
+  }
+  // 1b) só unit_id salvo → resolve o resto
+  if(p.unit_id){ const h = hashFor(p.unit_id); if(h) return h; }
+  // 2) descobre a unidade pelo block_id (notificações antigas)
+  if(p.block_id && window.UbiqueStore && UbiqueStore.unit_blocks){
+    try{
+      const blk = (UbiqueStore.unit_blocks.list() || []).find(b => b && String(b.id) === String(p.block_id));
+      if(blk && blk.unit_id){ const h = hashFor(blk.unit_id); if(h) return h; }
+    }catch(_){}
+  }
+  // 3) atalho secundário: hash salvo na criação (se não for a home)
+  if(p.target_hash && p.target_hash !== '#/' && p.target_hash !== '#'){ return p.target_hash; }
+  return '';
+}
+
 /* Rola até o comentário alvo de uma notificação de menção. Como os
  * comentários hidratam de forma assíncrona, faz polling por alguns segundos
  * até o elemento existir no DOM; cai no bloco se não achar o comentário. */
@@ -15355,9 +15450,9 @@ function _notifRenderItem(n){
   if(n.type === 'mention'){
     const excerpt = p.text_excerpt ? '<span class="notif-excerpt">"' + Util.esc(p.text_excerpt) + '"</span>' : '';
     line = `<strong>${Util.esc(fromName)}</strong> mencionou você em um comentário. ${excerpt}`;
-    // Leva o usuário até o comentário: usa o hash salvo na criação; se for
-    // notificação antiga (sem target_hash), cai no fallback por block_id.
-    const target = p.target_hash || (p.block_id ? '#/' : '');
+    // Resolve a rota REAL (módulo/capítulo/unidade). Só mostra o botão se
+    // conseguir resolver com segurança — nunca manda pra "Seus cursos".
+    const target = _resolveNotifTargetHash(p);
     if(target){
       actions = `<div class="notif-actions"><a class="btn-ghost" href="${Util.attr(target)}" data-notif-goto="1" data-notif-block="${Util.attr(p.block_id||'')}" data-notif-comment="${Util.attr(p.comment_id||'')}" data-notif-id="${Util.attr(n.id)}">Ver comentário →</a></div>`;
     }
