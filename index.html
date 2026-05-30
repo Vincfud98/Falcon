@@ -8583,12 +8583,18 @@ const Auth = (function(){
       if(event === 'SIGNED_OUT'){
         current = null;
         syncMockUser();
+        // Desmonta a sessão anterior (antena realtime + polling + sino).
+        try{ if(typeof window.teardownUserSession === 'function') window.teardownUserSession(); }catch(_){}
         _renderSoon();
       } else if(event === 'SIGNED_IN' && session && session.user){
         if(!current || current.id !== session.user.id){
           current = await _hydrateSupabaseUser(session.user);
           syncMockUser();
           _renderSoon();
+          // Prepara a sessão do NOVO usuário (notificações ao vivo, etc.) —
+          // antes isto só acontecia no boot, por isso ao relogar sem reload
+          // tudo aparecia vazio até um reload manual.
+          try{ if(typeof window.initUserSession === 'function') window.initUserSession(current); }catch(_){}
         }
       }
     });
@@ -9785,6 +9791,7 @@ const Store = (function(){
         const notifiedReply = new Set();
         function _sendReply(toUserId){
           if(!toUserId || toUserId === authorId || notifiedReply.has(toUserId)) return;
+          console.log('%c[notif] resposta notificada → user', 'color:#7bbf7b', toUserId);
           Notifications.create(toUserId, 'reply', Object.assign({ parent_id: parentId || null }, _basePayload));
           notifiedReply.add(toUserId);
         }
@@ -14453,6 +14460,82 @@ const Notifications = (function(){
   return { create, listFor, unreadCount, markRead, markAllRead, hydrate, subscribeRealtime, unsubscribeRealtime };
 })();
 window.Notifications = Notifications;
+
+/* ──────────────────────────────────────────────────────────────────────
+ * Ciclo de SESSÃO do usuário — preparar/desmontar os dados ao logar/deslogar.
+ * Antes, tudo isto rodava SÓ no boot (carregamento da página); ao relogar sem
+ * reload, notificações/realtime/comentários ficavam vazios. Centralizar aqui
+ * garante que o boot E o login (onAuthStateChange) façam a MESMA preparação.
+ * ────────────────────────────────────────────────────────────────────── */
+
+// Atualiza o sino + a página de notificações quando algo muda (sem reload).
+window._refreshNotifsUI = function(){
+  try{
+    const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    if(!u || !window.Notifications) return;
+    const bb = document.getElementById('tbBellBadge');
+    if(bb){
+      const c = Notifications.unreadCount(u.id);
+      if(c > 0){ bb.hidden = false; bb.textContent = c > 99 ? '99+' : String(c); }
+      else bb.hidden = true;
+    }
+    // Re-renderiza a página de notificações SÓ quando o total muda (evita
+    // reset de scroll e a amplificação que multiplicava ações).
+    const total = Notifications.listFor(u.id).length;
+    const changed = (total !== window._lastNotifTotal);
+    window._lastNotifTotal = total;
+    if(changed){
+      const r = Router.parse();
+      if(r && r.view === 'notifications' && window.App && App.render) App.render();
+    }
+  }catch(_){}
+};
+
+async function initUserSession(user){
+  if(!user || !user.id) return;
+  // 1) Entrega o "crachá" (token de login) à antena do realtime — necessário
+  //    pra entregar linhas de tabelas com RLS ao vivo. Sem isto, o realtime
+  //    conecta mas não recebe nada das tabelas protegidas.
+  try{
+    if(window._sb && window._sb.auth && window._sb.realtime && typeof window._sb.realtime.setAuth === 'function'){
+      const { data } = await window._sb.auth.getSession();
+      const token = data && data.session && data.session.access_token;
+      if(token) window._sb.realtime.setAuth(token);
+    }
+  }catch(e){ console.warn('[session] setAuth realtime', e); }
+  // 2) Store do usuário (se ainda não inicializado)
+  try{ if(window.COURSE && window.Store && typeof Store.get === 'function' && !Store.get()) Store.init(user.id, window.COURSE); }catch(e){ console.warn('[session] Store.init', e); }
+  // 3) Notificações: hidrata + (re)liga a antena realtime do usuário ATUAL
+  if(window.Notifications){
+    window._lastNotifTotal = undefined; // força re-render na 1ª hidratação
+    Notifications.hydrate(user.id).then(window._refreshNotifsUI).catch(()=>{});
+    if(typeof Notifications.subscribeRealtime === 'function'){
+      // Cancela qualquer antena anterior (de outro usuário) e religa pro atual.
+      if(typeof Notifications.unsubscribeRealtime === 'function') Notifications.unsubscribeRealtime();
+      Notifications.subscribeRealtime(user.id, () => {
+        console.log('%c[notif] chegou notificação ao vivo →', 'color:#7bbf7b');
+        Notifications.hydrate(user.id).then(window._refreshNotifsUI).catch(()=>{});
+      });
+    }
+    // Fallback "quase ao vivo": re-hidrata a cada 30s (caso o realtime falhe).
+    if(window._notifPoll){ clearInterval(window._notifPoll); }
+    window._notifPoll = setInterval(() => {
+      const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+      if(u && u.id) Notifications.hydrate(u.id).then(window._refreshNotifsUI).catch(()=>{});
+    }, 30000);
+  }
+  // 4) Follows
+  if(window.Follows && typeof Follows.hydrate === 'function') Follows.hydrate(user.id).catch(()=>{});
+}
+window.initUserSession = initUserSession;
+
+function teardownUserSession(){
+  try{ if(window.Notifications && Notifications.unsubscribeRealtime) Notifications.unsubscribeRealtime(); }catch(_){}
+  if(window._notifPoll){ clearInterval(window._notifPoll); window._notifPoll = null; }
+  window._lastNotifTotal = undefined;
+  const bb = document.getElementById('tbBellBadge'); if(bb) bb.hidden = true;
+}
+window.teardownUserSession = teardownUserSession;
 
 /* Follows — relações de seguir entre usuários (local-first + Supabase).
    Status:
@@ -24358,55 +24441,11 @@ const App = {
     // popula COURSE depois, o subscribe re-chama Store.init (ver IIFE
     // course-builder).
     if(user && window.COURSE) Store.init(user.id, window.COURSE);
-    // Fase 4g — hidrata notifications + follows do Supabase (fire-and-forget,
-    // mescla com legacy local; entries com UUID são source-of-truth do DB)
-    if(user && window.Notifications && typeof Notifications.hydrate === 'function'){
-      // Atualiza o sino + a página de Notificações quando algo muda (sem
-      // precisar de reload). Usado pela hidratação, realtime e polling.
-      const _refreshNotifsUI = () => {
-        try{
-          const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-          if(!u || !window.Notifications) return;
-          // Sino: sempre reflete a contagem de não-lidas.
-          const bb = document.getElementById('tbBellBadge');
-          if(bb){
-            const c = Notifications.unreadCount(u.id);
-            if(c > 0){ bb.hidden = false; bb.textContent = c > 99 ? '99+' : String(c); }
-            else bb.hidden = true;
-          }
-          // Re-renderiza a página de notificações SÓ quando algo realmente
-          // mudou (chegou/saiu notificação). Antes eu re-renderizava em todo
-          // tick do polling, o que resetava o scroll e — junto com um listener
-          // que se acumulava — multiplicava ações. Agora é cirúrgico.
-          const total = Notifications.listFor(u.id).length;
-          const changed = (total !== window._lastNotifTotal);
-          window._lastNotifTotal = total;
-          if(changed){
-            const r = Router.parse();
-            if(r && r.view === 'notifications' && window.App && App.render) App.render();
-          }
-        }catch(_){}
-      };
-      window._refreshNotifsUI = _refreshNotifsUI;
-      // 1) Hidrata e atualiza assim que chega (corrige "só após reload").
-      Notifications.hydrate(user.id).then(_refreshNotifsUI).catch(()=>{});
-      // 2) Realtime: chega AO VIVO se a tabela tiver Realtime habilitado.
-      if(typeof Notifications.subscribeRealtime === 'function'){
-        Notifications.subscribeRealtime(user.id, () => {
-          Notifications.hydrate(user.id).then(_refreshNotifsUI).catch(()=>{});
-        });
-      }
-      // 3) Fallback "quase ao vivo": re-hidrata a cada 45s (caso o Realtime
-      //    não esteja habilitado na tabela).
-      if(!window._notifPoll){
-        window._notifPoll = setInterval(() => {
-          const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-          if(u && u.id) Notifications.hydrate(u.id).then(_refreshNotifsUI).catch(()=>{});
-        }, 45000);
-      }
-    }
-    if(user && window.Follows && typeof Follows.hydrate === 'function'){
-      Follows.hydrate(user.id).catch(()=>{});
+    // Preparação completa da sessão (notificações + antena realtime + follows).
+    // Mesma função usada no login (onAuthStateChange), pra não haver diferença
+    // entre "abrir a página" e "logar dentro do app".
+    if(user && typeof window.initUserSession === 'function'){
+      window.initUserSession(user);
     }
     if(force){
       App.render();
