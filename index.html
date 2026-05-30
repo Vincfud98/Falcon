@@ -2562,6 +2562,19 @@ html[data-theme="light"] .bf-select{color-scheme:light}
 .comments-block .cmt-author{
   font-family:var(--sans);font-weight:500;font-size:.78rem;color:var(--text);
 }
+/* Autor clicável (abre modal de perfil) — reset de botão + estado hover */
+.comments-block button.cmt-author{
+  background:none;border:0;padding:0;margin:0;cursor:pointer;
+  text-align:left;line-height:inherit;transition:color .15s ease;
+}
+.comments-block button.cmt-author:hover{ color:var(--accent); text-decoration:underline; }
+.comments-block .cmt-avatar.cmt-author-link{ cursor:pointer; }
+/* Destaque temporário ao chegar via notificação de menção */
+@keyframes notifTargetFlash{
+  0%{ box-shadow:0 0 0 3px var(--accent), 0 0 18px var(--accent); }
+  100%{ box-shadow:0 0 0 0 transparent, 0 0 0 transparent; }
+}
+.notif-target-flash{ animation:notifTargetFlash 2.4s ease-out; border-radius:10px; }
 .comments-block .cmt-date{
   font-family:var(--mono);font-size:.52rem;color:var(--text-mute);
 }
@@ -9734,7 +9747,9 @@ const Store = (function(){
               from_user_id: authorId,
               comment_id: comment.id,
               block_id: blockId,
-              text_excerpt: excerpt
+              text_excerpt: excerpt,
+              // Leva o usuário exatamente até onde o comentário foi feito.
+              target_hash: (typeof location !== 'undefined' ? location.hash : '') || ''
             });
           }
         });
@@ -11554,6 +11569,8 @@ Blocks.quiz = {
         const item = allItems.find(x => x.id === itemEl.getAttribute('data-item-id'));
         if(item) bindQuizDataPanel(itemEl, item);
       });
+      // Contadores de comentários já visíveis na lista (1 consulta em lote).
+      _populateQuestionCommentBadges(stageEl);
       // Wire: clique no "ver gabarito" reexibe o gabarito da questão respondida
       // (mesmo sem desmarcar/remarcar a resposta)
       stageEl.querySelectorAll('.q-show-key').forEach(btn => {
@@ -13340,10 +13357,10 @@ function _buildCommentThread(block, ctx){
     const replies = allComments.filter(r => r.parentId === c.id);
     const isOwn = c.authorId === (window.MOCK_USER&&window.MOCK_USER.id);
     return `<div class="cmt-item" data-comment-id="${Util.attr(c.id)}">
-      <div class="cmt-avatar" data-cmt-avatar-uid="${Util.attr(c.authorId||'')}">${Util.esc(Util.initials(c.author||''))}</div>
+      <div class="cmt-avatar cmt-author-link" data-cmt-avatar-uid="${Util.attr(c.authorId||'')}" data-user-id="${Util.attr(c.authorId||'')}" title="Ver perfil">${Util.esc(Util.initials(c.author||''))}</div>
       <div class="cmt-item-body">
         <div class="cmt-item-head">
-          <span class="cmt-author">${Util.esc(c.author||'Anônimo')}</span>
+          <button type="button" class="cmt-author cmt-author-link" data-user-id="${Util.attr(c.authorId||'')}" title="Ver perfil">${Util.esc(c.author||'Anônimo')}</button>
           <span class="cmt-date">${fmtDate(c.createdAt)}</span>
           ${c.editedAt ? '<span class="cmt-edited-tag">editado</span>' : ''}
         </div>
@@ -13440,7 +13457,8 @@ Blocks.comments = {
     }
     // Click em menção dentro de comentários abre o modal de perfil
     wrap.addEventListener('click', e => {
-      const m = e.target.closest('.cmt-mention');
+      // Menção (@handle) OU nome/foto do autor → abre o modal de perfil.
+      const m = e.target.closest('.cmt-mention, .cmt-author-link');
       if(m){
         e.preventDefault();
         const uid = m.getAttribute('data-user-id');
@@ -14311,7 +14329,25 @@ const Notifications = (function(){
       return added;
     }catch(e){ console.warn('[notif hydrate ex]', e); return 0; }
   }
-  return { create, listFor, unreadCount, markRead, markAllRead, hydrate };
+  /* Realtime: assina INSERTs de notificações do usuário. Quando o Supabase
+   * Realtime está habilitado na tabela aluno.notifications, novas
+   * notificações chegam AO VIVO (sem reload). Se não estiver habilitado,
+   * o canal simplesmente não dispara — o polling do boot cobre. */
+  let _channel = null;
+  function subscribeRealtime(userId, cb){
+    if(!window._sb || !_isUuid(userId) || _channel) return;
+    try{
+      _channel = window._sb.channel('notif-' + userId)
+        .on('postgres_changes',
+          { event: 'INSERT', schema: 'aluno', table: 'notifications', filter: 'user_id=eq.' + userId },
+          () => { try{ cb && cb(); }catch(_){} })
+        .subscribe();
+    }catch(e){ console.warn('[notif realtime]', e); }
+  }
+  function unsubscribeRealtime(){
+    if(_channel && window._sb){ try{ window._sb.removeChannel(_channel); }catch(_){} _channel = null; }
+  }
+  return { create, listFor, unreadCount, markRead, markAllRead, hydrate, subscribeRealtime, unsubscribeRealtime };
 })();
 window.Notifications = Notifications;
 
@@ -15277,6 +15313,32 @@ function _notifTimeAgo(ts){
   catch(_){ return ''; }
 }
 
+/* Rola até o comentário alvo de uma notificação de menção. Como os
+ * comentários hidratam de forma assíncrona, faz polling por alguns segundos
+ * até o elemento existir no DOM; cai no bloco se não achar o comentário. */
+window._scrollToPendingComment = function(){
+  const pend = window._pendingCommentScroll;
+  if(!pend) return;
+  let tries = 0;
+  const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
+  const tick = () => {
+    tries++;
+    let el = null;
+    if(pend.commentId) el = document.querySelector('[data-comment-id="' + esc(pend.commentId) + '"]');
+    if(!el && pend.blockId) el = document.querySelector('[data-block-id="' + esc(pend.blockId) + '"]');
+    if(el){
+      el.scrollIntoView({ behavior:'smooth', block:'center' });
+      el.classList.add('notif-target-flash');
+      setTimeout(() => el.classList.remove('notif-target-flash'), 2400);
+      window._pendingCommentScroll = null;
+      return;
+    }
+    if(tries < 30) setTimeout(tick, 200);
+    else window._pendingCommentScroll = null;
+  };
+  tick();
+};
+
 function _notifRenderItem(n){
   const p = n.payload || {};
   const from = p.from_user_id ? UserDirectory.getById(p.from_user_id) : null;
@@ -15293,6 +15355,12 @@ function _notifRenderItem(n){
   if(n.type === 'mention'){
     const excerpt = p.text_excerpt ? '<span class="notif-excerpt">"' + Util.esc(p.text_excerpt) + '"</span>' : '';
     line = `<strong>${Util.esc(fromName)}</strong> mencionou você em um comentário. ${excerpt}`;
+    // Leva o usuário até o comentário: usa o hash salvo na criação; se for
+    // notificação antiga (sem target_hash), cai no fallback por block_id.
+    const target = p.target_hash || (p.block_id ? '#/' : '');
+    if(target){
+      actions = `<div class="notif-actions"><a class="btn-ghost" href="${Util.attr(target)}" data-notif-goto="1" data-notif-block="${Util.attr(p.block_id||'')}" data-notif-comment="${Util.attr(p.comment_id||'')}" data-notif-id="${Util.attr(n.id)}">Ver comentário →</a></div>`;
+    }
   } else if(n.type === 'follow_request'){
     line = `<strong>${Util.esc(fromName)}</strong> quer te seguir.`;
     // Verifica se o pedido ainda está pendente
@@ -15425,6 +15493,21 @@ Renderers.notifications.mount = function(stageEl){
 
   // Aceitar/Recusar pedidos inline
   stageEl.addEventListener('click', e => {
+    const goto = e.target.closest('[data-notif-goto]');
+    if(goto){
+      // Marca como lida e agenda a rolagem até o comentário. A navegação
+      // pelo href (#/...) dispara o router; o scroll roda após hidratar.
+      const nid = goto.getAttribute('data-notif-id');
+      if(nid) Notifications.markRead(nid);
+      window._pendingCommentScroll = {
+        blockId: goto.getAttribute('data-notif-block') || '',
+        commentId: goto.getAttribute('data-notif-comment') || ''
+      };
+      if(typeof window._scrollToPendingComment === 'function'){
+        setTimeout(window._scrollToPendingComment, 400);
+      }
+      // não dá return: deixa o href navegar normalmente
+    }
     const acc = e.target.closest('[data-notif-accept]');
     const dec = e.target.closest('[data-notif-decline]');
     if(acc){
@@ -23593,6 +23676,8 @@ function bindQuizItems(stageEl, items){
     // Botão "Dados" → expande/colapsa o painel de estatísticas (cortina).
     bindQuizDataPanel(itemEl, item);
   });
+  // Contadores de comentários já visíveis na lista (1 consulta em lote).
+  _populateQuestionCommentBadges(stageEl);
 }
 /* Liga o botão "Dados" de uma questão: expande o painel (Estatísticas) com
    animação de cortina; renderiza o conteúdo no 1º clique. */
@@ -23608,7 +23693,9 @@ function bindQuizDataPanel(itemEl, item){
 
   function updateBadge(){
     if(!countEl) return;
-    const n = (window.Store && Store.getComments) ? (Store.getComments(item.id)||[]).length : 0;
+    const local = (window.Store && Store.getComments) ? (Store.getComments(item.id)||[]).length : 0;
+    const server = parseInt(countEl.dataset.serverCount || '0', 10) || 0;
+    const n = Math.max(local, server); // mostra a contagem mesmo antes de abrir
     countEl.textContent = n; countEl.hidden = !(n > 0);
   }
   function remeasure(){ requestAnimationFrame(() => { panel.style.maxHeight = panel.scrollHeight + 'px'; }); }
@@ -23665,6 +23752,37 @@ function bindQuizDataPanel(itemEl, item){
   if(dataBtn) dataBtn.addEventListener('click', () => toggle('stats'));
   if(commBtn) commBtn.addEventListener('click', () => toggle('comments'));
   updateBadge(); // estado já hidratado de visita anterior
+}
+
+/* Preenche os contadores de comentários das questões visíveis ANTES de abrir
+   o painel — uma única consulta ao Supabase contando discussion_comments por
+   block_id (que, para questões, é o próprio id da questão). Isso faz o número
+   aparecer já na lista, incentivando o aluno a abrir e ler. */
+async function _populateQuestionCommentBadges(stageEl){
+  if(!stageEl || !window._sb) return;
+  try{
+    const items = Array.from(stageEl.querySelectorAll('.q-item[data-item-id]'));
+    const ids = [...new Set(items.map(el => el.getAttribute('data-item-id')).filter(Boolean))];
+    if(!ids.length) return;
+    const { data, error } = await window._sb.schema('aluno').from('discussion_comments')
+      .select('block_id')
+      .in('block_id', ids.map(String))
+      .is('deleted_at', null);
+    if(error){ console.warn('[q comment counts]', error); return; }
+    const counts = {};
+    (data||[]).forEach(r => { const k = String(r.block_id); counts[k] = (counts[k]||0) + 1; });
+    items.forEach(el => {
+      const id = String(el.getAttribute('data-item-id'));
+      const countEl = el.querySelector('.q-pill-count');
+      if(!countEl) return;
+      const n = counts[id] || 0;
+      countEl.dataset.serverCount = String(n);
+      // só sobe o número exibido (não derruba uma contagem local já maior)
+      const shown = parseInt(countEl.textContent || '0', 10) || 0;
+      const finalN = Math.max(shown, n);
+      countEl.textContent = finalN; countEl.hidden = !(finalN > 0);
+    });
+  }catch(e){ console.warn('[q comment counts]', e); }
 }
 function bindEssayItems(stageEl, items){
   stageEl.querySelectorAll('.essay-item[data-item-id]').forEach(itemEl => {
@@ -24078,7 +24196,39 @@ const App = {
     // Fase 4g — hidrata notifications + follows do Supabase (fire-and-forget,
     // mescla com legacy local; entries com UUID são source-of-truth do DB)
     if(user && window.Notifications && typeof Notifications.hydrate === 'function'){
-      Notifications.hydrate(user.id).catch(()=>{});
+      // Atualiza o sino + a página de Notificações quando algo muda (sem
+      // precisar de reload). Usado pela hidratação, realtime e polling.
+      const _refreshNotifsUI = () => {
+        try{
+          const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+          const bb = document.getElementById('tbBellBadge');
+          if(bb && u && window.Notifications){
+            const c = Notifications.unreadCount(u.id);
+            if(c > 0){ bb.hidden = false; bb.textContent = c > 99 ? '99+' : String(c); }
+            else bb.hidden = true;
+          }
+          // Re-renderiza a lista se o aluno estiver na página de notificações.
+          const r = Router.parse();
+          if(r && r.view === 'notifications' && window.App && App.render) App.render();
+        }catch(_){}
+      };
+      window._refreshNotifsUI = _refreshNotifsUI;
+      // 1) Hidrata e atualiza assim que chega (corrige "só após reload").
+      Notifications.hydrate(user.id).then(_refreshNotifsUI).catch(()=>{});
+      // 2) Realtime: chega AO VIVO se a tabela tiver Realtime habilitado.
+      if(typeof Notifications.subscribeRealtime === 'function'){
+        Notifications.subscribeRealtime(user.id, () => {
+          Notifications.hydrate(user.id).then(_refreshNotifsUI).catch(()=>{});
+        });
+      }
+      // 3) Fallback "quase ao vivo": re-hidrata a cada 45s (caso o Realtime
+      //    não esteja habilitado na tabela).
+      if(!window._notifPoll){
+        window._notifPoll = setInterval(() => {
+          const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+          if(u && u.id) Notifications.hydrate(u.id).then(_refreshNotifsUI).catch(()=>{});
+        }, 45000);
+      }
     }
     if(user && window.Follows && typeof Follows.hydrate === 'function'){
       Follows.hydrate(user.id).catch(()=>{});
