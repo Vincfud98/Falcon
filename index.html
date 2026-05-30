@@ -9785,33 +9785,39 @@ const Store = (function(){
           text_excerpt: excerpt,
           target_hash: _hash
         };
-        // Quem já recebeu a notificação de RESPOSTA não recebe também a de
-        // menção (evita notificar a mesma pessoa duas vezes pelo mesmo
-        // comentário — a de resposta é mais específica).
-        const notifiedReply = new Set();
-        function _sendReply(toUserId){
-          if(!toUserId || toUserId === authorId || notifiedReply.has(toUserId)) return;
-          console.log('%c[notif] resposta notificada → user', 'color:#7bbf7b', toUserId);
-          Notifications.create(toUserId, 'reply', Object.assign({ parent_id: parentId || null }, _basePayload));
-          notifiedReply.add(toUserId);
-        }
-        // Notificação de RESPOSTA: avisa o autor do comentário-pai.
+        // Autor do comentário-pai (se for uma resposta) — usado pra rotular
+        // a notificação como 'reply' (texto "respondeu seu comentário").
+        let parentAuthorId = null;
         if(parentId){
           const parent = (_state.comments[blockId] || []).find(c => String(c.id) === String(parentId));
-          const parentAuthorId = parent ? (parent.authorId || null) : null;
-          if(parentAuthorId){
-            _sendReply(parentAuthorId);
-          } else {
-            // Reforço: comentário-pai não está na memória → busca no banco.
-            _fetchCommentAuthor(parentId).then(uid => { if(uid) _sendReply(uid); }).catch(()=>{});
-          }
+          parentAuthorId = parent ? (parent.authorId || null) : null;
         }
-        // Notificação de MENÇÃO (pula quem já recebeu a de resposta).
+        // Notifica TODOS os destinatários pelo MESMO caminho (o da menção, que
+        // entrega ao vivo de forma confiável). Como ao "Responder" o @ do
+        // autor-pai já é preenchido, ele entra aqui e é rotulado como 'reply'.
+        const notified = new Set();
         mentions.forEach(m => {
-          if(m.user_id && m.user_id !== authorId && !notifiedReply.has(m.user_id)){
-            Notifications.create(m.user_id, 'mention', Object.assign({}, _basePayload));
-          }
+          if(!m.user_id || m.user_id === authorId || notified.has(m.user_id)) return;
+          notified.add(m.user_id);
+          const isReply = !!parentAuthorId && m.user_id === parentAuthorId;
+          console.log('%c[notif] ' + (isReply ? 'resposta' : 'menção') + ' notificada → user', 'color:#7bbf7b', m.user_id);
+          Notifications.create(m.user_id, isReply ? 'reply' : 'mention',
+            Object.assign(isReply ? { parent_id: parentId } : {}, _basePayload));
         });
+        // Reforço: se for resposta e o autor-pai NÃO foi @mencionado (ex.:
+        // o usuário apagou o @), ainda assim avisa como 'reply'. Se o pai não
+        // estiver na memória, busca o autor no banco.
+        if(parentId && parentAuthorId && !notified.has(parentAuthorId) && parentAuthorId !== authorId){
+          console.log('%c[notif] resposta notificada (sem @) → user', 'color:#7bbf7b', parentAuthorId);
+          Notifications.create(parentAuthorId, 'reply', Object.assign({ parent_id: parentId }, _basePayload));
+        } else if(parentId && !parentAuthorId){
+          _fetchCommentAuthor(parentId).then(uid => {
+            if(uid && uid !== authorId && !notified.has(uid)){
+              console.log('%c[notif] resposta notificada (DB) → user', 'color:#7bbf7b', uid);
+              Notifications.create(uid, 'reply', Object.assign({ parent_id: parentId }, _basePayload));
+            }
+          }).catch(()=>{});
+        }
       }
       return comment;
     },
@@ -13619,7 +13625,21 @@ Blocks.comments = {
           +'<button class="cmt-submit" data-action="submit-reply" data-parent-id="'+Util.attr(parentId)+'">Responder</button></div>';
         item.after(form);
         const replyTa = form.querySelector('.cmt-textarea');
+        // Auto-preenche "@handle " do autor do comentário-pai. Assim a
+        // resposta JÁ menciona a pessoa e ela é notificada pelo caminho de
+        // menção (que entrega ao vivo de forma confiável). Não preenche ao
+        // responder a si mesmo.
+        try{
+          const meId = window.MOCK_USER && window.MOCK_USER.id;
+          const parentC = (Store.getComments(block.id) || []).find(c => String(c.id) === String(parentId));
+          const pa = (parentC && parentC.authorId && typeof UserDirectory !== 'undefined') ? UserDirectory.getById(parentC.authorId) : null;
+          if(pa && pa.handle && parentC.authorId !== meId){
+            replyTa.value = '@' + pa.handle + ' ';
+          }
+        }catch(_){}
         replyTa.focus();
+        // Cursor no fim do texto pré-preenchido.
+        try{ replyTa.selectionStart = replyTa.selectionEnd = replyTa.value.length; }catch(_){}
         if(typeof window.attachMentionAutocomplete === 'function') attachMentionAutocomplete(replyTa);
         // Hidrata avatar do compose do reply (current user) com foto salva
         if(typeof wrap.__hydrateCmtAvatars === 'function') wrap.__hydrateCmtAvatars(form);
