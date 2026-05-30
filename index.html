@@ -7589,6 +7589,34 @@ window.TAG_REGISTRY = {
         }
       } catch(e){ console.warn('[hydrate glossario] exception:', e); }
 
+      // Fase 3.2 — hidrata o DIRETÓRIO de usuários (pra menções @ funcionarem).
+      // Sem a lista de perfis da plataforma, o UserDirectory fica vazio e o
+      // autocomplete do "@" não sugere ninguém. Faz merge (preserva o que já
+      // veio do mirror do usuário atual / autores de comentários).
+      try {
+        const { data: profs, error } = await window._sb.schema('crm').from('user_profiles')
+          .select('user_id, display_name, handle, bio, photo_url, photo_transform');
+        if(!error && Array.isArray(profs) && UbiqueStore.user_profiles){
+          const list = UbiqueStore.user_profiles.list() || [];
+          profs.forEach(p => {
+            if(!p || !p.user_id) return;
+            const merged = {
+              user_id:        p.user_id,
+              displayName:    p.display_name || '',
+              handle:         p.handle || '',
+              bio:            p.bio || '',
+              photoUrl:       p.photo_url || '',
+              photoTransform: p.photo_transform || { x:0, y:0, scale:1 },
+              updated_at:     Date.now()
+            };
+            const existing = list.find(x => x && x.user_id === p.user_id);
+            if(existing) UbiqueStore.user_profiles.update(existing.id, merged);
+            else UbiqueStore.user_profiles.add(Object.assign({ created_at: Date.now() }, merged));
+          });
+          console.log('[hydrate user_profiles] ✅', { perfis: profs.length });
+        } else if(error){ console.warn('[hydrate user_profiles] erro:', error); }
+      } catch(e){ console.warn('[hydrate user_profiles] exception:', e); }
+
       // Fase 4j — hidrata edital_progress do aluno logado
       try {
         const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
@@ -14123,7 +14151,25 @@ const UserDirectory = (function(){
     return list.find(p => p && p.user_id === userId) || null;
   }
   function all(){
-    return (window.AUTH_USERS || []).map(u => _publicShape(u, _profileForUserId(u.id)));
+    const out = []; const seen = new Set();
+    (window.AUTH_USERS || []).forEach(u => {
+      if(!u || u.id == null) return;
+      out.push(_publicShape(u, _profileForUserId(u.id))); seen.add(u.id);
+    });
+    // Inclui perfis do Supabase (UbiqueStore.user_profiles) que NÃO estão no
+    // AUTH_USERS (vazio desde a migração) — sem isto o diretório de menções
+    // ficava vazio e o "@" não sugeria ninguém.
+    if(window.UbiqueStore && UbiqueStore.user_profiles){
+      (UbiqueStore.user_profiles.list() || []).forEach(p => {
+        const uid = p && p.user_id;
+        if(!uid || seen.has(uid)) return;
+        seen.add(uid);
+        const pseudoAuth = { id: uid, email: p.email || '', role: p.role || 'student',
+          name: p.displayName || p.nickname || '', nickname: p.nickname || '' };
+        out.push(_publicShape(pseudoAuth, p));
+      });
+    }
+    return out;
   }
   function getById(userId){
     if(!userId) return null;
