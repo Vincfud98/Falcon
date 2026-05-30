@@ -9066,6 +9066,20 @@ const Store = (function(){
     }catch(e){ console.warn('[hydrate comments exception]', e); }
   }
 
+  // Reforço à prova de bala: descobre o AUTOR de um comentário direto no
+  // banco (usado pela notificação de RESPOSTA quando o comentário-pai não
+  // está na memória — caso raro, já que normalmente você responde algo que
+  // está vendo na tela).
+  async function _fetchCommentAuthor(commentId){
+    if(!window._sb || !commentId) return null;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('discussion_comments')
+        .select('user_id').eq('id', String(commentId)).maybeSingle();
+      if(error || !data) return null;
+      return data.user_id || null;
+    }catch(_){ return null; }
+  }
+
   // ────────────────────────────────────────────────────────────────────
   // Fase 4e — Sync de notes, reading_list, highlights (schema aluno)
   // ────────────────────────────────────────────────────────────────────
@@ -9754,19 +9768,41 @@ const Store = (function(){
             }
           }
         }catch(_){}
+        const _hash = (typeof location !== 'undefined' ? location.hash : '') || '';
+        const _basePayload = {
+          from_user_id: authorId,
+          comment_id: comment.id,
+          block_id: blockId,
+          unit_id: unitId || null,
+          module_id: modId,
+          chapter_id: chapId,
+          text_excerpt: excerpt,
+          target_hash: _hash
+        };
+        // Quem já recebeu a notificação de RESPOSTA não recebe também a de
+        // menção (evita notificar a mesma pessoa duas vezes pelo mesmo
+        // comentário — a de resposta é mais específica).
+        const notifiedReply = new Set();
+        function _sendReply(toUserId){
+          if(!toUserId || toUserId === authorId || notifiedReply.has(toUserId)) return;
+          Notifications.create(toUserId, 'reply', Object.assign({ parent_id: parentId || null }, _basePayload));
+          notifiedReply.add(toUserId);
+        }
+        // Notificação de RESPOSTA: avisa o autor do comentário-pai.
+        if(parentId){
+          const parent = (_state.comments[blockId] || []).find(c => String(c.id) === String(parentId));
+          const parentAuthorId = parent ? (parent.authorId || null) : null;
+          if(parentAuthorId){
+            _sendReply(parentAuthorId);
+          } else {
+            // Reforço: comentário-pai não está na memória → busca no banco.
+            _fetchCommentAuthor(parentId).then(uid => { if(uid) _sendReply(uid); }).catch(()=>{});
+          }
+        }
+        // Notificação de MENÇÃO (pula quem já recebeu a de resposta).
         mentions.forEach(m => {
-          if(m.user_id && m.user_id !== authorId){
-            Notifications.create(m.user_id, 'mention', {
-              from_user_id: authorId,
-              comment_id: comment.id,
-              block_id: blockId,
-              unit_id: unitId || null,
-              module_id: modId,
-              chapter_id: chapId,
-              text_excerpt: excerpt,
-              // Atalho secundário: hash atual no momento da criação.
-              target_hash: (typeof location !== 'undefined' ? location.hash : '') || ''
-            });
+          if(m.user_id && m.user_id !== authorId && !notifiedReply.has(m.user_id)){
+            Notifications.create(m.user_id, 'mention', Object.assign({}, _basePayload));
           }
         });
       }
@@ -15456,6 +15492,13 @@ function _notifRenderItem(n){
     if(target){
       actions = `<div class="notif-actions"><a class="btn-ghost" href="${Util.attr(target)}" data-notif-goto="1" data-notif-block="${Util.attr(p.block_id||'')}" data-notif-comment="${Util.attr(p.comment_id||'')}" data-notif-id="${Util.attr(n.id)}">Ver comentário →</a></div>`;
     }
+  } else if(n.type === 'reply'){
+    const excerpt = p.text_excerpt ? '<span class="notif-excerpt">"' + Util.esc(p.text_excerpt) + '"</span>' : '';
+    line = `<strong>${Util.esc(fromName)}</strong> respondeu seu comentário. ${excerpt}`;
+    const target = _resolveNotifTargetHash(p);
+    if(target){
+      actions = `<div class="notif-actions"><a class="btn-ghost" href="${Util.attr(target)}" data-notif-goto="1" data-notif-block="${Util.attr(p.block_id||'')}" data-notif-comment="${Util.attr(p.comment_id||'')}" data-notif-id="${Util.attr(n.id)}">Ver resposta →</a></div>`;
+    }
   } else if(n.type === 'follow_request'){
     line = `<strong>${Util.esc(fromName)}</strong> quer te seguir.`;
     // Verifica se o pedido ainda está pendente
@@ -15506,7 +15549,7 @@ Renderers.notifications = function(route){
   const filtered = all.filter(n => {
     if(filter === 'all') return true;
     if(filter === 'unread') return !n.read;
-    if(filter === 'mentions') return n.type === 'mention';
+    if(filter === 'mentions') return n.type === 'mention' || n.type === 'reply';
     if(filter === 'follows') return n.type === 'follow_request' || n.type === 'follow_accepted';
     if(filter === 'system') return n.type === 'essay_corrected';
     return true;
@@ -15515,7 +15558,7 @@ Renderers.notifications = function(route){
   const filters = [
     ['all', 'Todas', all.length],
     ['unread', 'Não lidas', unreadCount],
-    ['mentions', 'Menções', all.filter(n => n.type === 'mention').length],
+    ['mentions', 'Comentários', all.filter(n => n.type === 'mention' || n.type === 'reply').length],
     ['follows', 'Pedidos', all.filter(n => n.type === 'follow_request' || n.type === 'follow_accepted').length],
     ['system', 'Sistema', all.filter(n => n.type === 'essay_corrected').length]
   ];
