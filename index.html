@@ -13521,8 +13521,17 @@ Blocks.comments = {
     // Fase 4d — hidrata comentários do bloco a partir do Supabase. Ao
     // terminar, atualiza SÓ a thread (sem reload) — daí os comentários
     // aparecem assim que o aluno abre a unidade.
+    // Resiliente: logo após relogar, o Store pode ainda não estar pronto
+    // (Store.get() === null) — nesse caso re-tenta algumas vezes em vez de
+    // desistir (o que deixava a lista vazia até um reload manual).
     if(Store && typeof Store.hydrateCommentsForBlock === 'function'){
-      Store.hydrateCommentsForBlock(ctx && ctx.unitId, block.id).then(refreshThread).catch(()=>{});
+      let _tries = 0;
+      const _tryHydrate = () => {
+        const ready = (typeof Store.get !== 'function') || !!Store.get();
+        if(!ready && _tries < 6){ _tries++; setTimeout(_tryHydrate, 400); return; }
+        Store.hydrateCommentsForBlock(ctx && ctx.unitId, block.id).then(refreshThread).catch(()=>{});
+      };
+      _tryHydrate();
     }
 
     // Post top-level comment
@@ -15629,8 +15638,17 @@ Renderers.notifications.mount = function(stageEl){
     });
   }
 
-  // Aceitar/Recusar pedidos inline
-  stageEl.addEventListener('click', e => {
+  // Aceitar/Recusar pedidos inline.
+  // IMPORTANTE: stageEl é o #stage PERMANENTE (não é recriado a cada render).
+  // Sem a trava abaixo, este listener delegado era RE-ADICIONADO a cada
+  // renderização da página de notificações; com o polling/realtime
+  // redesenhando, os listeners se acumulavam e UM clique em "Aceitar"
+  // disparava a ação N vezes → dezenas de notificações duplicadas. A trava
+  // garante que o listener seja ligado UMA única vez. O handler lê tudo de
+  // atributos do DOM (sem closure obsoleto), então é seguro persistir.
+  if(!stageEl.__notifActionsBound){
+    stageEl.__notifActionsBound = true;
+    stageEl.addEventListener('click', e => {
     const goto = e.target.closest('[data-notif-goto]');
     if(goto){
       // Marca como lida e agenda a rolagem até o comentário. A navegação
@@ -15660,7 +15678,8 @@ Renderers.notifications.mount = function(stageEl){
       App.render();
       return;
     }
-  });
+    });
+  }
 
   // Click em item (fora de botões/links) marca como lida + abre destino
   stageEl.querySelectorAll('.notif-item').forEach(item => {
@@ -24169,6 +24188,14 @@ const App = {
     const user = Auth.getUser();
     const isAdminUser = !!user && (user.role === 'admin' || user.role === 'superadmin');
 
+    // Garante que o Store do usuário esteja inicializado ANTES de desenhar.
+    // Sem isto, ao relogar sem reload o _state ficava nulo e a busca de
+    // comentários (e outros dados) desistia em silêncio — só voltava após um
+    // reload. Só inicializa quando ainda não há estado (não re-hidrata à toa).
+    if(user && window.COURSE && window.Store && typeof Store.get === 'function' && !Store.get()){
+      try{ Store.init(user.id, window.COURSE); }catch(e){ console.warn('[render] Store.init', e); }
+    }
+
     // Helper: redireciona admin pro painel real (admin.html) com handoff
     // de sessão. Usado em vários branches abaixo pra evitar o flash de
     // "Página não encontrada" que apareceria se a gente trocasse só
@@ -24339,15 +24366,25 @@ const App = {
       const _refreshNotifsUI = () => {
         try{
           const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+          if(!u || !window.Notifications) return;
+          // Sino: sempre reflete a contagem de não-lidas.
           const bb = document.getElementById('tbBellBadge');
-          if(bb && u && window.Notifications){
+          if(bb){
             const c = Notifications.unreadCount(u.id);
             if(c > 0){ bb.hidden = false; bb.textContent = c > 99 ? '99+' : String(c); }
             else bb.hidden = true;
           }
-          // Re-renderiza a lista se o aluno estiver na página de notificações.
-          const r = Router.parse();
-          if(r && r.view === 'notifications' && window.App && App.render) App.render();
+          // Re-renderiza a página de notificações SÓ quando algo realmente
+          // mudou (chegou/saiu notificação). Antes eu re-renderizava em todo
+          // tick do polling, o que resetava o scroll e — junto com um listener
+          // que se acumulava — multiplicava ações. Agora é cirúrgico.
+          const total = Notifications.listFor(u.id).length;
+          const changed = (total !== window._lastNotifTotal);
+          window._lastNotifTotal = total;
+          if(changed){
+            const r = Router.parse();
+            if(r && r.view === 'notifications' && window.App && App.render) App.render();
+          }
         }catch(_){}
       };
       window._refreshNotifsUI = _refreshNotifsUI;
