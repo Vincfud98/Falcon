@@ -3325,6 +3325,10 @@ body.gallery-detail-open{overflow:hidden}
 .qd-dot-err{background:rgba(212,121,115,.85)}
 .qd-stats-vol{font-family:var(--sans);font-weight:300;font-size:.72rem;color:var(--text-mute)}
 .qd-stats-diff{font-family:var(--sans);font-weight:300;font-size:.72rem;color:var(--text-mute);display:flex;align-items:center;gap:.5rem;margin-top:.2rem}
+/* Estado vazio das estatísticas (sem respostas ainda) */
+.qd-stats-empty{justify-content:center;padding:.6rem 0}
+.qd-empty-msg{font-family:var(--sans);font-weight:300;font-size:.8rem;color:var(--text-dim);line-height:1.6;text-align:center}
+.qd-empty-msg small{color:var(--text-mute);font-size:.7rem}
 /* Tag de dificuldade dinâmica (5 níveis) */
 .q-diff-tier{
   display:inline-flex;align-items:center;padding:.25rem .7rem;border-radius:12px;
@@ -11218,24 +11222,58 @@ function classifyDifficulty(pctAcerto){
   const p = Math.max(0, Math.min(100, Number(pctAcerto) || 0));
   return DIFFICULTY_TIERS.find(t => p >= t.min) || DIFFICULTY_TIERS[DIFFICULTY_TIERS.length - 1];
 }
-/* FONTE ÚNICA das estatísticas da questão. HOJE: mock determinístico por id
-   (estável). FUTURO (Fase 3.2.C): trocar SÓ aqui pelo agregado real do
-   Supabase (RPC question_stats) — a UI não muda. Aceita item.stats real
-   {total, correct} se já vier preenchido. */
+/* FONTE ÚNICA das estatísticas da questão. Fase 3.2.C: dados REAIS do Supabase
+   (agregado de aluno.student_responses via RPC question_stats), aplicados em
+   item.stats por QuestionStats antes da renderização. Sem mock: se não houver
+   respostas ainda, devolve hasData=false (a UI mostra "Ainda sem respostas"). */
 function getQuestionStats(item){
   if(item && item.stats && typeof item.stats.total === 'number' && typeof item.stats.correct === 'number'){
     const total = Math.max(0, item.stats.total);
     const correct = Math.max(0, Math.min(total, item.stats.correct));
-    return { total, correct, incorrect: total - correct, pctAcerto: total ? Math.round(correct/total*100) : 0 };
+    return { total, correct, incorrect: total - correct, pctAcerto: total ? Math.round(correct/total*100) : 0, hasData: total > 0 };
   }
-  let seed = 0; const s = String((item && item.id) || 'x');
-  for(let i=0;i<s.length;i++) seed = (seed * 31 + s.charCodeAt(i)) >>> 0;
-  const rand = (n) => ((seed = (seed * 1103515245 + 12345) >>> 0) % n);
-  const total = 30 + rand(230);          // 30–259 respostas
-  const pct = 12 + rand(85);             // 12–96% de acerto
-  const correct = Math.round(total * pct / 100);
-  return { total, correct, incorrect: total - correct, pctAcerto: total ? Math.round(correct/total*100) : 0 };
+  // Ainda não buscamos / não há respostas: estado vazio (sem inventar números).
+  return { total: 0, correct: 0, incorrect: 0, pctAcerto: 0, hasData: false };
 }
+
+/* QuestionStats — busca o agregado real (RPC) e mantém cache por item.id.
+   A mesma questão usa o MESMO id (id do banco) na unidade e no edital, então
+   a soma por id já junta as respostas de todos os lugares. */
+const QuestionStats = (function(){
+  const _cache = {};        // item_id -> { total, correct }
+  let _allRequested = false, _allDone = false;
+  async function _fetch(itemIds){
+    if(!window._sb) return;
+    try{
+      const args = (itemIds && itemIds.length) ? { p_item_ids: itemIds.map(String) } : {};
+      const { data, error } = await window._sb.schema('aluno').rpc('question_stats', args);
+      if(error){ console.warn('[question_stats]', error); return; }
+      (data || []).forEach(r => {
+        if(r && r.item_id != null){
+          _cache[String(r.item_id)] = { total: Number(r.total) || 0, correct: Number(r.correct) || 0 };
+        }
+      });
+      // ids pedidos que não voltaram = 0 respostas → cacheia como zero pra não
+      // re-buscar a cada abertura.
+      (itemIds || []).forEach(id => { const k = String(id); if(!(k in _cache)) _cache[k] = { total: 0, correct: 0 }; });
+    }catch(e){ console.warn('[question_stats ex]', e); }
+  }
+  return {
+    // Garante que os ids pedidos estejam no cache (busca só os que faltam).
+    async ensure(itemIds){
+      const miss = (itemIds || []).map(String).filter(id => !(id in _cache));
+      if(miss.length) await _fetch(miss);
+    },
+    // Busca TODAS as estatísticas de uma vez (uma só vez) — usado pelo filtro
+    // de dificuldade do banco de questões.
+    async ensureAll(){ if(_allRequested) return; _allRequested = true; await _fetch(null); _allDone = true; },
+    allLoaded(){ return _allDone; },
+    get(itemId){ return _cache[String(itemId)] || null; },
+    // Aplica o stat no item (pra getQuestionStats consumir via item.stats).
+    apply(item){ if(item){ const s = this.get(item.id); if(s) item.stats = s; } return item; }
+  };
+})();
+window.QuestionStats = QuestionStats;
 /* Badge de dificuldade dinâmica (com tooltip). */
 function difficultyTierBadge(pctAcerto){
   const t = classifyDifficulty(pctAcerto);
@@ -11244,6 +11282,13 @@ function difficultyTierBadge(pctAcerto){
 /* Painel "Estatísticas" (pizza acerto/erro + volumetria + dificuldade). */
 function quizStatsPanelHTML(item){
   const st = getQuestionStats(item);
+  // Sem respostas ainda → estado vazio honesto (não classifica dificuldade do
+  // nada). A partir da 1ª resposta, mostra os números reais.
+  if(!st.hasData){
+    return `<div class="qd-stats qd-stats-empty">
+      <div class="qd-empty-msg">Ainda sem respostas para esta questão.<br><small>As estatísticas e a dificuldade aparecem assim que os alunos começarem a responder.</small></div>
+    </div>`;
+  }
   const pessoas = st.total + ' pessoa' + (st.total === 1 ? '' : 's') + ' responde' + (st.total === 1 ? 'u' : 'ram') + ' esta questão';
   return `<div class="qd-stats">
     <div class="qd-pie" style="--pct:${st.pctAcerto}" role="img" aria-label="${st.pctAcerto}% de acerto">
@@ -20061,10 +20106,20 @@ function _bankApplyFilters(items, f, opts){
     out = out.filter(function(q){ return q.source_type === f.origem; });
   }
   if(f.difficulty){
-    // Classificação dinâmica por % de acerto global (via getQuestionStats).
-    out = out.filter(function(q){
-      return classifyDifficulty(getQuestionStats(q).pctAcerto).key === f.difficulty;
-    });
+    // Classificação dinâmica por % de acerto global (dados reais via RPC).
+    if(window.QuestionStats && QuestionStats.allLoaded()){
+      out = out.filter(function(q){
+        QuestionStats.apply(q); // injeta item.stats real do cache
+        const st = getQuestionStats(q);
+        // Só filtra questões COM dados; sem respostas não têm dificuldade.
+        return st.hasData && classifyDifficulty(st.pctAcerto).key === f.difficulty;
+      });
+    } else if(window.QuestionStats){
+      // Estatísticas ainda não carregadas → carrega e re-renderiza pra aplicar
+      // o filtro (nesta passagem não filtra por dificuldade, evita resultado
+      // errado). Acontece uma única vez.
+      QuestionStats.ensureAll().then(function(){ if(window.App && App.render) App.render(); });
+    }
   }
   if(!isEssay && f.status && f.status.length){
     out = out.filter(function(q){
@@ -23987,10 +24042,23 @@ function bindQuizDataPanel(itemEl, item){
     setTimeout(() => { updateBadge(); remeasure(); }, 700);
     pane.addEventListener('click', () => setTimeout(() => { updateBadge(); remeasure(); }, 60));
   }
+  // Busca os números REAIS da questão (RPC) na 1ª vez que o painel de
+  // estatísticas é aberto e re-renderiza a aba com os dados.
+  let _statsHydrated = false;
+  function hydrateStats(){
+    if(_statsHydrated || !window.QuestionStats) return;
+    _statsHydrated = true;
+    QuestionStats.ensure([item.id]).then(() => {
+      QuestionStats.apply(item);
+      const pane = inner.querySelector('[data-qd-pane="stats"]');
+      if(pane){ pane.innerHTML = quizStatsPanelHTML(item); remeasure(); }
+    }).catch(()=>{});
+  }
   function switchTab(which){
     ensureRendered();
     inner.querySelectorAll('.qd-tab').forEach(t => t.classList.toggle('on', t.getAttribute('data-qd-tab') === which));
     inner.querySelectorAll('.qd-tabpane').forEach(p => p.toggleAttribute('hidden', p.getAttribute('data-qd-pane') !== which));
+    if(which === 'stats') hydrateStats();
     if(which === 'comments') mountComments();
     if(dataBtn) dataBtn.classList.toggle('on', which === 'stats');
     if(commBtn) commBtn.classList.toggle('on', which === 'comments');
