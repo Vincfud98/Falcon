@@ -9527,8 +9527,12 @@ const Store = (function(){
         _state.quizAnswers[unitId][blockId][itemId] = Object.assign({ answeredAt: Date.now() }, payload);
       }
       _persist(); _emit();
-      // Fase 4c — fire-and-forget sync Supabase (questoes.question_responses)
-      _syncQuizAnswerToSupabase(unitId, blockId, itemId, payload).catch(()=>{});
+      // Fase 4c — sync Supabase. Quando o upsert conclui, atualiza AO VIVO as
+      // estatísticas da questão (o novo voto do aluno já entra no agregado),
+      // sem precisar recarregar a página.
+      const _syncP = _syncQuizAnswerToSupabase(unitId, blockId, itemId, payload).catch(()=>{});
+      _syncP.then(() => { if(typeof window.refreshQuestionStats === 'function') window.refreshQuestionStats(itemId); });
+      return _syncP;
     },
     updateEssay(unitId, blockId, itemId, payload){
       // Y3 Fase I (espelho do quiz): se itemId é bank_id, grava também no
@@ -11268,12 +11272,39 @@ const QuestionStats = (function(){
     // de dificuldade do banco de questões.
     async ensureAll(){ if(_allRequested) return; _allRequested = true; await _fetch(null); _allDone = true; },
     allLoaded(){ return _allDone; },
+    // Descarta o cache de uma questão (após o aluno responder/mudar) pra forçar
+    // re-busca com os números atualizados. Também reabre o "carregar tudo" do
+    // filtro, pra ele não usar um número velho.
+    invalidate(itemId){ if(itemId != null) delete _cache[String(itemId)]; _allDone = false; _allRequested = false; },
     get(itemId){ return _cache[String(itemId)] || null; },
     // Aplica o stat no item (pra getQuestionStats consumir via item.stats).
     apply(item){ if(item){ const s = this.get(item.id); if(s) item.stats = s; } return item; }
   };
 })();
 window.QuestionStats = QuestionStats;
+
+/* Atualiza AO VIVO o painel de estatísticas de uma questão (sem reload):
+   invalida o cache, re-busca os números reais e re-renderiza a aba
+   "Estatísticas" daquela questão se ela já estiver renderizada/aberta.
+   Chamado após o aluno responder/mudar a resposta (depois do sync). */
+window.refreshQuestionStats = function(itemId){
+  if(itemId == null || !window.QuestionStats) return;
+  const idStr = String(itemId);
+  QuestionStats.invalidate(idStr);
+  QuestionStats.ensure([idStr]).then(function(){
+    const esc = (window.CSS && CSS.escape) ? CSS.escape(idStr) : idStr.replace(/["\\]/g, '\\$&');
+    document.querySelectorAll('.q-item[data-item-id="' + esc + '"]').forEach(function(itemEl){
+      const pane = itemEl.querySelector('[data-qd-pane="stats"]');
+      if(!pane || !pane.innerHTML.trim()) return; // só re-renderiza se já existe
+      pane.innerHTML = quizStatsPanelHTML(QuestionStats.apply({ id: idStr }));
+      // Se o painel está aberto, re-mede a altura da cortina.
+      const panel = itemEl.querySelector('[data-qd-panel]');
+      if(panel && !panel.hasAttribute('hidden')){
+        requestAnimationFrame(function(){ panel.style.maxHeight = panel.scrollHeight + 'px'; });
+      }
+    });
+  }).catch(function(){});
+};
 /* Badge de dificuldade dinâmica (com tooltip). */
 function difficultyTierBadge(pctAcerto){
   const t = classifyDifficulty(pctAcerto);
@@ -11428,10 +11459,12 @@ function renderQuizItem(it, ctx, blockId){
   const opts = norm.values.map((v,j) => {
     const mark = norm.display[j];
     let cls = '';
-    if(prior){
-      if(j === keyIdx) cls = ' correct';
-      if(j === selIdx && selIdx !== keyIdx) cls = ' wrong';
-      if(j === selIdx && selIdx === keyIdx) cls = ' correct selected';
+    // Pinta APENAS a alternativa marcada pelo aluno (verde se acertou, vermelha
+    // se errou) — igual ao comportamento ao vivo. O gabarito da correta aparece
+    // pelo botão dedicado/satélite, evitando 2 alternativas coloridas ao mesmo
+    // tempo (que confundia: parecia que a errada também estava certa).
+    if(prior && selIdx >= 0 && j === selIdx){
+      cls = (selIdx === keyIdx) ? ' correct selected' : ' wrong selected';
     }
     // Y3: text das opções também aceita HTML (sanitizado)
     const label = norm.tf ? '' : `<span class="q-option-text">${sanitize(String(v))}</span>`;
