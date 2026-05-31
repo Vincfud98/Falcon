@@ -3241,6 +3241,8 @@ body.gallery-detail-open{overflow:hidden}
 .q-option.selected{background:var(--accent-lo);border-color:var(--accent);color:var(--accent)}
 .q-option.correct{border-color:#6ba670;color:#8bc391;background:rgba(107,166,112,.16)}
 .q-option.wrong{border-color:#d47973;color:#e89690;background:rgba(212,121,115,.16)}
+/* Questão verificada (modo prova real) fica congelada — não aceita troca. */
+.q-item.q-frozen .q-option{cursor:not-allowed}
 .q-option-mark{
   display:inline-flex;align-items:center;justify-content:center;
   width:22px;height:22px;border-radius:50%;
@@ -9505,7 +9507,7 @@ const Store = (function(){
       _syncUnitProgressToSupabase(unitId, { completed: false }).catch(()=>{});
       _syncBlockBookmarksClearToSupabase(unitId).catch(()=>{});
     },
-    updateQuizAnswer(unitId, blockId, itemId, payload){
+    updateQuizAnswer(unitId, blockId, itemId, payload, opts){
       // Y3 Fase I — Stats compartilhadas por bank_id.
       // Se itemId for um bank_id (questão no banco), grava em
       // _state.quizAnswersByBankId[itemId] — compartilhado entre TODAS as
@@ -9527,6 +9529,10 @@ const Store = (function(){
         _state.quizAnswers[unitId][blockId][itemId] = Object.assign({ answeredAt: Date.now() }, payload);
       }
       _persist(); _emit();
+      // Modo adiado: seleção solta é salva SÓ localmente (opts.sync === false).
+      // Ela não conta nas estatísticas globais nem sincroniza — isso só
+      // acontece quando o aluno clica em "Verificar respostas".
+      if(opts && opts.sync === false) return Promise.resolve();
       // Fase 4c — sync Supabase. Quando o upsert conclui, atualiza AO VIVO as
       // estatísticas da questão (o novo voto do aluno já entra no agregado),
       // sem precisar recarregar a página.
@@ -11456,15 +11462,20 @@ function renderQuizItem(it, ctx, blockId){
   const LB = window.LearningBlocks || {};
   const sanitize = LB.sanitizeRichHTML ? LB.sanitizeRichHTML : function(x){ return x; };
 
+  // Modo "adiado" (prova real): marca-se tudo e só REVELA acerto/erro depois de
+  // clicar em "Verificar respostas". Enquanto não verificada, a opção marcada
+  // fica NEUTRA (sem verde/vermelho, sem ✓/✗, sem gabarito). Fora do modo
+  // adiado (ex.: banco do edital) mantém o comportamento de revelar ao marcar.
+  const defer = !!(ctx && ctx.deferFeedback);
+  const isSelected = !!(prior && prior.selected != null);
+  const revealed = defer ? !!(prior && prior.verified) : isSelected;
+
   const opts = norm.values.map((v,j) => {
     const mark = norm.display[j];
     let cls = '';
-    // Pinta APENAS a alternativa marcada pelo aluno (verde se acertou, vermelha
-    // se errou) — igual ao comportamento ao vivo. O gabarito da correta aparece
-    // pelo botão dedicado/satélite, evitando 2 alternativas coloridas ao mesmo
-    // tempo (que confundia: parecia que a errada também estava certa).
-    if(prior && selIdx >= 0 && j === selIdx){
-      cls = (selIdx === keyIdx) ? ' correct selected' : ' wrong selected';
+    if(j === selIdx && selIdx >= 0){
+      if(revealed)      cls = (selIdx === keyIdx) ? ' correct selected' : ' wrong selected';
+      else if(isSelected) cls = ' selected'; // marcada, ainda não verificada → neutra
     }
     // Y3: text das opções também aceita HTML (sanitizado)
     const label = norm.tf ? '' : `<span class="q-option-text">${sanitize(String(v))}</span>`;
@@ -11472,7 +11483,7 @@ function renderQuizItem(it, ctx, blockId){
       <span class="q-option-mark">${Util.esc(mark)}</span>${label}
     </button>`;
   }).join('');
-  const resultIcon = prior ? (prior.correct
+  const resultIcon = (revealed && prior) ? (prior.correct
     ? '<span class="q-result q-result-correct" title="Correto">✓</span>'
     : '<span class="q-result q-result-wrong" title="Incorreto">✗</span>') : '';
   const optionsHTML = `<div class="q-options${norm.tf?' is-tf':''}">${opts}</div>`;
@@ -11488,16 +11499,20 @@ function renderQuizItem(it, ctx, blockId){
   // pra não espremer a questão à esquerda quando o satélite expande.
 
   // Botões de ação (canto direito): "ver gabarito" (oculto até responder) + "dúvida"
-  const showKeyBtn = `<button class="q-show-key" data-action="show-key" data-item-id="${Util.attr(it.id)}" data-tip="Ver gabarito desta questão no painel lateral" aria-label="Ver gabarito" style="display:${prior&&prior.selected!=null?'flex':'none'}"><svg viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></button>`;
+  const showKeyBtn = `<button class="q-show-key" data-action="show-key" data-item-id="${Util.attr(it.id)}" data-tip="Ver gabarito desta questão no painel lateral" aria-label="Ver gabarito" style="display:${revealed?'flex':'none'}"><svg viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></button>`;
   const doubtBtn = `<button class="q-doubt${prior&&prior.doubt?' active':''}" data-action="doubt" data-item-id="${Util.attr(it.id)}" data-tip="Marcar que teve dúvida neste item" aria-label="Marcar dúvida"><svg viewBox="0 0 24 24"><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></button>`;
   const actionsHTML = `<div class="q-actions">${showKeyBtn}${doubtBtn}</div>`;
 
   // Fase 3.2: botão "Dados" (canto inferior direito) + painel de estatísticas
   // expansível. Some no modo simulado. Revelado só após responder (.answered).
-  const answered = !!(prior && prior.selected != null);
+  // "answered" agora significa REVELADA (no modo adiado, só após verificar) —
+  // é o que libera o painel "Dados/Estatísticas" e o ✓/✗.
+  const answered = revealed;
   const showData = !(ctx && ctx.simuladoMode);
   const dataBar = showData ? quizDataBarHTML() : '';
-  const answeredCls = answered ? ' answered' : '';
+  // No modo adiado, questão verificada fica CONGELADA (q-frozen → mount ignora
+  // cliques e o CSS mostra cursor de "bloqueado").
+  const answeredCls = (answered ? ' answered' : '') + (defer && revealed ? ' q-frozen' : '');
 
   if(norm.tf){
     return `<article class="q-item is-tf${answeredCls}" data-item-id="${Util.attr(it.id)}" id="item-${Util.attr(it.id)}">
@@ -11593,6 +11608,7 @@ Blocks.quiz = {
   mount(stageEl, block, ctx){
     const groups = normalizeQuizBlock(block);
     const allItems = groups.flatMap(g => g.items);
+    const defer = !!(ctx && ctx.deferFeedback); // prova real: marca → verifica depois
     stageEl.querySelectorAll(`[data-item-id]`).forEach(itemEl => {
       const itemId = itemEl.getAttribute('data-item-id');
       const item = allItems.find(x => x.id === itemId);
@@ -11605,28 +11621,47 @@ Blocks.quiz = {
           const keyIdx = quizItemKeyIndex(item, norm);
           const prior = ctx.store.getQuizAnswer(ctx.unitId, block.id, item.id);
           const assertion = itemEl.querySelector('.q-assertion');
+          const correct = idx === keyIdx;
+          const existingDoubt = !!(prior||{}).doubt;
 
-          // If clicking the same option again → clear answer (toggle off)
-          if(prior && prior.selected === value){
-            ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { selected:null, correct:null, doubt:!!prior.doubt });
-            itemEl.querySelectorAll('.q-option').forEach(b => b.classList.remove('selected','correct','wrong'));
-            const existingResult = assertion.querySelector('.q-result');
-            if(existingResult) existingResult.remove();
+          // ── MODO ADIADO (prova real) ──────────────────────────────────
+          if(defer){
+            // Questão já verificada está CONGELADA — ignora cliques.
+            if(prior && prior.verified) return;
+            // Toggle: clicar de novo na mesma opção desmarca.
+            if(prior && prior.selected === value){
+              ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id,
+                { selected:null, correct:null, verified:false, doubt:existingDoubt }, { sync:false });
+              itemEl.querySelectorAll('.q-option').forEach(b => b.classList.remove('selected','correct','wrong'));
+            } else {
+              // Salva a seleção LOCALMENTE (sem sincronizar/contar nas stats) e
+              // SEM revelar nada: só destaca a opção de forma neutra.
+              ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id,
+                { selected:value, correct, verified:false, doubt:existingDoubt }, { sync:false });
+              itemEl.querySelectorAll('.q-option').forEach((b,j) => {
+                b.classList.remove('selected','correct','wrong');
+                if(j === idx) b.classList.add('selected');
+              });
+            }
+            // Atualiza progresso (respondidas/total) e o botão "Verificar".
+            if(stageEl.__quizSyncVerifyBar) stageEl.__quizSyncVerifyBar();
+            if(stageEl.__quizUpdateSatellite) stageEl.__quizUpdateSatellite(item);
             return;
           }
 
-          const correct = idx === keyIdx;
-          const existingDoubt = !!(prior||{}).doubt;
+          // ── MODO INSTANTÂNEO (banco do edital) — comportamento original ──
+          // Toggle off
+          if(prior && prior.selected === value){
+            ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { selected:null, correct:null, doubt:existingDoubt });
+            itemEl.querySelectorAll('.q-option').forEach(b => b.classList.remove('selected','correct','wrong'));
+            const er = assertion.querySelector('.q-result'); if(er) er.remove();
+            return;
+          }
           ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { selected:value, correct, doubt:existingDoubt });
-          // Ilumina APENAS a alternativa marcada pelo aluno — verde se acertou,
-          // vermelha se errou. O gabarito da correta aparece via botão dedicado
-          // (.q-show-key) pra evitar a confusão de ter 2 alternativas coloridas
-          // simultaneamente.
           itemEl.querySelectorAll('.q-option').forEach((b,j) => {
             b.classList.remove('selected','correct','wrong');
             if(j === idx) b.classList.add(correct ? 'correct' : 'wrong', 'selected');
           });
-          // Show result icon inline beside assertion
           const existingResult = assertion.querySelector('.q-result');
           if(existingResult) existingResult.remove();
           const icon = document.createElement('span');
@@ -11660,18 +11695,26 @@ Blocks.quiz = {
       const remainEl = sat.querySelector('[data-qz-remaining]');
       const detailEl = sat.querySelector('[data-qz-detail]');
       function updateSatellite(activeItem, isCorrect){
-        // Count progress
+        // Conta progresso. No modo adiado, NÃO revela acertos antes de
+        // verificar: mostra "respondidas / total". No modo instantâneo, mantém
+        // "X / Y corretas" como antes.
         let answered = 0, correctCount = 0;
         allItems.forEach(it => {
           const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
           if(p && p.selected != null){ answered++; if(p.correct) correctCount++; }
         });
         const remaining = allItems.length - answered;
-        if(counterEl) counterEl.textContent = correctCount + ' / ' + allItems.length + ' corretas';
-        if(barEl) barEl.style.width = (allItems.length ? Math.round(correctCount/allItems.length*100) : 0) + '%';
+        if(counterEl) counterEl.textContent = defer
+          ? (answered + ' / ' + allItems.length + ' respondidas')
+          : (correctCount + ' / ' + allItems.length + ' corretas');
+        const pct = allItems.length ? Math.round((defer ? answered : correctCount)/allItems.length*100) : 0;
+        if(barEl) barEl.style.width = pct + '%';
         if(remainEl) remainEl.textContent = remaining > 0 ? 'Faltam ' + remaining : 'Todas respondidas';
-        // Show active item detail
+        // Detalhe do item ativo. No modo adiado, só revela gabarito/comentário/
+        // recomendação se a questão JÁ foi verificada (anti-"cola").
         if(activeItem && detailEl){
+          const aPrior = ctx.store.getQuizAnswer(ctx.unitId, block.id, activeItem.id);
+          const revealItem = defer ? !!(aPrior && aPrior.verified) : true;
           const diffLabel = {easy:'Fácil',medium:'Médio',hard:'Difícil','very-easy':'Muito fácil','very-hard':'Muito difícil'};
           const topicChips = (activeItem.topics||[]).map(id => { const t = Util.getTopic(id); return t ? `<span class="tpc tpc-d${Util.topicDepth(t)}"><span class="tpc-num">${Util.esc(t.number)}</span><span class="tpc-name">${Util.esc(t.name)}</span></span>` : ''; }).join('');
           const tagChips = (activeItem.tags||[]).map(id => { const t = Util.getTag(id); return t ? `<span class="tg"><span class="tg-hash">#</span>${Util.esc(t.name)}</span>` : ''; }).join('');
@@ -11679,34 +11722,41 @@ Blocks.quiz = {
           const _san = _LB.sanitizeRichHTML || function(x){ return x; };
           detailEl.innerHTML = `<div class="qz-sat-item">
             ${activeItem.difficulty ? `<div class="qz-sat-diff">${Util.esc(diffLabel[activeItem.difficulty]||activeItem.difficulty)}</div>` : ''}
-            ${activeItem.reference ? `<div class="qz-sat-ref">${Util.esc(activeItem.reference)}</div>` : ''}
-            ${activeItem.comments ? `<div class="qz-sat-comments">${_san(String(activeItem.comments))}</div>` : ''}
-            ${activeItem.recommendation ? `<div class="qz-sat-reco">${Util.esc(activeItem.recommendation)}</div>` : ''}
+            ${(revealItem && activeItem.reference) ? `<div class="qz-sat-ref">${Util.esc(activeItem.reference)}</div>` : ''}
+            ${(revealItem && activeItem.comments) ? `<div class="qz-sat-comments">${_san(String(activeItem.comments))}</div>` : ''}
+            ${(revealItem && activeItem.recommendation) ? `<div class="qz-sat-reco">${Util.esc(activeItem.recommendation)}</div>` : ''}
             ${(topicChips||tagChips) ? `<div class="q-topics-tags" style="margin-top:.6rem">${topicChips}${tagChips}</div>` : ''}
           </div>`;
         }
       }
-      // Wire: after each option click, update satellite + revela o
-      // botão "ver gabarito" daquela questão (oculto antes de responder)
-      stageEl.querySelectorAll('.q-option').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const itemEl = btn.closest('.q-item');
-          const itemId = itemEl?.getAttribute('data-item-id');
-          const item = allItems.find(x => x.id === itemId);
-          const prior = item ? ctx.store.getQuizAnswer(ctx.unitId, block.id, item.id) : null;
-          if(prior && prior.selected != null){
-            if(itemEl) itemEl.classList.add('answered'); // revela o botão "Dados"
-            updateSatellite(item, prior.correct);
-            const skBtn = itemEl?.querySelector('.q-show-key');
-            if(skBtn){
-              skBtn.style.display = 'flex';
-              // marca como "ativo" — o gabarito da questão atual está no satélite
-              stageEl.querySelectorAll('.q-show-key.is-active').forEach(b => b.classList.remove('is-active'));
-              skBtn.classList.add('is-active');
+      // Expõe pro handler de clique (modo adiado) atualizar o progresso.
+      stageEl.__quizUpdateSatellite = updateSatellite;
+      // Inicializa o contador no modo adiado (mostra "respondidas" já no load).
+      if(defer) updateSatellite(null);
+      // Wire: after each option click, update satellite + revela o botão "ver
+      // gabarito" daquela questão. SÓ no modo instantâneo — no modo adiado, o
+      // handler de clique já cuida do satélite SEM revelar nada antes de
+      // "Verificar respostas".
+      if(!defer){
+        stageEl.querySelectorAll('.q-option').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const itemEl = btn.closest('.q-item');
+            const itemId = itemEl?.getAttribute('data-item-id');
+            const item = allItems.find(x => x.id === itemId);
+            const prior = item ? ctx.store.getQuizAnswer(ctx.unitId, block.id, item.id) : null;
+            if(prior && prior.selected != null){
+              if(itemEl) itemEl.classList.add('answered'); // revela o botão "Dados"
+              updateSatellite(item, prior.correct);
+              const skBtn = itemEl?.querySelector('.q-show-key');
+              if(skBtn){
+                skBtn.style.display = 'flex';
+                stageEl.querySelectorAll('.q-show-key.is-active').forEach(b => b.classList.remove('is-active'));
+                skBtn.classList.add('is-active');
+              }
             }
-          }
+          });
         });
-      });
+      }
       // Fase 3.2: liga o botão "Dados" (painel de estatísticas) de cada questão.
       stageEl.querySelectorAll('.q-item[data-item-id]').forEach(itemEl => {
         const item = allItems.find(x => x.id === itemEl.getAttribute('data-item-id'));
@@ -18833,7 +18883,9 @@ Renderers.unit = function(route){
 
   // Render only blocks from the active group
   const groupBlocks = activeGroup ? (activeGroup.blocks||[]) : [];
-  const ctx = { unitId:unit.id, store:Store };
+  // deferFeedback: questões objetivas da UNIDADE usam o modelo "prova real"
+  // (marca tudo → "Verificar respostas"), sem feedback instantâneo.
+  const ctx = { unitId:unit.id, store:Store, deferFeedback:true };
   const allBlocksHtml = groupBlocks.map(b => {
     const renderer = Blocks[b.type];
     if(!renderer) return '';
@@ -18933,7 +18985,7 @@ Renderers.unit.mount = function(stageEl, route){
   const activeGroup = groups.find(g => g.id === activeGroupId) || groups[0];
   const groupBlocks = activeGroup ? (activeGroup.blocks||[]) : [];
   const ctx = {
-    unitId:unit.id, store:Store,
+    unitId:unit.id, store:Store, deferFeedback:true,
     moduleId:m.id, chapterId:chapter ? chapter.id : null,
     unitTitle:unit.title, unit:unit, module:m, chapter:chapter
   };
