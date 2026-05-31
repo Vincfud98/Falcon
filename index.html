@@ -3243,6 +3243,16 @@ body.gallery-detail-open{overflow:hidden}
 .q-option.wrong{border-color:#d47973;color:#e89690;background:rgba(212,121,115,.16)}
 /* Questão verificada (modo prova real) fica congelada — não aceita troca. */
 .q-item.q-frozen .q-option{cursor:not-allowed}
+/* Barra "Verificar respostas" no fim do bloco (modelo do "Avaliar" das discursivas) */
+.qz-verify-bar{
+  display:flex;align-items:center;justify-content:flex-end;gap:1rem;flex-wrap:wrap;
+  margin-top:1.4rem;padding-top:1.2rem;border-top:1px solid var(--border,rgba(200,169,126,.15));
+}
+.qz-verify-bar[hidden]{display:none}
+.qz-verify-summary{
+  font-family:var(--sans);font-weight:300;font-size:.86rem;color:var(--text);margin-right:auto;
+}
+.qz-verify-summary[hidden]{display:none}
 .q-option-mark{
   display:inline-flex;align-items:center;justify-content:center;
   width:22px;height:22px;border-radius:50%;
@@ -11545,6 +11555,7 @@ Blocks.quiz = {
     const groups = normalizeQuizBlock(block);
     const totalItems = groups.reduce((s,g)=>s+g.items.length,0);
     const isSimulado = ctx && ctx.simuladoMode;
+    const defer = !!(ctx && ctx.deferFeedback); // prova real (marca → verifica)
     if(!groups.length){
       return `<section class="block-wrap quiz-block">
         ${blockHeader(block,'Questões objetivas', Icons.quiz, ctx)}
@@ -11586,7 +11597,7 @@ Blocks.quiz = {
       <div class="qz-satellite-pin">
         <div class="qz-sat-header">
           <span class="qz-sat-label">Progresso</span>
-          <span class="qz-sat-counter" data-qz-counter>0 / ${totalItems} corretas</span>
+          <span class="qz-sat-counter" data-qz-counter>0 / ${totalItems} ${defer?'respondidas':'corretas'}</span>
         </div>
         <div class="qz-sat-bar"><span class="qz-sat-bar-fill" data-qz-bar style="width:0"></span></div>
         <div class="qz-sat-remaining" data-qz-remaining>Faltam ${totalItems}</div>
@@ -11598,9 +11609,13 @@ Blocks.quiz = {
     </aside>` : '';
     return `<section class="block-wrap quiz-block${!isSimulado?' qz-has-satellite':''}">
       ${blockHeader(block,'Questões objetivas', Icons.quiz)}
-      <div class="qb-intro">${totalItems} ite${totalItems>1?'ns':'m'}${groups.length>1?` em ${groups.length} grupos`:''} · responda clicando nas opções.</div>
+      <div class="qb-intro">${totalItems} ite${totalItems>1?'ns':'m'}${groups.length>1?` em ${groups.length} grupos`:''} · ${defer?'marque as respostas e clique em <strong>Verificar respostas</strong> no final.':'responda clicando nas opções.'}</div>
       <div class="qz-layout">
-        <div class="qz-main"><div class="q-list">${groupsHTML}</div></div>
+        <div class="qz-main"><div class="q-list">${groupsHTML}</div>${defer?`
+          <div class="qz-verify-bar" data-qz-verify hidden>
+            <div class="qz-verify-summary" data-qz-summary hidden></div>
+            <button type="button" class="btn-primary qz-verify-btn" data-qz-verify-btn>Verificar respostas</button>
+          </div>` : ''}</div>
         ${satellite}
       </div>
     </section>`;
@@ -11783,6 +11798,103 @@ Blocks.quiz = {
           sat.scrollIntoView({ behavior:'smooth', block:'nearest' });
         });
       });
+      // ── Modo adiado (prova real): botão "Verificar respostas" ──────────
+      if(defer){
+        const verifyBar = stageEl.querySelector('[data-qz-verify]');
+        const verifyBtn = stageEl.querySelector('[data-qz-verify-btn]');
+        const summaryEl = stageEl.querySelector('[data-qz-summary]');
+
+        function readStates(){
+          let selected = 0, unverified = 0, verifiedCount = 0, verifiedCorrect = 0;
+          allItems.forEach(it => {
+            const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
+            if(!p) return;
+            if(p.verified){ verifiedCount++; if(p.correct) verifiedCorrect++; }
+            else if(p.selected != null){ unverified++; }
+            if(p.selected != null) selected++;
+          });
+          return { selected, unverified, verifiedCount, verifiedCorrect };
+        }
+        function revealItem(itemEl, selIdx, correct){
+          itemEl.querySelectorAll('.q-option').forEach((b,j) => {
+            b.classList.remove('correct','wrong');
+            if(j === selIdx) b.classList.add(correct ? 'correct' : 'wrong', 'selected');
+          });
+          const assertion = itemEl.querySelector('.q-assertion');
+          if(assertion){
+            const er = assertion.querySelector('.q-result'); if(er) er.remove();
+            const icon = document.createElement('span');
+            icon.className = correct ? 'q-result q-result-correct' : 'q-result q-result-wrong';
+            icon.title = correct ? 'Correto' : 'Incorreto';
+            icon.textContent = correct ? '✓' : '✗';
+            assertion.appendChild(icon);
+          }
+          itemEl.classList.add('answered','q-frozen'); // revela Dados + congela
+          const sk = itemEl.querySelector('.q-show-key'); if(sk) sk.style.display = 'flex';
+        }
+        function unrevealItem(itemEl){
+          itemEl.querySelectorAll('.q-option').forEach(b => b.classList.remove('correct','wrong','selected'));
+          const assertion = itemEl.querySelector('.q-assertion');
+          const er = assertion && assertion.querySelector('.q-result'); if(er) er.remove();
+          itemEl.classList.remove('answered','q-frozen');
+          const sk = itemEl.querySelector('.q-show-key'); if(sk) sk.style.display = 'none';
+        }
+        function syncVerifyBar(){
+          if(!verifyBar || !verifyBtn) return;
+          const s = readStates();
+          if(s.selected === 0 && s.verifiedCount === 0){ verifyBar.hidden = true; return; }
+          verifyBar.hidden = false;
+          // "Verificar" se há marcação nova a conferir; senão "Tentar novamente".
+          if(s.unverified > 0){ verifyBtn.textContent = 'Verificar respostas'; verifyBtn.dataset.mode = 'verify'; }
+          else { verifyBtn.textContent = 'Tentar novamente'; verifyBtn.dataset.mode = 'retry'; }
+          // Resumo: % medido SÓ sobre as respondidas verificadas.
+          if(summaryEl){
+            if(s.verifiedCount > 0){
+              const pct = Math.round(s.verifiedCorrect / s.verifiedCount * 100);
+              summaryEl.hidden = false;
+              summaryEl.textContent = 'Você acertou ' + s.verifiedCorrect + ' de ' + s.verifiedCount + ' (' + pct + '%)';
+            } else { summaryEl.hidden = true; }
+          }
+        }
+        stageEl.__quizSyncVerifyBar = syncVerifyBar;
+
+        if(verifyBtn){
+          verifyBtn.addEventListener('click', () => {
+            const mode = verifyBtn.dataset.mode || 'verify';
+            if(mode === 'retry'){
+              // Decisão do usuário: "Tentar novamente" LIMPA as marcações.
+              allItems.forEach(it => {
+                const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
+                if(p && p.verified){
+                  ctx.store.updateQuizAnswer(ctx.unitId, block.id, it.id,
+                    { selected:null, correct:null, verified:false, doubt:!!p.doubt }, { sync:false });
+                  const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
+                  if(itemEl) unrevealItem(itemEl);
+                }
+              });
+            } else {
+              // Verifica TODAS as respondidas ainda não verificadas (parcial).
+              allItems.forEach(it => {
+                const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
+                if(p && p.selected != null && !p.verified){
+                  const norm = normalizeOptions(it.options);
+                  const keyIdx = quizItemKeyIndex(it, norm);
+                  const selIdx = norm.values.findIndex(v => String(v) === String(p.selected));
+                  const correct = selIdx === keyIdx;
+                  // Verifica + SINCRONIZA (só agora conta na estatística global).
+                  ctx.store.updateQuizAnswer(ctx.unitId, block.id, it.id,
+                    { selected:p.selected, correct, verified:true, doubt:!!p.doubt });
+                  const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
+                  if(itemEl) revealItem(itemEl, selIdx, correct);
+                }
+              });
+            }
+            syncVerifyBar();
+            updateSatellite(null);
+          });
+        }
+        syncVerifyBar(); // estado inicial (aluno pode já ter marcações salvas)
+      }
       // Initial state
       updateSatellite(null, false);
     }
