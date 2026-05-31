@@ -8768,6 +8768,19 @@ const Store = (function(){
     }catch(e){ console.warn('[quiz sync exception]', e); }
   }
 
+  // Apaga a resposta de quiz no Supabase (usado pelo "Tentar novamente" do
+  // modo prova real — o aluno retrata a resposta, então ela some das stats).
+  async function _deleteQuizAnswerFromSupabase(unitId, blockId, itemId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const questionRef = await _uuidFromString(`quiz:${unitId}:${blockId}:${itemId}`);
+      const { error } = await window._sb.schema('aluno').from('student_responses')
+        .delete().eq('user_id', userId).eq('question_ref', questionRef);
+      if(error) console.warn('[quiz delete]', error);
+    }catch(e){ console.warn('[quiz delete exception]', e); }
+  }
+
   async function _syncEssayAnswerToSupabase(unitId, blockId, itemId, payload){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb) return;
@@ -9549,6 +9562,22 @@ const Store = (function(){
       const _syncP = _syncQuizAnswerToSupabase(unitId, blockId, itemId, payload).catch(()=>{});
       _syncP.then(() => { if(typeof window.refreshQuestionStats === 'function') window.refreshQuestionStats(itemId); });
       return _syncP;
+    },
+    // Remove por completo a resposta de uma questão (local + Supabase). Usado
+    // pelo "Tentar novamente" do modo prova real: o aluno retrata a resposta,
+    // então ela some das estatísticas globais e não ressurge após reload.
+    clearQuizAnswer(unitId, blockId, itemId){
+      if(!_state) return Promise.resolve();
+      const isBankId = typeof itemId === 'string' &&
+        (itemId.startsWith('ubique-') || /^[a-z]+-\d/.test(itemId));
+      if(_state.quizAnswers[unitId] && _state.quizAnswers[unitId][blockId]){
+        delete _state.quizAnswers[unitId][blockId][itemId];
+      }
+      if(isBankId && _state.quizAnswersByBankId){ delete _state.quizAnswersByBankId[itemId]; }
+      _persist(); _emit();
+      const _p = _deleteQuizAnswerFromSupabase(unitId, blockId, itemId).catch(()=>{});
+      _p.then(() => { if(typeof window.refreshQuestionStats === 'function') window.refreshQuestionStats(itemId); });
+      return _p;
     },
     updateEssay(unitId, blockId, itemId, payload){
       // Y3 Fase I (espelho do quiz): se itemId é bank_id, grava também no
@@ -11862,12 +11891,13 @@ Blocks.quiz = {
           verifyBtn.addEventListener('click', () => {
             const mode = verifyBtn.dataset.mode || 'verify';
             if(mode === 'retry'){
-              // Decisão do usuário: "Tentar novamente" LIMPA as marcações.
+              // Decisão do usuário: "Tentar novamente" LIMPA as marcações —
+              // remove a resposta de vez (local + Supabase), pra não voltar
+              // após reload nem continuar contando na estatística global.
               allItems.forEach(it => {
                 const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
                 if(p && p.verified){
-                  ctx.store.updateQuizAnswer(ctx.unitId, block.id, it.id,
-                    { selected:null, correct:null, verified:false, doubt:!!p.doubt }, { sync:false });
+                  ctx.store.clearQuizAnswer(ctx.unitId, block.id, it.id);
                   const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
                   if(itemEl) unrevealItem(itemEl);
                 }
