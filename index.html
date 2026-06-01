@@ -7444,6 +7444,37 @@ window.TAG_REGISTRY = {
     };
   }
 
+  /* Expande os vínculos tópico↔alvo (concursos.edital_topic_units) para o nível
+   * de UNIDADE. O vínculo pode ser feito em unit, chapter OU module
+   * (target_type/target_id; unit_id é legado e só vem quando é unidade). Aqui
+   * resolvemos chapter→suas unidades e module→todas as unidades dos capítulos.
+   * Retorna { topicId(string) -> Set(storeUnitId string) }. */
+  function _expandTopicUnitLinks(){
+    const out = {};
+    if(!window.UbiqueStore || !UbiqueStore.edital_topic_units) return out;
+    const links = UbiqueStore.edital_topic_units.list() || [];
+    const units = (UbiqueStore.units && UbiqueStore.units.list()) || [];
+    const chapters = (UbiqueStore.chapters && UbiqueStore.chapters.list()) || [];
+    links.forEach(function(l){
+      if(!l || l.topic_id == null) return;
+      const ttype = l.target_type || (l.unit_id != null ? 'unit' : null);
+      const tid = (l.target_id != null) ? l.target_id : l.unit_id;
+      if(ttype == null || tid == null) return;
+      const tkey = String(l.topic_id);
+      const add = function(storeUnitId){ if(storeUnitId == null) return; (out[tkey] = out[tkey] || new Set()).add(String(storeUnitId)); };
+      if(ttype === 'unit'){
+        add(tid);
+      } else if(ttype === 'chapter'){
+        units.forEach(function(u){ if(u && String(u.chapter_id) === String(tid)) add(u.id); });
+      } else if(ttype === 'module'){
+        const chIds = new Set(chapters.filter(function(c){ return c && String(c.module_id) === String(tid); }).map(function(c){ return String(c.id); }));
+        units.forEach(function(u){ if(u && chIds.has(String(u.chapter_id))) add(u.id); });
+      }
+    });
+    return out;
+  }
+  window._expandTopicUnitLinks = _expandTopicUnitLinks;
+
   /**
    * Reconstrói modules/chapters/units de um course a partir do UbiqueStore
    * (= Supabase). Refatorado em 3b.4: SEM merge com mock — só dados do banco.
@@ -7465,12 +7496,16 @@ window.TAG_REGISTRY = {
     const allUnits    = UbiqueStore.units.list() || [];
     const topicLinks  = (UbiqueStore.edital_topic_units && UbiqueStore.edital_topic_units.list()) || [];
 
-    // Index: topics por unit_id (pra herança bloco-unidade em renderers)
+    // Index: topics por unit_id. Usa o helper que EXPANDE vínculos de
+    // capítulo/módulo (target_type) para as unidades — antes só pegava
+    // vínculos direto na unidade (l.unit_id), ignorando os de capítulo/módulo.
     const topicsByUnit = {};
-    topicLinks.forEach(function(l){
-      if(!l || l.unit_id == null) return;
-      if(!topicsByUnit[l.unit_id]) topicsByUnit[l.unit_id] = [];
-      topicsByUnit[l.unit_id].push(l.topic_id);
+    const _tu = (typeof _expandTopicUnitLinks === 'function') ? _expandTopicUnitLinks() : {};
+    Object.keys(_tu).forEach(function(topicId){
+      _tu[topicId].forEach(function(storeUnitId){
+        if(!topicsByUnit[storeUnitId]) topicsByUnit[storeUnitId] = [];
+        topicsByUnit[storeUnitId].push(topicId);
+      });
     });
 
     course.modules = storeModules.map(function(sm){
@@ -22613,11 +22648,8 @@ function _perfSubjectTopicTree(course, perUnit){
   Object.values(perUnit||{}).forEach(pu => { if(pu.subjectId === sid && pu.storeUnitId != null) subjUnitAgg[String(pu.storeUnitId)] = pu.agg; });
   const subjUnitIds = new Set(Object.keys(subjUnitAgg));
   if(!subjUnitIds.size) return [];
-  // topic_id → store unit ids vinculados
-  const topicUnits = {};
-  (UbiqueStore.edital_topic_units.list()||[]).forEach(l => {
-    if(l && l.topic_id != null && l.unit_id != null){ (topicUnits[l.topic_id] = topicUnits[l.topic_id] || new Set()).add(String(l.unit_id)); }
-  });
+  // topic_id → store unit ids vinculados (expande vínculos de capítulo/módulo).
+  const topicUnits = (typeof window._expandTopicUnitLinks === 'function') ? window._expandTopicUnitLinks() : {};
   // hierarquia
   const childrenOf = {};
   (UbiqueStore.edital_topics.list()||[]).forEach(t => { const p = (t.parent_id==null)?'__root':t.parent_id; (childrenOf[p] = childrenOf[p] || []).push(t); });
