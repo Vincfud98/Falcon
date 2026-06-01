@@ -22423,29 +22423,25 @@ Renderers.performance = function(route){
   // as colunas ✓ ✓? ✗ ✗? — Total % Disc. FC Concl.) das unidades da matéria,
   // com drill-down por unidade. Reaproveita row()/perfColgroup já definidos. ──
   const _courses = (window.Portal && Portal.scopeCourses) ? Portal.scopeCourses() : [window.COURSE].filter(Boolean);
-  const _perfHead = `<thead><tr>
-    <th>Unidade</th>
-    <th title="Acertos">✓</th><th title="Acertos com dúvida">✓?</th>
-    <th title="Erros">✗</th><th title="Erros com dúvida">✗?</th>
-    <th title="Pendentes">—</th><th title="Total de questões">Total</th><th title="% de acerto">%</th>
-    <th title="Discursivas">Disc.</th><th title="Flashcards">FC</th><th title="Conclusão">Concl.</th>
-  </tr></thead>`;
   const byUnitHtml = _courses.map(course => {
     const sid = course._subjectId;
-    const rows = (perf.unitRows||[]).filter(u => u.subjectId === sid);
+    const tree = _perfSubjectTree(course, perf.perUnit);
+    // Totais da matéria (a partir do perUnit dessa matéria).
     let csAns=0, csCorr=0, csTotal=0;
-    rows.forEach(u => { csAns += u.quiz.answered; csCorr += u.quiz.correct; csTotal += u.quiz.total; });
+    Object.values(perf.perUnit||{}).forEach(pu => {
+      if(pu.subjectId === sid && pu.agg && pu.agg.quiz){ csAns += pu.agg.quiz.answered; csCorr += pu.agg.quiz.correct; csTotal += pu.agg.quiz.total; }
+    });
     const csPct = csAns ? Math.round(csCorr/csAns*100) : null;
-    const body = rows.map(u => row(u,'unit')).join('') || `<tr><td colspan="11" class="perf-empty">Sem unidades com conteúdo nesta matéria.</td></tr>`;
+    const body = tree.length
+      ? `<div class="perf-table-wrap">${renderPerfBreakdown(tree, 'topic')}</div>`
+      : '<div class="perf-u-empty">Sem unidades com conteúdo nesta matéria.</div>';
     return `<details class="perf-acc" open>
       <summary class="perf-acc-sum">
         <span class="perf-acc-title">${Util.esc(course.title||'Matéria')}</span>
         <span class="perf-acc-meta">${csAns} de ${csTotal} respondidas${csPct!=null?` · ${csPct}% acerto`:''}</span>
         <span class="perf-acc-chev">▸</span>
       </summary>
-      <div class="perf-acc-body">
-        <div class="perf-table-wrap"><table class="perf-table">${perfColgroup}${_perfHead}<tbody>${body}</tbody></table></div>
-      </div>
+      <div class="perf-acc-body">${body}</div>
     </details>`;
   }).join('') || '<div class="perf-empty-note">Nenhuma matéria disponível.</div>';
 
@@ -22526,6 +22522,40 @@ Renderers.performance.mount = function(stageEl, route){
   });
 };
 
+/* Monta as linhas módulo → capítulo → unidade de UMA matéria (sem filtro de
+ * tópico), agregando o perUnit (que já vem com os dados reais). Formato pronto
+ * pro renderPerfBreakdown (level/label/quiz/essay/completion/flashcards). */
+function _perfSubjectTree(course, perUnit){
+  const Q = () => ({ answered:0, total:0, correct:0, correctDoubt:0, wrong:0, wrongDoubt:0, pending:0 });
+  const A = () => ({ quiz:Q(), essay:{scoreTotal:0,maxTotal:0}, completion:{num:0,denom:0}, flashcards:{mastered:0,learning:0,unseen:0,total:0} });
+  const add = (t, s) => {
+    ['answered','total','correct','correctDoubt','wrong','wrongDoubt','pending'].forEach(k => t.quiz[k] += (s.quiz[k]||0));
+    t.essay.scoreTotal += s.essay.scoreTotal||0; t.essay.maxTotal += s.essay.maxTotal||0;
+    t.completion.num += s.completion.num||0; t.completion.denom += s.completion.denom||0;
+    ['mastered','learning','unseen','total'].forEach(k => t.flashcards[k] += (s.flashcards[k]||0));
+  };
+  const rows = [];
+  (course.modules||[]).forEach(m => {
+    const modA = A(); const chBlocks = [];
+    (m.chapters||[]).forEach(ch => {
+      const chA = A(); const uRows = [];
+      (ch.units||[]).forEach(u => {
+        const pu = perUnit && perUnit[u.id];
+        if(!pu || !pu.agg) return;
+        add(modA, pu.agg); add(chA, pu.agg);
+        uRows.push(Object.assign({ level:'unit', label:`Unid. ${u.number||''} · ${u.title||''}` }, pu.agg));
+      });
+      if(!uRows.length) return;
+      chBlocks.push(Object.assign({ level:'chapter', label:`Cap. ${ch.number||''} · ${ch.title||''}` }, chA));
+      uRows.forEach(r => chBlocks.push(r));
+    });
+    if(!chBlocks.length) return;
+    rows.push(Object.assign({ level:'module', label:`${m.label||'Módulo'} · ${m.title||''}` }, modA));
+    chBlocks.forEach(r => rows.push(r));
+  });
+  return rows;
+}
+
 function renderPerfBreakdown(rows, parentKind){
   // parentKind === 'unit' → breakdown rows are topics → header "Tópicos", no kind prefix
   // parentKind === 'topic' | 'tag' → breakdown rows are modules/chapters/units → header "Unidades", keep hierarchy prefix
@@ -22548,7 +22578,8 @@ function renderPerfBreakdown(rows, parentKind){
       const essay = r.essay.maxTotal ? r.essay.scoreTotal/r.essay.maxTotal : null;
       const compl = r.completion.denom ? r.completion.num/r.completion.denom : null;
       const pctTxt = pct==null?'—':Math.round(pct*100)+'%';
-      const essayTxt = r.essay.maxTotal?`${r.essay.scoreTotal} / ${r.essay.maxTotal}`:'—';
+      const _rr = (v)=>{ const n=Math.round((Number(v)||0)*10)/10; return Number.isInteger(n)?String(n):n.toFixed(1); };
+      const essayTxt = r.essay.maxTotal?`${_rr(r.essay.scoreTotal)} / ${r.essay.maxTotal}`:'—';
       const complTxt = compl==null?'—':Math.round(compl*100)+'%';
       const fc = r.flashcards || { mastered:0, learning:0, unseen:0, total:0 };
       const fcTxt = fc.total
