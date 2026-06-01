@@ -22437,18 +22437,17 @@ Renderers.performance = function(route){
   // as colunas ✓ ✓? ✗ ✗? — Total % Disc. FC Concl.) das unidades da matéria,
   // com drill-down por unidade. Reaproveita row()/perfColgroup já definidos. ──
   const _courses = (window.Portal && Portal.scopeCourses) ? Portal.scopeCourses() : [window.COURSE].filter(Boolean);
-  const byUnitHtml = _courses.map(course => {
+  // Acordeão por matéria com uma árvore dentro (genérico p/ unidade e tópico).
+  function _subjAccordion(course, tree, firstColLabel, emptyMsg){
     const sid = course._subjectId;
-    const tree = _perfSubjectTree(course, perf.perUnit);
-    // Totais da matéria (a partir do perUnit dessa matéria).
     let csAns=0, csCorr=0, csTotal=0;
     Object.values(perf.perUnit||{}).forEach(pu => {
       if(pu.subjectId === sid && pu.agg && pu.agg.quiz){ csAns += pu.agg.quiz.answered; csCorr += pu.agg.quiz.correct; csTotal += pu.agg.quiz.total; }
     });
     const csPct = csAns ? Math.round(csCorr/csAns*100) : null;
     const body = tree.length
-      ? `<div class="perf-table-wrap">${renderPerfUnitTree(tree)}</div>`
-      : '<div class="perf-u-empty">Sem unidades com conteúdo nesta matéria.</div>';
+      ? `<div class="perf-table-wrap">${renderPerfTree(tree, firstColLabel)}</div>`
+      : `<div class="perf-u-empty">${emptyMsg}</div>`;
     return `<details class="perf-acc" open>
       <summary class="perf-acc-sum">
         <span class="perf-acc-title">${Util.esc(course.title||'Matéria')}</span>
@@ -22457,7 +22456,13 @@ Renderers.performance = function(route){
       </summary>
       <div class="perf-acc-body">${body}</div>
     </details>`;
-  }).join('') || '<div class="perf-empty-note">Nenhuma matéria disponível.</div>';
+  }
+  const byUnitHtml = _courses.map(course =>
+    _subjAccordion(course, _perfSubjectTree(course, perf.perUnit), 'Unidade', 'Sem unidades com conteúdo nesta matéria.')
+  ).join('') || '<div class="perf-empty-note">Nenhuma matéria disponível.</div>';
+  const byTopicHtml = _courses.map(course =>
+    _subjAccordion(course, _perfSubjectTopicTree(course, perf.perUnit), 'Tópico do edital', 'Esta matéria ainda não tem tópicos do edital vinculados às unidades.')
+  ).join('') || '<div class="perf-empty-note">Nenhuma matéria disponível.</div>';
 
   return `<div class="hero">
     <span class="s-label" data-a="1">Desempenho do curso</span>
@@ -22504,7 +22509,7 @@ Renderers.performance = function(route){
   </div>
 
   <div class="perf-view-content" data-view="topic" style="display:none">
-    <div class="perf-empty-note">A visão por <strong>tópico do edital</strong> (acordeão por matéria → tópicos e subtópicos) chega na próxima atualização.</div>
+    ${byTopicHtml}
   </div>`;
 };
 Renderers.performance.mount = function(stageEl, route){
@@ -22560,46 +22565,89 @@ Renderers.performance.mount = function(stageEl, route){
   });
 };
 
-/* Monta as linhas módulo → capítulo → unidade de UMA matéria (sem filtro de
- * tópico), agregando o perUnit (que já vem com os dados reais). Formato pronto
- * pro renderPerfBreakdown (level/label/quiz/essay/completion/flashcards). */
+/* Helpers compartilhados de agregação (quiz/essay/completion/flashcards). */
+function _perfEmptyAgg(){
+  return { quiz:{answered:0,total:0,correct:0,correctDoubt:0,wrong:0,wrongDoubt:0,pending:0}, essay:{scoreTotal:0,maxTotal:0}, completion:{num:0,denom:0}, flashcards:{mastered:0,learning:0,unseen:0,total:0} };
+}
+function _perfAddAgg(t, s){
+  if(!s) return;
+  ['answered','total','correct','correctDoubt','wrong','wrongDoubt','pending'].forEach(k => t.quiz[k] += (s.quiz[k]||0));
+  t.essay.scoreTotal += s.essay.scoreTotal||0; t.essay.maxTotal += s.essay.maxTotal||0;
+  t.completion.num += s.completion.num||0; t.completion.denom += s.completion.denom||0;
+  ['mastered','learning','unseen','total'].forEach(k => t.flashcards[k] += (s.flashcards[k]||0));
+}
+function _perfBadge(level, label){ return `<span class="perf-badge perf-badge-${level}">${label}</span>`; }
+
+/* Árvore MÓDULO → CAPÍTULO → UNIDADE de UMA matéria (dados reais do perUnit).
+ * Linhas no formato genérico do renderPerfTree (badge/depth/hasChildren). */
 function _perfSubjectTree(course, perUnit){
-  const Q = () => ({ answered:0, total:0, correct:0, correctDoubt:0, wrong:0, wrongDoubt:0, pending:0 });
-  const A = () => ({ quiz:Q(), essay:{scoreTotal:0,maxTotal:0}, completion:{num:0,denom:0}, flashcards:{mastered:0,learning:0,unseen:0,total:0} });
-  const add = (t, s) => {
-    ['answered','total','correct','correctDoubt','wrong','wrongDoubt','pending'].forEach(k => t.quiz[k] += (s.quiz[k]||0));
-    t.essay.scoreTotal += s.essay.scoreTotal||0; t.essay.maxTotal += s.essay.maxTotal||0;
-    t.completion.num += s.completion.num||0; t.completion.denom += s.completion.denom||0;
-    ['mastered','learning','unseen','total'].forEach(k => t.flashcards[k] += (s.flashcards[k]||0));
-  };
+  const kind = { module:'Módulo', chapter:'Capítulo', unit:'Unidade' };
   const rows = [];
   (course.modules||[]).forEach((m, mi) => {
-    const modA = A(); const chBlocks = [];
+    const modA = _perfEmptyAgg(); const chBlocks = [];
     (m.chapters||[]).forEach((ch, ci) => {
-      const chA = A(); const uRows = [];
+      const chA = _perfEmptyAgg(); const uRows = [];
       (ch.units||[]).forEach((u, ui) => {
         const pu = perUnit && perUnit[u.id];
         if(!pu || !pu.agg) return;
-        add(modA, pu.agg); add(chA, pu.agg);
-        uRows.push(Object.assign({ level:'unit', number:u.number||'', name:u.title||'', path:`m${mi}/c${ci}/u${ui}` }, pu.agg));
+        _perfAddAgg(modA, pu.agg); _perfAddAgg(chA, pu.agg);
+        uRows.push(Object.assign({ level:'unit', depth:2, hasChildren:false, badge:_perfBadge('unit', kind.unit + (u.number?(' '+Util.esc(u.number)):'')), name:u.title||'', path:`m${mi}/c${ci}/u${ui}` }, pu.agg));
       });
       if(!uRows.length) return;
-      chBlocks.push(Object.assign({ level:'chapter', number:ch.number||'', name:ch.title||'', path:`m${mi}/c${ci}` }, chA));
+      chBlocks.push(Object.assign({ level:'chapter', depth:1, hasChildren:true, badge:_perfBadge('chapter', kind.chapter + (ch.number?(' '+Util.esc(ch.number)):'')), name:ch.title||'', path:`m${mi}/c${ci}` }, chA));
       uRows.forEach(r => chBlocks.push(r));
     });
     if(!chBlocks.length) return;
-    rows.push(Object.assign({ level:'module', number:m.number||'', name:m.title||'', path:`m${mi}` }, modA));
+    rows.push(Object.assign({ level:'module', depth:0, hasChildren:true, badge:_perfBadge('module', kind.module + (m.number?(' '+Util.esc(m.number)):'')), name:m.title||'', path:`m${mi}` }, modA));
     chBlocks.forEach(r => rows.push(r));
   });
   return rows;
 }
 
-/* Renderiza a árvore (módulo/capítulo/unidade) como tabela COLAPSÁVEL:
- * seta à esquerda (gira quando expandida), tag caramelo (Módulo I / Capítulo
- * 01 / Unidade 01) + título do lado, e todas as colunas. O colapso é feito no
- * mount (Renderers.performance.mount). */
-function renderPerfUnitTree(rows){
-  const kindLabel = l => l==='module' ? 'Módulo' : l==='chapter' ? 'Capítulo' : 'Unidade';
+/* Árvore de TÓPICOS DO EDITAL de UMA matéria: hierarquia parent_id; cada tópico
+ * agrega as unidades vinculadas (edital_topic_units) que pertencem à matéria,
+ * mais o roll-up dos subtópicos. Só inclui tópicos que tocam a matéria. */
+function _perfSubjectTopicTree(course, perUnit){
+  if(!window.UbiqueStore || !UbiqueStore.edital_topics || !UbiqueStore.edital_topic_units) return [];
+  const sid = course._subjectId;
+  // store unit id → agg (só unidades desta matéria)
+  const subjUnitAgg = {};
+  Object.values(perUnit||{}).forEach(pu => { if(pu.subjectId === sid && pu.storeUnitId != null) subjUnitAgg[String(pu.storeUnitId)] = pu.agg; });
+  const subjUnitIds = new Set(Object.keys(subjUnitAgg));
+  if(!subjUnitIds.size) return [];
+  // topic_id → store unit ids vinculados
+  const topicUnits = {};
+  (UbiqueStore.edital_topic_units.list()||[]).forEach(l => {
+    if(l && l.topic_id != null && l.unit_id != null){ (topicUnits[l.topic_id] = topicUnits[l.topic_id] || new Set()).add(String(l.unit_id)); }
+  });
+  // hierarquia
+  const childrenOf = {};
+  (UbiqueStore.edital_topics.list()||[]).forEach(t => { const p = (t.parent_id==null)?'__root':t.parent_id; (childrenOf[p] = childrenOf[p] || []).push(t); });
+  Object.values(childrenOf).forEach(arr => arr.sort((a,b)=>(a.position||0)-(b.position||0)));
+  const cache = {};
+  function agg(tid){
+    if(cache[tid]) return cache[tid];
+    const a = _perfEmptyAgg(); let touched = false;
+    if(topicUnits[tid]) topicUnits[tid].forEach(uid => { if(subjUnitIds.has(uid)){ _perfAddAgg(a, subjUnitAgg[uid]); touched = true; } });
+    (childrenOf[tid]||[]).forEach(ch => { const r = agg(ch.id); if(r.touched){ _perfAddAgg(a, r.agg); touched = true; } });
+    return (cache[tid] = { agg:a, touched });
+  }
+  const rows = [];
+  function walk(t, depth, path){
+    const r = agg(t.id);
+    if(!r.touched) return;
+    const kids = (childrenOf[t.id]||[]).filter(c => agg(c.id).touched);
+    rows.push(Object.assign({ level:'topic', depth, hasChildren:kids.length>0, badge:_perfBadge('topic', Util.esc(t.code || '•')), name:t.title||'', path }, r.agg));
+    kids.forEach((c, ci) => walk(c, depth+1, path + '/t' + ci));
+  }
+  (childrenOf['__root']||[]).filter(t => agg(t.id).touched).forEach((t, i) => walk(t, 0, 't' + i));
+  return rows;
+}
+
+/* Renderizador GENÉRICO da árvore colapsável (unidade ou tópico). Cada linha
+ * traz: badge (tag), name, path, hasChildren, depth + os agregados. Colapso no
+ * mount. Inclui todas as colunas (✓ ✓? ✗ ✗? — Total % Disc. FC Concl.). */
+function renderPerfTree(rows, firstColLabel){
   const _rr = v => { const n = Math.round((Number(v)||0)*10)/10; return Number.isInteger(n)?String(n):n.toFixed(1); };
   const cells = r => {
     const pct = r.quiz.answered ? Math.round(r.quiz.correct/r.quiz.answered*100)+'%' : '—';
@@ -22612,19 +22660,18 @@ function renderPerfUnitTree(rows){
     return `<td class="perf-c-correct">${r.quiz.correct||0}</td><td class="perf-c-cdoubt">${r.quiz.correctDoubt||0}</td><td class="perf-c-wrong">${r.quiz.wrong||0}</td><td class="perf-c-wdoubt">${r.quiz.wrongDoubt||0}</td><td class="perf-dim">${r.quiz.pending||0}</td><td class="perf-dim">${r.quiz.total}</td><td>${pct}</td><td>${r.essay.maxTotal?_rr(r.essay.scoreTotal)+' / '+r.essay.maxTotal:'—'}</td><td class="perf-fc-cell">${fcTxt}</td>${complCell}`;
   };
   const body = rows.map(r => {
-    const hasChildren = r.level !== 'unit';
-    const badge = `<span class="perf-badge perf-badge-${r.level}">${kindLabel(r.level)}${r.number?(' '+Util.esc(r.number)):''}</span>`;
-    const chev = hasChildren
+    const chev = r.hasChildren
       ? `<button type="button" class="perf-tree-chev" data-toggle="${Util.attr(r.path)}" aria-expanded="true" aria-label="Expandir/recolher">›</button>`
       : '<span class="perf-tree-chev-ph"></span>';
+    const pad = `padding-left:${((r.depth||0)*1.4 + 0.2).toFixed(2)}rem`;
     return `<tr class="perf-tr perf-tr-${r.level}" data-path="${Util.attr(r.path)}">
-      <td class="perf-tree-label perf-tree-${r.level}">${chev}${badge}<span class="perf-tree-name">${Util.esc(r.name)}</span></td>
+      <td class="perf-tree-label" style="${pad}">${chev}${r.badge}<span class="perf-tree-name">${Util.esc(r.name)}</span></td>
       ${cells(r)}
     </tr>`;
   }).join('');
   return `<table class="perf-table perf-tree">
     <colgroup><col style="width:34%"><col style="width:5%"><col style="width:5%"><col style="width:5%"><col style="width:5%"><col style="width:5%"><col style="width:6%"><col style="width:6%"><col style="width:8%"><col style="width:10%"><col style="width:11%"></colgroup>
-    <thead><tr><th>Unidade</th><th title="Acertos">✓</th><th title="Acertos com dúvida">✓?</th><th title="Erros">✗</th><th title="Erros com dúvida">✗?</th><th title="Pendentes">—</th><th title="Total">Total</th><th title="% de acerto">%</th><th title="Discursivas">Disc.</th><th title="Flashcards">FC</th><th title="Conclusão">Concl.</th></tr></thead>
+    <thead><tr><th>${Util.esc(firstColLabel||'Conteúdo')}</th><th title="Acertos">✓</th><th title="Acertos com dúvida">✓?</th><th title="Erros">✗</th><th title="Erros com dúvida">✗?</th><th title="Pendentes">—</th><th title="Total">Total</th><th title="% de acerto">%</th><th title="Discursivas">Disc.</th><th title="Flashcards">FC</th><th title="Conclusão">Concl.</th></tr></thead>
     <tbody>${body}</tbody>
   </table>`;
 }
@@ -22718,7 +22765,7 @@ function buildPerformanceReport(){
     (Util.unitsOfModule(m)||[]).forEach(entry => {
       const unit = entry.unit;
       const chapter = entry.chapter;
-      const perU = perUnit[unit.id] = { agg:emptyAgg(), subjectId:m._subjectId||null, moduleId:m.id, chapterId:chapter?chapter.id:null, unitId:unit.id, unitNumber:unit.number, unitTitle:unit.title, moduleLabel:m.label, moduleTitle:m.title, chapterNumber:chapter?chapter.number:null, chapterTitle:chapter?chapter.title:null };
+      const perU = perUnit[unit.id] = { agg:emptyAgg(), subjectId:m._subjectId||null, storeUnitId:(unit._storeId!=null?unit._storeId:null), moduleId:m.id, chapterId:chapter?chapter.id:null, unitId:unit.id, unitNumber:unit.number, unitTitle:unit.title, moduleLabel:m.label, moduleTitle:m.title, chapterNumber:chapter?chapter.number:null, chapterTitle:chapter?chapter.title:null };
       summary.units.total++;
       const unitCompleted = !!((state.unitViews||{})[unit.id] || {}).completed;
       if(unitCompleted) summary.units.done++;
