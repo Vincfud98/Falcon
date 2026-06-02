@@ -1831,8 +1831,9 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
   border:1px solid var(--accent);color:var(--accent);background:var(--accent-lo);
   transition:all .25s ease;
 }
-.catalog-card-buy{background:var(--accent);color:var(--bg);cursor:pointer}
-.catalog-card-buy:hover{filter:brightness(1.03);transform:translateY(-1px)}
+.catalog-card-buy{background:var(--accent);color:var(--bg)}
+.catalog-back{color:var(--accent);text-decoration:none;letter-spacing:.08em}
+.catalog-back:hover{text-decoration:underline}
 .catalog-card:hover .catalog-card-cta{background:var(--accent);color:var(--bg)}
 .catalog-card-locked .catalog-card-cta{border-color:var(--border);color:var(--text-mute);background:transparent}
 .catalog-card-soon-badge{
@@ -7926,6 +7927,7 @@ window.TAG_REGISTRY = {
 
   // Render inicial com cache local (instantâneo) + re-render após hydrate
   window.rebuildCourses = rebuildCourses; // exposto p/ refresh de acesso no boot
+  window.coursesInExams = _coursesInExams; // exposto p/ filtrar catálogo por concurso
   rebuildCourses();
 
   // Helper: garante que Store.init rode quando window.COURSE ficar disponível.
@@ -10211,8 +10213,9 @@ const Router = (function(){
     // /m/<mId>/c/<cId>/u/<uId>      → unit (chapter context)
     // /m/<mId>/portal               → portal
     // /m/<mId>/portal/<cardKey>     → portalDetail
-    if(parts.length === 0) return asRoute('student', 'catalog', {}, query);
+    if(parts.length === 0) return asRoute('student', 'myExams', {}, query);   // tela inicial: Meus concursos
     if(parts[0] === 'login') return asRoute('public', 'login', {}, query);
+    if(parts[0] === 'cursos') return asRoute('student', 'catalog', {}, query); // Seus cursos (filtrável por ?exam=)
     if(parts[0] === 'course') return asRoute('student', 'courseHome', {}, query);
     if(parts[0] === 'admin') return asRoute('admin', 'admin', {}, query);
     if(parts[0] === 'notes') return asRoute('student', 'notes', {}, query);
@@ -10449,7 +10452,7 @@ function renderBreadcrumb(route){
   const el = document.getElementById('breadcrumb');
   // Catálogo ("Seus cursos") e login: SEM breadcrumb de matéria — o aluno
   // ainda não entrou em nada. (Resolve o "HISTÓRIA DO BRASIL" indevido.)
-  if(route.view === 'login' || route.view === 'catalog'){
+  if(route.view === 'login' || route.view === 'catalog' || route.view === 'myExams'){
     el.innerHTML = '';
     return;
   }
@@ -17951,10 +17954,74 @@ function progressBarHTML(pct){
   return `<div class="cprog"><div class="cprog-fill" style="width:${p}%"></div><span class="cprog-label">${p}% concluído</span></div>`;
 }
 
-Renderers.catalog = function(){
+// "Meus concursos" — tela inicial. Mesma estética de "Seus cursos", mas os
+// cards são CONCURSOS. Os do aluno abrem; os outros aparecem como "OBTER".
+Renderers.myExams = function(){
+  const exams = (window.UbiqueStore && UbiqueStore.exams && UbiqueStore.exams.list)
+    ? (UbiqueStore.exams.list() || []) : [];
+  const access = (window.Auth && Auth.loadAccessData) ? Auth.loadAccessData() : null;
+  const isAdmin = !!(window.Auth && Auth.isAdmin && Auth.isAdmin());
+  const myExamIds = new Set(((access && access.exam_ids) || []).map(String));
+  // contagem de matérias por concurso (via exam_subjects)
+  const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list)
+    ? (UbiqueStore.exam_subjects.list() || []) : [];
+  const subjCountByExam = {};
+  rel.forEach(es => { const k = String(es.exam_id); subjCountByExam[k] = (subjCountByExam[k] || 0) + 1; });
+  const gridIcon = '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>';
+
+  const cards = exams.map((e, i) => {
+    const subjCount = subjCountByExam[String(e.id)] || 0;
+    const hasContent = subjCount > 0;
+    const owned = isAdmin || myExamIds.has(String(e.id));
+    const canOpen = owned && hasContent;
+    const canBuy = !owned && hasContent;
+    const href = canOpen ? `#/cursos?exam=${encodeURIComponent(e.id)}` : '';
+    const footerCta = canOpen
+      ? `<span class="catalog-card-cta">Acessar</span>`
+      : canBuy
+        ? `<span class="catalog-card-cta catalog-card-buy">OBTER</span>`
+        : `<span class="catalog-card-cta">Indisponível</span>`;
+    return `<${canOpen?'a':'div'} class="catalog-card${canOpen?'':' catalog-card-locked'}" ${canOpen?`href="${href}"`:''} data-exam-id="${Util.attr(e.id)}" data-a="${i+2}">
+      <div class="catalog-card-cover" style="background-image:url('${Util.attr(e.cover||'')}')">
+        ${!canOpen ? `<div class="catalog-card-soon-badge">${canBuy ? 'Disponível' : 'Indisponível'}</div>` : ''}
+        <div class="catalog-card-cover-title">
+          <h3>${Util.esc(e.name || e.id)}</h3>
+          ${e.subtitle ? `<div class="ccc-sub">${Util.esc(e.subtitle)}</div>` : ''}
+        </div>
+      </div>
+      <div class="catalog-card-body">
+        ${e.description ? `<p class="catalog-card-desc">${Util.esc(e.description)}</p>` : ''}
+        <div class="catalog-card-stats">
+          ${subjCount ? `<span class="catalog-card-stat">${gridIcon} <strong>${subjCount}</strong> matéria${subjCount!==1?'s':''}</span>` : ''}
+        </div>
+      </div>
+      <div class="catalog-card-footer">${footerCta}</div>
+    </${canOpen?'a':'div'}>`;
+  }).join('');
+
+  return `<div class="hero">
+    <span class="s-label" data-a="1">Ubique Course Platform</span>
+    <h1 class="s-title hero" data-a="2">Meus concursos</h1>
+    <div class="s-divider" data-a="3"></div>
+    <p class="s-body" data-a="4">Escolha o concurso para ver suas matérias. Os concursos liberados para você abrem direto; os demais aparecem como sugestão.</p>
+  </div>
+  <div class="catalog-grid" data-a="5">${cards || '<p class="s-body">Nenhum concurso disponível no momento.</p>'}</div>`;
+};
+
+Renderers.catalog = function(route){
   // Filtra null/undefined: pode acontecer durante boot pré-hidratação.
-  const courses = (window.COURSES || []).filter(Boolean);
+  let courses = (window.COURSES || []).filter(Boolean);
   if(!courses.length && window.COURSE) courses.push(window.COURSE);
+  // Concurso selecionado (vindo de "Meus concursos"): restringe as matérias
+  // àquele concurso. Sem param → mostra todas as matérias do aluno.
+  const _examId = route && route.query && route.query.exam;
+  let _examName = '';
+  if(_examId){
+    if(typeof window.coursesInExams === 'function') courses = window.coursesInExams(courses, [_examId]);
+    const _ex = (window.UbiqueStore && UbiqueStore.exams && UbiqueStore.exams.list)
+      ? (UbiqueStore.exams.list() || []).find(x => String(x.id) === String(_examId)) : null;
+    _examName = _ex ? (_ex.name || _ex.id) : '';
+  }
   const starSvg = '<svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
   const cards = courses.map((c,i) => {
     const hasContent = c.modules && c.modules.length > 0;
@@ -18023,8 +18090,8 @@ Renderers.catalog = function(){
     </${canOpen?'a':'div'}>`;
   }).join('');
   return `<div class="hero">
-    <span class="s-label" data-a="1">Ubique Course Platform</span>
-    <h1 class="s-title hero" data-a="2">Seus cursos</h1>
+    <span class="s-label" data-a="1">${_examName ? `<a href="#/" class="catalog-back">← Meus concursos</a>` : 'Ubique Course Platform'}</span>
+    <h1 class="s-title hero" data-a="2">${_examName ? Util.esc(_examName) : 'Seus cursos'}</h1>
     <div class="s-divider" data-a="3"></div>
     <p class="s-body" data-a="4">Escolha um curso para começar. Cada disciplina contém módulos, unidades e materiais de referência organizados por tópicos e tags.</p>
   </div>
@@ -25489,7 +25556,7 @@ const App = {
     // Modo matéria (STICKY): catálogo SAI do modo; entrar numa matéria/
     // módulo ENTRA. Demais páginas (portal/desempenho/notas...) mantêm o
     // modo atual — assim o aluno que entrou em HB segue "dentro de HB".
-    if(route.view === 'catalog'){ window._subjectMode = false; }
+    if(route.view === 'catalog' || route.view === 'myExams'){ window._subjectMode = false; }
     else if(route.view === 'courseHome' || (route.params && route.params.moduleId)){ window._subjectMode = true; }
     // Garante que o Store esteja inicializado antes de renderizar qualquer
     // página logada (no 1º login, boot rodou com user/COURSE ainda null;
