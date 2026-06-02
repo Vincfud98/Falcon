@@ -7657,6 +7657,32 @@ window.TAG_REGISTRY = {
     return course;
   }
 
+  // Matérias pertencentes a um conjunto de concursos (exam_ids), via a relação
+  // autoritativa exam_subjects (com fallback em subject.concurso_ids).
+  function _coursesInExams(courses, examIds){
+    const ex = new Set((examIds || []).map(String));
+    if(!ex.size) return courses;
+    const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list)
+      ? (UbiqueStore.exam_subjects.list() || []) : [];
+    const subjOk = new Set(rel.filter(es => ex.has(String(es.exam_id))).map(es => String(es.subject_id)));
+    const hasMapping = subjOk.size > 0 || courses.some(c => (c.concurso_ids || []).length);
+    if(!hasMapping) return courses; // mapeamento não hidratado → não esconde nada
+    return courses.filter(c =>
+      subjOk.has(String(c._subjectId)) || (c.concurso_ids || []).some(id => ex.has(String(id)))
+    );
+  }
+  // Aplica o escopo do aluno logado (concurso). Admin e modo dev veem tudo.
+  function _scopeCoursesByExam(courses){
+    try{
+      if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return courses;
+      const a = (window.Auth && Auth.loadAccessData) ? Auth.loadAccessData() : null;
+      if(a && a.allowed && Array.isArray(a.exam_ids) && a.exam_ids.length){
+        return _coursesInExams(courses, a.exam_ids);
+      }
+    }catch(_){}
+    return courses;
+  }
+
   function rebuildCourses(){
     const subjects = UbiqueStore.subjects.list();
 
@@ -7669,6 +7695,10 @@ window.TAG_REGISTRY = {
     }
 
     window.COURSES = subjects.map(buildCourse);
+
+    // Escopa as matérias pelo(s) concurso(s) do aluno (Fase C). Admin/sem-acesso
+    // vê tudo; mapeamento ainda não hidratado → não esconde nada (graceful).
+    window.COURSES = _scopeCoursesByExam(window.COURSES);
 
     // Hidrata módulos/capítulos/unidades de CADA curso a partir do UbiqueStore.
     window.COURSES.forEach(function(course){
@@ -7895,6 +7925,7 @@ window.TAG_REGISTRY = {
   }
 
   // Render inicial com cache local (instantâneo) + re-render após hydrate
+  window.rebuildCourses = rebuildCourses; // exposto p/ refresh de acesso no boot
   rebuildCourses();
 
   // Helper: garante que Store.init rode quando window.COURSE ficar disponível.
@@ -8665,7 +8696,7 @@ const Auth = (function(){
       try{
         const { data, error } = await window._sb.schema('crm')
           .from('platform_access')
-          .select('status, access_type, subject_ids')
+          .select('status, access_type, subject_ids, exam_ids')
           .eq('email', normEmail)
           .maybeSingle();
         if(!error){
@@ -8675,6 +8706,7 @@ const Auth = (function(){
             allowed: true,
             access_type: data.access_type || 'full',
             subject_ids: Array.isArray(data.subject_ids) ? data.subject_ids : [],
+            exam_ids: Array.isArray(data.exam_ids) ? data.exam_ids : [],
           };
         }
         // Se error (rede/RLS), cai pro fallback UbiqueStore abaixo
@@ -8688,7 +8720,7 @@ const Auth = (function(){
     if(window.UbiqueStore){
       const list = window.UbiqueStore.platform_access.list();
       if(list.length === 0){
-        return { allowed: true, access_type: 'full', subject_ids: [] };
+        return { allowed: true, access_type: 'full', subject_ids: [], exam_ids: [] };
       }
       const found = list.find(x => (x.email||'').toLowerCase() === normEmail);
       if(!found) return { allowed: false, reason: 'not_found' };
@@ -8697,22 +8729,24 @@ const Auth = (function(){
         allowed: true,
         access_type: found.access_type || 'full',
         subject_ids: Array.isArray(found.subject_ids) ? found.subject_ids : [],
+        exam_ids: Array.isArray(found.exam_ids) ? found.exam_ids : [],
       };
     }
 
     // Sem store nem Supabase → libera (fallback seguro)
-    return { allowed: true, access_type: 'full', subject_ids: [] };
+    return { allowed: true, access_type: 'full', subject_ids: [], exam_ids: [] };
   }
 
-  // Verifica se um módulo está liberado para o usuário.
-  // Mapeamento: subject_ids contém posições 1-based dos módulos no COURSE.
+  // Verifica se o conteúdo está liberado para o usuário. A posse é por MATÉRIA
+  // (o aluno tem a matéria inteira ou não): no modo Personalizado, a matéria do
+  // curso ativo precisa estar em subject_ids (= ids de matéria). Completo libera.
   function canAccessModule(moduleId){
     const data = loadAccessData();
-    if(!data || data.access_type === 'full') return true;
-    const modules = (window.COURSE && window.COURSE.modules) || [];
-    const idx = modules.findIndex(m => m.id === moduleId);
-    if(idx === -1) return true;                          // módulo desconhecido → libera
-    return (data.subject_ids || []).includes(idx + 1);  // posição 1-based
+    if(!data || data.access_type !== 'custom') return true;
+    if(isAdmin && isAdmin()) return true;
+    const sid = window.COURSE && window.COURSE._subjectId;
+    if(sid == null) return true; // sem matéria ativa conhecida → não bloqueia
+    return (data.subject_ids || []).map(String).includes(String(sid));
   }
 
   /**
@@ -8772,6 +8806,20 @@ const Auth = (function(){
   // pare de redirecionar pro /login.
   load().then(() => {
     if(current) _renderSoon();
+    // Fase C: relê o acesso (com exam_ids) ao abrir o app — sessões antigas não
+    // têm exam_ids no storage. Reescopa os cursos quando a leitura voltar.
+    try{
+      if(current && current.email && !(isAdmin && isAdmin())){
+        checkPlatformAccess(current.email).then(acc => {
+          if(acc && acc.allowed){
+            const remembered = !!localStorage.getItem(ACCESS_KEY);
+            storeAccessData(acc, remembered);
+            if(typeof window.rebuildCourses === 'function') window.rebuildCourses();
+            _renderSoon();
+          }
+        }).catch(()=>{});
+      }
+    }catch(_){}
   });
 
   // ─── Auth state changes (login/logout em outras abas, expiração JWT)
@@ -8859,9 +8907,23 @@ const Commerce = (function(){
     try{ localStorage.setItem(KEY, JSON.stringify(owned)); }catch(_){}
   }
   function isOwned(courseId){
-    if(!owned || !Object.keys(owned).length) load();
     const course = (window.COURSES || []).find(item => item.id === courseId);
-    return !!(course && course.contractIncluded) || !!owned[courseId];
+    if(!course) return false;
+    // Admin enxerga tudo.
+    if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return true;
+    // Posse vem do acesso real (crm.platform_access).
+    const a = (window.Auth && Auth.loadAccessData) ? Auth.loadAccessData() : null;
+    if(a && a.allowed){
+      // Personalizado: dono só das matérias liberadas (subject_ids = ids de matéria).
+      if(a.access_type === 'custom'){
+        return (a.subject_ids || []).map(String).includes(String(course._subjectId));
+      }
+      // Completo: dono de todas as matérias do escopo (já filtrado por concurso).
+      return true;
+    }
+    // Sem dados de acesso (modo dev/local) → comportamento antigo (seguro).
+    if(!owned || !Object.keys(owned).length) load();
+    return !!course.contractIncluded || !!owned[courseId];
   }
   function purchase(course){
     if(!course || !course.id) return false;
@@ -17898,7 +17960,6 @@ Renderers.catalog = function(){
     const hasContent = c.modules && c.modules.length > 0;
     const owned = Commerce.isOwned(c.id);
     const releaseCountdown = formatReleaseCountdown(c.releaseAt);
-    const canBuy = !!c.availableForPurchase && !owned;
     // Bloqueio: status='scheduled' SEMPRE bloqueia (com ou sem data),
     // status='coming-soon' bloqueia se tiver data futura.
     const releaseTime = c.releaseAt ? new Date(c.releaseAt).getTime() : 0;
@@ -17908,6 +17969,9 @@ Renderers.catalog = function(){
       (releaseTime > 0 && releaseTime > Date.now());       // ou tem data futura
     const isScheduled = isLockedByRelease || (!!c.releaseAt && !hasContent);
     const canOpen = hasContent && owned && !isLockedByRelease;
+    // "OBTER": matéria do concurso que o aluno NÃO tem, mas está disponível
+    // (tem conteúdo e não está bloqueada por data). Por ora só badge, sem checkout.
+    const canBuy = !owned && hasContent && !isLockedByRelease;
     const moduleCount = (c.modules||[]).length;
     const unitCount = (c.modules||[]).reduce((s,m) => s + Util.unitsOfModule(m).length, 0);
     const href = canOpen ? '#/course' : '';
@@ -17924,7 +17988,7 @@ Renderers.catalog = function(){
     const footerCta = canOpen
       ? `<span class="catalog-card-cta">Acessar curso</span>`
       : canBuy
-        ? `<button class="catalog-card-cta catalog-card-buy" type="button" data-course-buy="${Util.attr(c.id)}">OBTER</button>`
+        ? `<span class="catalog-card-cta catalog-card-buy">OBTER</span>`
         : `<span class="catalog-card-cta">${isScheduled ? 'Em breve' : 'Indisponível'}</span>`;
     return `<${canOpen?'a':'div'} class="catalog-card${canOpen?'':' catalog-card-locked'}${isScheduled?' catalog-card-scheduled':''}" ${canOpen?`href="${href}"`:''} ${isScheduled?`data-release-at="${Util.attr(c.releaseAt)}"`:''} data-course-id="${Util.attr(c.id)}" data-subject-id="${Util.attr(c._subjectId||'')}" data-a="${i+2}">
       <div class="catalog-card-cover" style="background-image:url('${Util.attr(c.cover||'')}')">
