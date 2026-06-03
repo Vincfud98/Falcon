@@ -627,6 +627,21 @@
         }
 
         const groupsHTML = groups.map(function(g, gi){
+          // Q3 — grupo que referencia o banco real: resolve para o shape do
+          // preview (enunciado/referência + questions[] cru). O resolver é
+          // fornecido pelo app (admin: resolveBankGroupRaw via caches questoes).
+          if(g && g.bank_question_id && typeof global.resolveBankGroupRaw === 'function'){
+            const rg = global.resolveBankGroupRaw(g.bank_question_id, g.bank_item_ids);
+            if(rg){
+              g = Object.assign({}, g, {
+                title:           g.title || rg.title || '',
+                origin:          rg.origin || g.origin || '',
+                reference_text:  rg.reference_text || '',
+                reference_image: rg.reference_image || '',
+                questions:       Array.isArray(rg.questions) ? rg.questions : []
+              });
+            }
+          }
           const qs = Array.isArray(g.questions) ? g.questions : [];
           const parsedGOrigin = _lbParseQuestionOrigin(g.origin);
           const autoGTag = _lbOriginToTag(parsedGOrigin);
