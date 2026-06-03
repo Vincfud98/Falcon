@@ -8716,7 +8716,7 @@
             <div id="qf-subject"></div>
           </div>
           <div class="field">
-            <label>Tema</label>
+            <label>Tópico do edital</label>
             <div id="qf-topic"></div>
           </div>
           <div class="field">
@@ -9758,7 +9758,7 @@
                   <div class="field"><label>Ano</label><div id="kn-qf-year"></div></div>
                   <div class="field"><label>Fase</label><div id="kn-qf-phase"></div></div>
                   <div class="field"><label>Matéria</label><div id="kn-qf-subject"></div></div>
-                  <div class="field"><label>Temas</label><div id="kn-qf-topic"></div></div>
+                  <div class="field"><label>Tópicos do edital</label><div id="kn-qf-topic"></div></div>
                   <div class="field"><label>Tag</label><div id="kn-qf-tag"></div></div>
                   <div class="field" style="grid-column:1/-1">
                     <label>Nº da questão (busca parcial)</label>
@@ -14881,7 +14881,8 @@
 
   // Auxiliares de questão (carregados quando necessário)
   let referenceTextsCache = [];
-  let questionTopicsCache = [];         // {question_id, topic_id, auto_included}
+  let questionTopicsCache = [];         // {question_id, topic_id, auto_included} (taxonomia legada — sai na E6)
+  let questionEditalTopicsCache = [];   // {question_id, edital_topic_id} — tópicos do edital por questão (E6)
   let questionTagsCache = [];           // {question_id, tag_id}
   let questionRefsCache = [];           // {question_id, reference_text_id, ordem}
 
@@ -16450,7 +16451,7 @@
       loadSubjects(), loadTopics(), loadTopicAliases(), loadTags(),
       loadBancas(), loadExams(), loadExamSubjects(), loadExamBancas(),
       loadQuestions(),
-      loadReferenceTexts(), loadQuestionTopics(),
+      loadReferenceTexts(), loadQuestionTopics(), loadQuestionEditalTopics(),
       loadQuestionTags(), loadQuestionRefs(),
       loadTfItems(), loadTfItemComments(), loadTfItemTopics(), loadTfItemTags(),
       loadMcOptions(), loadEssayCriteria(), loadEssayAnswerModels(),
@@ -19769,14 +19770,13 @@
       .filter(s => availableSubjectIds.has(s.id))
       .sort((a, b) => (a.subject || '').localeCompare(b.subject || '', 'pt-BR'));
 
-    // ─── Temas disponíveis: filtrados por matéria selecionada ───
-    let availableTopics;
-    if(subjectIds.length > 0){
-      availableTopics = topicsCache.filter(t => subjectIds.includes(String(t.subject_id)));
-    } else {
-      availableTopics = topicsCache.filter(t => availableSubjectIds.has(t.subject_id));
-    }
-    availableTopics = sortTopicsHierarchically(availableTopics);
+    // ─── E6 — Tópicos do edital disponíveis: os que aparecem em alguma questão ───
+    const usedEditalIds = new Set((questionEditalTopicsCache || []).map(qe => String(qe.edital_topic_id)));
+    const editalAll = (window.UbiqueStore && UbiqueStore.edital_topics && UbiqueStore.edital_topics.list)
+      ? (UbiqueStore.edital_topics.list() || []) : [];
+    let availableTopics = editalAll
+      .filter(t => usedEditalIds.has(String(t.id)))
+      .sort((a, b) => String(a.code || '').localeCompare(String(b.code || ''), undefined, { numeric: true }));
 
     return {
       availableYears,
@@ -19873,10 +19873,10 @@
     }));
     upsertMS('subject_id', 'qf-subject', subjOpts, 'todas', true);
 
-    // ─── Tema ───
+    // ─── Tópico do edital ───
     const topicOpts = cascade.availableTopics.map(t => ({
       value: t.id,
-      label: (t.item ? t.item + ' · ' : '') + t.topic,
+      label: (t.code ? t.code + ' · ' : '') + (t.alias || t.title || ''),
     }));
     upsertMS('topic_id', 'qf-topic', topicOpts, 'todos', true);
 
@@ -19956,13 +19956,13 @@
       });
     }
 
-    // Filtro por tema (múltiplo — OR)
+    // E6 — Filtro por tópico do edital (múltiplo — OR)
     if(f.topic_id && f.topic_id.length > 0){
       const topicIdSet = new Set(f.topic_id.map(String));
       const qIdsWithTopic = new Set(
-        questionTopicsCache
-          .filter(qt => topicIdSet.has(String(qt.topic_id)))
-          .map(qt => qt.question_id)
+        questionEditalTopicsCache
+          .filter(qe => topicIdSet.has(String(qe.edital_topic_id)))
+          .map(qe => qe.question_id)
       );
       filtered = filtered.filter(q => qIdsWithTopic.has(q.id));
     }
@@ -20974,7 +20974,7 @@
     showMsg('globalMessage3', editingQuestionId ? 'Questão atualizada.' : 'Questão criada.', 'success');
 
     await Promise.all([
-      loadQuestions(), loadQuestionTopics(), loadQuestionTags(), loadQuestionRefs(),
+      loadQuestions(), loadQuestionTopics(), loadQuestionEditalTopics(), loadQuestionTags(), loadQuestionRefs(),
       loadTfItems(), loadTfItemComments(), loadTfItemTopics(), loadTfItemTags(),
       loadMcOptions(), loadEssayCriteria(), loadEssayAnswerModels()
     ]);
@@ -21203,6 +21203,13 @@
       .from('question_topics').select('*');
     if(error){ console.error('question_topics:', error); return; }
     questionTopicsCache = data || [];
+  }
+  // E6 — tópicos do edital por questão (substitui question_topics nos filtros).
+  async function loadQuestionEditalTopics(){
+    const { data, error } = await questoes()
+      .from('question_edital_topics').select('*');
+    if(error){ console.error('question_edital_topics:', error); return; }
+    questionEditalTopicsCache = data || [];
   }
   async function loadQuestionTags(){
     const { data, error } = await questoes()
@@ -25997,18 +26004,15 @@
         .map(s => ({ value: s.id, label: s.subject || s.sigla || '—' })),
       'todas');
 
-    // Temas: só os que aparecem em alguma questão via question_topics,
-    // E se o filtro de matéria estiver ativo, restringe aos temas das matérias selecionadas.
-    const subjectFilter = (knQuestionFilters.subject_id || []).map(String);
-    const usedTopicIds = new Set(
-      (questionTopicsCache || []).map(qt => qt.topic_id)
-    );
+    // E6 — Tópicos do edital: só os que aparecem em alguma questão via question_edital_topics.
+    const usedEditalIds = new Set((questionEditalTopicsCache || []).map(qe => String(qe.edital_topic_id)));
+    const editalTopicsList = (window.UbiqueStore && UbiqueStore.edital_topics && UbiqueStore.edital_topics.list)
+      ? (UbiqueStore.edital_topics.list() || []) : [];
     upsertMS('topic_id', 'kn-qf-topic',
-      (topicsCache || [])
-        .filter(t => usedTopicIds.has(t.id))
-        .filter(t => subjectFilter.length === 0 || subjectFilter.includes(String(t.subject_id)))
-        .sort((a, b) => (a.topic || '').localeCompare(b.topic || '', 'pt-BR'))
-        .map(t => ({ value: t.id, label: (t.numero ? t.numero + ' ' : '') + t.topic })),
+      editalTopicsList
+        .filter(t => usedEditalIds.has(String(t.id)))
+        .sort((a, b) => String(a.code || '').localeCompare(String(b.code || ''), undefined, { numeric: true }))
+        .map(t => ({ value: t.id, label: (t.code ? t.code + ' ' : '') + (t.alias || t.title || '') })),
       'todos');
 
     // Tags (só as que aparecem em alguma questão via question_tags)
@@ -26057,13 +26061,13 @@
       arr = arr.filter(q => set.has(String(q.subject_id)));
     }
 
-    // Filtros por TEMA (junction question_topics) e TAG (question_tags)
+    // E6 — Filtro por TÓPICO DO EDITAL (junction question_edital_topics) e TAG (question_tags)
     if(f.topic_id && f.topic_id.length > 0){
       const wanted = new Set(f.topic_id.map(String));
       const qIdsWithTopic = new Set(
-        (questionTopicsCache || [])
-          .filter(qt => wanted.has(String(qt.topic_id)))
-          .map(qt => qt.question_id)
+        (questionEditalTopicsCache || [])
+          .filter(qe => wanted.has(String(qe.edital_topic_id)))
+          .map(qe => qe.question_id)
       );
       arr = arr.filter(q => qIdsWithTopic.has(q.id));
     }
@@ -31074,7 +31078,7 @@
       await Promise.all([
         loadTags(),
         loadReferenceTexts(),
-        loadQuestions(), loadQuestionTopics(), loadQuestionTags(), loadQuestionRefs(),
+        loadQuestions(), loadQuestionTopics(), loadQuestionEditalTopics(), loadQuestionTags(), loadQuestionRefs(),
         loadTfItems(), loadTfItemComments(), loadTfItemTopics(), loadTfItemTags(),
         loadMcOptions(), loadEssayCriteria(), loadEssayAnswerModels(),
       ]);
