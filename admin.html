@@ -45657,14 +45657,21 @@
   // por enunciado/origin, source_type, tags). Admin clica numa pra
   // adicionar uma REF { bank_id } no bloco atual (grupo ou ungrouped).
   // ─────────────────────────────────────────────────────────────────────
+  // Ano de um grupo: extrai do código [#G-N/YYYY]; senão usa a coluna year.
+  function _ueOqYearOf(q){
+    const m = String((q && q.origin) || '').match(/\/(\d{4})\]/);
+    if(m) return m[1];
+    return (q && q.year != null) ? String(q.year) : '';
+  }
+
   window.ueOqOpenBankPicker = function(bid, gIdx){
     window._ueOqBankPickerTarget = { bid: bid, gIdx: gIdx };
-    const modal = document.getElementById('ueOqBankPickerModal');
-    if(!modal){
-      _ueOqBuildBankPickerModal();
-    }
+    window._ueOqBankSel = null;
+    if(!document.getElementById('ueOqBankPickerModal')) _ueOqBuildBankPickerModal();
     document.getElementById('ueOqBankPickerSearch').value = '';
-    _ueOqBankPickerRender('');
+    _ueOqBankFillYears();
+    _ueOqBankPickerRenderList();
+    _ueOqBankPickerRenderDetail();
     document.getElementById('ueOqBankPickerModal').classList.add('active');
   };
 
@@ -45673,71 +45680,128 @@
     modal.className = 'modal-backdrop';
     modal.id = 'ueOqBankPickerModal';
     modal.innerHTML =
-      '<div class="modal" style="max-width:760px;max-height:80vh;display:flex;flex-direction:column">' +
+      '<div class="modal" style="max-width:1040px;width:94vw;max-height:86vh;display:flex;flex-direction:column">' +
         '<header class="modal-header">' +
           '<div><span class="s-label">Importar do banco</span><h2 style="margin:.2rem 0 0">Banco de Questões</h2></div>' +
           '<button class="modal-close" onclick="document.getElementById(\'ueOqBankPickerModal\').classList.remove(\'active\')">×</button>' +
         '</header>' +
-        '<div style="padding:1rem 1.5rem;flex:1;overflow:hidden;display:flex;flex-direction:column;gap:.7rem">' +
-          '<input class="field-input" id="ueOqBankPickerSearch" placeholder="Buscar por enunciado, ID ou tag…" oninput="_ueOqBankPickerRender(this.value)">' +
-          '<div id="ueOqBankPickerList" style="flex:1;overflow-y:auto;border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.5rem"></div>' +
+        '<div style="display:grid;grid-template-columns:1fr 1.2fr;flex:1;overflow:hidden;border-top:1px solid var(--accent-border-soft)">' +
+          '<div style="display:flex;flex-direction:column;gap:.6rem;padding:1rem;overflow:hidden;border-right:1px solid var(--accent-border-soft)">' +
+            '<input class="field-input" id="ueOqBankPickerSearch" placeholder="Buscar por enunciado ou código [#15/2006]…" oninput="_ueOqBankPickerRenderList()">' +
+            '<div style="display:flex;align-items:center;gap:.5rem">' +
+              '<label style="font-size:.6rem;color:var(--text-mute);font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em">Ano</label>' +
+              '<select class="field-input" id="ueOqBankPickerYear" onchange="_ueOqBankPickerRenderList()" style="flex:1;font-size:.8rem"><option value="">todos</option></select>' +
+            '</div>' +
+            '<div id="ueOqBankPickerList" style="flex:1;overflow-y:auto;border:1px solid var(--accent-border-soft);border-radius:var(--radius)"></div>' +
+          '</div>' +
+          '<div id="ueOqBankPickerDetail" style="display:flex;flex-direction:column;padding:1rem;overflow-y:auto"></div>' +
         '</div>' +
       '</div>';
     document.body.appendChild(modal);
   }
 
-  // Q3 — resumo de uma questão do BANCO REAL (questoes.*) p/ o picker e o card
-  // do grupo-referência. Usa os caches já carregados no admin.
+  function _ueOqBankFillYears(){
+    const sel = document.getElementById('ueOqBankPickerYear');
+    if(!sel) return;
+    const years = {};
+    (questionsCache || []).forEach(function(q){ const y = _ueOqYearOf(q); if(y) years[y] = true; });
+    const list = Object.keys(years).sort(function(a,b){ return Number(b) - Number(a); });
+    sel.innerHTML = '<option value="">todos</option>' + list.map(function(y){ return '<option value="' + esc(y) + '">' + esc(y) + '</option>'; }).join('');
+  }
+
+  // Resumo de um GRUPO DE QUESTÕES do banco real: enunciado, código, tipo +
+  // a lista das QUESTÕES (afirmativas C/E, ou a própria MC) com código + trecho.
   window._ueResolveBankGroupSummary = function(questionId){
     const q = (questionsCache || []).find(function(x){ return String(x.id) === String(questionId); });
     if(!q) return null;
-    let itemCount, originCode;
-    if(q.type === 'multiple_choice'){
-      itemCount = 1;
-      originCode = q.origin || '';
+    const type = q.type || 'true_false';
+    let questoes;
+    if(type === 'multiple_choice'){
+      questoes = [{ id: q.id, origin: q.origin || '', text: '(múltipla escolha)' }];
     } else {
-      const tf = (tfItemsCache || []).filter(function(t){ return String(t.question_id) === String(q.id); });
-      itemCount = tf.length;
-      originCode = q.origin || (tf[0] && tf[0].origin) || '';
+      questoes = (tfItemsCache || [])
+        .filter(function(t){ return String(t.question_id) === String(q.id); })
+        .sort(function(a, b){ return (a.numero || 0) - (b.numero || 0); })
+        .map(function(t){ return { id: t.id, origin: t.origin || '', text: String(t.assertiva || '').replace(/<[^>]+>/g, '') }; });
     }
-    return { id: q.id, enunciado: q.enunciado || '', type: q.type || 'true_false', origin: originCode, itemCount: itemCount };
+    return { id: q.id, enunciado: q.enunciado || '', type: type, origin: q.origin || '', year: _ueOqYearOf(q), questoes: questoes, itemCount: questoes.length };
   };
   // "editar no banco" — por ora aponta o admin pra aba Questões (no Q3b liga direto).
   window.ueOqEditBankQuestion = function(){
     if(typeof window.ueToast === 'function') window.ueToast('Abra a aba Questões → Questões para editar no banco.', 'info');
   };
 
-  window._ueOqBankPickerRender = function(filter){
+  // COLUNA ESQUERDA — lista de grupos de questões
+  window._ueOqBankPickerRenderList = function(){
     const list = document.getElementById('ueOqBankPickerList');
     if(!list) return;
+    const f = String((document.getElementById('ueOqBankPickerSearch') || {}).value || '').toLowerCase().trim();
+    const yr = String((document.getElementById('ueOqBankPickerYear') || {}).value || '');
     const all = (questionsCache || []);
-    const f = String(filter || '').toLowerCase().trim();
     const filtered = all.filter(function(q){
+      if(yr && _ueOqYearOf(q) !== yr) return false;
       if(!f) return true;
-      const haystack = ((q.enunciado || '') + ' ' + (q.origin || '') + ' ' + (q.id || '') + ' ' + (q.numero || '')).toLowerCase();
-      return haystack.indexOf(f) >= 0;
+      const tfCodes = (tfItemsCache || []).filter(function(t){ return String(t.question_id) === String(q.id); }).map(function(t){ return t.origin || ''; }).join(' ');
+      const hay = ((q.enunciado || '') + ' ' + (q.origin || '') + ' ' + tfCodes + ' ' + (q.id || '')).toLowerCase();
+      return hay.indexOf(f) >= 0;
     });
-
     if(!filtered.length){
       list.innerHTML = '<p class="s-body" style="font-style:italic;color:var(--text-mute);text-align:center;padding:1rem">' +
-        (all.length === 0 ? 'Banco vazio — cadastre questões na aba Questões.' : 'Nenhuma questão bate com o filtro.') +
-      '</p>';
+        (all.length === 0 ? 'Banco vazio — cadastre questões na aba Questões.' : 'Nada bate com o filtro.') + '</p>';
       return;
     }
-
-    list.innerHTML = filtered.slice(0, 200).map(function(q){
-      const s = window._ueResolveBankGroupSummary(q.id) || { origin:'', itemCount:0, type:q.type };
-      const code = s.origin
-        ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + esc(s.origin) + '</span>'
-        : '';
+    const selId = window._ueOqBankSel;
+    list.innerHTML = filtered.slice(0, 300).map(function(q){
+      const s = window._ueResolveBankGroupSummary(q.id);
+      const code = (s && s.origin)
+        ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .4rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + esc(s.origin) + '</span>'
+        : ((s && s.year) ? '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">' + esc(s.year) + '</span>' : '');
       const typeLabel = (q.type === 'multiple_choice') ? 'Múltipla escolha' : 'Certo/Errado';
-      const meta = '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">' + typeLabel + ' · ' + s.itemCount + ' ' + (s.itemCount === 1 ? 'item' : 'itens') + '</span>';
-      const stmtPreview = String(q.enunciado || '').replace(/<[^>]+>/g, '').slice(0, 140);
-      return '<div style="display:flex;flex-direction:column;gap:.3rem;padding:.55rem .7rem;border-bottom:1px solid var(--accent-border-soft);cursor:pointer" onclick="ueOqImportFromBank(\'' + esc(q.id) + '\')" onmouseover="this.style.background=\'var(--accent-lo)\'" onmouseout="this.style.background=\'\'">' +
-        '<div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">' + code + meta + '</div>' +
-        '<div style="font-family:var(--serif);font-size:.85rem;line-height:1.4;color:var(--text)">' + esc(stmtPreview) + (stmtPreview.length >= 140 ? '…' : '') + '</div>' +
+      const cnt = s ? s.itemCount : 0;
+      const meta = typeLabel + ' · ' + cnt + ' ' + (cnt === 1 ? 'questão' : 'questões');
+      const stmt = String(q.enunciado || '').replace(/<[^>]+>/g, '').slice(0, 90);
+      const active = String(q.id) === String(selId);
+      return '<div onclick="_ueOqBankSelectGroup(\'' + esc(String(q.id)) + '\')" style="padding:.55rem .7rem;border-bottom:1px solid var(--accent-border-soft);cursor:pointer;' + (active ? 'background:var(--accent-lo)' : '') + '">' +
+        '<div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin-bottom:.2rem">' + code + '<span style="font-family:var(--mono);font-size:.56rem;color:var(--text-mute)">' + esc(meta) + '</span></div>' +
+        '<div style="font-family:var(--serif);font-size:.82rem;line-height:1.35;color:var(--text)">' + esc(stmt) + (stmt.length >= 90 ? '…' : '') + '</div>' +
       '</div>';
     }).join('');
+  };
+
+  window._ueOqBankSelectGroup = function(questionId){
+    window._ueOqBankSel = questionId;
+    _ueOqBankPickerRenderList();
+    _ueOqBankPickerRenderDetail();
+  };
+
+  // COLUNA DIREITA — questões do grupo selecionado + importar (todo/selecionadas)
+  window._ueOqBankPickerRenderDetail = function(){
+    const box = document.getElementById('ueOqBankPickerDetail');
+    if(!box) return;
+    const id = window._ueOqBankSel;
+    if(!id){ box.innerHTML = '<div style="margin:auto;color:var(--text-mute);font-style:italic;font-size:.85rem;text-align:center;padding:2rem">Selecione um grupo à esquerda para ver as questões.</div>'; return; }
+    const s = window._ueResolveBankGroupSummary(id);
+    if(!s){ box.innerHTML = '<div style="margin:auto;color:var(--text-mute)">Grupo não encontrado.</div>'; return; }
+    const enun = String(s.enunciado || '').replace(/<[^>]+>/g, '');
+    const qsHtml = s.questoes.map(function(it){
+      const c = it.origin ? '<span style="font-family:var(--mono);font-size:.58rem;color:var(--accent)">' + esc(it.origin) + '</span> ' : '';
+      return '<label style="display:flex;gap:.5rem;align-items:flex-start;padding:.5rem .6rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius);margin-bottom:.4rem;cursor:pointer">' +
+        '<input type="checkbox" class="ueOqBankItemChk" value="' + esc(String(it.id)) + '" checked style="margin-top:.2rem;accent-color:var(--accent)">' +
+        '<span style="font-size:.8rem;line-height:1.4;color:var(--text)">' + c + esc(it.text.slice(0, 220)) + (it.text.length > 220 ? '…' : '') + '</span>' +
+      '</label>';
+    }).join('');
+    box.innerHTML =
+      '<div style="margin-bottom:.6rem;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">' +
+        (s.origin ? '<span style="font-family:var(--mono);font-size:.62rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + esc(s.origin) + '</span>' : '') +
+        '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">' + (s.type === 'multiple_choice' ? 'Múltipla escolha' : 'Certo/Errado') + ' · ' + s.itemCount + ' ' + (s.itemCount === 1 ? 'questão' : 'questões') + '</span>' +
+      '</div>' +
+      '<div style="font-family:var(--serif);font-size:.86rem;line-height:1.45;color:var(--text);margin-bottom:.7rem">' + esc(enun) + '</div>' +
+      '<div style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin-bottom:.4rem">Questões do grupo (desmarque as que não quiser)</div>' +
+      qsHtml +
+      '<div style="display:flex;gap:.5rem;margin-top:.7rem;flex-wrap:wrap;position:sticky;bottom:-1rem;background:var(--bg-card);padding:.6rem 0">' +
+        '<button class="btn btn-sm" onclick="ueOqImportFromBank(\'' + esc(String(id)) + '\',true)" style="flex:1;background:var(--accent);color:var(--bg);border:0;font-weight:600;padding:.4rem .7rem;border-radius:var(--radius);cursor:pointer">Importar grupo todo</button>' +
+        '<button class="btn btn-ghost btn-sm" onclick="ueOqImportFromBank(\'' + esc(String(id)) + '\',false)" style="flex:1;padding:.4rem .7rem">Importar selecionadas</button>' +
+      '</div>';
   };
 
   // ─────────────────────────────────────────────────────────────────────
@@ -45831,25 +45895,26 @@
     if(typeof window.ueToast === 'function') window.ueToast('Discursiva importada do banco', 'success');
   };
 
-  // Q3 — uma questão do banco é um GRUPO inteiro (cabeçalho + assertivas).
-  // Inserir = adicionar um grupo-referência { id, bank_question_id } ao bloco.
-  window.ueOqImportFromBank = function(bankQuestionId){
+  // Q3 — um GRUPO DE QUESTÕES do banco vira um grupo-referência no bloco.
+  // whole=true → todas as questões; whole=false → só as marcadas (bank_item_ids).
+  window.ueOqImportFromBank = function(bankQuestionId, whole){
     const target = window._ueOqBankPickerTarget;
     if(!target) return;
     const b = _ueGetBlock(target.bid); if(!b) return;
     if(!b.content) b.content = {};
     if(!Array.isArray(b.content.groups)) b.content.groups = [];
-    const already = b.content.groups.some(function(g){ return g && String(g.bank_question_id) === String(bankQuestionId); });
-    if(already){
-      if(typeof window.ueToast === 'function') window.ueToast('Esta questão já está no bloco.', 'info');
-      document.getElementById('ueOqBankPickerModal').classList.remove('active');
-      return;
+    let itemIds = null;
+    if(!whole){
+      itemIds = [].slice.call(document.querySelectorAll('.ueOqBankItemChk:checked')).map(function(c){ return c.value; });
+      if(!itemIds.length){ if(typeof window.ueToast === 'function') window.ueToast('Marque ao menos uma questão.', 'info'); return; }
     }
     const n = b.content.groups.length + 1;
-    b.content.groups.push({ id: 'g' + n, bank_question_id: bankQuestionId });
+    const grp = { id: 'g' + n, bank_question_id: bankQuestionId };
+    if(itemIds) grp.bank_item_ids = itemIds;
+    b.content.groups.push(grp);
     _ueSaveStructured(target.bid); _ueRerenderBlockBody(target.bid);
     document.getElementById('ueOqBankPickerModal').classList.remove('active');
-    if(typeof window.ueToast === 'function') window.ueToast('Questão do banco adicionada como grupo', 'success');
+    if(typeof window.ueToast === 'function') window.ueToast(itemIds ? (itemIds.length + ' questão(ões) importada(s)') : 'Grupo importado do banco', 'success');
   };
 
   // ─────────────────────────────────────────────────────────────────────
@@ -46311,23 +46376,32 @@
         }
 
         function renderGroup(g, gIdx, total){
-          // Q3 — grupo que REFERENCIA o banco real: card somente-leitura.
+          // Q3 — grupo que REFERENCIA o banco real: card somente-leitura, com a
+          // lista das questões (honra bank_item_ids quando é importação parcial).
           if(g && g.bank_question_id){
             const s = (typeof window._ueResolveBankGroupSummary === 'function') ? window._ueResolveBankGroupSummary(g.bank_question_id) : null;
-            const enun = s ? String(s.enunciado || '').replace(/<[^>]+>/g, '').slice(0, 160) : '(questão não encontrada no banco)';
+            const enun = s ? String(s.enunciado || '').replace(/<[^>]+>/g, '').slice(0, 200) : '(questão não encontrada no banco)';
             const code = (s && s.origin) ? s.origin : '';
-            const cnt = s ? s.itemCount : 0;
+            const subset = Array.isArray(g.bank_item_ids) && g.bank_item_ids.length ? g.bank_item_ids.map(String) : null;
+            let questoes = (s && s.questoes) ? s.questoes : [];
+            if(subset) questoes = questoes.filter(function(it){ return subset.indexOf(String(it.id)) >= 0; });
+            const cnt = questoes.length;
             const typeLabel = (s && s.type === 'multiple_choice') ? 'Múltipla escolha' : 'Certo/Errado';
+            const qListHtml = questoes.map(function(it, i){
+              const c = it.origin ? '<span style="font-family:var(--mono);font-size:.56rem;color:var(--accent)">' + esc(it.origin) + '</span> ' : ('<span style="font-family:var(--mono);font-size:.56rem;color:var(--text-mute)">' + (i + 1) + '.</span> ');
+              return '<div style="font-size:.74rem;line-height:1.35;color:var(--text-dim);padding:.2rem 0;border-top:1px dashed var(--accent-border-soft)">' + c + esc(String(it.text || '').slice(0, 130)) + (String(it.text || '').length > 130 ? '…' : '') + '</div>';
+            }).join('');
             return '<div style="border:1px solid var(--accent);border-radius:var(--radius);padding:.8rem 1rem;background:var(--accent-lo);margin-bottom:.8rem">' +
               '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;flex-wrap:wrap">' +
                 '<span class="card-label" style="background:var(--accent);color:var(--bg);padding:.15rem .55rem;border-radius:var(--radius);font-size:.65rem;font-weight:600">Grupo ' + (gIdx + 1) + ' · do banco</span>' +
                 (code ? '<span style="font-family:var(--mono);font-size:.62rem;padding:.1rem .45rem;border-radius:999px;background:var(--bg);color:var(--accent);border:1px solid var(--accent-border)">' + esc(code) + '</span>' : '') +
-                '<span style="font-family:var(--mono);font-size:.62rem;color:var(--text-mute)">' + typeLabel + ' · ' + cnt + ' ' + (cnt === 1 ? 'item' : 'itens') + '</span>' +
+                '<span style="font-family:var(--mono);font-size:.62rem;color:var(--text-mute)">' + typeLabel + ' · ' + cnt + ' ' + (cnt === 1 ? 'questão' : 'questões') + (subset ? ' (parcial)' : '') + '</span>' +
                 '<button class="btn btn-ghost btn-sm" onclick="ueOqGroupMove(' + bid + ',' + gIdx + ',-1)" ' + (gIdx === 0 ? 'disabled' : '') + ' style="margin-left:auto;padding:.15rem .35rem;font-size:.65rem">▲</button>' +
                 '<button class="btn btn-ghost btn-sm" onclick="ueOqGroupMove(' + bid + ',' + gIdx + ',1)" ' + (gIdx === total - 1 ? 'disabled' : '') + ' style="padding:.15rem .35rem;font-size:.65rem">▼</button>' +
                 '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.15rem .45rem;font-size:.7rem" onclick="ueOqGroupRemove(' + bid + ',' + gIdx + ')" title="Remove só a referência do bloco (a questão continua no banco)">remover do bloco</button>' +
               '</div>' +
-              '<div style="font-family:var(--serif);font-size:.85rem;line-height:1.4;color:var(--text)">' + esc(enun) + (enun.length >= 160 ? '…' : '') + '</div>' +
+              '<div style="font-family:var(--serif);font-size:.85rem;line-height:1.4;color:var(--text);margin-bottom:.3rem">' + esc(enun) + (enun.length >= 200 ? '…' : '') + '</div>' +
+              qListHtml +
               '<div style="margin-top:.4rem"><a href="javascript:void(0)" onclick="ueOqEditBankQuestion(\'' + esc(String(g.bank_question_id)) + '\')" style="font-size:.72rem;color:var(--accent)">editar no banco →</a></div>' +
             '</div>';
           }
