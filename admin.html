@@ -45948,6 +45948,139 @@
   };
 
   // ─────────────────────────────────────────────────────────────────────
+  // Q4 — MIGRAR bloco inline → banco (one-time, legado). Cria grupo+questões
+  // no banco, troca por referência e gera SQL pra preservar as respostas.
+  // ─────────────────────────────────────────────────────────────────────
+  async function _ueUuidFromString(str){
+    const enc = new TextEncoder().encode(String(str));
+    const buf = await crypto.subtle.digest('SHA-256', enc);
+    const b = Array.from(new Uint8Array(buf).slice(0, 16));
+    b[6] = (b[6] & 0x0f) | 0x50; b[8] = (b[8] & 0x3f) | 0x80;
+    const hex = b.map(function(x){ return x.toString(16).padStart(2, '0'); }).join('');
+    return hex.slice(0,8)+'-'+hex.slice(8,12)+'-'+hex.slice(12,16)+'-'+hex.slice(16,20)+'-'+hex.slice(20,32);
+  }
+  function _ueSubjectIdOfUnit(unitId){
+    try{
+      const u = (UbiqueStore.units.list() || []).find(function(x){ return String(x.id) === String(unitId); });
+      if(!u) return null;
+      const chId = (u.course_chapter_id != null) ? u.course_chapter_id : u.chapter_id;
+      const ch = (UbiqueStore.chapters.list() || []).find(function(x){ return String(x.id) === String(chId); });
+      if(!ch) return null;
+      const mod = (UbiqueStore.modules.list() || []).find(function(x){ return String(x.id) === String(ch.module_id); });
+      return mod ? mod.subject_id : null;
+    }catch(_){ return null; }
+  }
+  // Grava o gabarito no MESMO formato que o banco já usa (detecta da amostra).
+  function _ueTfKeyFormat(correctBool){
+    const sample = (tfItemsCache || []).find(function(t){ return t.key != null; });
+    const k = sample ? sample.key : null;
+    if(k === null || typeof k === 'boolean') return correctBool;
+    const s = String(k).toLowerCase();
+    if(s === 'certo' || s === 'errado') return correctBool ? 'Certo' : 'Errado';
+    if(s === 'c' || s === 'e')         return correctBool ? 'C' : 'E';
+    if(s === 'true' || s === 'false')  return correctBool ? 'true' : 'false';
+    return correctBool;
+  }
+  function _ueShowMigrateSQL(sql, summary){
+    let modal = document.getElementById('ueMigrateSqlModal');
+    if(!modal){ modal = document.createElement('div'); modal.className = 'modal-backdrop'; modal.id = 'ueMigrateSqlModal'; document.body.appendChild(modal); }
+    modal.innerHTML = '<div class="modal" style="max-width:760px;display:flex;flex-direction:column;max-height:82vh">' +
+      '<header class="modal-header"><div><span class="s-label">Migração concluída</span><h2 style="margin:.2rem 0 0">Banco atualizado</h2></div>' +
+      '<button class="modal-close" onclick="document.getElementById(\'ueMigrateSqlModal\').classList.remove(\'active\')">×</button></header>' +
+      '<div style="padding:1rem 1.5rem;overflow-y:auto">' +
+        '<p class="s-body" style="font-size:.85rem;margin:0 0 .7rem;line-height:1.5">' + esc(summary) + '</p>' +
+        (sql
+          ? '<p class="s-body" style="font-size:.82rem;color:var(--text-dim);margin:0 0 .4rem;line-height:1.5">Para <strong>preservar as respostas já dadas</strong>, rode este SQL no Supabase (SQL Editor):</p>' +
+            '<textarea class="field-input" style="width:100%;height:200px;font-family:var(--mono);font-size:.72rem;line-height:1.5" readonly onclick="this.select()">' + esc(sql) + '</textarea>'
+          : '<p class="s-body" style="font-size:.82rem;color:var(--text-mute)">Nenhuma resposta a remapear.</p>') +
+      '</div></div>';
+    modal.classList.add('active');
+  }
+
+  window.ueOqMigrateBlockToBank = async function(bid){
+    const b = _ueGetBlock(bid); if(!b || !b.content) return;
+    const groups = Array.isArray(b.content.groups) ? b.content.groups : [];
+    const inlineGroups = groups.filter(function(g){ return g && !g.bank_question_id && Array.isArray(g.questions) && g.questions.length; });
+    if(!inlineGroups.length){ if(window.ueToast) window.ueToast('Nenhum grupo inline pra migrar.', 'info'); return; }
+    if(!confirm('Migrar ' + inlineGroups.length + ' grupo(s) inline para o banco?\n\nAs questões serão criadas no banco e o bloco passará a referenciá-las. As respostas já dadas serão preservadas via um SQL que eu te mostro no fim.')) return;
+
+    const subjectId = _ueSubjectIdOfUnit(b.unit_id);
+    const examId = ((questionsCache || []).find(function(q){ return String(q.subject_id) === String(subjectId); }) || {}).exam_id || 1;
+    const remap = [];
+    let nGroups = 0, nQuestoes = 0;
+
+    try{
+      for(const g of inlineGroups){
+        const code = g.origin || '';
+        const ym = code.match(/\/(\d{4})\]/);
+        const year = ym ? parseInt(ym[1], 10) : null;
+        const gm = code.match(/\[#(\d+)/);
+        const numero = gm ? parseInt(gm[1], 10) : 0;
+        const enunciado = g.enunciado || g.description || g.title || '';
+        const qs = g.questions;
+        const qType = qs.some(function(q){ return q.type === 'multiple_choice'; }) ? 'multiple_choice' : 'true_false';
+
+        const ins = await questoes().from('questions').insert({
+          type: qType, enunciado: enunciado, origin: code || null, year: year, numero: numero,
+          subject_id: subjectId, exam_id: examId, ativo: true, anulada: false, desatualizada: false,
+          phase_numero: 1, difficulty: 'media', questao_simulada: false, image_url: g.reference_image || null
+        }).select().single();
+        if(ins.error || !ins.data){ throw new Error('questions: ' + (ins.error && ins.error.message)); }
+        const bankQuestionId = ins.data.id;
+        nGroups++;
+
+        if(g.reference_text){
+          const rt = await questoes().from('reference_texts').insert({ text: g.reference_text, exam_id: examId, year: year }).select().single();
+          if(rt.data) await questoes().from('question_reference_texts').insert({ question_id: bankQuestionId, reference_text_id: rt.data.id, ordem: 1 });
+        }
+
+        if(qType === 'true_false'){
+          let numItem = 0;
+          for(const q of qs){
+            numItem++;
+            const tf = await questoes().from('tf_items').insert({
+              question_id: bankQuestionId, numero: numItem, assertiva: q.statement || q.assertion || '',
+              key: _ueTfKeyFormat(q.correct === true), comment: q.comment || null, origin: q.origin || null,
+              subject_id: subjectId, difficulty: 'media', anulada: false, desatualizada: false
+            }).select().single();
+            if(tf.error || !tf.data){ throw new Error('tf_items: ' + (tf.error && tf.error.message)); }
+            nQuestoes++;
+            remap.push({ oldItemId: q.id, newItemId: tf.data.id });
+          }
+        } else {
+          const q = qs[0];
+          const opts = Array.isArray(q.options) ? q.options : [];
+          for(let i = 0; i < opts.length; i++){
+            const o = opts[i];
+            await questoes().from('mc_options').insert({ question_id: bankQuestionId, letra: o.label || String.fromCharCode(65 + i), opcao: o.text || '', correct: !!o.correct, comment: o.comment || null });
+          }
+          nQuestoes++;
+          remap.push({ oldItemId: q.id, newItemId: bankQuestionId });
+        }
+
+        const idx = b.content.groups.indexOf(g);
+        if(idx >= 0) b.content.groups[idx] = { id: g.id, bank_question_id: bankQuestionId };
+      }
+    }catch(e){
+      if(window.ueToast) window.ueToast('Erro na migração: ' + e.message, 'error');
+      return;
+    }
+
+    _ueSaveStructured(bid);
+    try{ await Promise.all([loadQuestions(), loadTfItems(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
+    _ueRerenderBlockBody(bid);
+
+    const lines = [];
+    for(const m of remap){
+      const oldRef = await _ueUuidFromString('quiz:' + b.unit_id + ':' + b.id + ':' + m.oldItemId);
+      const newRef = await _ueUuidFromString('quiz:' + b.unit_id + ':' + b.id + ':' + m.newItemId);
+      lines.push("update aluno.student_responses set question_ref='" + newRef + "', metadata=jsonb_set(coalesce(metadata,'{}'::jsonb),'{item_id}',to_jsonb('" + m.newItemId + "'::text)) where question_ref='" + oldRef + "';");
+    }
+    _ueShowMigrateSQL(lines.join('\n'), 'Criados no banco: ' + nGroups + ' grupo(s) e ' + nQuestoes + ' questão(ões). O bloco agora referencia o banco.');
+    if(window.ueToast) window.ueToast('Migração concluída', 'success');
+  };
+
+  // ─────────────────────────────────────────────────────────────────────
   // Renderer reutilizável de lista de items (Y3c/Y3d core)
   // spec = {
   //   contentKey: 'items',     // qual array em content
@@ -46524,6 +46657,10 @@
             '</div>' +
           '</div>';
 
+        const _hasInline = groups.some(function(g){ return g && !g.bank_question_id && Array.isArray(g.questions) && g.questions.length; });
+        const _migrateBtn = _hasInline
+          ? '<button class="btn btn-sm" onclick="ueOqMigrateBlockToBank(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem;background:var(--accent);color:var(--bg);border:0;font-weight:600;cursor:pointer" title="Cria as questões inline no banco e troca por referência (uma vez)">⇪ Migrar pro banco</button>'
+          : '';
         return '<div style="margin-top:.4rem">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">' +
             '<span class="s-subtitle" style="font-size:.65rem">Grupos e questões avulsas</span>' +
@@ -46532,6 +46669,7 @@
               '<button class="btn btn-ghost btn-sm" onclick="ueOqGroupAdd(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem">+ Grupo</button>' +
               '<button class="btn btn-ghost btn-sm" onclick="ueOqOpenBankPicker(' + bid + ',-1)" style="padding:.3rem .7rem;font-size:.78rem;border-color:var(--accent-border)" title="Inserir uma questão do banco como grupo">' + UE_ICONS.download + 'Pegar do banco</button>' +
               '<button class="btn btn-ghost btn-sm" onclick="ueOqQuestionAdd(' + bid + ',-1,\'true_false\')" style="padding:.3rem .7rem;font-size:.78rem">+ Questão avulsa</button>' +
+              _migrateBtn +
             '</div>' +
           '</div>' +
           importPanelHTML +
