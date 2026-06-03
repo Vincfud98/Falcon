@@ -20213,7 +20213,20 @@
   });
 
   async function deleteQuestion(id){
-    if(!confirm('Apagar esta questão?\n\nTodos os items, alternativas, critérios e modelos vinculados também serão apagados (cascade).')) return;
+    // Descobre blocos/unidades que referenciam esta questão — pra avisar e depois
+    // LIMPAR as referências (senão o bloco fica com referência órfã → "nenhum grupo").
+    const usingBlocks = [];
+    if(window.UbiqueStore && UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.list){
+      (UbiqueStore.unit_blocks.list() || []).forEach(function(b){
+        const groups = (b.content && b.content.groups) || [];
+        if(groups.some(function(g){ return g && String(g.bank_question_id) === String(id); })) usingBlocks.push(b);
+      });
+    }
+    let confirmMsg = 'Apagar esta questão?\n\nTodos os items, alternativas, gabaritos, critérios e modelos vinculados também serão apagados (cascade).';
+    if(usingBlocks.length){
+      confirmMsg += '\n\n⚠ Esta questão está em ' + usingBlocks.length + ' bloco(s)/unidade(s). Apagar vai REMOVÊ-LA deles também.';
+    }
+    if(!confirm(confirmMsg)) return;
     // .select() devolve as linhas REALMENTE apagadas — assim detectamos quando o
     // delete não removeu nada (ex.: bloqueio de permissão, que não gera erro).
     const { data, error } = await questoes().from('questions').delete().eq('id', id).select();
@@ -20222,7 +20235,19 @@
       showMsg('globalMessage3', 'Nada foi apagado no banco — a questão pode já ter sido removida ou faltou permissão (is_admin). Recarregue e tente de novo.');
       return;
     }
-    showMsg('globalMessage3', 'Questão apagada do banco.', 'success');
+    // Limpa as referências nos blocos (evita referência órfã quebrando o bloco no aluno).
+    let cleaned = 0;
+    for(const b of usingBlocks){
+      b.content.groups = (b.content.groups || []).filter(function(g){ return !(g && String(g.bank_question_id) === String(id)); });
+      try{
+        await conteudo().from('unit_blocks').update({ content: b.content }).eq('id', b.id);
+        if(UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.update) UbiqueStore.unit_blocks.update(b.id, { content: b.content });
+        cleaned++;
+      }catch(e){ console.warn('[limpar ref órfã do bloco]', b.id, e); }
+    }
+    let okMsg = 'Questão apagada do banco.';
+    if(cleaned) okMsg += ' Referência removida de ' + cleaned + ' bloco(s).';
+    showMsg('globalMessage3', okMsg, 'success');
     await loadQuestions();
     populateQuestionFilters();
     renderQuestionsList();
