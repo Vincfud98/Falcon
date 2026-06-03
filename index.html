@@ -7811,6 +7811,36 @@ window.TAG_REGISTRY = {
         }
       } catch(e){ console.warn('[hydrate avatares] exception:', e); }
 
+      // Fase Q2 — banco de questões REAL (questoes.*) num store SEPARADO (window._QBank),
+      // só para resolver referências {bank_question_id}. NÃO toca em UbiqueStore.questions
+      // (que alimenta o filtro do Portal e o caminho inline) → Portal/unidade idênticos.
+      try {
+        const qsb = window._sb.schema('questoes');
+        const [qR, tfR, mcR, rtR, qrtR] = await Promise.all([
+          qsb.from('questions').select('*'),
+          qsb.from('tf_items').select('*'),
+          qsb.from('mc_options').select('*'),
+          qsb.from('reference_texts').select('*'),
+          qsb.from('question_reference_texts').select('*'),
+        ]);
+        const qErrs = [qR.error, tfR.error, mcR.error, rtR.error, qrtR.error].filter(Boolean);
+        if(!qErrs.length){
+          window._QBank = {
+            questions:        qR.data   || [],
+            tfItems:          tfR.data  || [],
+            mcOptions:        mcR.data  || [],
+            referenceTexts:   rtR.data  || [],
+            questionRefTexts: qrtR.data || [],
+          };
+          console.log('[hydrate qbank] ✅', {
+            questions: (qR.data||[]).length, tf_items: (tfR.data||[]).length,
+            mc_options: (mcR.data||[]).length, reference_texts: (rtR.data||[]).length,
+          });
+        } else {
+          console.warn('[hydrate qbank] erros:', qErrs.map(e => e.message));
+        }
+      } catch(e){ console.warn('[hydrate qbank] exception:', e); }
+
       // Fase 4n — hidrata catálogo de tags (admin gerencia, aluno usa pra renderizar chips)
       try {
         const csb = window._sb.schema('conteudo');
@@ -18768,6 +18798,68 @@ function _getDerivedEBankMap(){
   _derivedEBankCacheKey = key;
   return map;
 }
+
+// Fase Q2 — monta um GRUPO de quiz (enunciado + texto de referência + itens) a
+// partir de uma questão do banco REAL (questoes.*, carregado em window._QBank).
+// Saída no MESMO formato que normalizeQuizBlock produz, pronta pro renderer (Q5).
+// Não é usada por nada ainda — é a fundação testável da migração.
+function resolveBankGroup(questionId){
+  const bank = window._QBank;
+  if(!bank || questionId == null) return null;
+  const q = (bank.questions || []).find(x => String(x.id) === String(questionId));
+  if(!q) return null;
+  // Texto de referência (via junção question_reference_texts → reference_texts)
+  let refText = '';
+  const link = (bank.questionRefTexts || []).find(l => String(l.question_id) === String(q.id));
+  if(link){
+    const rt = (bank.referenceTexts || []).find(r => String(r.id) === String(link.reference_text_id));
+    if(rt) refText = rt.text || rt.body || rt.conteudo || '';
+  }
+  const refImage = q.image_url || '';
+  let items = [];
+  if(q.type === 'multiple_choice'){
+    const opts = (bank.mcOptions || [])
+      .filter(o => String(o.question_id) === String(q.id))
+      .sort((a, b) => String(a.letra || '').localeCompare(String(b.letra || '')));
+    const correct = opts.find(o => o.correct);
+    items = [{
+      id: q.id,
+      assertion: '',                          // comando fica no enunciado do grupo
+      comments: q.description || '',
+      origin: q.origin || '',
+      options: opts.map(o => o.opcao || ''),
+      key: correct ? (correct.opcao || '') : '',
+      tags: [], topics: [],
+      reference_text: refText, reference_image: refImage,
+    }];
+  } else {
+    // true_false (Certo/Errado) — cada tf_item é um item respondível
+    const tf = (bank.tfItems || [])
+      .filter(t => String(t.question_id) === String(q.id))
+      .sort((a, b) => (a.numero || 0) - (b.numero || 0));
+    items = tf.map(t => ({
+      id: t.id,
+      assertion: t.assertiva || '',
+      comments: t.comment || '',
+      origin: t.origin || '',
+      options: ['Certo', 'Errado'],
+      key: (t.key === true || t.key === 'Certo') ? 'Certo' : 'Errado',
+      tags: [], topics: [],
+      reference_text: refText, reference_image: refImage,
+    }));
+  }
+  return {
+    bank_question_id: q.id,
+    enunciado:       q.enunciado || '',
+    title:           '',
+    description:     q.description || '',
+    origin:          q.origin || '',
+    reference_text:  refText,
+    reference_image: refImage,
+    items:           items,
+  };
+}
+window.resolveBankGroup = resolveBankGroup;
 
 const QuestionBank = {
   // Procura por id canônico. Fallback pra items derivados de unit_blocks
