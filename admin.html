@@ -14887,6 +14887,7 @@
 
   // Conteúdo (TF / MC / Essay)
   let tfItemsCache = [];                // tabela tf_items
+  let tfItemCommentsCache = [];         // {id, tf_item_id, text, label, position} — gabaritos comentados (E3)
   let tfItemTopicsCache = [];           // {tf_item_id, topic_id, auto_included}
   let tfItemTagsCache = [];             // {tf_item_id, tag_id}
   let mcOptionsCache = [];              // tabela mc_options
@@ -14894,7 +14895,7 @@
   let essayAnswerModelsCache = [];      // tabela essay_answer_models
 
   // Estado do modal para conteúdo (edita-se aqui, persiste no save)
-  let modalTfItems = [];                // [{tempId, numero, texto, key, comment, subject_id, anulada, desatualizada, topics:Set, tags:Set, originalId?}]
+  let modalTfItems = [];                // [{tempId, numero, texto, key, comment, comments:[{originalId,text,label}], subject_id, anulada, desatualizada, topics:Set, tags:Set, originalId?}]
   let modalMcOptions = [];              // [{tempId, letra, texto, correct, comment, originalId?}]
   let modalEssayCriteria = [];          // [{tempId, numero, nome, descricao, resposta_esperada, peso, originalId?}]
   let modalEssayModels = [];            // [{tempId, content_html, author, grade, description, ordem, originalId?}]
@@ -16451,7 +16452,7 @@
       loadQuestions(),
       loadReferenceTexts(), loadQuestionTopics(),
       loadQuestionTags(), loadQuestionRefs(),
-      loadTfItems(), loadTfItemTopics(), loadTfItemTags(),
+      loadTfItems(), loadTfItemComments(), loadTfItemTopics(), loadTfItemTags(),
       loadMcOptions(), loadEssayCriteria(), loadEssayAnswerModels(),
       loadAuthors(), loadSources(), loadSourceAuthors(), loadSourceSubjects(),
       loadChapters(), loadChapterTopics(), loadChapterTags(),
@@ -20373,6 +20374,15 @@
                 .filter(it => it.tf_item_id === i.id)
                 .map(it => it.tag_id)
             );
+            // Gabaritos comentados (E3): vêm de tf_item_comments, ordenados por position.
+            // Fallback p/ dados antigos: se não houver nenhum, usa o tf_items.comment como "Gabarito 1".
+            let iComments = tfItemCommentsCache
+              .filter(c => String(c.tf_item_id) === String(i.id))
+              .sort((a, b) => (a.position || 0) - (b.position || 0))
+              .map(c => ({ originalId: c.id, text: c.text || '', label: c.label || '' }));
+            if(iComments.length === 0 && (i.comment || '').trim()){
+              iComments = [{ originalId: null, text: i.comment, label: '' }];
+            }
             return {
               tempId: newTempId(),
               originalId: i.id,
@@ -20380,6 +20390,7 @@
               texto: i.assertiva || i.texto || '',
               key: i.key,
               comment: i.comment || '',
+              comments: iComments,
               subject_id: i.subject_id,
               difficulty: i.difficulty || 'media',
               anulada: !!i.anulada,
@@ -20913,7 +20924,7 @@
 
     await Promise.all([
       loadQuestions(), loadQuestionTopics(), loadQuestionTags(), loadQuestionRefs(),
-      loadTfItems(), loadTfItemTopics(), loadTfItemTags(),
+      loadTfItems(), loadTfItemComments(), loadTfItemTopics(), loadTfItemTags(),
       loadMcOptions(), loadEssayCriteria(), loadEssayAnswerModels()
     ]);
     populateQuestionFilters();
@@ -20957,7 +20968,10 @@
         numero: item.numero,
         assertiva: item.texto,
         key: item.key,
-        comment: item.comment || null,
+        // Campo legado mantido como espelho do 1º gabarito (rede de segurança até a limpeza E6/E7).
+        comment: (Array.isArray(item.comments) && item.comments[0] && (item.comments[0].text || '').trim())
+                   ? item.comments[0].text
+                   : (item.comment || null),
         subject_id: item.subject_id || modalSelectedSubjectId,
         difficulty: item.difficulty || 'media',
         anulada: item.anulada,
@@ -20978,6 +20992,26 @@
       }
 
       if(!itemId) continue;
+
+      // E3.2 — Sincroniza os gabaritos comentados (tf_item_comments) deste item.
+      {
+        const desired = (item.comments || []).filter(c => (c.text || '').trim());
+        const existingComments = tfItemCommentsCache.filter(c => String(c.tf_item_id) === String(itemId));
+        const desiredIds = desired.filter(c => c.originalId).map(c => String(c.originalId));
+        const removeComments = existingComments.filter(c => !desiredIds.includes(String(c.id))).map(c => c.id);
+        if(removeComments.length > 0){
+          await questoes().from('tf_item_comments').delete().in('id', removeComments);
+        }
+        for(let ci = 0; ci < desired.length; ci++){
+          const c = desired[ci];
+          const cPayload = { tf_item_id: itemId, text: c.text, label: (c.label || '').trim() || null, position: ci + 1 };
+          if(c.originalId){
+            await questoes().from('tf_item_comments').update(cPayload).eq('id', c.originalId);
+          } else {
+            await questoes().from('tf_item_comments').insert(cPayload);
+          }
+        }
+      }
 
       // Sincroniza topics desse item
       const currentItemTopics = new Set(
@@ -21794,6 +21828,11 @@
     if(error){ console.error('tf_items:', error); return; }
     tfItemsCache = data || [];
   }
+  async function loadTfItemComments(){
+    const { data, error } = await questoes().from('tf_item_comments').select('*');
+    if(error){ console.error('tf_item_comments:', error); return; }
+    tfItemCommentsCache = data || [];
+  }
   async function loadTfItemTopics(){
     const { data, error } = await questoes().from('tf_item_topics').select('*');
     if(error){ console.error('tf_item_topics:', error); return; }
@@ -21853,6 +21892,14 @@
       ? preset.tags
       : new Set(modalSelectedTags);
 
+    // Gabaritos comentados (E3): aceita preset.comments (lista) ou preset.comment (legado, 1 só).
+    let preComments = Array.isArray(preset.comments)
+      ? preset.comments.map(c => ({ originalId: c.originalId || null, text: c.text || '', label: c.label || '' }))
+      : [];
+    if(preComments.length === 0 && (preset.comment || '').trim()){
+      preComments = [{ originalId: null, text: preset.comment, label: '' }];
+    }
+
     modalTfItems.push({
       tempId: newTempId(),
       originalId: preset.originalId || null,
@@ -21860,6 +21907,7 @@
       texto: preset.texto || '',
       key: preset.key !== undefined ? preset.key : true,
       comment: preset.comment || '',
+      comments: preComments,
       subject_id: preset.subject_id || modalSelectedSubjectId,
       difficulty: preset.difficulty || modalSelectedDifficulty || 'media',
       anulada: preset.anulada || false,
@@ -21871,6 +21919,26 @@
     });
     modalDirty = true;
     renderTfItems();
+  }
+
+  // E3.2 — Editor de múltiplos gabaritos comentados por questão.
+  function gabaritosEditorHtml(item, idx){
+    const comments = item.comments || [];
+    const rows = comments.map((c, cidx) => `
+      <div style="border:1px solid var(--border);border-radius:8px;padding:.55rem;margin-bottom:.5rem;background:var(--bg-elevated)">
+        <div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem">
+          <span style="font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);white-space:nowrap">Gabarito ${cidx + 1}</span>
+          <input type="text" data-gfield="label" data-item-idx="${idx}" data-gab-cidx="${cidx}" value="${esc(c.label || '')}" placeholder="rótulo opcional (ex: CACD 2023)" style="flex:1;font-size:.72rem;padding:.3rem .5rem">
+          <button type="button" class="btn btn-danger btn-sm" data-act="remove-gab" data-item-idx="${idx}" data-gab-cidx="${cidx}">remover</button>
+        </div>
+        <textarea data-gfield="text" data-item-idx="${idx}" data-gab-cidx="${cidx}" placeholder="explicação detalhada (HTML opcional)" style="font-family:var(--mono);font-size:.76rem;line-height:1.4">${esc(c.text || '')}</textarea>
+      </div>`).join('');
+    return `
+      <div class="field">
+        <label>Gabaritos comentados <span style="font-family:var(--mono);color:var(--text-mute);font-size:.6rem;letter-spacing:.1em">opcional</span></label>
+        <div data-gab-list="${idx}">${rows || '<p class="modal-panel-hint" style="font-size:.78rem;margin:.2rem 0 .5rem">Nenhum gabarito comentado ainda.</p>'}</div>
+        <button type="button" class="btn btn-sm" data-act="add-gab" data-item-idx="${idx}">＋ Adicionar gabarito comentado</button>
+      </div>`;
   }
 
   function renderTfItems(){
@@ -21955,10 +22023,7 @@
             </div>
           </div>
 
-          <div class="field">
-            <label>Comentário (justificativa pedagógica)</label>
-            <textarea data-field="comment" data-item-idx="${idx}" placeholder="opcional">${esc(item.comment || '')}</textarea>
-          </div>
+          ${gabaritosEditorHtml(item, idx)}
 
           <div class="item-classif">
             <div class="item-classif-head">
@@ -22117,6 +22182,50 @@
         modalDirty = true;
         renderTfItems();
         validateModal();
+      });
+    });
+
+    // E3.2 — Gabaritos comentados: edição de texto/rótulo (sem re-render, pra não perder o foco)
+    document.querySelectorAll('#tfItemsList [data-gfield]').forEach(el => {
+      const update = () => {
+        const idx = parseInt(el.dataset.itemIdx);
+        const cidx = parseInt(el.dataset.gabCidx);
+        const item = modalTfItems[idx];
+        if(!item || !item.comments || !item.comments[cidx]) return;
+        const f = el.dataset.gfield; // 'text' | 'label'
+        item.comments[cidx][f] = el.value;
+        // Mantém o campo legado em sincronia com o 1º gabarito (rede de segurança).
+        item.comment = (item.comments[0] && item.comments[0].text) || '';
+        modalDirty = true;
+      };
+      el.addEventListener('input', update);
+      el.addEventListener('change', update);
+    });
+
+    // E3.2 — Adicionar gabarito comentado
+    document.querySelectorAll('#tfItemsList [data-act="add-gab"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.itemIdx);
+        const item = modalTfItems[idx];
+        if(!item) return;
+        if(!Array.isArray(item.comments)) item.comments = [];
+        item.comments.push({ originalId: null, text: '', label: '' });
+        modalDirty = true;
+        renderTfItems();
+      });
+    });
+
+    // E3.2 — Remover gabarito comentado
+    document.querySelectorAll('#tfItemsList [data-act="remove-gab"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.itemIdx);
+        const cidx = parseInt(btn.dataset.gabCidx);
+        const item = modalTfItems[idx];
+        if(!item || !item.comments) return;
+        item.comments.splice(cidx, 1);
+        item.comment = (item.comments[0] && item.comments[0].text) || '';
+        modalDirty = true;
+        renderTfItems();
       });
     });
   }
@@ -30912,7 +31021,7 @@
         loadTags(),
         loadReferenceTexts(),
         loadQuestions(), loadQuestionTopics(), loadQuestionTags(), loadQuestionRefs(),
-        loadTfItems(), loadTfItemTopics(), loadTfItemTags(),
+        loadTfItems(), loadTfItemComments(), loadTfItemTopics(), loadTfItemTags(),
         loadMcOptions(), loadEssayCriteria(), loadEssayAnswerModels(),
       ]);
       populateQuestionFilters();
@@ -45946,6 +46055,15 @@
   // Q3 — resolve um grupo do banco para o SHAPE do preview (LearningBlocks):
   // { reference_text, reference_image, questions:[{statement,type,options,correct,comment,origin}] }.
   // Usado pelo preview do editor (learning-blocks-render.js chama global.resolveBankGroupRaw).
+  // E3.3 — gabarito a exibir: 1º comentário de tf_item_comments (por position); fallback ao campo legado.
+  function _ueFirstGabarito(tfItemId, legacy){
+    const list = (tfItemCommentsCache || [])
+      .filter(function(c){ return String(c.tf_item_id) === String(tfItemId); })
+      .sort(function(a, b){ return (a.position || 0) - (b.position || 0); });
+    if(list.length && (list[0].text || '').trim()) return list[0].text;
+    return legacy || '';
+  }
+
   window.resolveBankGroupRaw = function(questionId, itemIds){
     const q = (questionsCache || []).find(function(x){ return String(x.id) === String(questionId); });
     if(!q) return null;
@@ -45969,7 +46087,7 @@
         .sort(function(a, b){ return (a.numero || 0) - (b.numero || 0); });
       if(subset) tf = tf.filter(function(t){ return subset.indexOf(String(t.id)) >= 0; });
       questions = tf.map(function(t){ return { statement: t.assertiva || '', type: 'true_false', source_type: 'past_exam', origin: t.origin || '',
-        correct: (t.key === true || t.key === 'Certo'), comment: t.comment || '' }; });
+        correct: (t.key === true || t.key === 'Certo'), comment: _ueFirstGabarito(t.id, t.comment) }; });
     }
     return { title: '', description: '', origin: q.origin || '', reference_text: refText, reference_image: q.image_url || '', questions: questions };
   };
@@ -46284,7 +46402,7 @@
     }
 
     _ueSaveStructured(bid);
-    try{ await Promise.all([loadQuestions(), loadTfItems(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
+    try{ await Promise.all([loadQuestions(), loadTfItems(), loadTfItemComments(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
     _ueRerenderBlockBody(bid);
 
     const lines = [];
@@ -46392,7 +46510,7 @@
         _ueSaveStructured(ret.bid);
       }
     }
-    try{ await Promise.all([loadQuestions(), loadTfItems(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
+    try{ await Promise.all([loadQuestions(), loadTfItems(), loadTfItemComments(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
 
     let msg = '<strong>' + created + '</strong> grupo(s) criados no banco.';
     if(dupes) msg += ' <strong>' + dupes + '</strong> repetido(s) (referenciado sem recriar): <span style="font-family:var(--mono);font-size:.72rem">' + esc(dupeCodes.filter(Boolean).join(', ')) + '</span>.';
