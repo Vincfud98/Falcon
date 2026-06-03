@@ -10223,11 +10223,11 @@
 
           <div class="classif-section">
             <div class="classif-head">
-              <h4>Temas</h4>
-              <span class="hint" id="topics-hint">selecione a matéria primeiro</span>
+              <h4>Tópicos do edital</h4>
+              <span class="hint" id="topics-hint">clique para incluir</span>
             </div>
             <div class="classif-search">
-              <input type="text" id="topics-search" placeholder="buscar tema por nome ou item (ex: 1.1.1)">
+              <input type="text" id="topics-search" placeholder="buscar tópico do edital por nome ou código (ex: 1.1)">
             </div>
             <div class="classif-list" id="topics-chipbox">
               <p class="modal-panel-hint" style="padding:1rem 0;font-size:.85rem">
@@ -14900,7 +14900,8 @@
   let modalEssayModels = [];            // [{tempId, content_html, author, grade, description, ordem, originalId?}]
 
   // Modal state: seleções temporárias (não persistidas até salvar)
-  let modalSelectedTopics = new Set();   // Set<topic_id>
+  let modalSelectedTopics = new Set();   // Set<topic_id> (taxonomia legada — sai na E6)
+  let modalSelectedEditalTopics = new Set();   // Set<edital_topic_id (uuid)> — Tópicos do edital
   let modalSelectedTags = new Set();     // Set<tag_id>
   let modalSelectedRefs = new Map();     // Map<reference_text_id, ordem>
   let modalSelectedSubjectId = null;     // para filtrar topics disponíveis
@@ -20253,6 +20254,7 @@
 
     // Reset estado das abas Classificação e Referências
     modalSelectedTopics = new Set();
+    modalSelectedEditalTopics = new Set();
     modalSelectedTags = new Set();
     modalSelectedRefs = new Map();
     modalSelectedSubjectId = null;
@@ -20338,6 +20340,12 @@
         questionTopicsCache
           .filter(qt => qt.question_id === q.id)
           .forEach(qt => modalSelectedTopics.add(qt.topic_id));
+        // Tópicos do EDITAL da questão (async — re-renderiza o chipbox ao voltar)
+        questoes().from('question_edital_topics').select('edital_topic_id').eq('question_id', q.id)
+          .then(function(r){
+            (r.data || []).forEach(function(row){ modalSelectedEditalTopics.add(String(row.edital_topic_id)); });
+            if(typeof renderTopicsChipbox === 'function') renderTopicsChipbox('');
+          }).catch(function(){});
         questionTagsCache
           .filter(qt => qt.question_id === q.id)
           .forEach(qt => modalSelectedTags.add(qt.tag_id));
@@ -20823,24 +20831,23 @@
     // ═══════════════════════════════════════════════════════════
     btn.textContent = 'Sincronizando...';
 
+    // E1/E6 — TÓPICOS DO EDITAL (substitui a taxonomia "Temas"). Vale p/ todos os
+    // tipos. Sincroniza question_edital_topics a partir de modalSelectedEditalTopics.
+    try{
+      const cur = await questoes().from('question_edital_topics').select('edital_topic_id').eq('question_id', savedId);
+      const currentEt = new Set((cur.data || []).map(r => String(r.edital_topic_id)));
+      const desiredEt = new Set([...modalSelectedEditalTopics].map(String));
+      const toAddEt = [...desiredEt].filter(id => !currentEt.has(id));
+      const toRemoveEt = [...currentEt].filter(id => !desiredEt.has(id));
+      if(toRemoveEt.length > 0){
+        await questoes().from('question_edital_topics').delete().eq('question_id', savedId).in('edital_topic_id', toRemoveEt);
+      }
+      if(toAddEt.length > 0){
+        await questoes().from('question_edital_topics').insert(toAddEt.map(edital_topic_id => ({ question_id: savedId, edital_topic_id })));
+      }
+    }catch(e){ console.warn('[question_edital_topics sync]', e); }
+
     if(qType !== 'true_false'){
-      const currentTopics = new Set(
-        questionTopicsCache.filter(qt => qt.question_id === savedId).map(qt => qt.topic_id)
-      );
-      const desiredTopics = modalSelectedTopics;
-      const toAddTopics = [...desiredTopics].filter(id => !currentTopics.has(id));
-      const toRemoveTopics = [...currentTopics].filter(id => !desiredTopics.has(id));
-
-      if(toRemoveTopics.length > 0){
-        await questoes().from('question_topics')
-          .delete().eq('question_id', savedId).in('topic_id', toRemoveTopics);
-      }
-      if(toAddTopics.length > 0){
-        await questoes().from('question_topics').insert(
-          toAddTopics.map(topic_id => ({ question_id: savedId, topic_id, auto_included: false }))
-        );
-      }
-
       const currentTags = new Set(
         questionTagsCache.filter(qt => qt.question_id === savedId).map(qt => qt.tag_id)
       );
@@ -21129,70 +21136,54 @@
     const box = document.getElementById('topics-chipbox');
     const selectedText = document.getElementById('topics-selected');
     const hint = document.getElementById('topics-hint');
+    if(!box) return;
 
-    if(!modalSelectedSubjectId){
-      box.innerHTML = `<p class="modal-panel-hint" style="padding:1rem 0;font-size:.85rem">
-        Escolha uma matéria na aba "Dados" para ver os temas disponíveis.
-      </p>`;
-      selectedText.innerHTML = '';
-      hint.textContent = 'selecione a matéria primeiro';
+    // Tópicos do EDITAL (concursos.edital_topics), ordenados pelo código.
+    const all = ((window.UbiqueStore && window.UbiqueStore.edital_topics && window.UbiqueStore.edital_topics.list()) || [])
+      .slice()
+      .sort((a, b) => String(a.code || '').localeCompare(String(b.code || ''), undefined, { numeric: true }));
+
+    if(all.length === 0){
+      box.innerHTML = `<p class="modal-panel-hint" style="padding:1rem 0;font-size:.85rem">Nenhum tópico de edital cadastrado (cadastre em Concursos → Edital).</p>`;
+      if(selectedText) selectedText.innerHTML = '';
+      if(hint) hint.textContent = 'sem edital cadastrado';
       return;
     }
 
-    // Temas daquela matéria, ordenados hierarquicamente
-    const available = topicsCache
-      .filter(t => t.subject_id == modalSelectedSubjectId)
-      .sort((a, b) => {
-        const aItem = (a.item || '').split('.').map(n => parseInt(n) || 0);
-        const bItem = (b.item || '').split('.').map(n => parseInt(n) || 0);
-        for(let i = 0; i < Math.max(aItem.length, bItem.length); i++){
-          const x = aItem[i] ?? -1, y = bItem[i] ?? -1;
-          if(x !== y) return x - y;
-        }
-        return a.id - b.id;
-      });
-
-    // Filtro de busca
-    const f = filter.trim().toLowerCase();
+    const f = String(filter || '').trim().toLowerCase();
     const filtered = f
-      ? available.filter(t =>
-          (t.topic || '').toLowerCase().includes(f) ||
-          (t.item || '').toLowerCase().includes(f))
-      : available;
+      ? all.filter(t => (String(t.title || '') + ' ' + String(t.alias || '') + ' ' + String(t.code || '')).toLowerCase().includes(f))
+      : all;
 
     if(filtered.length === 0){
-      box.innerHTML = `<p class="modal-panel-hint" style="padding:1rem 0;font-size:.85rem">
-        Nenhum tema${f ? ' encontrado' : ' cadastrado para esta matéria'}.
-      </p>`;
+      box.innerHTML = `<p class="modal-panel-hint" style="padding:1rem 0;font-size:.85rem">Nenhum tópico encontrado.</p>`;
     } else {
       box.innerHTML = filtered.map(t => {
-        const active = modalSelectedTopics.has(t.id) ? 'active' : '';
+        const active = modalSelectedEditalTopics.has(String(t.id)) ? 'active' : '';
+        const name = t.alias || t.title || '(sem título)';
         return `
-          <button type="button" class="classif-chip ${active}" data-topic-id="${t.id}">
-            ${t.item ? `<span class="item-tag">${esc(t.item)}</span>` : ''}
-            ${esc(t.topic)}
+          <button type="button" class="classif-chip ${active}" data-edital-topic-id="${esc(String(t.id))}">
+            ${t.code ? `<span class="item-tag">${esc(t.code)}</span>` : ''}
+            ${esc(name)}
           </button>`;
       }).join('');
 
       box.querySelectorAll('.classif-chip').forEach(chip => {
         chip.addEventListener('click', () => {
-          const tid = parseInt(chip.dataset.topicId);
-          if(modalSelectedTopics.has(tid)){
-            modalSelectedTopics.delete(tid);
-          } else {
-            modalSelectedTopics.add(tid);
-          }
+          const tid = String(chip.dataset.editalTopicId);
+          if(modalSelectedEditalTopics.has(tid)) modalSelectedEditalTopics.delete(tid);
+          else modalSelectedEditalTopics.add(tid);
           modalDirty = true;
           renderTopicsChipbox(filter);
         });
       });
     }
 
-    const count = modalSelectedTopics.size;
-    selectedText.innerHTML = count === 0
-      ? 'Nenhum tema selecionado.'
-      : `<strong>${count}</strong> ${count === 1 ? 'tema selecionado' : 'temas selecionados'}.`;
-    hint.textContent = count === 0 ? 'clique para incluir' : `${count} selecionado(s)`;
+    const count = modalSelectedEditalTopics.size;
+    if(selectedText) selectedText.innerHTML = count === 0
+      ? 'Nenhum tópico do edital selecionado.'
+      : `<strong>${count}</strong> ${count === 1 ? 'tópico do edital selecionado' : 'tópicos do edital selecionados'}.`;
+    if(hint) hint.textContent = count === 0 ? 'clique para incluir' : `${count} selecionado(s)`;
   }
 
   // E1 — contexto da unidade ao "Criar no banco": mostra a localização no curso
@@ -21223,7 +21214,7 @@
                       (l.unit_id != null && String(l.unit_id) === String(unitId)) ||
                       (tt === 'chapter' && chId != null && String(tid) === String(chId)) ||
                       (tt === 'module' && modId != null && String(tid) === String(modId));
-        if(match && l.topic_id != null) modalSelectedTopics.add(l.topic_id);
+        if(match && l.topic_id != null) modalSelectedEditalTopics.add(String(l.topic_id));
       });
       if(typeof renderTopicsChipbox === 'function') renderTopicsChipbox('');
     }catch(e){ console.warn('[qApplyUnitContext]', e); }
