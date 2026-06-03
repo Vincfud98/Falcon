@@ -12481,7 +12481,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
 <script src="ubique-shared.js?v=134"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=58"></script>
+<script src="learning-blocks-render.js?v=59"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -45444,6 +45444,16 @@
     _ueSaveStructured(bid); _ueRerenderBlockBody(bid);
   };
 
+  // E3.4 — define qual gabarito comentado esta unidade exibe para uma questão do banco.
+  window.ueOqSetGabarito = function(bid, gIdx, tfItemId, commentId){
+    const b = _ueGetBlock(bid); if(!b) return;
+    const g = _ueOqGroup(b, gIdx); if(!g) return;
+    if(!g.bank_item_comments) g.bank_item_comments = {};
+    g.bank_item_comments[String(tfItemId)] = commentId;
+    _ueSaveStructured(bid);
+    _ueRerenderBlockBody(bid);
+  };
+
   window.ueOqGroupUpdate = function(bid, gIdx, field, value){
     const b = _ueGetBlock(bid); if(!b) return;
     const g = _ueOqGroup(b, gIdx); if(!g) return;
@@ -46048,23 +46058,69 @@
       questoes = (tfItemsCache || [])
         .filter(function(t){ return String(t.question_id) === String(q.id); })
         .sort(function(a, b){ return (a.numero || 0) - (b.numero || 0); })
-        .map(function(t){ return { id: t.id, origin: t.origin || '', text: String(t.assertiva || '').replace(/<[^>]+>/g, '') }; });
+        .map(function(t){
+          // E3.4 — gabaritos disponíveis desta questão (tf_item_comments, por position).
+          const gabs = (tfItemCommentsCache || [])
+            .filter(function(c){ return String(c.tf_item_id) === String(t.id); })
+            .sort(function(a, b){ return (a.position || 0) - (b.position || 0); })
+            .map(function(c){ return { id: c.id, label: c.label || '', preview: String(c.text || '').replace(/<[^>]+>/g, '').slice(0, 60) }; });
+          return { id: t.id, origin: t.origin || '', text: String(t.assertiva || '').replace(/<[^>]+>/g, ''), gabaritos: gabs };
+        });
     }
     return { id: q.id, enunciado: q.enunciado || '', type: type, origin: q.origin || '', year: _ueOqYearOf(q), questoes: questoes, itemCount: questoes.length };
   };
+
+  // E3.4 — rótulo curto de uma unidade (sigla da matéria + título), pro aviso "usado em…".
+  function _ueGabUnitLabel(unitId){
+    const u = (unitsCache || []).find(function(x){ return String(x.id) === String(unitId); });
+    if(!u) return null;
+    let sigla = '';
+    const subj = (subjectsCache || []).find(function(s){ return String(s.id) === String(u.subject_id); });
+    if(subj) sigla = subj.sigla || (subj.subject ? String(subj.subject).slice(0, 2).toUpperCase() : '');
+    const titulo = String(u.title || '').slice(0, 22);
+    return (sigla ? sigla + ' · ' : '') + (titulo || ('unidade ' + u.id));
+  }
+
+  // E3.4 — onde um gabarito (comment_id) já é exibido, varrendo os blocos carregados
+  // (melhor esforço: vê o que estiver em UbiqueStore.unit_blocks). Ignora a unidade atual.
+  function _ueGabUsedWhere(commentId, exceptUnitId){
+    const blocks = (window.UbiqueStore && UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.list)
+      ? UbiqueStore.unit_blocks.list() : [];
+    const units = {};
+    blocks.forEach(function(b){
+      if(exceptUnitId != null && String(b.unit_id) === String(exceptUnitId)) return;
+      const groups = (b.content && b.content.groups) || [];
+      groups.forEach(function(g){
+        const map = g && g.bank_item_comments;
+        if(!map) return;
+        const hit = Object.keys(map).some(function(k){ return String(map[k]) === String(commentId); });
+        if(hit) units[String(b.unit_id)] = true;
+      });
+    });
+    const labels = Object.keys(units).map(_ueGabUnitLabel).filter(Boolean);
+    if(!labels.length) return '';
+    if(labels.length <= 2) return 'usado em ' + labels.join(', ');
+    return 'usado em ' + labels.slice(0, 2).join(', ') + ' +' + (labels.length - 2);
+  }
+
   // Q3 — resolve um grupo do banco para o SHAPE do preview (LearningBlocks):
   // { reference_text, reference_image, questions:[{statement,type,options,correct,comment,origin}] }.
   // Usado pelo preview do editor (learning-blocks-render.js chama global.resolveBankGroupRaw).
-  // E3.3 — gabarito a exibir: 1º comentário de tf_item_comments (por position); fallback ao campo legado.
-  function _ueFirstGabarito(tfItemId, legacy){
+  // E3.3/E3.4 — gabarito a exibir: o escolhido pela unidade (choice) se houver;
+  // senão o 1º comentário de tf_item_comments (por position); fallback ao campo legado.
+  function _ueFirstGabarito(tfItemId, legacy, choice){
     const list = (tfItemCommentsCache || [])
       .filter(function(c){ return String(c.tf_item_id) === String(tfItemId); })
       .sort(function(a, b){ return (a.position || 0) - (b.position || 0); });
+    if(choice && choice[String(tfItemId)] != null){
+      const sel = list.find(function(c){ return String(c.id) === String(choice[String(tfItemId)]); });
+      if(sel && (sel.text || '').trim()) return sel.text;
+    }
     if(list.length && (list[0].text || '').trim()) return list[0].text;
     return legacy || '';
   }
 
-  window.resolveBankGroupRaw = function(questionId, itemIds){
+  window.resolveBankGroupRaw = function(questionId, itemIds, commentChoice){
     const q = (questionsCache || []).find(function(x){ return String(x.id) === String(questionId); });
     if(!q) return null;
     const subset = (Array.isArray(itemIds) && itemIds.length) ? itemIds.map(String) : null;
@@ -46087,7 +46143,7 @@
         .sort(function(a, b){ return (a.numero || 0) - (b.numero || 0); });
       if(subset) tf = tf.filter(function(t){ return subset.indexOf(String(t.id)) >= 0; });
       questions = tf.map(function(t){ return { statement: t.assertiva || '', type: 'true_false', source_type: 'past_exam', origin: t.origin || '',
-        correct: (t.key === true || t.key === 'Certo'), comment: _ueFirstGabarito(t.id, t.comment) }; });
+        correct: (t.key === true || t.key === 'Certo'), comment: _ueFirstGabarito(t.id, t.comment, commentChoice) }; });
     }
     return { title: '', description: '', origin: q.origin || '', reference_text: refText, reference_image: q.image_url || '', questions: questions };
   };
@@ -46992,7 +47048,23 @@
             const typeLabel = (s && s.type === 'multiple_choice') ? 'Múltipla escolha' : 'Certo/Errado';
             const qListHtml = questoes.map(function(it, i){
               const c = it.origin ? '<span style="font-family:var(--mono);font-size:.56rem;color:var(--accent)">' + esc(it.origin) + '</span> ' : ('<span style="font-family:var(--mono);font-size:.56rem;color:var(--text-mute)">' + (i + 1) + '.</span> ');
-              return '<div style="font-size:.74rem;line-height:1.35;color:var(--text-dim);padding:.2rem 0;border-top:1px dashed var(--accent-border-soft)">' + c + esc(String(it.text || '').slice(0, 130)) + (String(it.text || '').length > 130 ? '…' : '') + '</div>';
+              // E3.4 — seletor de gabarito (só quando a questão tem mais de um).
+              let gabSel = '';
+              const gabs = it.gabaritos || [];
+              if(gabs.length > 1){
+                const chosen = (g.bank_item_comments && g.bank_item_comments[String(it.id)] != null)
+                  ? String(g.bank_item_comments[String(it.id)]) : String(gabs[0].id);
+                const opts = gabs.map(function(gb, gi){
+                  const used = _ueGabUsedWhere(gb.id, ueCurrentUnitId);
+                  const txt = 'Gabarito ' + (gi + 1) + (gb.label ? ' · ' + gb.label : '') + (used ? ' — ' + used : '');
+                  return '<option value="' + esc(String(gb.id)) + '"' + (String(gb.id) === chosen ? ' selected' : '') + '>' + esc(txt) + '</option>';
+                }).join('');
+                gabSel = '<div style="margin:.3rem 0 .15rem;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">' +
+                  '<span style="font-family:var(--mono);font-size:.55rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.08em">Gabarito exibido</span>' +
+                  '<select class="field-input" onchange="ueOqSetGabarito(' + bid + ',' + gIdx + ',\'' + esc(String(it.id)) + '\',this.value)" style="font-size:.66rem;padding:.12rem .3rem;width:auto;max-width:100%">' + opts + '</select>' +
+                '</div>';
+              }
+              return '<div style="font-size:.74rem;line-height:1.35;color:var(--text-dim);padding:.2rem 0;border-top:1px dashed var(--accent-border-soft)">' + c + esc(String(it.text || '').slice(0, 130)) + (String(it.text || '').length > 130 ? '…' : '') + gabSel + '</div>';
             }).join('');
             return '<div style="border:1px solid var(--accent);border-radius:var(--radius);padding:.8rem 1rem;background:var(--accent-lo);margin-bottom:.8rem">' +
               '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem;flex-wrap:wrap">' +

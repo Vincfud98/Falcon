@@ -631,7 +631,7 @@
           // preview (enunciado/referência + questions[] cru). O resolver é
           // fornecido pelo app (admin: resolveBankGroupRaw via caches questoes).
           if(g && g.bank_question_id && typeof global.resolveBankGroupRaw === 'function'){
-            const rg = global.resolveBankGroupRaw(g.bank_question_id, g.bank_item_ids);
+            const rg = global.resolveBankGroupRaw(g.bank_question_id, g.bank_item_ids, g.bank_item_comments);
             if(rg){
               g = Object.assign({}, g, {
                 title:           g.title || rg.title || '',
