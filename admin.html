@@ -10108,6 +10108,9 @@
         <button class="modal-tab" data-mtab="revisao">
           5 · Revisão
         </button>
+        <button class="modal-tab" data-mtab="massa" title="Importar várias questões de uma vez (JSON)">
+          ⇪ Em massa
+        </button>
       </nav>
 
       <div class="modal-body">
@@ -10355,6 +10358,28 @@
         <!-- PAINEL REVISÃO -->
         <div class="modal-panel" id="mpanel-revisao">
           <div id="reviewContent"></div>
+        </div>
+
+        <!-- PAINEL EM MASSA (JSON → banco) -->
+        <div class="modal-panel" id="mpanel-massa">
+          <p class="s-body" style="font-size:.85rem;color:var(--text-dim);margin:0 0 .6rem;line-height:1.5">
+            Cole um JSON com vários <strong>grupos de questões</strong>. Elas são criadas <strong>no banco</strong>
+            (e, se você abriu isto por uma <strong>unidade</strong>, já entram na unidade como referência).
+            Questões repetidas (mesmo código de origem) são <strong>referenciadas sem recriar</strong>.
+          </p>
+          <textarea class="field-input" id="q-bulk-json" rows="12" placeholder='{ "groups": [ { "origin": "[#15/2006]", "reference_text": "<p>…</p>", "questions": [ { "type": "true_false", "origin": "[#15-1/2006]", "statement": "<p>…</p>", "correct": false, "comment": "<p>…</p>", "tags": [] } ] } ] }' style="font-family:var(--mono);font-size:.74rem;line-height:1.5;width:100%"></textarea>
+          <details style="margin-top:.5rem">
+            <summary style="cursor:pointer;font-family:var(--mono);font-size:.65rem;letter-spacing:.06em;text-transform:uppercase;color:var(--text-mute)">Schema aceito + regras</summary>
+            <div class="s-body" style="font-size:.74rem;color:var(--text-dim);line-height:1.6;margin-top:.4rem">
+              <p style="margin:0 0 .3rem"><strong>Grupo:</strong> <code>title</code>, <code>description</code>, <code>origin</code> (ID da prova do grupo, ex.: <code>[#15/2006]</code> — sem origin = questões inéditas/Ubique), <code>reference_text</code> (HTML), <code>reference_image</code> (URL), <code>questions</code> (ou <code>options</code> p/ múltipla escolha).</p>
+              <p style="margin:0 0 .3rem"><strong>Questão (C/E):</strong> <code>type:"true_false"</code>, <code>origin</code> (<code>[#G-N/YYYY]</code> ou <code>[#N/YYYY]</code>; prefixo p/ outro concurso: <code>[pf:#10/2024]</code>), <code>statement</code> (HTML), <code>correct</code> (true=Certo/false=Errado), <code>comment</code> (HTML), <code>tags</code> [], <code>reference_text</code>/<code>reference_image</code> (opcionais).</p>
+              <p style="margin:0"><strong>Múltipla escolha:</strong> <code>type:"multiple_choice"</code>, <code>options:[{label,text,correct}]</code>. <em>Sem dificuldade no JSON — ela vem do uso na plataforma.</em></p>
+            </div>
+          </details>
+          <div id="q-bulk-result" style="display:none;margin-top:.6rem;padding:.5rem .7rem;border-left:3px solid var(--accent);background:var(--bg-elev);border-radius:var(--radius);font-size:.8rem;line-height:1.5"></div>
+          <div style="display:flex;justify-content:flex-end;margin-top:.7rem">
+            <button class="btn" onclick="ueOqBulkImportToBank()" style="background:var(--accent);color:var(--bg);border:0;font-weight:600;padding:.45rem 1rem;border-radius:var(--radius);cursor:pointer">Importar tudo</button>
+          </div>
         </div>
       </div>
 
@@ -20440,6 +20465,11 @@
     // sendo usado a partir da unidade.
     const m = document.getElementById('questionModal');
     if(m) m.style.zIndex = '600';
+    // Comunica que vai pro banco E pra unidade (uma questão ou "Em massa").
+    const eye = document.getElementById('modalEyebrow');
+    if(eye) eye.textContent = 'Nova questão → banco + unidade';
+    const ttl = document.getElementById('modalTitle');
+    if(ttl) ttl.textContent = 'Criar no banco (uma ou "Em massa")';
   };
   document.getElementById('modalCloseBtn').addEventListener('click', closeQuestionModal);
   document.getElementById('modalCancelBtn').addEventListener('click', closeQuestionModal);
@@ -46117,6 +46147,111 @@
     if(window.ueToast) window.ueToast('Migração concluída', 'success');
   };
 
+  // ── Cria UM grupo no banco a partir de um objeto-grupo (inline/JSON) ──
+  // Retorna { bankQuestionId, nQuestoes }. Reaproveitado pela importação em massa.
+  async function _ueBankCreateGroupFromInline(g, subjectId, examId){
+    const code = (g.origin || '').trim();
+    const ym = code.match(/\/(\d{4})\]/);
+    const year = ym ? parseInt(ym[1], 10) : null;
+    const gm = code.match(/#(\d+)/);
+    const numero = gm ? parseInt(gm[1], 10) : null;
+    const enunciado = g.enunciado || g.description || g.title || '';
+    const qs = Array.isArray(g.questions) ? g.questions : [];
+    const qType = qs.some(function(q){ return q.type === 'multiple_choice'; }) ? 'multiple_choice' : 'true_false';
+    const isUbique = !code; // sem código de origem → questão inédita (Ubique)
+    const ins = await questoes().from('questions').insert({
+      type: qType, enunciado: enunciado, origin: code || null, year: year, numero: numero,
+      subject_id: subjectId, exam_id: examId, ativo: true, anulada: false, desatualizada: false,
+      phase_numero: 1, difficulty: 'media', questao_simulada: isUbique, image_url: g.reference_image || null
+    }).select().single();
+    if(ins.error || !ins.data){ throw new Error('questions: ' + (ins.error && ins.error.message)); }
+    const bankQuestionId = ins.data.id;
+    if(g.reference_text){
+      const rt = await questoes().from('reference_texts').insert({ text: g.reference_text, exam_id: examId, year: year }).select().single();
+      if(rt.data) await questoes().from('question_reference_texts').insert({ question_id: bankQuestionId, reference_text_id: rt.data.id, ordem: 1 });
+    }
+    let nQuestoes = 0;
+    if(qType === 'true_false'){
+      let numItem = 0;
+      for(const q of qs){
+        numItem++;
+        const itOrigin = q.origin || ((code && numero) ? ('[#' + numero + '-' + numItem + '/' + year + ']') : null);
+        const tf = await questoes().from('tf_items').insert({
+          question_id: bankQuestionId, numero: numItem, assertiva: q.statement || q.assertion || '',
+          key: _ueTfKeyFormat(q.correct === true), comment: q.comment || null, origin: itOrigin,
+          subject_id: subjectId, difficulty: 'media', anulada: false, desatualizada: false
+        }).select().single();
+        if(tf.error || !tf.data){ throw new Error('tf_items: ' + (tf.error && tf.error.message)); }
+        nQuestoes++;
+      }
+    } else {
+      const q = qs[0] || {};
+      const opts = Array.isArray(q.options) ? q.options : [];
+      for(let i = 0; i < opts.length; i++){
+        const o = opts[i];
+        await questoes().from('mc_options').insert({ question_id: bankQuestionId, letra: o.label || String.fromCharCode(65 + i), opcao: o.text || '', correct: !!o.correct, comment: o.comment || null });
+      }
+      nQuestoes++;
+    }
+    return { bankQuestionId: bankQuestionId, nQuestoes: nQuestoes };
+  }
+  function _ueBankFindGroupByOrigin(code){
+    if(!code) return null;
+    return (questionsCache || []).find(function(q){ return q.origin && String(q.origin) === String(code); }) || null;
+  }
+
+  // Importação EM MASSA pro banco (dentro de "Criar no banco"). Dedup por código.
+  window.ueOqBulkImportToBank = async function(){
+    const ret = window._ueOqCreateReturn; // setado quando aberto por uma unidade
+    const ta = document.getElementById('q-bulk-json');
+    const resBox = document.getElementById('q-bulk-result');
+    if(!ta || !resBox) return;
+    const show = function(html, ok){ resBox.style.display = 'block'; resBox.style.borderLeftColor = ok ? 'var(--accent)' : 'var(--red)'; resBox.innerHTML = html; };
+    let parsed;
+    try{ parsed = _ueOqParseImportJSON(ta.value); }
+    catch(e){ show('<span style="color:var(--red)">' + esc(e.message) + '</span>', false); return; }
+    const groups = (parsed.groups || []).slice();
+    (parsed.ungrouped || []).forEach(function(q){ groups.push({ title: '', description: '', origin: '', reference_text: '', reference_image: '', questions: [q] }); });
+    if(!groups.length){ show('Nenhum grupo/questão encontrado no JSON.', false); return; }
+
+    let subjectId = null;
+    if(ret){ const blk = _ueGetBlock(ret.bid); if(blk) subjectId = _ueSubjectIdOfUnit(blk.unit_id); }
+    if(subjectId == null) subjectId = modalSelectedSubjectId || parseInt((document.getElementById('q-subject') || {}).value) || null;
+    const examId = ((questionsCache || []).find(function(q){ return String(q.subject_id) === String(subjectId); }) || {}).exam_id || 1;
+
+    let created = 0, dupes = 0; const dupeCodes = []; const refIds = [];
+    try{
+      for(const g of groups){
+        const existing = _ueBankFindGroupByOrigin(g.origin);
+        if(existing){ dupes++; if(g.origin) dupeCodes.push(g.origin); refIds.push(existing.id); }
+        else { const r = await _ueBankCreateGroupFromInline(g, subjectId, examId); created++; refIds.push(r.bankQuestionId); }
+      }
+    }catch(e){ show('<span style="color:var(--red)">Erro: ' + esc(e.message) + '</span>', false); return; }
+
+    if(ret){
+      const blk = _ueGetBlock(ret.bid);
+      if(blk){
+        if(!blk.content) blk.content = {};
+        if(!Array.isArray(blk.content.groups)) blk.content.groups = [];
+        refIds.forEach(function(qid){
+          if(!blk.content.groups.some(function(x){ return String(x.bank_question_id) === String(qid); })){
+            const n = blk.content.groups.length + 1;
+            blk.content.groups.push({ id: 'g' + n, bank_question_id: qid });
+          }
+        });
+        _ueSaveStructured(ret.bid);
+      }
+    }
+    try{ await Promise.all([loadQuestions(), loadTfItems(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
+
+    let msg = '<strong>' + created + '</strong> grupo(s) criados no banco.';
+    if(dupes) msg += ' <strong>' + dupes + '</strong> repetido(s) (referenciado sem recriar): <span style="font-family:var(--mono);font-size:.72rem">' + esc(dupeCodes.filter(Boolean).join(', ')) + '</span>.';
+    if(ret) msg += ' Adicionado(s) à unidade.';
+    show(msg, true);
+    if(ret){ _ueRerenderBlockBody(ret.bid); window._ueOqCreateReturn = null; }
+    if(window.ueToast) window.ueToast('Importação em massa concluída', 'success');
+  };
+
   // ─────────────────────────────────────────────────────────────────────
   // Renderer reutilizável de lista de items (Y3c/Y3d core)
   // spec = {
@@ -46702,11 +46837,8 @@
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">' +
             '<span class="s-subtitle" style="font-size:.65rem">Grupos e questões avulsas</span>' +
             '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' +
-              '<button class="btn btn-ghost btn-sm" onclick="ueOqImportToggle(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem">' + UE_ICONS.download + 'Importar JSON</button>' +
-              '<button class="btn btn-ghost btn-sm" onclick="ueOqGroupAdd(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem">+ Grupo</button>' +
-              '<button class="btn btn-ghost btn-sm" onclick="ueOqOpenBankPicker(' + bid + ',-1)" style="padding:.3rem .7rem;font-size:.78rem;border-color:var(--accent-border)" title="Inserir uma questão do banco como grupo">' + UE_ICONS.download + 'Pegar do banco</button>' +
-              '<button class="btn btn-ghost btn-sm" onclick="ueOqCreateInBank(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem;border-color:var(--accent-border)" title="Cria uma questão nova já no banco e adiciona à unidade">+ Criar no banco</button>' +
-              '<button class="btn btn-ghost btn-sm" onclick="ueOqQuestionAdd(' + bid + ',-1,\'true_false\')" style="padding:.3rem .7rem;font-size:.78rem">+ Questão avulsa</button>' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueOqOpenBankPicker(' + bid + ',-1)" style="padding:.3rem .7rem;font-size:.78rem;border-color:var(--accent-border)" title="Inserir uma questão que já existe no banco">' + UE_ICONS.download + 'Pegar do banco</button>' +
+              '<button class="btn btn-sm" onclick="ueOqCreateInBank(' + bid + ')" style="padding:.3rem .8rem;font-size:.78rem;background:var(--accent);color:var(--bg);border:0;font-weight:600;cursor:pointer" title="Cria questão(ões) nova(s) no banco (uma ou em massa via JSON) e adiciona à unidade">+ Criar no banco</button>' +
               _migrateBtn +
             '</div>' +
           '</div>' +
