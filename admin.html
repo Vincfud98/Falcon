@@ -46564,6 +46564,29 @@
     return (questionsCache || []).find(function(q){ return q.origin && String(q.origin) === String(code); }) || null;
   }
 
+  // E3.5 — em questão repetida (mesmo código), ADICIONA os gabaritos comentados que
+  // vieram no JSON como gabaritos extras (sem substituir os já cadastrados, sem comparar).
+  // Casa cada afirmativa por posição (1ª com 1ª, 2ª com 2ª…). Só Certo/Errado.
+  async function _ueAddImportedGabaritos(existingQuestion, g){
+    if(!existingQuestion || existingQuestion.type !== 'true_false') return 0;
+    const qs = Array.isArray(g.questions) ? g.questions : [];
+    const tf = (tfItemsCache || [])
+      .filter(function(t){ return String(t.question_id) === String(existingQuestion.id); })
+      .sort(function(a, b){ return (a.numero || 0) - (b.numero || 0); });
+    const label = (g.origin || '').trim() || null;
+    let added = 0;
+    for(let i = 0; i < qs.length; i++){
+      const newComment = (qs[i] && qs[i].comment) ? String(qs[i].comment) : '';
+      if(!newComment.trim()) continue;
+      const item = tf[i];
+      if(!item) continue;
+      const pos = (tfItemCommentsCache || []).filter(function(c){ return String(c.tf_item_id) === String(item.id); }).length + 1;
+      const insC = await questoes().from('tf_item_comments').insert({ tf_item_id: item.id, text: newComment, label: label, position: pos });
+      if(!insC.error) added++;
+    }
+    return added;
+  }
+
   // Importação EM MASSA pro banco (dentro de "Criar no banco"). Dedup por código.
   window.ueOqBulkImportToBank = async function(){
     const ret = window._ueOqCreateReturn; // setado quando aberto por uma unidade
@@ -46583,11 +46606,15 @@
     if(subjectId == null) subjectId = modalSelectedSubjectId || parseInt((document.getElementById('q-subject') || {}).value) || null;
     const examId = ((questionsCache || []).find(function(q){ return String(q.subject_id) === String(subjectId); }) || {}).exam_id || null;
 
-    let created = 0, dupes = 0; const dupeCodes = []; const refIds = [];
+    let created = 0, dupes = 0, gabAdded = 0; const dupeCodes = []; const refIds = [];
     try{
       for(const g of groups){
         const existing = _ueBankFindGroupByOrigin(g.origin);
-        if(existing){ dupes++; if(g.origin) dupeCodes.push(g.origin); refIds.push(existing.id); }
+        if(existing){
+          dupes++; if(g.origin) dupeCodes.push(g.origin); refIds.push(existing.id);
+          // E3.5 — adiciona os gabaritos do JSON como extras (sem substituir).
+          gabAdded += await _ueAddImportedGabaritos(existing, g);
+        }
         else { const r = await _ueBankCreateGroupFromInline(g, subjectId, examId); created++; refIds.push(r.bankQuestionId); }
       }
     }catch(e){ show('<span style="color:var(--red)">Erro: ' + esc(e.message) + '</span>', false); return; }
@@ -46610,6 +46637,7 @@
 
     let msg = '<strong>' + created + '</strong> grupo(s) criados no banco.';
     if(dupes) msg += ' <strong>' + dupes + '</strong> repetido(s) (referenciado sem recriar): <span style="font-family:var(--mono);font-size:.72rem">' + esc(dupeCodes.filter(Boolean).join(', ')) + '</span>.';
+    if(gabAdded) msg += ' <strong>' + gabAdded + '</strong> gabarito(s) comentado(s) adicionado(s) às questões repetidas.';
     if(ret) msg += ' Adicionado(s) à unidade.';
     show(msg, true);
     if(ret){ _ueRerenderBlockBody(ret.bid); window._ueOqCreateReturn = null; }
