@@ -9679,6 +9679,46 @@ const Store = (function(){
   // S2.2 — carrega respostas item-a-item de uma tentativa específica e injeta
   // no _state.quizAnswers (com unitId sintético __sim_<simId>), pra que o
   // render do simulado mostre as respostas ao reabrir/recarregar.
+  // S2.2 — no boot: hidrata as respostas item-a-item da ÚLTIMA tentativa de
+  // CADA simulado do aluno. Sem isso, voltar pra Performance/Detail depois de
+  // sair e entrar dá leitura suja (estado em memória pode ter resíduo de outra
+  // tentativa). Banco é a fonte de verdade.
+  async function _hydrateAllLastSimuladoResponses(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('simulado_responses')
+        .select('simulado_id, attempt_number, item_id, selected, correct, answered_at')
+        .eq('user_id', userId);
+      if(error){ console.warn('[hydrate last sim resps]', error); return; }
+      // Acha a última tentativa por simulado
+      const lastBySim = {};
+      (data || []).forEach(r => {
+        const cur = lastBySim[r.simulado_id];
+        if(!cur || r.attempt_number > cur) lastBySim[r.simulado_id] = r.attempt_number;
+      });
+      _state.quizAnswers = _state.quizAnswers || {};
+      // Popula só as respostas da última tentativa de cada simulado
+      Object.keys(lastBySim).forEach(simId => {
+        const unitId = '__sim_' + simId;
+        _state.quizAnswers[unitId] = {};
+        _state.quizAnswers[unitId]['_all'] = {};
+      });
+      (data || []).forEach(r => {
+        if(r.attempt_number !== lastBySim[r.simulado_id]) return;
+        const unitId = '__sim_' + r.simulado_id;
+        _state.quizAnswers[unitId]['_all'][String(r.item_id)] = {
+          selected: r.selected,
+          correct: r.correct,
+          answeredAt: r.answered_at ? new Date(r.answered_at).getTime() : Date.now()
+        };
+      });
+      const n = Object.keys(lastBySim).length;
+      if(n) console.log('[Store] hydrated last sim responses for', n, 'simulado(s)');
+      _persist();
+    }catch(e){ console.warn('[hydrate last sim resps ex]', e); }
+  }
+
   async function _hydrateSimuladoResponses(simId, attemptNumber){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb) return;
@@ -9779,7 +9819,10 @@ const Store = (function(){
       _hydrateHighlightsFromSupabase().catch(()=>{});
       // Fase 4h — hidrata flashcards + simulados do Supabase
       _hydrateFlashcardsFromSupabase().catch(()=>{});
-      _hydrateSimuladosFromSupabase().catch(()=>{});
+      // Encadeia: depois das tentativas, hidrata as respostas item-a-item da última.
+      _hydrateSimuladosFromSupabase()
+        .then(() => _hydrateAllLastSimuladoResponses())
+        .catch(()=>{});
       return _state;
     },
     get(){ return _state; },
@@ -10058,7 +10101,22 @@ const Store = (function(){
         return _state.quizAnswersByBankId[itemId];
       }
       if(!_state.quizAnswers) return null;
-      return (((_state.quizAnswers[unitId]||{})[blockId]||{})[itemId]) || null;
+      const byBlock = (((_state.quizAnswers[unitId]||{})[blockId]||{})[itemId]) || null;
+      if(byBlock) return byBlock;
+      // S2.2 — fallback para simulado: a hidratação grava as respostas no bucket
+      // '_all' (sem blockId), porque a tabela aluno.simulado_responses não guarda
+      // blockId. Quando o render lê via blockId e não acha, cai aqui.
+      if(typeof unitId === 'string' && unitId.indexOf('__sim_') === 0){
+        const all = (_state.quizAnswers[unitId] || {})._all;
+        if(all && all[itemId]) return all[itemId];
+        // Os tf_items.id podem ter sido salvos como string no DOM e como número
+        // no banco (ou vice-versa). Compara normalizado.
+        if(all){
+          const k = String(itemId);
+          for(const x in all) if(String(x) === k) return all[x];
+        }
+      }
+      return null;
     },
     getEssayAnswer(unitId, blockId, itemId){
       // Defensive: _state pode ser null antes de Store.init.
