@@ -17760,26 +17760,16 @@ Renderers.simuladoRanking = function(route){
   const sim = sims.find(s => s.id === route.params.simuladoId);
   if(!sim) return `<div class="empty"><div class="empty-title">Simulado não encontrado</div></div>`;
 
-  // Build ranking from mock data + current user
-  const mockRanking = [
-    { name:'Ana Beatriz', score:28, total:30, pct:93.3, submittedAt:Date.now()-86400000*3 },
-    { name:'Carlos Eduardo', score:26, total:30, pct:86.7, submittedAt:Date.now()-86400000*2 },
-    { name:'Fernanda Lima', score:25, total:30, pct:83.3, submittedAt:Date.now()-86400000*5 },
-    { name:'Rafael Souza', score:24, total:30, pct:80.0, submittedAt:Date.now()-86400000*1 },
-    { name:'Juliana Costa', score:23, total:30, pct:76.7, submittedAt:Date.now()-86400000*4 },
-    { name:'Marcos Oliveira', score:22, total:30, pct:73.3, submittedAt:Date.now()-86400000*7 },
-    { name:'Patrícia Mendes', score:21, total:30, pct:70.0, submittedAt:Date.now()-86400000*6 },
-    { name:'Thiago Almeida', score:20, total:30, pct:66.7, submittedAt:Date.now()-86400000*8 }
-  ];
-
-  // Insert current user if submitted
+  // S3 — ranking real: só participantes reais (por enquanto, o usuário atual).
+  // Leaderboard completo (todos os alunos, via view) fica pra S3b.
+  const ranking = [];
   const simState = (Store.get().simulados||{})[sim.id];
   if(simState && simState.submittedAt){
-    mockRanking.push({ name:window.MOCK_USER.name, score:simState.score, total:simState.total, pct:Math.round(simState.pct*100*10)/10, submittedAt:simState.submittedAt, isUser:true });
+    ranking.push({ name:(window.MOCK_USER && window.MOCK_USER.name) || 'Você', score:simState.score, total:simState.total, pct:Math.round((simState.pct||0)*100*10)/10, submittedAt:simState.submittedAt, isUser:true });
   }
-  mockRanking.sort((a,b) => b.score - a.score || a.submittedAt - b.submittedAt);
+  ranking.sort((a,b) => b.score - a.score || a.submittedAt - b.submittedAt);
 
-  const rows = mockRanking.map((r,i) => {
+  const rows = ranking.map((r,i) => {
     const pos = i + 1;
     const medal = pos === 1 ? '🥇' : pos === 2 ? '🥈' : pos === 3 ? '🥉' : '';
     const date = new Date(r.submittedAt).toLocaleDateString('pt-BR',{day:'2-digit',month:'short'});
@@ -17790,12 +17780,12 @@ Renderers.simuladoRanking = function(route){
       <td class="rank-pct">${r.pct.toFixed(1)}%</td>
       <td class="rank-date">${date}</td>
     </tr>`;
-  }).join('');
+  }).join('') || '<tr><td colspan="5" class="perf-empty" style="text-align:center;padding:1.5rem;color:var(--text-mute)">Ainda sem participantes. Finalize o simulado para entrar no ranking.</td></tr>';
 
   return `<div class="hero">
     <span class="s-label" data-a="1">Ranking</span>
     <h1 class="s-title hero" data-a="2">${Util.esc(sim.name)}</h1>
-    <p class="s-subtitle" data-a="3">${mockRanking.length} participantes</p>
+    <p class="s-subtitle" data-a="3">${ranking.length} participante${ranking.length===1?'':'s'}</p>
     <div class="s-divider" data-a="4"></div>
     <div class="cta-row" data-a="5">
       <a class="btn-ghost" href="#/simulados/${sim.id}">${Icons.chevron} Voltar ao simulado</a>
@@ -17822,37 +17812,31 @@ Renderers.simuladoPerformance = function(route){
   const unitId = '__sim_'+sim.id;
   const fmtPct = v => v == null ? '—' : Math.round(v*100)+'%';
 
-  // Aggregate by topic across this simulado's quiz blocks
-  const topicAgg = {};
+  // S3 — agrega por SEÇÃO do simulado (questões do banco não têm tópico no item).
+  const sectionAgg = [];
   (sim.blocks||[]).forEach(b => {
     if(b.type !== 'quiz') return;
     const groups = (typeof normalizeQuizBlock === 'function') ? normalizeQuizBlock(b) : (b.groups || [{items:b.items||[]}]);
+    const a = { name: b.title || '', correct:0, correctDoubt:0, wrong:0, wrongDoubt:0, pending:0, total:0, answered:0 };
     groups.forEach(g => (g.items||[]).forEach(it => {
-      const topics = Array.from(new Set([...(it.topics||[]),...(b.topics||[])]));
       const prior = (((state.quizAnswers||{})[unitId]||{})[b.id]||{})[it.id];
       const answered = !!prior && prior.selected != null;
       const correct = answered && prior.correct;
       const doubt = prior && !!prior.doubt;
-      topics.forEach(tid => {
-        if(!topicAgg[tid]) topicAgg[tid] = { correct:0, correctDoubt:0, wrong:0, wrongDoubt:0, pending:0, total:0, answered:0 };
-        const a = topicAgg[tid];
-        a.total++;
-        if(!answered) a.pending++;
-        else if(correct && doubt){ a.answered++; a.correct++; a.correctDoubt++; }
-        else if(correct){ a.answered++; a.correct++; }
-        else if(doubt){ a.answered++; a.wrong++; a.wrongDoubt++; }
-        else { a.answered++; a.wrong++; }
-      });
+      a.total++;
+      if(!answered) a.pending++;
+      else if(correct && doubt){ a.answered++; a.correct++; a.correctDoubt++; }
+      else if(correct){ a.answered++; a.correct++; }
+      else if(doubt){ a.answered++; a.wrong++; a.wrongDoubt++; }
+      else { a.answered++; a.wrong++; }
     }));
+    if(a.total) sectionAgg.push(a);
   });
 
-  const rows = Object.keys(topicAgg).map(tid => {
-    const t = window.TOPIC_REGISTRY[tid];
-    if(!t) return '';
-    const a = topicAgg[tid];
+  const rows = sectionAgg.map((a, i) => {
     const pct = a.answered ? (a.correct / a.answered) : null;
     return `<tr class="perf-row">
-      <td class="perf-label"><span class="perf-label-inner"><span class="perf-num">${Util.esc(t.number||'')}</span><span class="perf-name">${Util.esc(t.name)}</span></span></td>
+      <td class="perf-label"><span class="perf-label-inner"><span class="perf-num">${i+1}</span><span class="perf-name">${Util.esc(a.name || ('Seção '+(i+1)))}</span></span></td>
       <td class="perf-num-cell perf-c-correct">${a.correct}</td>
       <td class="perf-num-cell perf-c-cdoubt">${a.correctDoubt}</td>
       <td class="perf-num-cell perf-c-wrong">${a.wrong}</td>
@@ -17864,7 +17848,7 @@ Renderers.simuladoPerformance = function(route){
   }).join('') || '<tr><td colspan="8" class="perf-empty">Nenhum dado disponível. Responda as questões do simulado primeiro.</td></tr>';
 
   // Summary
-  const totals = Object.values(topicAgg).reduce((s,a) => ({
+  const totals = sectionAgg.reduce((s,a) => ({
     correct:s.correct+a.correct, correctDoubt:s.correctDoubt+a.correctDoubt,
     wrong:s.wrong+a.wrong, wrongDoubt:s.wrongDoubt+a.wrongDoubt,
     pending:s.pending+a.pending, total:s.total+a.total, answered:s.answered+a.answered
@@ -17898,10 +17882,10 @@ Renderers.simuladoPerformance = function(route){
     </div>
   </section>
   <section class="perf-section" data-a="6">
-    <div class="perf-section-label">Desempenho por tópico</div>
+    <div class="perf-section-label">Desempenho por seção</div>
     <div class="perf-table-wrap"><table class="perf-table">
       <thead><tr>
-        <th>Tópico</th>
+        <th>Seção</th>
         <th title="Acertos">✓</th><th title="Acertos com dúvida">✓?</th>
         <th title="Erros">✗</th><th title="Erros com dúvida">✗?</th>
         <th title="Pendentes">—</th><th title="Total">Total</th><th>%</th>
