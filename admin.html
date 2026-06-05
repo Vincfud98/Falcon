@@ -39519,43 +39519,51 @@
     section.style.display = '';
     panel.innerHTML = '<p class="client-panel-hint" style="margin:0;text-align:center">carregando…</p>';
 
-    const { data, error } = await questoes()
-      .from('v_response_sessions_full')
-      .select('*')
-      .eq('context', 'mock_exam')
-      .eq('context_ref', mockExamId)
-      .order('started_at', { ascending: false })
-      .limit(8);
+    // S2.2 — lê das tabelas REAIS (aluno.simulado_attempts é onde as tentativas vivem,
+    // não em response_sessions). Junta com crm.clients (nome) e crm.user_profiles (apelido).
+    const aSb = window._sb.schema('aluno');
+    const { data: rows, error } = await aSb.from('simulado_attempts')
+      .select('user_id, score, total, pct, submitted_at, attempt_number')
+      .eq('simulado_id', mockExamId)
+      .order('submitted_at', { ascending: false })
+      .limit(50);
 
     if(error){
       panel.innerHTML = `<p class="client-panel-hint" style="margin:0;color:#c77272">${esc(error.message)}</p>`;
       return;
     }
-
-    const total = (data || []).length;
-    countEl.textContent = total > 0 ? `(${total} ${total === 1 ? 'recente' : 'recentes'})` : '';
-
+    const total = (rows || []).length;
+    countEl.textContent = total > 0 ? `(${total})` : '';
     if(total === 0){
       panel.innerHTML = '<p class="client-panel-hint" style="margin:0;text-align:center">Nenhuma tentativa ainda.</p>';
       return;
     }
 
-    panel.innerHTML = data.map(s => {
-      const score = s.score_percent != null ? parseFloat(s.score_percent).toFixed(0) + '%' : '—';
-      const scoreClass = s.score_percent == null ? '' :
-        s.score_percent < 50 ? 'low' :
-        s.score_percent < 70 ? 'mid' : '';
-      const dt = s.started_at ? new Date(s.started_at).toLocaleDateString('pt-BR', {
-        day:'2-digit', month:'2-digit', year:'numeric'
-      }) : '—';
-      return `
-        <div class="me-attempt-row">
-          <div class="me-attempt-client">${esc(s.client_name || s.client_email || '(cliente)')}</div>
-          <div class="me-attempt-score ${scoreClass}">${score}</div>
-          <span class="me-attempt-status ${s.status}">${s.status === 'in_progress' ? 'em curso' : s.status === 'submitted' ? 'submetido' : 'abandonado'}</span>
-          <span class="me-attempt-date">${dt}</span>
-        </div>
-      `;
+    // Busca nomes/apelidos em paralelo
+    const userIds = Array.from(new Set(rows.map(r => r.user_id))).filter(Boolean);
+    const cSb = window._sb.schema('crm');
+    const [cliR, profR] = await Promise.all([
+      cSb.from('clients').select('id, full_name, email').in('id', userIds),
+      cSb.from('user_profiles').select('user_id, display_name').in('user_id', userIds),
+    ]);
+    const byId = {};
+    (cliR.data || []).forEach(c => { byId[c.id] = byId[c.id] || {}; byId[c.id].full_name = c.full_name; byId[c.id].email = c.email; });
+    (profR.data || []).forEach(p => { byId[p.user_id] = byId[p.user_id] || {}; byId[p.user_id].display_name = p.display_name; });
+
+    panel.innerHTML = rows.map(r => {
+      const u = byId[r.user_id] || {};
+      const apelido = u.display_name || '—';
+      const fullName = u.full_name || u.email || '(aluno)';
+      const pct = (r.pct != null) ? Math.round(parseFloat(r.pct) * 100) : null;
+      const pctTxt = (pct != null) ? (pct + '%') : '—';
+      const cls = pct == null ? '' : pct < 50 ? 'low' : pct < 70 ? 'mid' : '';
+      const dt = r.submitted_at ? new Date(r.submitted_at).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }) : '—';
+      return '<div class="me-attempt-row">' +
+        '<div class="me-attempt-client"><strong>' + esc(apelido) + '</strong> · <span style="color:var(--text-mute);font-size:.78rem">' + esc(fullName) + '</span></div>' +
+        '<div class="me-attempt-score ' + cls + '">' + pctTxt + '</div>' +
+        '<span class="me-attempt-status submitted">tentativa ' + (r.attempt_number || 1) + '</span>' +
+        '<span class="me-attempt-date">' + dt + '</span>' +
+      '</div>';
     }).join('');
   }
 
