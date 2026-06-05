@@ -17756,9 +17756,11 @@ function _openRefazerModal(simId){
   backdrop.addEventListener('click', (e) => { if(e.target === backdrop) close(); });
   backdrop.querySelector('#simRefCancel').addEventListener('click', close);
   backdrop.querySelector('#simRefOk').addEventListener('click', () => {
-    // Marca "intenção de refazer": ao abrir o detalhe, o renderer cria uma NOVA tentativa.
+    // Marca "intenção de refazer" em sessionStorage para sobreviver a reload.
+    // Limpa em memória ao mesmo tempo. A flag é consumida no simuladoDetail.
     window._simRefazerIntent = window._simRefazerIntent || {};
     window._simRefazerIntent[simId] = true;
+    try{ sessionStorage.setItem('simRefazerIntent:' + simId, '1'); }catch(_){}
     close();
     Router.go('/simulados/' + simId);
   });
@@ -17796,12 +17798,18 @@ Renderers.simuladoDetail = function(route){
   // S2.2 — estado / tentativa atual
   const simState = Store.getSimuladoState(sim.id);
   const isEstudo = sim.attemptMode === 'estudo';
-  const refazerIntent = !!(window._simRefazerIntent && window._simRefazerIntent[sim.id]);
+  // Intenção de refazer: vem do sessionStorage (sobrevive reload) ou da memória.
+  let refazerIntent = !!(window._simRefazerIntent && window._simRefazerIntent[sim.id]);
+  if(!refazerIntent){
+    try{ refazerIntent = sessionStorage.getItem('simRefazerIntent:' + sim.id) === '1'; }catch(_){}
+  }
   // ESTUDO com intenção de refazer: começa uma nova tentativa (number maior)
   let activeAttempt = (simState && simState.attemptNumber) || 1;
   if(isEstudo && refazerIntent){
     activeAttempt = (simState && simState.attemptNumber ? simState.attemptNumber : 0) + 1;
-    window._simRefazerIntent[sim.id] = false; // consome a flag
+    // Mantém a flag até o envio da nova tentativa (em submitSimulado abaixo,
+    // a gente limpa a flag de sessionStorage). Assim o reload no meio do simulado
+    // ainda mostra a tela limpa da #2.
   }
   window._simCurrentAttempt = window._simCurrentAttempt || {};
   const _prevAttempt = window._simCurrentAttempt[sim.id];
@@ -17812,13 +17820,16 @@ Renderers.simuladoDetail = function(route){
   // bloqueia o conteúdo — o aluno pode revisar respostas+gabarito; só não pode trocar.
   const submitted = !!(simState && simState.submittedAt) && activeAttempt === (simState.attemptNumber || 1);
 
-  // S2.2 — REFAZER ou trocou de tentativa: limpa o estado em memória SÍNCRONO
-  // (antes do render do HTML) para o quiz não nascer com as marcas antigas.
-  // O mount depois faz uma hidratação async da tentativa atual (que estará vazia
-  // num refazer recém-iniciado).
+  // REFAZER ou trocou de tentativa: limpa o estado em memória SÍNCRONO antes do
+  // render do HTML para o quiz não nascer com as marcas antigas.
+  // FIX: usa Store.get() (que devolve _state via closure). _state direto não
+  // existe neste escopo — quebrava com ReferenceError e o renderer não rodava.
   if(refazerIntent || (_prevAttempt && _prevAttempt !== activeAttempt)){
-    _state.quizAnswers = _state.quizAnswers || {};
-    _state.quizAnswers['__sim_' + sim.id] = {};
+    const _st = Store.get();
+    if(_st){
+      _st.quizAnswers = _st.quizAnswers || {};
+      _st.quizAnswers['__sim_' + sim.id] = {};
+    }
   }
 
   const ctx = { unitId:'__sim_'+sim.id, store:Store, suppressActions:true, simuladoMode:!submitted };
@@ -17957,6 +17968,9 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
         });
         // Save submission + reveal by re-rendering the page
         Store.submitSimulado(sim.id, correct, total, activeAttempt);
+        // Consome a flag de "refazer" agora que a nova tentativa foi enviada.
+        try{ sessionStorage.removeItem('simRefazerIntent:' + sim.id); }catch(_){}
+        if(window._simRefazerIntent) window._simRefazerIntent[sim.id] = false;
         // Force re-render by toggling hash
         const h = location.hash;
         location.hash = '#/__reload';
