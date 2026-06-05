@@ -7899,6 +7899,7 @@ window.TAG_REGISTRY = {
             questionCount: objCount,
             essayCount: essayCount,
             locked: false,
+            attemptMode: (me.attempt_mode === 'estudo') ? 'estudo' : 'prova',
             blocks: blocks,
           };
         });
@@ -9641,30 +9642,104 @@ const Store = (function(){
         score: st.score || 0,
         total: st.total || 0,
         pct: st.pct || 0,
+        attempt_number: st.attemptNumber || 1,
         submitted_at: st.submittedAt ? new Date(st.submittedAt).toISOString() : new Date().toISOString()
       };
+      // S2.2 — onConflict inclui attempt_number pra suportar N tentativas (modo Estudo).
       const { error } = await window._sb.schema('aluno').from('simulado_attempts')
-        .upsert(row, { onConflict: 'user_id,simulado_id' });
+        .upsert(row, { onConflict: 'user_id,simulado_id,attempt_number' });
       if(error) console.warn('[simulado sync]', error);
     }catch(e){ console.warn('[simulado sync ex]', e); }
+  }
+
+  // S2.2 — grava UMA resposta de simulado (item-a-item) na tabela isolada
+  // aluno.simulado_responses. Não toca em student_responses (Desempenho geral
+  // continua intocado pelo simulado).
+  async function _syncSimuladoResponseToSupabase(simId, attemptNumber, itemId, payload){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const row = {
+        user_id: userId,
+        simulado_id: String(simId),
+        attempt_number: attemptNumber || 1,
+        item_id: String(itemId),
+        selected: payload && payload.selected != null ? String(payload.selected) : null,
+        correct: (payload && (payload.correct === true || payload.correct === false)) ? payload.correct : null,
+        answered_at: new Date().toISOString()
+      };
+      const { error } = await window._sb.schema('aluno').from('simulado_responses')
+        .upsert(row, { onConflict: 'user_id,simulado_id,attempt_number,item_id' });
+      if(error) console.warn('[simresp sync]', error);
+    }catch(e){ console.warn('[simresp sync ex]', e); }
+  }
+
+  // S2.2 — carrega respostas item-a-item de uma tentativa específica e injeta
+  // no _state.quizAnswers (com unitId sintético __sim_<simId>), pra que o
+  // render do simulado mostre as respostas ao reabrir/recarregar.
+  async function _hydrateSimuladoResponses(simId, attemptNumber){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('simulado_responses')
+        .select('item_id, selected, correct, answered_at')
+        .eq('user_id', userId)
+        .eq('simulado_id', String(simId))
+        .eq('attempt_number', attemptNumber || 1);
+      if(error){ console.warn('[simresp hydrate]', error); return; }
+      const unitId = '__sim_' + simId;
+      _state.quizAnswers = _state.quizAnswers || {};
+      _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
+      // O blockId não é guardado na tabela (não importa pro Desempenho do simulado),
+      // então uso um bucket sintético "_all" — basta achar por item_id.
+      _state.quizAnswers[unitId]['_all'] = _state.quizAnswers[unitId]['_all'] || {};
+      (data || []).forEach(r => {
+        _state.quizAnswers[unitId]['_all'][r.item_id] = {
+          selected: r.selected,
+          correct: r.correct,
+          answeredAt: r.answered_at ? new Date(r.answered_at).getTime() : Date.now()
+        };
+      });
+    }catch(e){ console.warn('[simresp hydrate ex]', e); }
+  }
+
+  // S2.2 — quantas tentativas o aluno já fez (submetidas) para um simulado.
+  // Retorna 0 se nunca tentou. Usado pra calcular "próxima tentativa" no modo Estudo.
+  async function _getSimuladoAttemptCount(simId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return 0;
+    try{
+      const { count, error } = await window._sb.schema('aluno').from('simulado_attempts')
+        .select('*', { count: 'exact', head: true })
+        .eq('user_id', userId).eq('simulado_id', String(simId));
+      if(error){ console.warn('[sim count]', error); return 0; }
+      return count || 0;
+    }catch(e){ console.warn('[sim count ex]', e); return 0; }
   }
 
   async function _hydrateSimuladosFromSupabase(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state) return;
     try{
+      // S2.2 — busca todas as tentativas; pra cada simulado, guarda a ÚLTIMA
+      // (maior attempt_number). Pra Estudo, isso é a base do CTA "Ver resultado"
+      // + "Refazer". Pra Prova, é só a #1 mesmo.
       const { data, error } = await window._sb.schema('aluno').from('simulado_attempts')
-        .select('simulado_id, score, total, pct, submitted_at')
-        .eq('user_id', userId);
+        .select('simulado_id, score, total, pct, submitted_at, attempt_number')
+        .eq('user_id', userId)
+        .order('attempt_number', { ascending: false });
       if(error){ console.warn('[hydrate simulados]', error); return; }
       let n = 0;
       _state.simulados = _state.simulados || {};
       (data || []).forEach(row => {
+        // Já está ordenado desc por attempt_number; o primeiro hit por simulado é o último.
+        if(_state.simulados[row.simulado_id]) return;
         _state.simulados[row.simulado_id] = {
           score: row.score,
           total: row.total,
           pct: row.pct,
           submittedAt: row.submitted_at ? new Date(row.submitted_at).getTime() : Date.now(),
+          attemptNumber: row.attempt_number || 1,
           userName: (window.MOCK_USER && window.MOCK_USER.name) || ''
         };
         n++;
@@ -9795,6 +9870,15 @@ const Store = (function(){
       // Ela não conta nas estatísticas globais nem sincroniza — isso só
       // acontece quando o aluno clica em "Verificar respostas".
       if(opts && opts.sync === false) return Promise.resolve();
+      // S2.2 — ISOLAMENTO DE SIMULADO: respostas de simulado NÃO vão para
+      // student_responses (que alimenta Desempenho geral/da matéria). Vão para
+      // aluno.simulado_responses, ambiente separado. Detecta pelo prefixo
+      // sintético __sim_<simId> que Renderers.simuladoDetail injeta no unitId.
+      if(typeof unitId === 'string' && unitId.indexOf('__sim_') === 0){
+        const simId = unitId.slice('__sim_'.length);
+        const _attempt = (window._simCurrentAttempt && window._simCurrentAttempt[simId]) || 1;
+        return _syncSimuladoResponseToSupabase(simId, _attempt, itemId, payload).catch(()=>{});
+      }
       // Fase 4c — sync Supabase. Quando o upsert conclui, atualiza AO VIVO as
       // estatísticas da questão (o novo voto do aluno já entra no agregado),
       // sem precisar recarregar a página.
@@ -9991,9 +10075,9 @@ const Store = (function(){
       if(!_state || !_state.flashcards) return null;
       return (((_state.flashcards[unitId]||{})[blockId]||{})[cardId]) || null;
     },
-    submitSimulado(simId, score, total){
+    submitSimulado(simId, score, total, attemptNumber){
       _state.simulados = _state.simulados || {};
-      const st = { submittedAt:Date.now(), score, total, pct:total?(score/total):0, userName:window.MOCK_USER.name };
+      const st = { submittedAt:Date.now(), score, total, pct:total?(score/total):0, userName:window.MOCK_USER.name, attemptNumber: attemptNumber || 1 };
       _state.simulados[simId] = st;
       _persist(); _emit();
       // Fase 4h — fire-and-forget sync Supabase
@@ -17571,11 +17655,37 @@ Renderers.simulados = function(route){
   const cards = filtered.map((s,i) => {
     const locked = !!s.locked;
     const isFree = s.category === 'free';
-    const href = locked ? '' : `#/simulados/${s.id}`;
     const concursoChips = (s.concursos||[]).map(c => `<span class="sim-card-tag">${Util.esc(c)}</span>`).join('');
     const topicChips = (s.topics||[]).slice(0,3).map(id => { const t = Util.getTopic(id); return t ? `<span class="sim-card-tag">${Util.esc(t.number+' '+t.name)}</span>` : ''; }).join('');
 
-    return `<${locked?'div':'a'} class="sim-card${locked?' sim-card-locked':''}${isFree?' sim-card-free':''}" ${locked?'':'href="'+Util.attr(href)+'"'} data-a="${i+2}">
+    // S2.2 — estado do simulado deste aluno
+    const st = Store.getSimuladoState(s.id);
+    const done = !locked && !!(st && st.submittedAt);
+    const isEstudo = s.attemptMode === 'estudo';
+    const tentTxt = (done && st.attemptNumber > 1) ? ` <span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">(tentativa ${st.attemptNumber})</span>` : '';
+
+    // Constrói o rodapé conforme estado
+    let footerInner = '';
+    if(locked){
+      footerInner = `<span class="sim-card-price">${Util.esc(s.price||'')}</span><span class="sim-card-cta">Adquirir</span>`;
+    } else if(done && isEstudo){
+      // Estudo já feito: Ver resultado + Refazer
+      footerInner =
+        `<a class="sim-card-cta sim-card-cta-ghost" href="#/simulados/${s.id}/desempenho">Ver resultado${tentTxt}</a>` +
+        `<a class="sim-card-cta" href="javascript:void(0)" data-sim-refazer="${Util.attr(s.id)}">Refazer</a>`;
+    } else if(done){
+      // Prova já feita: só Ver resultado
+      footerInner =
+        `<span class="sim-card-price" style="font-size:.7rem;color:var(--text-mute);font-family:var(--mono)">Tentativa única já enviada</span>` +
+        `<a class="sim-card-cta" href="#/simulados/${s.id}/desempenho">Ver resultado${tentTxt}</a>`;
+    } else {
+      // Ainda não fez
+      footerInner =
+        (isFree ? '<span class="sim-card-price sim-card-price-free">Acesso livre</span>' : `<span class="sim-card-price">${Util.esc(s.price||'')}</span>`) +
+        `<a class="sim-card-cta" href="#/simulados/${s.id}">${isFree?'Começar agora':'Iniciar'}</a>`;
+    }
+
+    return `<div class="sim-card${locked?' sim-card-locked':''}${isFree?' sim-card-free':''}" data-a="${i+2}">
       <div class="sim-card-cover" style="background-image:url('${Util.attr(s.cover||'')}')">
         <div class="sim-card-badge">
           <span class="sim-card-diff ${diffClass[s.difficulty]||'sim-diff-medium'}">${Util.esc(diffLabel[s.difficulty]||s.difficulty)}</span>
@@ -17596,11 +17706,8 @@ Renderers.simulados = function(route){
           <span class="sim-card-stat"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> ${Util.esc(s.duration||'')}</span>
         </div>
       </div>
-      <div class="sim-card-footer">
-        ${isFree ? '<span class="sim-card-price sim-card-price-free">Acesso livre</span>' : locked ? `<span class="sim-card-price">${Util.esc(s.price||'')}</span>` : `<span class="sim-card-price">${Util.esc(s.price||'')}</span>`}
-        <span class="sim-card-cta">${locked?'Adquirir':isFree?'Começar agora':'Iniciar'}</span>
-      </div>
-    </${locked?'div':'a'}>`;
+      <div class="sim-card-footer">${footerInner}</div>
+    </div>`;
   }).join('');
 
   return `<div class="sim-hero">
@@ -17616,7 +17723,52 @@ Renderers.simulados = function(route){
   </div>
   <div class="sim-grid" data-a="6">${cards.length ? cards : '<div class="empty"><div class="empty-title">Nenhum simulado encontrado</div><div class="empty-sub">Ajuste os filtros para ver mais opções.</div></div>'}</div>`;
 };
+// S2.2 — modal de confirmação ao "Refazer" um simulado de Estudo
+function _openRefazerModal(simId){
+  const sims = window.SIMULADOS || [];
+  const sim = sims.find(s => s.id === simId);
+  if(!sim) return;
+  const st = Store.getSimuladoState(simId);
+  const proxNum = (st && st.attemptNumber ? st.attemptNumber : 0) + 1;
+  // Cria overlay simples (sem dependência de modal existente)
+  let backdrop = document.getElementById('simRefazerBackdrop');
+  if(backdrop) backdrop.remove();
+  backdrop = document.createElement('div');
+  backdrop.id = 'simRefazerBackdrop';
+  backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9000;display:flex;align-items:center;justify-content:center;padding:1rem';
+  backdrop.innerHTML =
+    '<div style="background:var(--bg);border:1px solid var(--accent-border-soft);border-radius:6px;max-width:520px;width:100%;padding:1.6rem 1.8rem">' +
+      '<h3 style="font-family:var(--serif);font-weight:400;font-size:1.25rem;margin:0 0 .8rem">Refazer este simulado?</h3>' +
+      '<p style="color:var(--text-dim);font-size:.88rem;line-height:1.55;margin:0 0 .7rem">Suas respostas atuais ficam <strong>congeladas</strong> como tentativa #' + (st && st.attemptNumber ? st.attemptNumber : 1) + '.</p>' +
+      '<p style="color:var(--text-dim);font-size:.88rem;line-height:1.55;margin:0 0 .7rem">Você vai começar a tentativa #' + proxNum + ' do zero. Não dá pra desfazer.</p>' +
+      '<p style="color:var(--text-dim);font-size:.82rem;line-height:1.55;margin:0 0 1.3rem"><strong>No Ranking</strong> vale sempre a sua <strong>última</strong> tentativa. <strong>No Desempenho</strong> você verá a evolução entre as tentativas.</p>' +
+      '<div style="display:flex;gap:.6rem;justify-content:flex-end">' +
+        '<button class="btn-ghost" id="simRefCancel" style="padding:.5rem 1rem">Cancelar</button>' +
+        '<button class="sim-card-cta" id="simRefOk" style="padding:.5rem 1.2rem">Sim, quero refazer</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.addEventListener('click', (e) => { if(e.target === backdrop) close(); });
+  backdrop.querySelector('#simRefCancel').addEventListener('click', close);
+  backdrop.querySelector('#simRefOk').addEventListener('click', () => {
+    // Marca "intenção de refazer": ao abrir o detalhe, o renderer cria uma NOVA tentativa.
+    window._simRefazerIntent = window._simRefazerIntent || {};
+    window._simRefazerIntent[simId] = true;
+    close();
+    Router.go('/simulados/' + simId);
+  });
+}
+
 Renderers.simulados.mount = function(stageEl, route){
+  // S2.2 — handler do "Refazer" (modal de confirmação)
+  stageEl.querySelectorAll('[data-sim-refazer]').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const simId = btn.getAttribute('data-sim-refazer');
+      _openRefazerModal(simId);
+    });
+  });
   stageEl.querySelectorAll('[data-filter]').forEach(el => {
     const key = el.getAttribute('data-filter');
     el.addEventListener('change', () => {
@@ -17637,9 +17789,32 @@ Renderers.simuladoDetail = function(route){
   if(sim.locked) return `<div class="empty"><div class="empty-title">Simulado bloqueado</div><div class="empty-sub">Adquira este simulado para acessar as questões.</div></div>`;
   if(!sim.blocks || !sim.blocks.length) return `<div class="empty"><div class="empty-title">${Util.esc(sim.name)}</div><div class="empty-sub">Este simulado ainda não possui questões cadastradas.</div></div>`;
 
-  // Check if already submitted
+  // S2.2 — estado / tentativa atual / bloqueio
   const simState = Store.getSimuladoState(sim.id);
-  const submitted = !!(simState && simState.submittedAt);
+  const isEstudo = sim.attemptMode === 'estudo';
+  const refazerIntent = !!(window._simRefazerIntent && window._simRefazerIntent[sim.id]);
+  // PROVA enviada: bloqueia tela de resposta (não tem como refazer; mostra link p/ resultado)
+  if(simState && simState.submittedAt && !isEstudo){
+    return `<div class="empty">
+      <div class="empty-title">${Util.esc(sim.name)}</div>
+      <div class="empty-sub">Você já enviou este simulado (tentativa única). Suas respostas estão congeladas.</div>
+      <div class="cta-row" style="justify-content:center;margin-top:1rem">
+        <a class="btn-ghost" href="#/simulados">${Icons.chevron} Voltar</a>
+        <a class="sim-card-cta" href="#/simulados/${sim.id}/desempenho">Ver resultado</a>
+      </div>
+    </div>`;
+  }
+  // ESTUDO com intenção de refazer: começa uma nova tentativa (number maior)
+  let activeAttempt = (simState && simState.attemptNumber) || 1;
+  if(isEstudo && refazerIntent){
+    activeAttempt = (simState && simState.attemptNumber ? simState.attemptNumber : 0) + 1;
+    window._simRefazerIntent[sim.id] = false; // consome a flag
+  }
+  window._simCurrentAttempt = window._simCurrentAttempt || {};
+  window._simCurrentAttempt[sim.id] = activeAttempt;
+
+  // Submitted = enviado a tentativa atual? (em Estudo refazendo, começa não-enviada)
+  const submitted = !!(simState && simState.submittedAt) && activeAttempt === (simState.attemptNumber || 1);
 
   const ctx = { unitId:'__sim_'+sim.id, store:Store, suppressActions:true, simuladoMode:!submitted };
   const blocksHtml = sim.blocks.map(b => {
@@ -17679,7 +17854,24 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
   const sim = sims.find(s => s.id === route.params.simuladoId);
   if(!sim || sim.locked || !sim.blocks) return;
   const simState = Store.getSimuladoState(sim.id);
-  const submitted = !!(simState && simState.submittedAt);
+  const isEstudo = sim.attemptMode === 'estudo';
+  const activeAttempt = (window._simCurrentAttempt && window._simCurrentAttempt[sim.id]) || 1;
+  // submitted = a tentativa ATUAL já foi enviada
+  const submitted = !!(simState && simState.submittedAt) && activeAttempt === (simState.attemptNumber || 1);
+  // S2.2 — hidrata as respostas item-a-item do banco antes do mount, pra
+  // sobreviver a recarregar a aba. As respostas vão pro bucket __sim_<id>._all,
+  // mas o renderer espera _all blockId — então também espelhamos por blockId real.
+  if(typeof _hydrateSimuladoResponses === 'function'){
+    _hydrateSimuladoResponses(sim.id, activeAttempt).then(() => {
+      const u = '__sim_' + sim.id;
+      const all = ((Store.get().quizAnswers || {})[u] || {})._all || {};
+      (sim.blocks || []).forEach(b => {
+        const bucket = (Store.get().quizAnswers[u] = Store.get().quizAnswers[u] || {});
+        bucket[b.id] = bucket[b.id] || {};
+        Object.keys(all).forEach(itemId => { bucket[b.id][itemId] = all[itemId]; });
+      });
+    });
+  }
   const ctx = { unitId:'__sim_'+sim.id, store:Store, suppressActions:true, simuladoMode:!submitted };
 
   sim.blocks.forEach(b => {
@@ -17747,7 +17939,7 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
           }));
         });
         // Save submission + reveal by re-rendering the page
-        Store.submitSimulado(sim.id, correct, total);
+        Store.submitSimulado(sim.id, correct, total, activeAttempt);
         // Force re-render by toggling hash
         const h = location.hash;
         location.hash = '#/__reload';
