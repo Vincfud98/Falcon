@@ -20633,6 +20633,44 @@
   document.getElementById('newQuestionBtn').addEventListener('click', () => openQuestionModal());
   // Q3b — "Criar nova no banco" a partir de uma unidade: abre o editor do banco
   // e, ao salvar, insere a referência no bloco (ver hook no save).
+  // Pacote G — Criar uma DISCURSIVA no banco a partir da unidade.
+  // Espelha ueOqCreateInBank, mas pré-seleciona type='essay' e ajusta o eyebrow/título.
+  // O hook Q3b genérico (no save) insere a referência em blk.content.items[]
+  // (formato discursiva), não em groups[] (formato objetivas).
+  window.ueEssayCreateInBank = function(bid){
+    window._ueOqCreateReturn = { bid: bid };
+    openQuestionModal();
+    const m = document.getElementById('questionModal');
+    if(m) m.style.zIndex = '600';
+    const eye = document.getElementById('modalEyebrow');
+    if(eye) eye.textContent = 'Nova discursiva → banco + unidade';
+    const ttl = document.getElementById('modalTitle');
+    if(ttl) ttl.textContent = 'Criar discursiva no banco';
+    // Pré-seleciona o tipo Discursiva
+    try{
+      const tSel = document.getElementById('q-type');
+      if(tSel){
+        tSel.value = 'essay';
+        tSel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }catch(_){}
+    // Pré-seleciona Concurso + Matéria pelo contexto da unidade (igual objetivas)
+    try{
+      const blk = _ueGetBlock(bid);
+      const sid = blk ? _ueSubjectIdOfUnit(blk.unit_id) : null;
+      const link = (examSubjectsCache || []).find(function(es){ return String(es.subject_id) === String(sid); });
+      const exId = link ? link.exam_id : null;
+      const exSel = document.getElementById('q-exam');
+      if(exSel && exId != null){
+        exSel.value = String(exId);
+        exSel.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      const subSel = document.getElementById('q-subject');
+      if(subSel && sid != null){ subSel.value = String(sid); subSel.dispatchEvent(new Event('change', { bubbles: true })); }
+      if(blk && blk.unit_id != null && typeof window._qApplyUnitContext === 'function') window._qApplyUnitContext(blk.unit_id);
+    }catch(_){}
+  };
+
   window.ueOqCreateInBank = function(bid){
     window._ueOqCreateReturn = { bid: bid };
     openQuestionModal();
@@ -21062,16 +21100,23 @@
     renderQuestionsList();
 
     // Q3b — se o editor foi aberto via "Criar nova no banco" de uma unidade,
-    // insere a referência {bank_question_id} no bloco e atualiza o editor.
+    // insere a referência no bloco e atualiza o editor.
+    // Objetivas (true_false/multiple_choice) → blk.content.groups[].bank_question_id
+    // Discursiva (essay)                      → blk.content.items[].bank_question_id
     if(savedId && wasNewQuestion && _q3bReturn && _q3bReturn.bid != null){
       const ret = _q3bReturn; window._ueOqCreateReturn = null;
       try{
         const blk = _ueGetBlock(ret.bid);
         if(blk){
           if(!blk.content) blk.content = {};
-          if(!Array.isArray(blk.content.groups)) blk.content.groups = [];
-          const n = blk.content.groups.length + 1;
-          blk.content.groups.push({ id: 'g' + n, bank_question_id: savedId });
+          if(qType === 'essay'){
+            if(!Array.isArray(blk.content.items)) blk.content.items = [];
+            blk.content.items.push({ bank_question_id: savedId, source_type: (payload.origin ? 'past_exam' : 'ubique') });
+          } else {
+            if(!Array.isArray(blk.content.groups)) blk.content.groups = [];
+            const n = blk.content.groups.length + 1;
+            blk.content.groups.push({ id: 'g' + n, bank_question_id: savedId });
+          }
           _ueSaveStructured(ret.bid); _ueRerenderBlockBody(ret.bid);
           if(window.ueToast) window.ueToast('Questão criada no banco e adicionada à unidade', 'success');
         }
@@ -45478,14 +45523,47 @@
   // ueOqQuestion* delegar ao QuestionBank).
   // ─────────────────────────────────────────────────────────────────────
 
-  // Resolve a ref { bank_id } → registro completo do banco
+  // Resolve a ref → registro completo do banco.
+  // Aceita 2 formatos:
+  //   { bank_id: ... }            → EssayBank legado (UbiqueStore.essays, in-memory).
+  //   { bank_question_id: <uuid> } → banco real questoes.questions com type='essay'
+  //                                  (formato do "Pegar do banco" + "Criar no banco" novos).
   function _ueEssayResolve(b, idx){
     const ref = (b && b.content && Array.isArray(b.content.items)) ? b.content.items[idx] : null;
     if(!ref) return null;
     if(ref.bank_id && window.EssayBank){
       return window.EssayBank.getById(ref.bank_id) || null;
     }
-    return ref;  // legacy inline
+    // bank_question_id: lê o banco real (questionsCache, hidratado de questoes.questions).
+    if(ref.bank_question_id && typeof questionsCache !== 'undefined'){
+      const q = (questionsCache || []).find(function(x){ return String(x.id) === String(ref.bank_question_id); });
+      if(!q) return null;
+      // Mapeia o registro do banco para o shape que o renderer espera.
+      const crits = (typeof essayCriteriaCache !== 'undefined' ? essayCriteriaCache : [])
+        .filter(function(c){ return String(c.question_id) === String(q.id); })
+        .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); })
+        .map(function(c){ return { label: c.criterio || '', maxScore: c.peso, description: c.descricao || '', modelAnswer: c.resposta_esperada || '' }; });
+      const models = (typeof essayAnswerModelsCache !== 'undefined' ? essayAnswerModelsCache : [])
+        .filter(function(m){ return String(m.question_id) === String(q.id); })
+        .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); })
+        .map(function(m){ return { author: m.author || '', grade: m.grade || '', description: m.description || '', body: m.modelo || '' }; });
+      return {
+        id: q.id,
+        statement: q.enunciado || '',
+        maxLength: q.maxLength || 3000,
+        source_type: q.origin ? 'past_exam' : 'ubique',
+        origin: q.origin || '',
+        officialAnswer: q.official_answer || '',
+        show_criteria:        q.show_criteria        !== false,
+        show_official_answer: q.show_official_answer !== false,
+        show_model_answers:   q.show_model_answers   !== false,
+        criteria: crits,
+        modelAnswers: models,
+        references: ref.references || [],
+        _bank_question_id: q.id,
+      };
+    }
+    return ref;  // legacy inline (sem bank_id nem bank_question_id)
   }
 
   // Persiste patch no banco (ou inline se legacy)
@@ -47865,14 +47943,14 @@
         }
 
         const itemsHTML = items.map(renderEssayItem).join('');
-        const empty = items.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem;margin:1rem 0;text-align:center">Nenhuma discursiva ainda. Use "+ Discursiva" ou "' + UE_ICONS.download + 'Do banco" pra adicionar.</p>' : '';
+        const empty = items.length === 0 ? '<p class="s-body" style="font-style:italic;color:var(--text-mute);font-size:.78rem;margin:1rem 0;text-align:center">Nenhuma discursiva ainda. Use "Pegar do banco" ou "+ Criar no banco" pra adicionar.</p>' : '';
 
         return '<div style="margin-top:.4rem">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem">' +
             '<span class="s-subtitle" style="font-size:.65rem">Questões discursivas</span>' +
             '<div style="display:flex;gap:.4rem;flex-wrap:wrap">' +
-              '<button class="btn btn-ghost btn-sm" onclick="ueEssayOpenBankPicker(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem" title="Importar do banco de discursivas">' + UE_ICONS.download + 'Do banco</button>' +
-              '<button class="btn btn-ghost btn-sm" onclick="ueEssayAdd(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem">+ Discursiva</button>' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueEssayOpenBankPicker(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem;border-color:var(--accent-border)" title="Inserir uma discursiva que já existe no banco">' + UE_ICONS.download + 'Pegar do banco</button>' +
+              '<button class="btn btn-ghost btn-sm" onclick="ueEssayCreateInBank(' + bid + ')" style="padding:.3rem .7rem;font-size:.78rem;background:var(--accent);color:var(--bg);border:0;font-weight:600" title="Cria a discursiva no banco e já adiciona à unidade">+ Criar no banco</button>' +
             '</div>' +
           '</div>' +
           itemsHTML + empty +
