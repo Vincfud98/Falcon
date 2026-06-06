@@ -704,7 +704,7 @@
             const models = (bank.essayAnswerModels || [])
               .filter(function(m){ return String(m.question_id) === String(q.id); })
               .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); })
-              .map(function(m){ return { author: m.author || '', grade: m.grade || '', description: m.description || '', body: m.modelo || '' }; });
+              .map(function(m){ return { title: m.title || '', author: m.author || '', grade: m.grade || '', description: m.description || '', body: m.modelo || '' }; });
             return {
               id: q.id,
               statement: q.enunciado || '',
