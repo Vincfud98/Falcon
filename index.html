@@ -7874,16 +7874,38 @@ window.TAG_REGISTRY = {
             const qs = myQ.filter(function(m){ return secs.length ? String(m.section_id) === String(sec.id) : true; })
                           .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); });
             const groups = [];
+            const essayItems = []; // S1.1: discursivas viram blocos próprios
             qs.forEach(function(m, i){
               const q = qById[String(m.question_id)];
               if(!q) return;                       // questão não está no banco carregado
-              if(q.type === 'essay'){ essayCount++; return; }   // discursivas: S1.1
+              if(q.type === 'essay'){
+                // S1.1 — discursiva: bloco essay individual (1 item por bloco).
+                essayCount++;
+                essayItems.push({ question_id: q.id, q: q, ordem: m.ordem || i });
+                return;
+              }
               // S2.1 — se o admin escolheu só algumas afirmativas, passa pra montar parcial.
               const grp = { id:'g'+(i+1), bank_question_id: m.question_id };
               if(Array.isArray(m.tf_item_ids) && m.tf_item_ids.length) grp.bank_item_ids = m.tf_item_ids;
               groups.push(grp);
             });
             if(groups.length) blocks.push({ id:'sec-'+sec.id, type:'quiz', title: sec.name || '', groups: groups });
+            // S1.1 — adiciona um bloco essay por discursiva, na ordem em que entraram.
+            essayItems.forEach(function(ei, i){
+              blocks.push({
+                id: 'sec-' + sec.id + '-essay-' + i,
+                type: 'essay',
+                title: sec.name || '',
+                items: [{
+                  id: ei.question_id,            // id da questão do banco (string)
+                  command: ei.q.enunciado || '',  // enunciado da discursiva (texto/HTML)
+                  maxLength: 3000,
+                  references: [],
+                  criteria: [],                   // critérios virão da hidratação on-demand (Block.essay já busca via _QBank)
+                  bank_question_id: ei.question_id, // pra Block.essay/IA achar critérios/modelos
+                }],
+              });
+            });
           });
           // conta itens objetivos REAIS (resolvendo o banco), não só os grupos
           if(typeof window.resolveBankGroup === 'function'){
@@ -9676,6 +9698,76 @@ const Store = (function(){
     }catch(e){ console.warn('[simresp sync ex]', e); }
   }
 
+  // S1.1 — grava UMA discursiva do simulado em aluno.simulado_essay_responses.
+  // Tabela isolada de student_responses (universos separados).
+  async function _syncSimuladoEssayResponseToSupabase(simId, attemptNumber, itemId, payload){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const row = {
+        user_id: userId,
+        simulado_id: String(simId),
+        attempt_number: attemptNumber || 1,
+        item_id: String(itemId),
+        essay_text: (payload && payload.text != null) ? String(payload.text) : null,
+        score: (payload && typeof payload.score === 'number') ? payload.score : null,
+        max_score: (payload && typeof payload.maxScore === 'number') ? payload.maxScore : null,
+        feedback_json: (payload && (payload.feedback || payload.strengths || payload.weaknesses || payload.overallComment))
+          ? { feedback: payload.feedback || null, strengths: payload.strengths || null, weaknesses: payload.weaknesses || null, overallComment: payload.overallComment || null, wordCount: payload.wordCount || null }
+          : null,
+        ai_corrected_at: (payload && payload.aiCorrected) ? new Date().toISOString() : null,
+        answered_at: new Date().toISOString()
+      };
+      const { error } = await window._sb.schema('aluno').from('simulado_essay_responses')
+        .upsert(row, { onConflict: 'user_id,simulado_id,attempt_number,item_id' });
+      if(error) console.warn('[simessay sync]', error);
+    }catch(e){ console.warn('[simessay sync ex]', e); }
+  }
+
+  // S1.1 — no boot: hidrata respostas discursivas item-a-item da última tentativa
+  // de CADA simulado. Mesma estratégia das objetivas: banco é fonte única.
+  async function _hydrateAllLastSimuladoEssays(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('simulado_essay_responses')
+        .select('simulado_id, attempt_number, item_id, essay_text, score, max_score, feedback_json, ai_corrected_at, human_reviewed_at, answered_at')
+        .eq('user_id', userId);
+      if(error){ console.warn('[hydrate last sim essays]', error); return; }
+      const lastBySim = {};
+      (data || []).forEach(r => {
+        const cur = lastBySim[r.simulado_id];
+        if(!cur || r.attempt_number > cur) lastBySim[r.simulado_id] = r.attempt_number;
+      });
+      _state.essays = _state.essays || {};
+      Object.keys(lastBySim).forEach(simId => {
+        const unitId = '__sim_' + simId;
+        _state.essays[unitId] = {};
+        _state.essays[unitId]['_all'] = {};
+      });
+      (data || []).forEach(r => {
+        if(r.attempt_number !== lastBySim[r.simulado_id]) return;
+        const unitId = '__sim_' + r.simulado_id;
+        _state.essays[unitId]['_all'][String(r.item_id)] = {
+          text: r.essay_text || '',
+          score: r.score,
+          maxScore: r.max_score,
+          feedback: (r.feedback_json && r.feedback_json.feedback) || null,
+          strengths: (r.feedback_json && r.feedback_json.strengths) || null,
+          weaknesses: (r.feedback_json && r.feedback_json.weaknesses) || null,
+          overallComment: (r.feedback_json && r.feedback_json.overallComment) || null,
+          wordCount: (r.feedback_json && r.feedback_json.wordCount) || null,
+          aiCorrectedAt: r.ai_corrected_at,
+          humanReviewedAt: r.human_reviewed_at,
+          submittedAt: r.answered_at ? new Date(r.answered_at).getTime() : Date.now()
+        };
+      });
+      const n = Object.keys(lastBySim).length;
+      if(n) console.log('[Store] hydrated last sim essays for', n, 'simulado(s)');
+      _persist();
+    }catch(e){ console.warn('[hydrate last sim essays ex]', e); }
+  }
+
   // S2.2 — carrega respostas item-a-item de uma tentativa específica e injeta
   // no _state.quizAnswers (com unitId sintético __sim_<simId>), pra que o
   // render do simulado mostre as respostas ao reabrir/recarregar.
@@ -9821,7 +9913,10 @@ const Store = (function(){
       _hydrateFlashcardsFromSupabase().catch(()=>{});
       // Encadeia: depois das tentativas, hidrata as respostas item-a-item da última.
       _hydrateSimuladosFromSupabase()
-        .then(() => _hydrateAllLastSimuladoResponses())
+        .then(() => Promise.all([
+          _hydrateAllLastSimuladoResponses(),  // C/E e MC
+          _hydrateAllLastSimuladoEssays(),     // S1.1 — discursivas
+        ]))
         .catch(()=>{});
       return _state;
     },
@@ -9964,7 +10059,15 @@ const Store = (function(){
       _state.essays[unitId][blockId] = _state.essays[unitId][blockId] || {};
       _state.essays[unitId][blockId][itemId] = merged;
       _persist(); _emit();
-      // Fase 4c — fire-and-forget sync Supabase
+      // S1.1 — ISOLAMENTO DE SIMULADO: discursivas de simulado vão para a tabela
+      // própria (aluno.simulado_essay_responses), não para student_responses.
+      // Detecta pelo prefixo sintético __sim_<simId> no unitId.
+      if(typeof unitId === 'string' && unitId.indexOf('__sim_') === 0){
+        const simId = unitId.slice('__sim_'.length);
+        const _attempt = (window._simCurrentAttempt && window._simCurrentAttempt[simId]) || 1;
+        return _syncSimuladoEssayResponseToSupabase(simId, _attempt, itemId, payload).catch(()=>{});
+      }
+      // Fase 4c — fire-and-forget sync Supabase (unidade normal)
       _syncEssayAnswerToSupabase(unitId, blockId, itemId, payload).catch(()=>{});
     },
     updateFlashcard(unitId, blockId, cardId, status){
@@ -10130,7 +10233,18 @@ const Store = (function(){
         return _state.essaysByBankId[itemId];
       }
       if(!_state.essays) return null;
-      return (((_state.essays[unitId]||{})[blockId]||{})[itemId]) || null;
+      const byBlock = (((_state.essays[unitId]||{})[blockId]||{})[itemId]) || null;
+      if(byBlock) return byBlock;
+      // S1.1 — fallback para simulado: hidratação grava em _all (sem blockId).
+      if(typeof unitId === 'string' && unitId.indexOf('__sim_') === 0){
+        const all = (_state.essays[unitId] || {})._all;
+        if(all && all[itemId]) return all[itemId];
+        if(all){
+          const k = String(itemId);
+          for(const x in all) if(String(x) === k) return all[x];
+        }
+      }
+      return null;
     },
     getFlashcardState(unitId, blockId, cardId){
       // Defensive: _state pode ser null antes de Store.init.
