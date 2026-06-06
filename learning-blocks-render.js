@@ -691,6 +691,37 @@
           if(rawItem && rawItem.bank_id && global.EssayBank){
             return global.EssayBank.getById(rawItem.bank_id) || rawItem;
           }
+          // S1.1 — bank_question_id: lê do _QBank do aluno (questoes.questions
+          // + essay_criteria + essay_answer_models) e monta o shape do renderer.
+          if(rawItem && rawItem.bank_question_id){
+            const bank = (global && global._QBank) || {};
+            const q = (bank.questions || []).find(function(x){ return String(x.id) === String(rawItem.bank_question_id); });
+            if(!q) return rawItem;
+            const crits = (bank.essayCriteria || [])
+              .filter(function(c){ return String(c.question_id) === String(q.id); })
+              .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); })
+              .map(function(c){ return { label: c.criterio || '', maxScore: c.peso, description: c.descricao || '', modelAnswer: c.resposta_esperada || '' }; });
+            const models = (bank.essayAnswerModels || [])
+              .filter(function(m){ return String(m.question_id) === String(q.id); })
+              .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); })
+              .map(function(m){ return { author: m.author || '', grade: m.grade || '', description: m.description || '', body: m.modelo || '' }; });
+            return {
+              id: q.id,
+              statement: q.enunciado || '',
+              maxLines: q.max_lines || null,
+              maxLength: q.max_lines || 3000,
+              source_type: q.origin ? 'past_exam' : 'ubique',
+              origin: q.origin || '',
+              officialAnswer: q.official_answer || '',
+              show_criteria:        q.show_criteria        !== false,
+              show_official_answer: q.show_official_answer !== false,
+              show_model_answers:   q.show_model_answers   !== false,
+              criteria: crits,
+              modelAnswers: models,
+              references: rawItem.references || [],
+              tags: q.tags || [],
+            };
+          }
           return rawItem;
         }
 
