@@ -47564,7 +47564,10 @@
     // reference_texts[] ricos vinculados ao grupo (= à questão essay)
     await _ueBankPersistReferenceTexts(bankQuestionId, g.reference_texts, examId, year);
 
-    // Critérios (essay_criteria) — campos espelham o form do modal
+    // Critérios (essay_criteria) — campos espelham o form do modal.
+    // Erros agora são COLETADOS (não só console.warn) pra subir à UI do
+    // result box, evitando "criou sem critérios mas ninguém viu".
+    const childErrors = [];
     const crits = Array.isArray(q.criteria) ? q.criteria : [];
     for(let i = 0; i < crits.length; i++){
       const c = crits[i];
@@ -47577,10 +47580,14 @@
         resposta_esperada: c.resposta_esperada || null,
         peso:              c.peso,
       });
-      if(ce.error) console.warn('[import] essay_criteria insert falhou:', ce.error.message);
+      if(ce.error){
+        const msg = 'essay_criteria #' + (i+1) + ': ' + ce.error.message;
+        console.warn('[import]', msg);
+        childErrors.push(msg);
+      }
     }
 
-    // Modelos (essay_answer_models)
+    // Modelos (essay_answer_models) — idem coleta erros.
     const models = Array.isArray(q.models) ? q.models : [];
     for(let i = 0; i < models.length; i++){
       const m = models[i];
@@ -47593,10 +47600,21 @@
         modelo:      m.modelo || '',
         ordem:       m.ordem || (i + 1),
       });
-      if(me.error) console.warn('[import] essay_answer_models insert falhou:', me.error.message);
+      if(me.error){
+        const msg = 'essay_answer_models #' + (i+1) + ': ' + me.error.message;
+        console.warn('[import]', msg);
+        childErrors.push(msg);
+      }
     }
 
-    return { bankQuestionId: bankQuestionId, nQuestoes: 1 };
+    console.log('[import] essay criada no banco:', bankQuestionId, '| critérios:', crits.length, '| modelos:', models.length, '| erros filhos:', childErrors.length);
+
+    return {
+      bankQuestionId: bankQuestionId,
+      nQuestoes:      1,
+      refs:           [{ id: String(bankQuestionId), type: 'essay', sourceType: isUbique ? 'ubique' : 'past_exam' }],
+      childErrors:    childErrors,
+    };
   }
 
   async function _ueBankCreateGroupFromInline(g, subjectId, examId){
@@ -47612,31 +47630,34 @@
     // própria entrada no banco. Discursivas não compartilham grupo
     // (cada uma tem critérios/modelos próprios). C/E e MC continuam
     // agrupados como antes. Pacote D/E.
+    //
+    // BUGFIX (importação em massa pra unidade): retorno agora carrega
+    // `refs: [{id, type, sourceType}]` com TODAS as questões criadas
+    // (uma essay por entry; uma objetiva por grupo). O caller usa esse
+    // array pra empurrar pro bucket certo do bloco (groups[] = objetivas;
+    // items[] = essays). Antes, perdia ids quando havia >1 essay no
+    // grupo (só retornava o ID da primeira).
     const essayQs = qs.filter(function(q){ return q.type === 'essay'; });
     const objQs   = qs.filter(function(q){ return q.type !== 'essay'; });
+    const allRefs = [];
+    const allChildErrors = [];
 
-    // Se SÓ tem essays no grupo, retorna o ID da PRIMEIRA discursiva criada
-    // (compatibilidade com chamadores que esperam um bankQuestionId).
-    if(essayQs.length && !objQs.length){
-      let firstId = null, total = 0;
-      for(const q of essayQs){
-        const r = await _ueBankCreateEssayFromInline(g, q, subjectId, examId);
-        if(!firstId) firstId = r.bankQuestionId;
-        total += r.nQuestoes;
-      }
-      return { bankQuestionId: firstId, nQuestoes: total, kind: 'essay' };
+    // Cria todas as discursivas; coleta refs com type='essay'.
+    for(const q of essayQs){
+      const r = await _ueBankCreateEssayFromInline(g, q, subjectId, examId);
+      if(r && Array.isArray(r.refs)) Array.prototype.push.apply(allRefs, r.refs);
+      if(r && Array.isArray(r.childErrors)) Array.prototype.push.apply(allChildErrors, r.childErrors);
     }
-    // Se MISTURA essay + objetivas, criamos as essays separadamente e a
-    // função segue criando o grupo objetivo (que pode ser referenciado
-    // pelo bloco). As essays viram cards independentes no banco.
-    if(essayQs.length){
-      for(const q of essayQs){
-        await _ueBankCreateEssayFromInline(g, q, subjectId, examId);
-      }
-    }
-    // Sobrou só objetivas (ou ambos) — segue o fluxo histórico.
+
+    // Sem objetivas, retorna o que temos.
     if(!objQs.length){
-      return { bankQuestionId: null, nQuestoes: essayQs.length, kind: 'essay' };
+      return {
+        bankQuestionId: allRefs.length ? allRefs[0].id : null,
+        nQuestoes:      essayQs.length,
+        kind:           'essay',
+        refs:           allRefs,
+        childErrors:    allChildErrors,
+      };
     }
 
     const qType = objQs.some(function(q){ return q.type === 'multiple_choice'; }) ? 'multiple_choice' : 'true_false';
@@ -47704,7 +47725,18 @@
       }
       nQuestoes++;
     }
-    return { bankQuestionId: bankQuestionId, nQuestoes: nQuestoes + essayQs.length };
+
+    console.log('[import] grupo objetivo criado:', bankQuestionId, '| tipo:', qType, '| items:', nQuestoes);
+
+    // Adiciona ref do grupo objetivo às refs (essays já foram empurradas antes).
+    allRefs.push({ id: String(bankQuestionId), type: 'objective', sourceType: isUbique ? 'ubique' : 'past_exam' });
+
+    return {
+      bankQuestionId: bankQuestionId,
+      nQuestoes:      nQuestoes + essayQs.length,
+      refs:           allRefs,
+      childErrors:    allChildErrors,
+    };
   }
   function _ueBankFindGroupByOrigin(code){
     if(!code) return null;
@@ -47771,18 +47803,51 @@
     if(subjectId == null) subjectId = modalSelectedSubjectId || parseInt((document.getElementById('q-subject') || {}).value) || null;
     const examId = ((questionsCache || []).find(function(q){ return String(q.subject_id) === String(subjectId); }) || {}).exam_id || null;
 
-    let created = 0, dupes = 0, gabAdded = 0; const dupeCodes = []; const refIds = [];
+    // BUGFIX (importação em massa pra unidade): coleta TODAS as refs criadas
+    // (essays + objetivas), cada uma com seu type — antes o caller só
+    // recebia bankQuestionId (1 id), perdendo essays múltiplas de um grupo
+    // e empurrando tudo em groups[] (que bloco essay não lê).
+    let created = 0, dupes = 0, gabAdded = 0;
+    const dupeCodes = [];
+    const allRefs = [];           // [{ id, type: 'essay'|'objective', sourceType }]
+    const allChildErrors = [];
     try{
       for(const g of groups){
         const existing = _ueBankFindGroupByOrigin(g.origin);
         if(existing){
-          dupes++; if(g.origin) dupeCodes.push(g.origin); refIds.push(existing.id);
+          dupes++;
+          if(g.origin) dupeCodes.push(g.origin);
+          // Grupo duplicado é SEMPRE objetivo (essays não compartilham origin).
+          allRefs.push({ id: String(existing.id), type: 'objective', sourceType: existing.questao_simulada ? 'ubique' : 'past_exam' });
           // E3.5 — adiciona os gabaritos do JSON como extras (sem substituir).
           gabAdded += await _ueAddImportedGabaritos(existing, g);
         }
-        else { const r = await _ueBankCreateGroupFromInline(g, subjectId, examId); created++; refIds.push(r.bankQuestionId); }
+        else {
+          const r = await _ueBankCreateGroupFromInline(g, subjectId, examId);
+          created++;
+          if(r && Array.isArray(r.refs)) Array.prototype.push.apply(allRefs, r.refs);
+          if(r && Array.isArray(r.childErrors)) Array.prototype.push.apply(allChildErrors, r.childErrors);
+        }
       }
-    }catch(e){ show('<span style="color:var(--red)">Erro: ' + esc(e.message) + '</span>', false); return; }
+    }catch(e){
+      console.error('[import] erro fatal:', e);
+      show('<span style="color:var(--red)">Erro: ' + esc(e.message) + '</span>', false);
+      return;
+    }
+
+    console.log('[import] refs criadas:', allRefs);
+
+    // Detecta o tipo do bloco target pra validar compatibilidade.
+    let blkType = null;
+    if(target === 'unit' && ret){
+      const blk = _ueGetBlock(ret.bid);
+      if(blk) blkType = blk.type;
+    }
+
+    // Bucketiza refs por tipo (essay vs objective).
+    const essayRefs = allRefs.filter(function(r){ return r.type === 'essay'; });
+    const objRefs   = allRefs.filter(function(r){ return r.type === 'objective'; });
+    let mismatchWarn = '';
 
     // Dispatcha pro destino certo.
     let destLabel = '';
@@ -47790,34 +47855,86 @@
       const blk = _ueGetBlock(ret.bid);
       if(blk){
         if(!blk.content) blk.content = {};
-        if(!Array.isArray(blk.content.groups)) blk.content.groups = [];
-        refIds.forEach(function(qid){
-          if(!blk.content.groups.some(function(x){ return String(x.bank_question_id) === String(qid); })){
-            const n = blk.content.groups.length + 1;
-            blk.content.groups.push({ id: 'g' + n, bank_question_id: qid });
+
+        // Bloco essay: aceita só essays em content.items[].
+        // Bloco objective_questions/quiz: aceita só objetivas em content.groups[].
+        // Qualquer mismatch é avisado, mas as questões FICAM no banco.
+        if(blkType === 'essay'){
+          if(!Array.isArray(blk.content.items)) blk.content.items = [];
+          let addedToItems = 0;
+          essayRefs.forEach(function(ref){
+            if(!blk.content.items.some(function(x){ return String(x.bank_question_id) === String(ref.id); })){
+              blk.content.items.push({ bank_question_id: String(ref.id), source_type: ref.sourceType || 'past_exam' });
+              addedToItems++;
+            }
+          });
+          _ueSaveStructured(ret.bid);
+          destLabel = ' <strong>' + addedToItems + '</strong> discursiva(s) adicionada(s) ao bloco.';
+          if(objRefs.length){
+            mismatchWarn = ' <span style="color:var(--accent)"><strong>' + objRefs.length + '</strong> objetiva(s) criada(s) no banco mas <em>não vinculada(s)</em> a este bloco (bloco é discursiva). Adicione em outro bloco do tipo Questões objetivas.</span>';
           }
-        });
-        _ueSaveStructured(ret.bid);
-        destLabel = ' Adicionado(s) à unidade.';
+        } else if(blkType === 'objective_questions' || blkType === 'quiz'){
+          if(!Array.isArray(blk.content.groups)) blk.content.groups = [];
+          let addedToGroups = 0;
+          objRefs.forEach(function(ref){
+            if(!blk.content.groups.some(function(x){ return String(x.bank_question_id) === String(ref.id); })){
+              const n = blk.content.groups.length + 1;
+              blk.content.groups.push({ id: 'g' + n, bank_question_id: String(ref.id) });
+              addedToGroups++;
+            }
+          });
+          _ueSaveStructured(ret.bid);
+          destLabel = ' <strong>' + addedToGroups + '</strong> grupo(s) objetivo(s) adicionado(s) ao bloco.';
+          if(essayRefs.length){
+            mismatchWarn = ' <span style="color:var(--accent)"><strong>' + essayRefs.length + '</strong> discursiva(s) criada(s) no banco mas <em>não vinculada(s)</em> a este bloco (bloco é de objetivas). Adicione em outro bloco do tipo Discursiva.</span>';
+          }
+        } else {
+          // Bloco de tipo desconhecido: mostra aviso e deixa as questões só no banco.
+          mismatchWarn = ' <span style="color:var(--red)">Bloco de tipo "<code>' + esc(String(blkType||'?')) + '</code>" não suporta vínculo automático. Questões ficaram no banco.</span>';
+        }
       }
     } else if(target === 'mock_exam' && typeof addQuestionToMockExam === 'function'){
-      // Para simulado: cada question_id criado/recuperado vira uma entrada no
-      // draft do simulado. addQuestionToMockExam já é idempotente (ignora se
-      // a questão já está no draft).
-      refIds.forEach(function(qid){ addQuestionToMockExam(qid, null); });
-      destLabel = ' Adicionado(s) ao simulado.';
+      // Para simulado: TODAS as refs (essay + objetiva) viram entries do draft.
+      // addQuestionToMockExam é idempotente (ignora se a questão já está).
+      let addedToSim = 0;
+      allRefs.forEach(function(ref){
+        addQuestionToMockExam(ref.id, null);
+        addedToSim++;
+      });
+      destLabel = ' <strong>' + addedToSim + '</strong> questão(ões) adicionada(s) ao simulado.';
     }
 
-    try{ await Promise.all([loadQuestions(), loadTfItems(), loadTfItemComments(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
+    // Refresh dos caches AFETADOS — incluindo essay_criteria e essay_answer_models,
+    // que estavam fora do Promise.all anterior e deixavam o admin com cache stale
+    // (questão recém-criada não aparecia na listagem).
+    try{
+      await Promise.all([
+        loadQuestions(),
+        loadTfItems(),
+        loadTfItemComments(),
+        loadMcOptions(),
+        (typeof loadReferenceTexts    === 'function') ? loadReferenceTexts()    : null,
+        (typeof loadEssayCriteria     === 'function') ? loadEssayCriteria()    : null,
+        (typeof loadEssayAnswerModels === 'function') ? loadEssayAnswerModels() : null,
+      ].filter(Boolean));
+    }catch(e){ console.warn('[import] reload caches falhou:', e); }
 
     let msg = '<strong>' + created + '</strong> grupo(s) criados no banco.';
     if(dupes) msg += ' <strong>' + dupes + '</strong> repetido(s) (referenciado sem recriar): <span style="font-family:var(--mono);font-size:.72rem">' + esc(dupeCodes.filter(Boolean).join(', ')) + '</span>.';
     if(gabAdded) msg += ' <strong>' + gabAdded + '</strong> gabarito(s) comentado(s) adicionado(s) às questões repetidas.';
     if(destLabel) msg += destLabel;
-    show(msg, true);
+    if(mismatchWarn) msg += '<br>' + mismatchWarn;
+    if(allChildErrors.length){
+      msg += '<br><span style="color:var(--red)">⚠ ' + allChildErrors.length + ' erro(s) ao salvar critérios/modelos:</span><ul style="margin:.3rem 0 0;padding-left:1.2rem;font-size:.72rem;color:var(--red)">' +
+             allChildErrors.slice(0, 5).map(function(e){ return '<li>' + esc(e) + '</li>'; }).join('') +
+             (allChildErrors.length > 5 ? '<li>… e mais ' + (allChildErrors.length - 5) + '</li>' : '') +
+             '</ul>';
+    }
+    show(msg, allChildErrors.length === 0);
+
     if(target === 'unit' && ret){ _ueRerenderBlockBody(ret.bid); window._ueOqCreateReturn = null; }
     else if(target === 'mock_exam'){ window._ueOqCreateReturn = null; }
-    if(window.ueToast) window.ueToast('Importação em massa concluída', 'success');
+    if(window.ueToast) window.ueToast('Importação em massa concluída', allChildErrors.length === 0 ? 'success' : 'info');
   };
 
   // ─────────────────────────────────────────────────────────────────────
