@@ -47193,6 +47193,30 @@
   // S1.1 — picker de discursivas lê do banco REAL (questoes.questions onde
   // type='essay'), via questionsCache. 2 colunas: lista à esquerda, detalhe à direita.
   window._ueEssayBankPickerSel = null;
+  // Helper compartilhado por render+detail: monta a tag automática da
+  // questão. Fallback robusto: se origin tem [#N/YYYY], usa LB.originToTag;
+  // senão tenta exam_id + year (banco) → "CACD 2009"; senão se for
+  // questao_simulada → "Ubique". Antes deixava vazio se origin faltasse.
+  function _ueEssayBankPickerComputeTag(q){
+    const LB = window.LearningBlocks;
+    if(q && q.origin && LB && LB.parseQuestionOrigin && LB.originToTag){
+      const parsed = LB.parseQuestionOrigin(q.origin);
+      const t = parsed ? LB.originToTag(parsed) : null;
+      if(t) return t;
+    }
+    // Fallback — exam + year do banco, sem precisar de origin formatado.
+    if(q && q.exam_id && q.year && typeof examsCache !== 'undefined'){
+      const ex = (examsCache || []).find(function(e){ return String(e.id) === String(q.exam_id); });
+      if(ex){
+        const sigla = ex.sigla || ex.exam || '';
+        if(sigla) return (sigla + ' ' + q.year).trim();
+      }
+    }
+    // Ubique (sem origem)
+    if(q && q.questao_simulada) return 'Ubique';
+    return '';
+  }
+
   window._ueEssayBankPickerRender = function(filter){
     const list = document.getElementById('ueEssayBankPickerList');
     if(!list) return;
@@ -47201,7 +47225,9 @@
     const f = String(filter || '').toLowerCase().trim();
     const filtered = all.filter(function(q){
       if(!f) return true;
-      const haystack = ((q.enunciado || '') + ' ' + (q.origin || '') + ' ' + (q.id || '')).toLowerCase();
+      // Bug fix — busca passa a olhar command (comando da questão) também,
+      // não só enunciado (que pós-fix Bug 2 é apenas "Leia o texto…").
+      const haystack = ((q.enunciado || '') + ' ' + (q.command || '') + ' ' + (q.origin || '') + ' ' + (q.id || '')).toLowerCase();
       return haystack.indexOf(f) >= 0;
     });
     if(!filtered.length){
@@ -47211,22 +47237,30 @@
       _ueEssayBankPickerRenderDetail();
       return;
     }
-    const LB = window.LearningBlocks;
     list.innerHTML = filtered.slice(0, 200).map(function(q){
-      const parsed = (LB && q.origin) ? LB.parseQuestionOrigin(q.origin) : null;
-      const autoTag = parsed && LB ? LB.originToTag(parsed) : (q.questao_simulada ? 'Ubique' : '');
+      const autoTag = _ueEssayBankPickerComputeTag(q);
       const tagBadge = autoTag
         ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + esc(autoTag) + '</span>'
         : '';
-      const stmtPreview = String(q.enunciado || '').replace(/<[^>]+>/g, '').slice(0, 140);
+      // Bug fix — preview da lista usa COMMAND (comando da questão) que
+      // é distintivo entre questões. Antes mostrava enunciado/grupo, que
+      // pós-fix Bug 2 é uniforme ("Leia o texto a seguir") e não distinguia
+      // uma questão da outra.
+      const previewText = String(q.command || q.enunciado || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+      const previewClipped = previewText.slice(0, 160);
       const isSel = String(window._ueEssayBankPickerSel || '') === String(q.id);
       const bgSel = isSel ? 'var(--accent-lo)' : '';
+      // ID mostrado: 8 chars iniciais (suficiente pra distinguir + identificar
+      // no log/banco). Se for CACD com origin, mostra também `[#N/YYYY]` curto.
+      const idChip = '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)" title="' + esc(String(q.id)) + '">' + esc(String(q.id).slice(0,8)) + '</span>';
+      const originChip = q.origin
+        ? '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)" title="' + esc(String(q.origin)) + '">' + esc(String(q.origin)) + '</span>'
+        : '';
       return '<div data-essay-id="' + esc(String(q.id)) + '" style="display:flex;flex-direction:column;gap:.3rem;padding:.55rem .7rem;border-bottom:1px solid var(--accent-border-soft);cursor:pointer;background:' + bgSel + '" onclick="_ueEssayBankPickerSelect(\'' + esc(String(q.id)) + '\')" onmouseover="if(!this.dataset.sel)this.style.background=\'var(--accent-lo)\'" onmouseout="if(!this.dataset.sel)this.style.background=\'\'"' + (isSel ? ' data-sel="1"' : '') + '>' +
         '<div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">' +
-          tagBadge +
-          '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">' + esc(String(q.id).slice(0,8)) + '</span>' +
+          tagBadge + originChip + idChip +
         '</div>' +
-        '<div style="font-family:var(--serif);font-size:.85rem;line-height:1.4;color:var(--text)">' + esc(stmtPreview) + (stmtPreview.length >= 140 ? '…' : '') + '</div>' +
+        '<div style="font-family:var(--serif);font-size:.85rem;line-height:1.4;color:var(--text)">' + esc(previewClipped) + (previewText.length > 160 ? '…' : '') + '</div>' +
       '</div>';
     }).join('');
     _ueEssayBankPickerRenderDetail();
@@ -47239,7 +47273,11 @@
     window._ueEssayBankPickerRender(search);
   };
 
-  // Detalhe à direita: enunciado completo + critérios/modelos + botão Importar.
+  // Detalhe à direita: visão RICA da discursiva — espelho do card do aluno.
+  // Mostra: header com tag/origin/id + metadados, statement (enunciado/grupo
+  // se houver), imagem, textos de referência, command (comando da questão,
+  // o principal), critérios, modelos, padrão da banca, max_lines.
+  // Pacote D/E v2.
   window._ueEssayBankPickerRenderDetail = function(){
     const box = document.getElementById('ueEssayBankPickerDetail');
     if(!box) return;
@@ -47259,33 +47297,125 @@
     const models = (typeof essayAnswerModelsCache !== 'undefined' ? essayAnswerModelsCache : [])
       .filter(function(m){ return String(m.question_id) === String(q.id); })
       .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); });
-    const LB = window.LearningBlocks;
-    const parsed = (LB && q.origin) ? LB.parseQuestionOrigin(q.origin) : null;
-    const autoTag = parsed && LB ? LB.originToTag(parsed) : (q.questao_simulada ? 'Ubique' : '');
-    const enun = String(q.enunciado || '');
-    const enunPlain = enun.replace(/<[^>]+>/g, '');
-    const officialPreview = String(q.official_answer || '').replace(/<[^>]+>/g, '').slice(0, 200);
+    // Refs do banco: junction question_reference_texts + reference_texts.
+    const refLinks = (typeof questionRefsCache !== 'undefined' ? questionRefsCache : [])
+      .filter(function(l){ return String(l.question_id) === String(q.id); })
+      .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); });
+    const refs = refLinks.map(function(l){
+      return (typeof referenceTextsCache !== 'undefined' ? referenceTextsCache : [])
+        .find(function(r){ return String(r.id) === String(l.reference_text_id); });
+    }).filter(Boolean);
+
+    const autoTag = _ueEssayBankPickerComputeTag(q);
+    const statementPlain = String(q.enunciado || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    const commandPlain   = String(q.command   || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+    const officialPreview = String(q.official_answer || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 240);
+
+    // ── Header chips ──
+    const headerChips =
+      (autoTag ? '<span style="font-family:var(--mono);font-size:.62rem;padding:.15rem .5rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + esc(autoTag) + '</span>' : '') +
+      (q.origin ? '<span style="font-family:var(--mono);font-size:.6rem;padding:.1rem .45rem;border-radius:3px;background:var(--bg-elev);color:var(--text-dim);border:1px solid var(--accent-border-soft)">' + esc(String(q.origin)) + '</span>' : '') +
+      '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)" title="' + esc(String(q.id)) + '">#' + esc(String(q.id).slice(0,8)) + '</span>';
+    const headerMeta =
+      '<div style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute);margin-top:.3rem;line-height:1.6">' +
+        'Discursiva · ' + refs.length + ' texto(s)-base · ' + crits.length + ' critério(s) · ' + models.length + ' modelo(s)' +
+        (q.official_answer ? ' · padrão ✓' : '') +
+        (q.image_url ? ' · imagem ✓' : '') +
+        (q.max_lines ? ' · até ' + esc(q.max_lines) + ' linhas' : '') +
+      '</div>';
+
+    // ── Statement (Enunciado/Comando do grupo) ──
+    const statementHTML = statementPlain ?
+      '<div style="font-size:.58rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin:.9rem 0 .25rem">Enunciado/Comando do grupo</div>' +
+      '<div style="font-family:var(--serif);font-size:.82rem;font-style:italic;line-height:1.5;color:var(--text-dim);padding-left:.7rem;border-left:2px solid var(--accent-border-soft)">' +
+        esc(statementPlain) +
+      '</div>'
+      : '';
+
+    // ── Imagem da questão ──
+    const imageHTML = q.image_url ?
+      '<div style="font-size:.58rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin:.9rem 0 .25rem">Imagem</div>' +
+      '<div style="margin-bottom:.4rem"><img src="' + esc(q.image_url) + '" alt="" style="max-width:100%;max-height:140px;border-radius:var(--radius);border:1px solid var(--accent-border-soft);display:block"></div>'
+      : '';
+
+    // ── Textos de referência (do banco) ──
+    const refsHTML = refs.length ?
+      '<div style="font-size:.58rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin:.9rem 0 .25rem">Textos de referência (' + refs.length + ')</div>' +
+      '<div style="display:flex;flex-direction:column;gap:.45rem;margin-bottom:.4rem">' +
+        refs.map(function(r){
+          const body = String(r.text || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+          const bodyClipped = body.slice(0, 200);
+          return '<div style="padding:.55rem .7rem;background:var(--bg-elev);border-left:2px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0">' +
+            (r.label ? '<div style="font-family:var(--mono);font-size:.58rem;letter-spacing:.06em;color:var(--accent);text-transform:uppercase;margin-bottom:.2rem">' + esc(r.label) + '</div>' : '') +
+            (r.title ? '<div style="font-family:var(--serif);font-size:.78rem;color:var(--text);margin-bottom:.2rem">' + esc(r.title) + '</div>' : '') +
+            (r.author || r.source ? '<div style="font-family:var(--sans);font-size:.66rem;color:var(--text-mute);margin-bottom:.25rem">' + esc([r.author, r.source].filter(Boolean).join(' · ')) + '</div>' : '') +
+            (bodyClipped ? '<div style="font-family:var(--serif);font-size:.74rem;line-height:1.55;color:var(--text-dim);font-style:italic">' + esc(bodyClipped) + (body.length > 200 ? '…' : '') + '</div>' : '') +
+          '</div>';
+        }).join('') +
+      '</div>'
+      : '';
+
+    // ── Command (Comando da questão — o principal) ──
+    const commandHTML = commandPlain ?
+      '<div style="font-size:.58rem;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin:.9rem 0 .25rem">Comando da questão</div>' +
+      '<div style="font-family:var(--serif);font-size:.86rem;line-height:1.5;color:var(--text);padding:.65rem .8rem;border:1px solid var(--accent-border);border-radius:var(--radius);background:var(--bg-elev);max-height:160px;overflow-y:auto">' +
+        esc(commandPlain) +
+      '</div>'
+      : '';
+
+    // ── Critérios (com descrição preview) ──
+    const critsHTML = crits.length ?
+      '<div style="font-size:.58rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin:.9rem 0 .25rem">Critérios (' + crits.length + ')</div>' +
+      '<ul style="margin:0;padding-left:1.1rem;font-family:var(--sans);font-size:.76rem;line-height:1.5;color:var(--text-dim)">' +
+        crits.map(function(c){
+          const desc = String(c.descricao || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+          const descClipped = desc.slice(0, 110);
+          return '<li style="margin-bottom:.25rem"><strong style="color:var(--text)">' + esc(c.criterio || '') + '</strong>' +
+            (c.peso != null ? ' <span style="color:var(--text-mute)">(peso ' + esc(c.peso) + ')</span>' : '') +
+            (descClipped ? '<div style="font-size:.7rem;color:var(--text-mute);margin-top:.1rem">' + esc(descClipped) + (desc.length > 110 ? '…' : '') + '</div>' : '') +
+          '</li>';
+        }).join('') +
+      '</ul>'
+      : '';
+
+    // ── Modelos (com title, author, grade) ──
+    const modelsHTML = models.length ?
+      '<div style="font-size:.58rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin:.9rem 0 .25rem">Modelos de resposta (' + models.length + ')</div>' +
+      '<div style="display:flex;flex-direction:column;gap:.35rem">' +
+        models.map(function(m){
+          const body = String(m.modelo || '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+          const bodyClipped = body.slice(0, 150);
+          return '<div style="padding:.5rem .65rem;background:var(--bg-elev);border-left:2px dashed var(--accent-border);border-radius:0 var(--radius) var(--radius) 0">' +
+            '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:.4rem;margin-bottom:.15rem">' +
+              '<strong style="font-family:var(--sans);font-size:.74rem;color:var(--text)">' + esc(m.title || 'Modelo') + '</strong>' +
+              (m.grade ? '<span style="font-family:var(--mono);font-size:.62rem;color:var(--text-mute)">' + esc(m.grade) + '</span>' : '') +
+            '</div>' +
+            (m.author ? '<div style="font-family:var(--sans);font-size:.65rem;color:var(--text-mute);font-style:italic;margin-bottom:.2rem">' + esc(m.author) + '</div>' : '') +
+            (bodyClipped ? '<div style="font-family:var(--serif);font-size:.72rem;color:var(--text-dim);line-height:1.5">' + esc(bodyClipped) + (body.length > 150 ? '…' : '') + '</div>' : '') +
+          '</div>';
+        }).join('') +
+      '</div>'
+      : '';
+
+    // ── Padrão da banca preview ──
+    const officialHTML = q.official_answer ?
+      '<div style="font-size:.58rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin:.9rem 0 .25rem">Padrão de resposta da banca</div>' +
+      '<div style="font-family:var(--serif);font-size:.74rem;line-height:1.55;color:var(--text-dim);padding:.55rem .7rem;border:1px dashed var(--accent-border-soft);border-radius:var(--radius)">' +
+        esc(officialPreview) + (officialPreview.length >= 240 ? '…' : '') +
+      '</div>'
+      : '';
+
     box.innerHTML =
-      '<div style="margin-bottom:.6rem;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">' +
-        (autoTag ? '<span style="font-family:var(--mono);font-size:.62rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">' + esc(autoTag) + '</span>' : '') +
-        '<span style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">Discursiva · ' + crits.length + ' critério(s) · ' + models.length + ' modelo(s)' + (q.official_answer ? ' · padrão da banca ✓' : '') + '</span>' +
-      '</div>' +
-      '<div style="font-family:var(--serif);font-size:.86rem;line-height:1.5;color:var(--text);margin-bottom:.9rem;padding:.7rem .8rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius);background:var(--bg-elev);max-height:180px;overflow-y:auto">' +
-        esc(enunPlain) +
-      '</div>' +
-      (crits.length ?
-        '<div style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin-bottom:.3rem">Critérios</div>' +
-        '<ul style="margin:0 0 .9rem;padding-left:1.1rem;font-family:var(--sans);font-size:.78rem;line-height:1.5;color:var(--text-dim)">' +
-          crits.map(function(c){ return '<li><strong style="color:var(--text)">' + esc(c.criterio || '') + '</strong>' + (c.peso != null ? ' <span style="color:var(--text-mute)">(peso ' + esc(c.peso) + ')</span>' : '') + '</li>'; }).join('') +
-        '</ul>'
-        : '') +
-      (q.official_answer ?
-        '<div style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin-bottom:.3rem">Padrão de resposta da banca (preview)</div>' +
-        '<div style="font-family:var(--serif);font-size:.78rem;line-height:1.5;color:var(--text-dim);margin-bottom:.9rem;padding:.55rem .7rem;border:1px dashed var(--accent-border-soft);border-radius:var(--radius)">' +
-          esc(officialPreview) + (officialPreview.length >= 200 ? '…' : '') +
-        '</div>'
-        : '') +
-      '<div style="display:flex;gap:.5rem;margin-top:.7rem;position:sticky;bottom:-1rem;background:var(--bg-card);padding:.6rem 0">' +
+      '<div style="display:flex;align-items:center;gap:.4rem;flex-wrap:wrap">' + headerChips + '</div>' +
+      headerMeta +
+      statementHTML +
+      imageHTML +
+      refsHTML +
+      commandHTML +
+      critsHTML +
+      modelsHTML +
+      officialHTML +
+      '<div style="display:flex;gap:.5rem;margin-top:1rem;position:sticky;bottom:-1rem;background:var(--bg-card);padding:.6rem 0">' +
         '<button class="btn btn-sm" onclick="ueEssayImportFromBank(\'' + esc(String(q.id)) + '\')" style="flex:1;background:var(--accent);color:var(--bg);border:0;font-weight:600;padding:.45rem .7rem;border-radius:var(--radius);cursor:pointer">+ Adicionar ao bloco</button>' +
       '</div>';
   };
