@@ -12769,6 +12769,92 @@ Blocks.keypoints = {
 };
 
 /* ESSAY */
+// Mapeia o JSON que a Edge Function `correct-essay` devolve (formato do
+// Claude, em PT-BR: { score, summary, criteria:[{id,label,weight,pct,score,
+// comment}], pontos_fortes:[], a_melhorar:[] }) para o shape que o front
+// consome (igual ao do mock: { score, maxScore, criteriaScores:{[label]:n},
+// criteriaComments:{[label]:s}, overallComment, strengths:[], weaknesses:[],
+// wordCount, ratio, text, isMocked:false, evaluatedAt, aiProvider, aiModel }).
+//
+// Sem isso, a UI ignora a correção rica do Claude e cai nos textos default
+// ("Sem destaques específicos…" / "Nenhum critério ficou notavelmente
+// abaixo do esperado") porque os arrays vêm com nome errado.
+//
+// Retorna null se o payload do Claude não tiver formato mínimo válido —
+// nesse caso o caller usa o mock como fallback.
+function _mapClaudeEssayPayload(claude, item, text){
+  if(!claude || typeof claude !== 'object') return null;
+  if(typeof claude.score !== 'number' && !Array.isArray(claude.criteria)) return null;
+
+  const criteriaItems = (item && item.criteria) || [];
+  const maxTotal = criteriaItems.reduce(function(s,c){ return s + (Number(c.maxScore)||0); }, 0);
+
+  const criteriaScores = {};
+  const criteriaComments = {};
+  const claudeCrits = Array.isArray(claude.criteria) ? claude.criteria : [];
+
+  claudeCrits.forEach(function(cc, i){
+    // Tenta casar pelo id do quesito; se não, pelo label; senão pelo índice.
+    var matched = null;
+    if(cc && cc.id){
+      matched = criteriaItems.find(function(ic){
+        return ic && (String(ic.id) === String(cc.id) || String(ic.key) === String(cc.id));
+      });
+    }
+    if(!matched && cc && cc.label){
+      matched = criteriaItems.find(function(ic){ return ic && ic.label === cc.label; });
+    }
+    if(!matched) matched = criteriaItems[i];
+    if(!matched) return;
+    var label = matched.label;
+    // Score: prioriza `score` direto do Claude; senão calcula via pct*maxScore.
+    var s = null;
+    if(typeof cc.score === 'number'){
+      s = cc.score;
+    } else if(typeof cc.pct === 'number' && matched.maxScore){
+      s = (Number(matched.maxScore) * cc.pct) / 100;
+    }
+    if(s !== null && !isNaN(s)){
+      criteriaScores[label] = Math.round(s * 10) / 10;
+    }
+    if(cc.comment) criteriaComments[label] = String(cc.comment);
+  });
+
+  // Score total: usa o do Claude se vier; senão soma os scores por quesito.
+  var finalScore;
+  if(typeof claude.score === 'number'){
+    finalScore = Math.round(claude.score * 10) / 10;
+  } else {
+    var sum = 0;
+    Object.keys(criteriaScores).forEach(function(k){ sum += Number(criteriaScores[k]) || 0; });
+    finalScore = Math.round(sum * 10) / 10;
+  }
+
+  var ratio = maxTotal > 0 ? finalScore / maxTotal : 0;
+  var wordCount = (text || '').trim().split(/\s+/).filter(Boolean).length;
+
+  return {
+    text: text || '',
+    score: finalScore,
+    maxScore: maxTotal,
+    criteriaScores: criteriaScores,
+    criteriaComments: criteriaComments,
+    overallComment: claude.summary || claude.overallComment || '',
+    strengths: Array.isArray(claude.pontos_fortes) ? claude.pontos_fortes.filter(Boolean)
+              : Array.isArray(claude.strengths)   ? claude.strengths.filter(Boolean)
+              : [],
+    weaknesses: Array.isArray(claude.a_melhorar) ? claude.a_melhorar.filter(Boolean)
+              : Array.isArray(claude.weaknesses) ? claude.weaknesses.filter(Boolean)
+              : [],
+    wordCount: wordCount,
+    ratio: ratio,
+    isMocked: false,
+    evaluatedAt: Date.now(),
+    aiProvider: 'anthropic',
+    aiModel: 'claude-sonnet-4-5'
+  };
+}
+
 function generateMockEssayFeedback(item, text){
   // deterministic pseudo-random based on item.id + text length
   function hash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; } return Math.abs(h); }
@@ -13244,9 +13330,16 @@ Blocks.essay = {
                 new Promise(r => setTimeout(() => r({ error: { message: 'timeout 120s' } }), 120000))
               ]);
               if(!racing.error && racing.data && !racing.data.error){
-                payload = racing.data;
-                usedAI = true;
-                console.log('[essay AI] ✅ corrigido via', payload.aiProvider, payload.aiModel);
+                // Mapeia o JSON do Claude (PT-BR) pro shape interno do front.
+                // Se o mapeamento falhar (formato inesperado), cai pro mock.
+                const mapped = _mapClaudeEssayPayload(racing.data, item, text);
+                if(mapped){
+                  payload = mapped;
+                  usedAI = true;
+                  console.log('[essay AI] ✅ corrigido via', payload.aiProvider, payload.aiModel, '— score:', payload.score, '/', payload.maxScore);
+                } else {
+                  console.warn('[essay AI] resposta da Edge Function em formato inesperado, fallback mock. Raw:', racing.data);
+                }
               } else {
                 console.warn('[essay AI] indisponível, fallback mock. Detalhes:', {
                   invokeError: racing.error,
