@@ -773,19 +773,31 @@
             ? '<span style="font-family:var(--mono);font-size:.65rem;color:var(--text-mute);margin-left:auto">Extensão: até ' + e(linesText) + ' linhas</span>'
             : '';
 
-          // GABARITO — 3 abas conforme visibilidade
+          // GABARITO — 3 abas conforme visibilidade.
+          // Pacote C — Rótulos adaptativos por source_type:
+          // - Ubique: sem aba "Padrão" (não existe pra Ubique) +
+          //           "Melhor resposta" no lugar de "Resposta Modelo".
+          // - CACD/past_exam: comportamento idêntico ao anterior.
           const criteria = Array.isArray(it.criteria) ? it.criteria : [];
+          const isUbique = it.source_type === 'ubique';
           const showCrit = it.show_criteria !== false && criteria.length > 0;
-          const showOfficial = it.show_official_answer !== false && (it.officialAnswer || it.modelAnswer);
+          const showOfficial = !isUbique
+                            && it.show_official_answer !== false
+                            && !!it.officialAnswer; // sem fallback pro modelAnswer (duplicava)
           const showModels = it.show_model_answers !== false && Array.isArray(it.modelAnswers) && it.modelAnswers.length > 0;
           const anyGab = showCrit || showOfficial || showModels;
+
+          const modelTabLabel = isUbique
+            ? ((it.modelAnswers && it.modelAnswers.length > 1) ? 'Melhores respostas' : 'Melhor resposta')
+            : ((it.modelAnswers && it.modelAnswers.length > 1) ? 'Respostas-modelo' : 'Resposta-modelo');
+          const modelItemFallback = isUbique ? 'Melhor resposta' : 'Modelo';
 
           let gabaritoHTML = '';
           if(anyGab){
             const tabs = [];
             if(showCrit) tabs.push({ key: 'criteria', label: 'Critérios de correção' });
             if(showOfficial) tabs.push({ key: 'official', label: 'Padrão de Resposta' });
-            if(showModels) tabs.push({ key: 'models', label: 'Resposta Modelo' });
+            if(showModels) tabs.push({ key: 'models', label: modelTabLabel });
 
             const tabsBar = '<div style="display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:.6rem;border-bottom:1px solid var(--accent-border-soft);padding-bottom:.4rem">' +
               tabs.map(function(t, ti){
@@ -810,13 +822,17 @@
                 '</div>';
               }).join('');
             } else if(firstKey === 'official'){
-              const officialText = it.officialAnswer || it.modelAnswer || '';
+              // Só chega aqui se !isUbique (showOfficial é false em Ubique).
+              const officialText = it.officialAnswer || '';
               firstPaneHTML = '<div style="padding:.5rem .7rem;background:var(--bg-elev);border-left:2px solid var(--accent);border-radius:0 var(--radius) var(--radius) 0;font-family:var(--serif);font-size:.85rem;color:var(--text);line-height:1.65">' + sanitize(String(officialText)) + '</div>';
             } else if(firstKey === 'models'){
               firstPaneHTML = it.modelAnswers.map(function(m, mi){
+                const titleFallback = it.modelAnswers.length > 1
+                  ? (modelItemFallback + ' ' + String.fromCharCode(65 + mi))
+                  : modelItemFallback;
                 return '<div style="padding:.5rem .7rem;background:var(--bg-elev);border-left:2px solid var(--accent);margin-bottom:.4rem;border-radius:0 var(--radius) var(--radius) 0">' +
                   '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:.25rem">' +
-                    '<strong style="font-family:var(--sans);font-size:.78rem;color:var(--accent)">' + e(m.title || ('Modelo ' + String.fromCharCode(65 + mi))) + '</strong>' +
+                    '<strong style="font-family:var(--sans);font-size:.78rem;color:var(--accent)">' + e(m.title || titleFallback) + '</strong>' +
                     (m.score ? '<span style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute)">' + e(m.score) + '</span>' : '') +
                   '</div>' +
                   (m.author ? '<div style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute);margin-bottom:.3rem;font-style:italic">' + e(m.author) + '</div>' : '') +
