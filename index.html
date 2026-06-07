@@ -7816,7 +7816,11 @@ window.TAG_REGISTRY = {
       // Fase Q2 — banco de questões REAL (questoes.*) num store SEPARADO (window._QBank),
       // só para resolver referências {bank_question_id}. NÃO toca em UbiqueStore.questions
       // (que alimenta o filtro do Portal e o caminho inline) → Portal/unidade idênticos.
-      try {
+      //
+      // window._hydrateQBank() é definida UMA VEZ aqui e reutilizada pela
+      // re-hidratação automática (_maybeRehydrateQBank, logo abaixo). Mantém a
+      // primeira hidratação idêntica ao comportamento anterior.
+      window._hydrateQBank = async function _hydrateQBank(){
         const qsb = window._sb.schema('questoes');
         const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR] = await Promise.all([
           qsb.from('questions').select('*'),
@@ -7835,27 +7839,90 @@ window.TAG_REGISTRY = {
         if(eamR.error) console.warn('[hydrate qbank] essay_answer_models (extra) falhou:', eamR.error.message);
         // Tabelas essenciais para resolver as questões:
         const qErrs = [qR.error, tfR.error, mcR.error, rtR.error, qrtR.error].filter(Boolean);
-        if(!qErrs.length){
-          window._QBank = {
-            questions:        qR.data   || [],
-            tfItems:          tfR.data  || [],
-            tfItemComments:   tfcR.data || [],
-            mcOptions:        mcR.data  || [],
-            referenceTexts:   rtR.data  || [],
-            questionRefTexts: qrtR.data || [],
-            essayCriteria:        ecR.data  || [],
-            essayAnswerModels:    eamR.data || [],
-          };
-          console.log('[hydrate qbank] ✅', {
-            questions: (qR.data||[]).length, tf_items: (tfR.data||[]).length,
-            tf_item_comments: (tfcR.data||[]).length,
-            mc_options: (mcR.data||[]).length, reference_texts: (rtR.data||[]).length,
-            essay_criteria: (ecR.data||[]).length, essay_answer_models: (eamR.data||[]).length,
-          });
-        } else {
+        if(qErrs.length){
           console.warn('[hydrate qbank] erros:', qErrs.map(e => e.message));
+          throw new Error('qbank essential fetch failed: ' + qErrs.map(e => e.message).join(' | '));
         }
-      } catch(e){ console.warn('[hydrate qbank] exception:', e); }
+        window._QBank = {
+          questions:        qR.data   || [],
+          tfItems:          tfR.data  || [],
+          tfItemComments:   tfcR.data || [],
+          mcOptions:        mcR.data  || [],
+          referenceTexts:   rtR.data  || [],
+          questionRefTexts: qrtR.data || [],
+          essayCriteria:        ecR.data  || [],
+          essayAnswerModels:    eamR.data || [],
+        };
+        console.log('[hydrate qbank] ✅', {
+          questions: (qR.data||[]).length, tf_items: (tfR.data||[]).length,
+          tf_item_comments: (tfcR.data||[]).length,
+          mc_options: (mcR.data||[]).length, reference_texts: (rtR.data||[]).length,
+          essay_criteria: (ecR.data||[]).length, essay_answer_models: (eamR.data||[]).length,
+        });
+      };
+
+      // _maybeRehydrateQBank(reason, bankQuestionId):
+      //   Acionado pelo normalizeQuizBlock quando um bank_question_id não
+      //   resolve no _QBank atual. Causa típica: admin importou novas questões
+      //   DEPOIS que o aluno já carregou a página — o _QBank na memória do
+      //   aluno ficou desatualizado. Sem isto, o aluno precisaria Cmd+Shift+R.
+      //
+      //   Salvaguardas (não-gambiarra):
+      //   - 1 re-hidratação por vez (in-flight guard).
+      //   - Cooldown de 5s entre re-hidratações (sem spam).
+      //   - IDs que continuam ausentes APÓS uma re-hidratação são marcados
+      //     em _qbankFailedIds — não acionam novas tentativas (corta loop
+      //     infinito quando a questão simplesmente não existe / RLS bloqueia).
+      //   - Re-renderiza a view ao final, pra a UI refletir o estado novo.
+      let _qbankRehydrateInFlight = null;
+      let _qbankLastRehydrateAt = 0;
+      const _qbankFailedIds = new Set();
+      const QBANK_REHYDRATE_COOLDOWN_MS = 5000;
+      window._maybeRehydrateQBank = function(reason, bankQuestionId){
+        if(bankQuestionId && _qbankFailedIds.has(String(bankQuestionId))){
+          return Promise.resolve(false); // já tentou pra esse id e falhou
+        }
+        if(_qbankRehydrateInFlight) return _qbankRehydrateInFlight;
+        const now = Date.now();
+        if(now - _qbankLastRehydrateAt < QBANK_REHYDRATE_COOLDOWN_MS){
+          return Promise.resolve(false);
+        }
+        console.log('[qbank] re-hidratação automática iniciada. Motivo:', reason);
+        _qbankRehydrateInFlight = window._hydrateQBank()
+          .then(function(){
+            _qbankLastRehydrateAt = Date.now();
+            // Marca como permanentemente falhado se o id ainda não apareceu
+            // (assim não fica tentando re-hidratar a cada render).
+            if(bankQuestionId){
+              const bank = window._QBank;
+              const found = bank && (bank.questions || []).some(x => String(x.id) === String(bankQuestionId));
+              if(!found){
+                _qbankFailedIds.add(String(bankQuestionId));
+                console.warn('[qbank] id ainda não encontrado após re-hidratação — sem novas tentativas:', bankQuestionId);
+              } else {
+                console.log('[qbank] id encontrado após re-hidratação:', bankQuestionId);
+              }
+            }
+            // Re-renderiza pra UI refletir o _QBank atualizado.
+            if(window.App && typeof window.App.render === 'function'){
+              try { window.App.render(); } catch(e){ console.warn('[qbank] re-render após re-hidratação falhou:', e); }
+            }
+            return true;
+          })
+          .catch(function(e){
+            console.warn('[qbank] re-hidratação falhou:', e && e.message || e);
+            return false;
+          })
+          .finally(function(){
+            _qbankRehydrateInFlight = null;
+          });
+        return _qbankRehydrateInFlight;
+      };
+
+      // Hidratação INICIAL — usa a mesma função; comportamento idêntico ao anterior.
+      try {
+        await window._hydrateQBank();
+      } catch(e){ console.warn('[hydrate qbank] exception:', e && e.message || e); }
 
       // S1 — hidrata SIMULADOS reais do banco (substitui a lista fake). Cada seção
       // vira um bloco de questões que referencia o banco (resolveBankGroup monta tudo).
@@ -11627,12 +11694,16 @@ function normalizeQuizBlock(block){
         });
         return;
       }
-      // DIAGNÓSTICO: chegou aqui com bank_question_id mas não resolveu.
-      // Causas comuns:
+      // DIAGNÓSTICO + AUTO-REHYDRATE: chegou aqui com bank_question_id mas
+      // não resolveu. Causas comuns:
       //  - _QBank ainda não hidratou (race condition);
-      //  - questão importada não está no _QBank.questions (RLS no schema 'questoes');
+      //  - questão importada não está no _QBank.questions (sessão do aluno é
+      //    anterior ao import; ou RLS no schema 'questoes' bloqueando);
       //  - tf_items vazio pra essa question_id (questão criada sem afirmativas).
-      // Sem este warn, o aluno só vê "Nenhum grupo configurado" sem pista do motivo.
+      //
+      // Aciona _maybeRehydrateQBank pra rebuscar do Supabase e re-renderizar.
+      // Sem isto, o aluno teria que Cmd+Shift+R toda vez que o admin importa
+      // questões novas — UX inaceitável.
       try {
         const bank = window._QBank;
         const qExists = bank && (bank.questions || []).some(x => String(x.id) === String(g.bank_question_id));
@@ -11645,6 +11716,11 @@ function normalizeQuizBlock(block){
           tf_items_for_this_question: bank ? (bank.tfItems || []).filter(t => String(t.question_id) === String(g.bank_question_id)).length : 0,
           mc_options_for_this_question: bank ? (bank.mcOptions || []).filter(o => String(o.question_id) === String(g.bank_question_id)).length : 0,
         });
+        // Aciona re-hidratação automática. As salvaguardas (throttle + Set de
+        // ids já falhados) estão dentro do próprio _maybeRehydrateQBank.
+        if(typeof window._maybeRehydrateQBank === 'function'){
+          window._maybeRehydrateQBank('id ' + g.bank_question_id + ' não estava no _QBank', g.bank_question_id);
+        }
       } catch(_){}
     }
     // NOVO schema (Y3): g.questions[] em vez de g.items[]; converte cada um
