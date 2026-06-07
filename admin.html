@@ -12533,7 +12533,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
 <script src="ubique-shared.js?v=134"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=62"></script>
+<script src="learning-blocks-render.js?v=63"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -20560,9 +20560,15 @@
             image_id: o.image_id || null,
           }));
         } else if(q.type === 'essay'){
-          // Essay command vem do enunciado da questão — a tabela não tem campo separado
-          // OBS: o enunciado da questão é o comando essay
-          document.getElementById('essay-command').value = q.enunciado || '';
+          // Bug 2 fix — desde a migration, essay tem 2 campos distintos:
+          //   q.enunciado  → "Enunciado / Comando do grupo" (q-enunciado)
+          //   q.command    → "Comando da questão" (essay-command)
+          // COMPAT: questões antigas (criadas antes da migration) só têm
+          // q.enunciado preenchido (com o "comando da questão" lá dentro,
+          // por causa do bug histórico). Para essas, espelha enunciado→command
+          // para que o admin possa editar e reorganizar nos dois campos certos.
+          // Quando salvar, os 2 campos passam a viver separados.
+          document.getElementById('essay-command').value = q.command || q.enunciado || '';
           // Pacote A / F.2 — carregar Padrão da Banca + 3 toggles + max_lines
           const _offEl = document.getElementById('essay-official-answer');
           if(_offEl) _offEl.value = q.official_answer || '';
@@ -21093,11 +21099,14 @@
 
     const qType = document.getElementById('q-type').value;
 
-    // Para essay, o comando vai no campo enunciado
-    let finalEnunciado = document.getElementById('q-enunciado').value.trim() || null;
-    if(qType === 'essay'){
-      finalEnunciado = document.getElementById('essay-command').value.trim() || finalEnunciado;
-    }
+    // Bug 2 fix — discursivas têm DOIS campos distintos:
+    //   q-enunciado    → "Enunciado / Comando do grupo" (ex: "Leia o texto a seguir")
+    //   essay-command  → "Comando da questão" (texto que o aluno lê e responde)
+    // Antes da migration o segundo sobrescrevia o primeiro porque a tabela só
+    // tinha a coluna `enunciado`. Agora persistem em colunas distintas:
+    //   q.enunciado = q-enunciado (todos os tipos)
+    //   q.command   = essay-command (só essay; null nos outros)
+    const finalEnunciado = document.getElementById('q-enunciado').value.trim() || null;
 
     // E1 — sincroniza year/numero/simulada a partir do código + origem antes de ler.
     if(typeof _qSyncCodigo === 'function') _qSyncCodigo();
@@ -21119,6 +21128,10 @@
       image_url: questionModalImageUrl || null,
       image_id: questionModalImageId || null,
     };
+    // Bug 2 fix — coluna NOVA `command` (só essay; nulo para os demais tipos).
+    if(qType === 'essay'){
+      payload.command = document.getElementById('essay-command').value.trim() || null;
+    }
     // Pacote A / F.2 — Padrão da banca + 3 toggles "Mostrar pro aluno" + max_lines (essay).
     // Pacote C — Em questão Ubique, official_answer é forçado a NULL (Ubique
     // não tem padrão da banca por definição). Sem isso, texto digitado antes
@@ -21162,12 +21175,14 @@
         origin: payload.origin,
       };
       // Pacote A / F.2 — Padrão da banca + 3 toggles + max_lines (só essay).
+      // Bug 2 fix — também propaga a coluna `command` separada (essay only).
       if(payload.type === 'essay'){
         editPayload.official_answer       = payload.official_answer;
         editPayload.show_official_answer  = payload.show_official_answer;
         editPayload.show_criteria         = payload.show_criteria;
         editPayload.show_model_answers    = payload.show_model_answers;
         editPayload.max_lines             = payload.max_lines;
+        editPayload.command               = payload.command;
       }
       // .select() devolve a linha realmente atualizada → diagnostica bloqueio de
       // permissão (0 linhas) ou valor recusado (volta sem o concurso).
@@ -46877,14 +46892,41 @@
     return { title: '', description: '', origin: q.origin || '', reference_text: refText, reference_image: q.image_url || '', questions: questions };
   };
   // "editar no banco" — reabre o modal da questão JÁ PREENCHIDO para editar.
+  // Bug 1 diagnóstico — adiciona logs pra investigar relato do user:
+  // "clico em editar no banco mas não edita de verdade". Causas plausíveis:
+  //   - bankQuestionId chega null ou undefined (HTML mal montado);
+  //   - questão não está em questionsCache (cache stale após import);
+  //   - openQuestionModal falha silenciosamente em algum reset.
+  // O log marca o estado pré-abertura pra triangular a causa real.
   window.ueOqEditBankQuestion = function(bankQuestionId){
+    const _diag = {
+      arg_bankQuestionId: bankQuestionId,
+      arg_type: typeof bankQuestionId,
+      arg_isNull: bankQuestionId == null,
+      cache_loaded: Array.isArray(typeof questionsCache !== 'undefined' ? questionsCache : null),
+      cache_size: (typeof questionsCache !== 'undefined' && Array.isArray(questionsCache)) ? questionsCache.length : -1,
+      question_in_cache: false,
+      openQuestionModal_exists: typeof openQuestionModal === 'function',
+    };
+    if(_diag.cache_loaded){
+      _diag.question_in_cache = questionsCache.some(function(qq){ return String(qq.id) === String(bankQuestionId); });
+    }
+    console.log('[ueOqEditBankQuestion] diagnóstico', _diag);
+
     if(bankQuestionId == null){
+      console.warn('[ueOqEditBankQuestion] abortando: bankQuestionId é null/undefined');
       if(typeof window.ueToast === 'function') window.ueToast('Questão não encontrada no banco.', 'error');
       return;
     }
     if(typeof openQuestionModal !== 'function'){
+      console.warn('[ueOqEditBankQuestion] abortando: openQuestionModal não está disponível');
       if(typeof window.ueToast === 'function') window.ueToast('Abra a aba Questões → Questões para editar.', 'info');
       return;
+    }
+    if(!_diag.question_in_cache){
+      console.warn('[ueOqEditBankQuestion] questão NÃO está em questionsCache. ' +
+        'Provavelmente o cache não foi recarregado após criação/import. Vai tentar abrir mesmo assim — ' +
+        'se aparecer alert "Questão não encontrada", essa é a causa.');
     }
     openQuestionModal(bankQuestionId);
     // Eleva acima do editor de unidade (que está em z-index 100).

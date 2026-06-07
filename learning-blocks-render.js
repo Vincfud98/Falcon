@@ -692,7 +692,9 @@
             return global.EssayBank.getById(rawItem.bank_id) || rawItem;
           }
           // S1.1 — bank_question_id: lê do _QBank do aluno (questoes.questions
-          // + essay_criteria + essay_answer_models) e monta o shape do renderer.
+          // + essay_criteria + essay_answer_models + questionRefTexts +
+          // referenceTexts) e monta o shape do renderer. Espelho do
+          // _resolveEssayItem do index.html — bugs 2/3/4 fix.
           if(rawItem && rawItem.bank_question_id){
             const bank = (global && global._QBank) || {};
             const q = (bank.questions || []).find(function(x){ return String(x.id) === String(rawItem.bank_question_id); });
@@ -705,9 +707,28 @@
               .filter(function(m){ return String(m.question_id) === String(q.id); })
               .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); })
               .map(function(m){ return { title: m.title || '', author: m.author || '', grade: m.grade || '', description: m.description || '', body: m.modelo || '' }; });
+            // Bug 3 fix — references do banco
+            const refsFromBank = (bank.questionRefTexts || [])
+              .filter(function(l){ return String(l.question_id) === String(q.id); })
+              .sort(function(a, b){ return (a.ordem || 0) - (b.ordem || 0); })
+              .map(function(l){
+                const rt = (bank.referenceTexts || []).find(function(r){ return String(r.id) === String(l.reference_text_id); });
+                if(!rt) return null;
+                return {
+                  label: rt.label || '',
+                  title: rt.title || '',
+                  body:  rt.text  || rt.body || rt.conteudo || '',
+                  image: rt.image || rt.image_url || ''
+                };
+              })
+              .filter(Boolean);
             return {
               id: q.id,
-              statement: q.enunciado || '',
+              // Bug 2 fix — statement (enunciado/grupo) e command (comando da questão) separados
+              statement: q.command ? (q.enunciado || '') : '',
+              command:   q.command || q.enunciado || '',
+              // Bug 4 fix — imagem da questão
+              image_url: q.image_url || '',
               maxLines: q.max_lines || null,
               maxLength: q.max_lines || 3000,
               source_type: q.origin ? 'past_exam' : 'ubique',
@@ -718,7 +739,8 @@
               show_model_answers:   q.show_model_answers   !== false,
               criteria: crits,
               modelAnswers: models,
-              references: rawItem.references || [],
+              // Bug 3 fix — banco vence
+              references: refsFromBank.length ? refsFromBank : (rawItem.references || []),
               tags: q.tags || [],
             };
           }
@@ -764,8 +786,17 @@
               '</div>'
             : '';
 
-          // Enunciado em HTML (sanitizado, NÃO escapado)
-          const statementHTML = sanitize(String(it.statement || it.command || ''));
+          // Bug 2 fix — statement (Enunciado/Comando do grupo) e command
+          // (Comando da questão) renderizados separados.
+          const statementBlockHTML = it.statement
+            ? '<div style="font-family:var(--serif);font-style:italic;color:var(--text-dim);font-size:.85rem;line-height:1.55;margin:0 0 .8rem;padding-left:.7rem;border-left:2px solid var(--accent-border-soft)">' + sanitize(String(it.statement)) + '</div>'
+            : '';
+          // Bug 4 fix — Imagem da questão (q.image_url).
+          const questionImageHTML = it.image_url
+            ? '<div style="margin:0 0 1rem;display:flex;justify-content:center"><img src="' + attrHtml(it.image_url) + '" alt="" style="max-width:100%;max-height:300px;border-radius:var(--radius);border:1px solid var(--accent-border-soft)"></div>'
+            : '';
+          // Enunciado/Comando principal em HTML (sanitizado).
+          const statementHTML = sanitize(String(it.command || it.statement || ''));
 
           // Extensão em linhas (campo novo) — fallback pra maxLength legado
           const linesText = it.maxLines || it.maxLength;
@@ -847,8 +878,13 @@
               '</details>';
           }
 
+          // Bug 2/3/4 fix — ordem visual no preview do admin:
+          // tagsHTML → statementBlockHTML (Enunciado/grupo) → questionImageHTML
+          //  → refsHTML (textos de referência) → statementHTML (Comando da questão)
           return '<article style="background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius-lg);padding:1rem 1.2rem;margin-bottom:.8rem">' +
             tagsHTML +
+            statementBlockHTML +
+            questionImageHTML +
             refsHTML +
             '<div style="font-family:var(--serif);font-size:.95rem;color:var(--text);line-height:1.65;margin:0 0 .8rem;padding:.5rem .9rem;border-left:3px solid var(--accent);background:var(--bg-elev);border-radius:0 var(--radius) var(--radius) 0">' +
               statementHTML +

@@ -11,7 +11,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin -->
 <script src="ubique-shared.js?v=134"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=62"></script>
+<script src="learning-blocks-render.js?v=63"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -3440,6 +3440,28 @@ body.gallery-detail-open{overflow:hidden}
 .essay-command{
   font-family:var(--serif);font-weight:400;
   font-size:1.2rem;line-height:1.4;color:var(--text);
+}
+/* Bug 2 fix — Enunciado/Comando do grupo: aparece ANTES dos textos de
+   referência. Estilo curto e discreto, como uma instrução de leitura
+   ("Leia o texto a seguir."), em contraste com o .essay-command que é
+   o enunciado principal. */
+.essay-statement{
+  font-family:var(--serif);font-style:italic;color:var(--text-dim);
+  font-size:1rem;line-height:1.55;
+  margin:0 0 1rem;padding-left:.9rem;border-left:2px solid var(--accent-border-soft);
+}
+.essay-statement p{margin:0}
+.essay-statement p+p{margin-top:.4rem}
+/* Bug 4 fix — Imagem ANEXADA À QUESTÃO (q.image_url), distinta das
+   imagens dentro dos textos de referência. Renderizada como bloco
+   próprio entre o statement e as references. */
+.essay-question-image{
+  margin:0 0 1.4rem;display:flex;justify-content:center;
+}
+.essay-question-image img{
+  max-width:100%;max-height:420px;
+  border-radius:var(--radius);border:1px solid var(--accent-border-soft);
+  cursor:zoom-in;
 }
 /* Y3: bullets / listas dentro do enunciado ficam INDENTADAS pra não
    vazar pra fora do card. Antes os <ul>/<ol> vinham com padding-left:0
@@ -13198,8 +13220,9 @@ function _resolveEssayItem(item){
     }
   }
   // S1.1 — bank_question_id (formato novo, banco real questoes.questions).
-  // Lê do _QBank do aluno (questions + essay_criteria + essay_answer_models)
-  // e monta o shape esperado pelo renderer Blocks.essay.
+  // Lê do _QBank do aluno (questions + essay_criteria + essay_answer_models
+  // + questionRefTexts + referenceTexts) e monta o shape esperado pelo
+  // renderer Blocks.essay.
   if(item.bank_question_id){
     const bank = window._QBank || {};
     const q = (bank.questions || []).find(x => String(x.id) === String(item.bank_question_id));
@@ -13212,11 +13235,41 @@ function _resolveEssayItem(item){
       .filter(m => String(m.question_id) === String(q.id))
       .sort((a,b) => (a.ordem||0) - (b.ordem||0))
       .map(m => ({ title: m.title || '', author: m.author || '', grade: m.grade || '', description: m.description || '', body: m.modelo || '' }));
+    // Bug 3 fix — monta references[] a partir do banco (questionRefTexts +
+    // referenceTexts). Antes só lia item.references (que era sempre vazio em
+    // questões vindas do banco real). Por causa disso, o texto-base que o
+    // admin associou no modal nunca chegava ao aluno.
+    const refsFromBank = (bank.questionRefTexts || [])
+      .filter(l => String(l.question_id) === String(q.id))
+      .sort((a, b) => (a.ordem || 0) - (b.ordem || 0))
+      .map(l => {
+        const rt = (bank.referenceTexts || []).find(r => String(r.id) === String(l.reference_text_id));
+        if(!rt) return null;
+        return {
+          label: rt.label || '',
+          title: rt.title || '',
+          body:  rt.text  || rt.body || rt.conteudo || '',
+          image: rt.image || rt.image_url || ''
+        };
+      })
+      .filter(Boolean);
     return {
       id: q.id,
       _bank_id: q.id,
-      statement: q.enunciado || '',
-      command: q.enunciado || '',
+      // Bug 2 fix — agora os 2 campos vivem separados:
+      //   statement = q.enunciado  → "Enunciado / Comando do grupo"
+      //   command   = q.command    → "Comando da questão" (o que o aluno responde)
+      // COMPAT: questões antigas (antes da migration) só têm q.enunciado
+      // populado e ainda não foram editadas pra dividir — nesse caso o
+      // statement fica vazio e o command vira o q.enunciado (ou vice-versa).
+      // Aqui escolhemos: se NÃO TEM command, o enunciado vira command (que
+      // é o uso pré-fix); se NÃO TEM enunciado mas TEM command, statement
+      // fica vazio. Não duplicamos no aluno.
+      statement: q.command ? (q.enunciado || '') : '',
+      command:   q.command || q.enunciado || '',
+      // Bug 4 fix — propaga imagem da questão (ficava no banco mas nunca
+      // chegava ao renderer do aluno).
+      image_url: q.image_url || '',
       maxLines: q.max_lines || null,
       maxLength: q.max_lines || 3000,
       source_type: q.origin ? 'past_exam' : 'ubique',
@@ -13227,7 +13280,9 @@ function _resolveEssayItem(item){
       show_model_answers:   q.show_model_answers   !== false,
       criteria: crits,
       modelAnswers: models,
-      references: item.references || [],
+      // Bug 3 fix — banco vence quando há refs; legacy `item.references`
+      // ainda é usado se nada vem do banco (compat com inline antigos).
+      references: refsFromBank.length ? refsFromBank : (item.references || []),
       tags: q.tags || [],
     };
   }
@@ -13262,9 +13317,26 @@ Blocks.essay = {
         : '';
       const badgesHTML = (originBadgeHTML || tagBadges) ? `<div class="q-badges">${originBadgeHTML}${tagBadges}</div>` : '';
 
-      // Enunciado (HTML)
-      const promptText = it.statement || it.command || '';
-      const promptHTML = sanitize(String(promptText));
+      // Bug 2 fix — discursivas têm DOIS campos visíveis ao aluno:
+      //   statement → "Enunciado / Comando do grupo" (curto, ex: "Leia o texto a seguir")
+      //               aparece ACIMA dos textos de referência.
+      //   command   → "Comando da questão" (longo: o que o aluno precisa responder)
+      //               aparece ABAIXO dos textos de referência, no topo da área de
+      //               resposta. É o "enunciado principal" historicamente renderizado
+      //               em .essay-command.
+      // COMPAT: se a questão só tem `command` populado (caso normal pós-fix), o
+      // statement fica vazio e não renderiza. Se só tem statement (não esperado
+      // mas possível em legacy), command fallback pro statement.
+      const statementText = it.statement || '';
+      const statementHTML = statementText ? sanitize(String(statementText)) : '';
+      const commandText = it.command || it.statement || '';
+      const promptHTML = sanitize(String(commandText));
+      // Bug 4 fix — imagem ANEXADA À QUESTÃO (q.image_url), distinta da imagem
+      // de cada texto de referência. Renderizada como bloco próprio entre o
+      // statement e as references (ou antes do command se não há refs).
+      const questionImageHTML = it.image_url
+        ? `<div class="essay-question-image"><img src="${Util.attr(it.image_url)}" alt="" loading="lazy" data-lightbox data-lightbox-src="${Util.attr(it.image_url)}"></div>`
+        : '';
 
       // ── Aside lateral com 3 abas: Critérios / Padrão / Modelos ──
       // Visibilidade respeita show_criteria, show_official_answer,
@@ -13392,7 +13464,16 @@ Blocks.essay = {
         ? `<span class="essay-counter">Extensão do texto: até ${Util.esc(linesLimit)} linhas</span>`
         : '';
 
+      // Bug 2/4 fix — ordem visual do enunciado completo:
+      //   1) statement (Enunciado/Comando do grupo) — curto, instrução
+      //   2) imagem da questão (q.image_url) — se houver
+      //   3) textos de referência (banco) — texto-base + suas próprias imagens
+      //   4) command (Comando da questão) — dentro do .essay-command no header,
+      //      preservando todo o estilo histórico (.essay-num + chips + textarea
+      //      abaixo). Comportamento legado quando só há `command` é idêntico.
       return `<article class="essay-item" data-item-id="${Util.attr(itemId)}" id="item-${Util.attr(itemId)}">
+        ${statementHTML ? `<div class="essay-statement">${statementHTML}</div>` : ''}
+        ${questionImageHTML}
         ${refs ? `<div class="essay-refs essay-refs--top">${refs}</div>` : ''}
         <header class="essay-header">
           <span class="essay-num">${Util.pad2(i+1)}</span>
