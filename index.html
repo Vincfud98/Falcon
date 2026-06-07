@@ -13401,20 +13401,47 @@ Blocks.essay = {
       // HIDRATAÇÃO: se já existe uma resposta enviada antes, re-injeta o
       // feedback ao reabrir a unidade (sem isso, o aluno via só o textarea
       // pré-preenchido e perdia a nota + comentário).
+      //
+      // Suporta 3 formatos persistidos:
+      //  (A) Shape interno completo (mock OU Claude já mapeado): tem
+      //      overallComment/ratio/aiProvider/isMocked=false. Usa direto.
+      //  (B) Shape cru do Claude (salvo em sessões antes do mapper existir):
+      //      tem summary/pontos_fortes/a_melhorar/criteria como array.
+      //      RE-MAPEIA pra shape interno e persiste a versão consertada —
+      //      nunca joga fora a correção real da IA.
+      //  (C) Legado quebrado de verdade (sem campos modernos e sem shape
+      //      do Claude): aí sim mocka como antes.
       if(ctx && ctx.store){
         const prior = ctx.store.getEssayAnswer(ctx.unitId, block.id, itemId);
         if(prior && prior.score != null){
-          // ⚠️ NÃO re-mocka se o payload veio da IA (isAI=true), mesmo que
-          // não tenha overallComment/ratio — formato da resposta Gemini
-          // é diferente do mock e re-mockar SOBRESCREVE a correção da IA.
-          // Só enriquece se for um payload antigo de mock que falta campos.
-          const isAIPayload = !!prior.isAI || !!prior.aiProvider || !!prior.aiModel;
-          const isLegacyMockMissingFields = !isAIPayload
-            && (prior.overallComment == null || prior.ratio == null);
-          const payload = isLegacyMockMissingFields
-            ? generateMockEssayFeedback(item, prior.text || '')
-            : prior;
-          if(isLegacyMockMissingFields){
+          const isInternalShape = prior.overallComment != null && prior.ratio != null;
+          const isAIPayload = !!prior.isAI || !!prior.aiProvider || !!prior.aiModel || prior.isMocked === false;
+          const looksLikeClaudeRaw = !isInternalShape && (
+            typeof prior.summary === 'string'
+            || Array.isArray(prior.pontos_fortes)
+            || Array.isArray(prior.a_melhorar)
+            || Array.isArray(prior.criteria)
+          );
+
+          let payload;
+          if(isInternalShape || isAIPayload){
+            // Já tá pronto. Usa direto.
+            payload = prior;
+          } else if(looksLikeClaudeRaw){
+            // Recupera correção real do Claude salva sem mapeamento.
+            const mapped = _mapClaudeEssayPayload(prior, item, prior.text || '');
+            if(mapped){
+              payload = mapped;
+              // Persiste a versão consertada — próxima hidratação cai em (A).
+              ctx.store.updateEssay(ctx.unitId, block.id, itemId, mapped);
+              console.log('[essay AI] correção do Claude recuperada e re-mapeada na hidratação.');
+            } else {
+              payload = generateMockEssayFeedback(item, prior.text || '');
+              ctx.store.updateEssay(ctx.unitId, block.id, itemId, payload);
+            }
+          } else {
+            // Legacy mock sem campos modernos — re-mocka pra preencher.
+            payload = generateMockEssayFeedback(item, prior.text || '');
             ctx.store.updateEssay(ctx.unitId, block.id, itemId, payload);
           }
           injectEssayEvaluation(itemEl, item, payload);
