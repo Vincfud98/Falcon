@@ -9950,7 +9950,7 @@ const Store = (function(){
     if(!userId || !window._sb || !_state) return;
     try{
       const { data, error } = await window._sb.schema('aluno').from('simulado_essay_responses')
-        .select('simulado_id, attempt_number, item_id, essay_text, score, max_score, feedback_json, ai_corrected_at, human_reviewed_at, answered_at')
+        .select('simulado_id, attempt_number, item_id, essay_text, score, max_score, feedback_json, ai_corrected_at, human_reviewed_at, comentario_admin, answered_at')
         .eq('user_id', userId);
       if(error){ console.warn('[hydrate last sim essays]', error); return; }
       const lastBySim = {};
@@ -9978,6 +9978,8 @@ const Store = (function(){
           wordCount: (r.feedback_json && r.feedback_json.wordCount) || null,
           aiCorrectedAt: r.ai_corrected_at,
           humanReviewedAt: r.human_reviewed_at,
+          // Bug #4 Fase D — exibir comentário do professor (Fase E grava)
+          comentarioAdmin: r.comentario_admin || null,
           submittedAt: r.answered_at ? new Date(r.answered_at).getTime() : Date.now()
         };
       });
@@ -18995,6 +18997,101 @@ Renderers.simuladoPerformance = function(route){
   }), {correct:0,correctDoubt:0,wrong:0,wrongDoubt:0,pending:0,total:0,answered:0});
   const totalPct = totals.answered ? (totals.correct/totals.answered) : null;
 
+  // ─────────────────────────────────────────────────────────────────
+  // Bug #4 Fase D — Discursivas do simulado na tela de Desempenho.
+  // Coleta todos os itens de blocos type='essay', resolve item rico
+  // pra ter command+enunciado, lê resposta+nota do Store (já hidratado
+  // do banco via _hydrateAllLastSimuladoEssays).
+  // ─────────────────────────────────────────────────────────────────
+  const essayEntries = [];
+  let essayScoreSum = 0, essayMaxSum = 0, essayCorrectedCount = 0, essayPendingCount = 0;
+  (sim.blocks||[]).forEach(b => {
+    if(b.type !== 'essay') return;
+    (b.items||[]).forEach((rawIt, idx) => {
+      const it = (typeof _resolveEssayItem === 'function') ? (_resolveEssayItem(rawIt) || rawIt) : rawIt;
+      const itemId = it._bank_id || it.id;
+      const ans = Store.getEssayAnswer(unitId, b.id, itemId);
+      if(!ans) return; // discursiva não respondida não entra
+      const hasIa = typeof ans.score === 'number' && typeof ans.maxScore === 'number';
+      const hasHuman = !!ans.humanReviewedAt;
+      if(hasIa){
+        essayScoreSum += ans.score;
+        essayMaxSum += ans.maxScore;
+        essayCorrectedCount++;
+      } else {
+        essayPendingCount++;
+      }
+      essayEntries.push({ block: b, item: it, itemId, ans, hasIa, hasHuman, index: essayEntries.length + 1 });
+    });
+  });
+  const hasEssays = essayEntries.length > 0;
+  const essayPct = essayMaxSum > 0 ? (essayScoreSum / essayMaxSum) : null;
+
+  // Renderiza um cartão por discursiva. Sempre mostra comando + (nota ou
+  // status pendente). Detalhes da resposta + feedback ficam dentro do
+  // <details> nativo do HTML (expansível) pra não poluir a tela quando
+  // o aluno só quer um overview.
+  const fmtEssayScore = function(score, max){
+    if(typeof score !== 'number' || typeof max !== 'number' || !(max > 0)) return '—';
+    return `<span style="font-family:var(--mono);font-weight:600">${score.toFixed(1)}</span><span style="font-family:var(--mono);color:var(--text-mute);font-weight:400">/${max}</span>`;
+  };
+  const _stripHtmlPerf = function(html){
+    if(!html) return '';
+    return String(html).replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|h\d|li|tr)>/gi, '\n').replace(/<[^>]+>/g, '').replace(/\n{3,}/g, '\n\n').trim();
+  };
+  const essayCards = essayEntries.map(e => {
+    const cmdText = _stripHtmlPerf(e.item.command || e.item.statement || '');
+    const respText = String(e.ans.text || '').trim();
+    const pctOfMax = e.hasIa ? (e.ans.score / e.ans.maxScore) : null;
+    const pctClass = pctOfMax == null ? '' : (pctOfMax >= 0.7 ? 'good' : pctOfMax >= 0.4 ? 'mid' : 'low');
+    const status = e.hasHuman ? 'Revisado pelo professor' : (e.hasIa ? 'Corrigido pela IA' : 'Aguardando correção');
+    const statusColor = e.hasHuman ? 'var(--accent)' : (e.hasIa ? '#88c391' : '#e8a857');
+
+    // Listas de feedback (strengths, weaknesses) — feedback_json no banco
+    const strengthsHtml = (Array.isArray(e.ans.strengths) && e.ans.strengths.length)
+      ? `<div style="margin-top:.9rem"><div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin-bottom:.35rem">Pontos fortes</div><ul style="margin:0;padding-left:1.2rem;font-size:.86rem;line-height:1.55;color:var(--text)">${e.ans.strengths.map(s => `<li>${Util.esc(_stripHtmlPerf(s))}</li>`).join('')}</ul></div>`
+      : '';
+    const weaknessesHtml = (Array.isArray(e.ans.weaknesses) && e.ans.weaknesses.length)
+      ? `<div style="margin-top:.9rem"><div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin-bottom:.35rem">A melhorar</div><ul style="margin:0;padding-left:1.2rem;font-size:.86rem;line-height:1.55;color:var(--text)">${e.ans.weaknesses.map(s => `<li>${Util.esc(_stripHtmlPerf(s))}</li>`).join('')}</ul></div>`
+      : '';
+    const overallHtml = e.ans.overallComment
+      ? `<div style="margin-top:.9rem;padding:.7rem .85rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius);background:rgba(190,160,90,.06);font-family:var(--serif);font-size:.88rem;line-height:1.55;color:var(--text);font-style:italic">${Util.esc(_stripHtmlPerf(e.ans.overallComment))}</div>`
+      : '';
+    // Comentário humano do admin (Fase E vai gravar em ans.comentarioAdmin)
+    const adminCommentHtml = e.ans.comentarioAdmin
+      ? `<div style="margin-top:.9rem;padding:.7rem .85rem;border:1px solid var(--accent);border-radius:var(--radius);background:rgba(190,160,90,.1);font-family:var(--serif);font-size:.88rem;line-height:1.55;color:var(--text)"><div style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);margin-bottom:.3rem;font-style:normal;font-family:var(--mono)">Comentário do professor</div>${Util.esc(_stripHtmlPerf(e.ans.comentarioAdmin))}</div>`
+      : '';
+
+    return `<article class="sim-essay-card" style="border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:1rem 1.1rem;margin-bottom:.9rem;background:var(--accent-lo)">
+      <header style="display:flex;align-items:center;gap:.7rem;flex-wrap:wrap;margin-bottom:.55rem">
+        <span style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute);font-weight:600">Questão ${Util.pad2(e.index)}</span>
+        ${e.item.origin ? `<span style="font-family:var(--mono);font-size:.62rem;padding:.1rem .45rem;border-radius:999px;background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)">${Util.esc(e.item.origin)}</span>` : ''}
+        <span style="font-family:var(--mono);font-size:.62rem;color:${statusColor};padding:.1rem .5rem;border:1px solid currentColor;border-radius:999px">${Util.esc(status)}</span>
+        <div style="margin-left:auto;font-family:var(--serif);font-size:1.05rem">${e.hasIa ? fmtEssayScore(e.ans.score, e.ans.maxScore) : '<span style="font-family:var(--mono);color:var(--text-mute);font-size:.85rem">sem nota</span>'}${e.hasIa && pctOfMax != null ? ` <span class="sim-essay-pct sim-essay-pct--${pctClass}" style="font-family:var(--mono);font-size:.75rem;color:${pctClass==='good'?'#88c391':pctClass==='mid'?'#e8a857':'#c77272'};margin-left:.3rem">(${Math.round(pctOfMax*100)}%)</span>` : ''}</div>
+      </header>
+      ${cmdText ? `<div style="font-family:var(--serif);font-size:.88rem;line-height:1.55;color:var(--text);padding:.65rem .8rem;border-left:2px solid var(--accent-border);background:rgba(0,0,0,.12);margin-bottom:.7rem;border-radius:0 var(--radius) var(--radius) 0">${Util.esc(cmdText)}</div>` : ''}
+      <details style="margin-top:.4rem">
+        <summary style="cursor:pointer;font-family:var(--mono);font-size:.7rem;color:var(--accent);padding:.3rem 0;user-select:none">Ver sua resposta e correção</summary>
+        <div style="padding-top:.7rem">
+          <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin-bottom:.35rem">Sua resposta</div>
+          <div style="font-family:var(--serif);font-size:.88rem;line-height:1.6;color:var(--text);padding:.7rem .85rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius);white-space:pre-wrap">${Util.esc(respText) || '<span style="color:var(--text-mute);font-style:italic">Você não respondeu esta questão.</span>'}</div>
+          ${overallHtml}
+          ${strengthsHtml}
+          ${weaknessesHtml}
+          ${adminCommentHtml}
+          ${!e.hasIa && !e.hasHuman ? `<div style="margin-top:.9rem;padding:.7rem .85rem;border:1px dashed var(--accent-border-soft);border-radius:var(--radius);font-size:.82rem;color:var(--text-mute);text-align:center">Esta discursiva ainda não foi corrigida. Aguarde a correção pelo professor.</div>` : ''}
+        </div>
+      </details>
+    </article>`;
+  }).join('');
+
+  // Card de score adicional nos summary cards (só aparece quando há discursivas)
+  const essaySummaryCard = hasEssays ? `<div class="perf-summary-card">
+    <div class="perf-summary-label">Discursivas</div>
+    <div class="perf-summary-value" style="color:var(--accent)">${essayScoreSum.toFixed(1)}<span>/${essayMaxSum||'—'}</span></div>
+    <div class="perf-summary-sub">${essayCorrectedCount} corrigida(s) · ${essayPendingCount} pendente(s)</div>
+  </div>` : '';
+
   return `<div class="hero">
     <span class="s-label" data-a="1">Desempenho do simulado</span>
     <h1 class="s-title hero" data-a="2">${Util.esc(sim.name)}</h1>
@@ -19020,6 +19117,7 @@ Renderers.simuladoPerformance = function(route){
       <div class="perf-summary-value">${totals.pending}</div>
       <div class="perf-summary-sub">de ${totals.total} questões</div>
     </div>
+    ${essaySummaryCard}
   </section>
   <section class="perf-section" data-a="6">
     <div class="perf-section-label">Desempenho por seção</div>
@@ -19032,7 +19130,11 @@ Renderers.simuladoPerformance = function(route){
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
-  </section>`;
+  </section>
+  ${hasEssays ? `<section class="perf-section" data-a="7">
+    <div class="perf-section-label">Discursivas <span style="font-family:var(--mono);font-size:.7rem;color:var(--accent);text-transform:none;letter-spacing:0;margin-left:.3rem">${essayScoreSum.toFixed(1)}/${essayMaxSum} · ${essayPct != null ? Math.round(essayPct*100)+'%' : '—'}</span></div>
+    <div>${essayCards}</div>
+  </section>` : ''}`;
 };
 
 function formatReleaseCountdown(dateString){
