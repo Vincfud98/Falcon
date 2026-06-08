@@ -13660,11 +13660,38 @@
         </p>
       </div>
 
-      <!-- ABA: TENTATIVAS (Etapa 3) -->
-      <div class="ss-tab-content" data-ss-pane="attempts" style="flex:1;overflow-y:auto;padding:1.4rem;display:none">
-        <p class="client-panel-hint" style="text-align:center;padding:3rem 1rem;color:var(--text-mute)">
-          Lista de tentativas em construção. Próxima etapa: ver todas tentativas dos alunos, filtrar, reabrir.
-        </p>
+      <!-- ABA: TENTATIVAS -->
+      <div class="ss-tab-content" data-ss-pane="attempts" style="flex:1;display:none;flex-direction:column;min-height:0">
+        <!-- Filtros -->
+        <div style="padding:.8rem 1.2rem;border-bottom:1px solid var(--accent-border-soft);display:flex;gap:.7rem;flex-wrap:wrap;align-items:center;background:var(--accent-lo)">
+          <div class="field" style="margin:0">
+            <label style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);display:block;margin-bottom:.2rem">Status</label>
+            <select id="attReviewFltStatus" style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--accent-border-soft);border-radius:var(--radius);color:var(--text);font-family:var(--sans);font-size:.8rem">
+              <option value="todos">Todas</option>
+              <option value="baixo">Nota baixa (&lt;50%)</option>
+              <option value="medio">Nota média (50-70%)</option>
+              <option value="alto">Nota alta (≥70%)</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0;flex:1;min-width:200px">
+            <label style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);display:block;margin-bottom:.2rem">Buscar aluno</label>
+            <input type="text" id="attReviewFltSearch" placeholder="nome ou email…" style="width:100%;padding:.35rem .5rem;background:var(--bg);border:1px solid var(--accent-border-soft);border-radius:var(--radius);color:var(--text);font-family:var(--sans);font-size:.8rem">
+          </div>
+          <div class="field" style="margin:0">
+            <label style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);display:block;margin-bottom:.2rem">Período</label>
+            <select id="attReviewFltPeriod" style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--accent-border-soft);border-radius:var(--radius);color:var(--text);font-family:var(--sans);font-size:.8rem">
+              <option value="todos">Todas</option>
+              <option value="7">Últimos 7 dias</option>
+              <option value="30" selected>Últimos 30 dias</option>
+              <option value="90">Últimos 90 dias</option>
+            </select>
+          </div>
+          <span style="margin-left:auto;font-family:var(--mono);font-size:.7rem;color:var(--text-mute)" id="attReviewCountInfo"></span>
+        </div>
+        <!-- Lista de tentativas -->
+        <div id="attReviewList" style="flex:1;overflow-y:auto;padding:1rem 1.2rem">
+          <div class="loading" style="padding:2rem;text-align:center;color:var(--text-mute)">Carregando…</div>
+        </div>
       </div>
 
       <!-- ABA: DISCURSIVAS (já implementada na Fase E do Bug #4 — movido pra cá) -->
@@ -40468,8 +40495,11 @@
     _essayReviewSimuladoTitle = simuladoTitle || '';
     _essayReviewActiveId = null;
     _essayReviewFilters = { status: 'todos', search: '', period: '30' };
-    // Reset do cache do overview — força reload se reabrir o modal
+    // Reset dos caches — força reload em todas as abas se reabrir o modal
     _ssOverviewCacheKey = null;
+    _ssAttemptsCacheKey = null;
+    _attReviewRows = [];
+    _attReviewFilters = { status: 'todos', search: '', period: '30' };
     document.getElementById('simuladoStatsTitle').textContent = simuladoTitle || 'Simulado';
     // Reset filtros visíveis
     document.getElementById('essayReviewFltStatus').value = 'todos';
@@ -40521,12 +40551,212 @@
     });
     document.querySelectorAll('#simuladoStatsModal .ss-tab-content').forEach(p => {
       const isActive = p.getAttribute('data-ss-pane') === tabKey;
-      p.style.display = isActive ? (tabKey === 'essays' ? 'flex' : 'block') : 'none';
+      // Discursivas e Tentativas usam flex (têm layout column interno)
+      p.style.display = isActive ? ((tabKey === 'essays' || tabKey === 'attempts') ? 'flex' : 'block') : 'none';
     });
     // Lazy load por aba (cache evita re-fetch). skipAutoLoad=true é usado
     // por openSimuladoStatsModal pra sequenciar discursivas → overview.
     if(!skipAutoLoad && tabKey === 'overview' && _essayReviewSimuladoId && !_ssOverviewCacheKey){
       loadAndRenderStatsOverview(_essayReviewSimuladoId);
+    }
+    if(!skipAutoLoad && tabKey === 'attempts' && _essayReviewSimuladoId && !_ssAttemptsCacheKey){
+      loadAndRenderStatsAttempts(_essayReviewSimuladoId);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // S8+S11 Etapa 3 — TENTATIVAS (lista, filtros, reabrir)
+  // ═══════════════════════════════════════════════════════════════════
+  let _ssAttemptsCacheKey = null;
+  let _attReviewRows = [];
+  let _attReviewFilters = { status: 'todos', search: '', period: '30' };
+
+  // Carrega tentativas do simulado + enriquece com nome/avatar via JOIN
+  // client-side com crm.app_users + crm.user_profiles (mesmo padrão das
+  // discursivas). Calcula isLastAttempt por user (pra controlar quando
+  // mostrar botão "Reabrir": só na última tentativa de cada aluno).
+  async function loadAndRenderStatsAttempts(simuladoId){
+    const listEl = document.getElementById('attReviewList');
+    if(!listEl) return;
+    listEl.innerHTML = '<div class="loading" style="padding:2rem;text-align:center;color:var(--text-mute)">Carregando tentativas…</div>';
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('simulado_attempts')
+        .select('id, user_id, simulado_id, attempt_number, score, total, pct, submitted_at')
+        .eq('simulado_id', simuladoId)
+        .order('submitted_at', { ascending: false });
+      if(error){ throw error; }
+      const rows = data || [];
+      // Enriquece com dados do aluno (paralelo, mesmo padrão das discursivas)
+      const userIds = [...new Set(rows.map(r => r.user_id).filter(Boolean))];
+      const usersById = {};
+      const profilesByUserId = {};
+      if(userIds.length){
+        const [uResp, pResp] = await Promise.all([
+          window._sb.schema('crm').from('app_users').select('id, full_name, nickname, email').in('id', userIds),
+          window._sb.schema('crm').from('user_profiles').select('user_id, photo_url, photo_transform').in('user_id', userIds)
+        ]);
+        if(uResp.error) console.warn('[attempts users]', uResp.error);
+        if(pResp.error) console.warn('[attempts profiles]', pResp.error);
+        (uResp.data || []).forEach(u => usersById[u.id] = u);
+        (pResp.data || []).forEach(p => profilesByUserId[p.user_id] = p);
+      }
+      // Marca cada row com isLastAttempt: a maior attempt_number daquele user_id.
+      const lastByUser = {};
+      rows.forEach(r => {
+        const cur = lastByUser[r.user_id];
+        if(!cur || r.attempt_number > cur) lastByUser[r.user_id] = r.attempt_number;
+      });
+      _attReviewRows = rows.map(r => {
+        const u = usersById[r.user_id] || {};
+        const p = profilesByUserId[r.user_id] || {};
+        const displayName = u.nickname || u.full_name || u.email || '(aluno sem nome)';
+        return Object.assign({}, r, {
+          student_name: displayName,
+          student_nickname: u.nickname || '',
+          student_fullname: u.full_name || '',
+          student_email: u.email || '',
+          student_photo_url: p.photo_url || '',
+          student_photo_transform: p.photo_transform || null,
+          isLastAttempt: r.attempt_number === lastByUser[r.user_id]
+        });
+      });
+      _ssAttemptsCacheKey = simuladoId;
+      renderStatsAttempts();
+    }catch(e){
+      console.warn('[attempts load] erro:', e);
+      listEl.innerHTML = '<div style="text-align:center;padding:2rem 1rem;color:#c77272;font-family:var(--mono);font-size:.85rem">Erro ao carregar: ' + esc(e.message || String(e)) + '</div>';
+    }
+  }
+
+  function _attReviewGetFiltered(){
+    const f = _attReviewFilters;
+    let arr = _attReviewRows.slice();
+    if(f.status && f.status !== 'todos'){
+      arr = arr.filter(r => {
+        const pct = parseFloat(r.pct) || 0;
+        if(f.status === 'baixo') return pct < 0.5;
+        if(f.status === 'medio') return pct >= 0.5 && pct < 0.7;
+        if(f.status === 'alto') return pct >= 0.7;
+        return true;
+      });
+    }
+    if(f.search){
+      const s = f.search.toLowerCase();
+      arr = arr.filter(r => (r.student_name||'').toLowerCase().includes(s) || (r.student_email||'').toLowerCase().includes(s) || (r.student_fullname||'').toLowerCase().includes(s));
+    }
+    if(f.period && f.period !== 'todos'){
+      const days = parseInt(f.period, 10);
+      if(days > 0){
+        const cutoff = Date.now() - days * 86400000;
+        arr = arr.filter(r => r.submitted_at && new Date(r.submitted_at).getTime() >= cutoff);
+      }
+    }
+    return arr;
+  }
+
+  function renderStatsAttempts(){
+    const listEl = document.getElementById('attReviewList');
+    if(!listEl) return;
+    const visible = _attReviewGetFiltered();
+    const total = _attReviewRows.length;
+    const cntEl = document.getElementById('attReviewCountInfo');
+    if(cntEl) cntEl.textContent = visible.length + ' de ' + total + ' tentativa' + (total===1?'':'s');
+    // Atualiza badge da aba também
+    const tabBadge = document.getElementById('ssAttemptsCount');
+    if(tabBadge) tabBadge.textContent = total ? '(' + total + ')' : '';
+
+    if(!visible.length){
+      listEl.innerHTML = '<p class="client-panel-hint" style="padding:2rem;text-align:center;color:var(--text-mute);font-size:.85rem;margin:0">' + (total === 0 ? 'Nenhuma tentativa registrada neste simulado ainda.' : 'Nenhuma tentativa com os filtros atuais.') + '</p>';
+      return;
+    }
+
+    listEl.innerHTML = visible.map(r => {
+      const pct = parseFloat(r.pct) || 0;
+      const pct100 = Math.round(pct * 100);
+      const pctColor = pct >= 0.7 ? '#88c391' : pct >= 0.5 ? '#bea05a' : '#c77272';
+      const pctLabel = pct >= 0.7 ? 'Nota alta' : pct >= 0.5 ? 'Nota média' : 'Nota baixa';
+      const dt = r.submitted_at ? new Date(r.submitted_at).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '—';
+      // Botão "Reabrir" só na última tentativa de cada aluno (evita órfãs de attempt_number)
+      const reopenBtn = r.isLastAttempt
+        ? '<button class="att-reopen-btn" data-row-id="' + esc(String(r.id)) + '" style="padding:.35rem .8rem;background:transparent;border:1px solid var(--accent-border);color:var(--accent);font-family:var(--mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;border-radius:var(--radius);cursor:pointer">Reabrir</button>'
+        : '<span style="font-family:var(--mono);font-size:.62rem;color:var(--text-mute);font-style:italic">tentativa antiga</span>';
+      return '<article class="att-row" data-row-id="' + esc(String(r.id)) + '" style="display:grid;grid-template-columns:50px 1fr auto auto;gap:.85rem;align-items:center;padding:.85rem 1rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius);background:var(--accent-lo);margin-bottom:.55rem">' +
+        '<div class="att-avatar" data-row-id="' + esc(String(r.id)) + '" style="width:46px;height:46px"></div>' +
+        '<div style="min-width:0">' +
+          '<div style="display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;margin-bottom:.2rem">' +
+            '<strong style="font-family:var(--serif);font-size:.95rem;color:var(--text)">' + esc(r.student_name) + '</strong>' +
+            (r.student_fullname && r.student_fullname !== r.student_nickname ? '<span style="font-family:var(--serif);font-size:.78rem;color:var(--text-mute)">' + esc(r.student_fullname) + '</span>' : '') +
+          '</div>' +
+          '<div style="font-family:var(--mono);font-size:.65rem;color:var(--text-mute)">' +
+            'Tentativa #' + (r.attempt_number || 1) + ' · ' + esc(dt) + ' · ' + esc(r.student_email || '') +
+          '</div>' +
+        '</div>' +
+        '<div style="text-align:right">' +
+          '<div style="font-family:var(--mono);font-size:1.1rem;color:' + pctColor + ';font-weight:600">' + pct100 + '%</div>' +
+          '<div style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">' + (r.score || 0) + '/' + (r.total || 0) + ' · ' + esc(pctLabel) + '</div>' +
+        '</div>' +
+        '<div>' + reopenBtn + '</div>' +
+      '</article>';
+    }).join('');
+
+    // Avatares (depois do DOM montado)
+    visible.forEach(r => {
+      const avEl = listEl.querySelector('.att-avatar[data-row-id="' + r.id + '"]');
+      if(avEl) _renderAdminAvatarInto(avEl, r.student_photo_url, r.student_photo_transform, r.student_name);
+    });
+
+    // Wire dos botões "Reabrir"
+    listEl.querySelectorAll('.att-reopen-btn').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const rowId = btn.getAttribute('data-row-id');
+        const r = _attReviewRows.find(x => String(x.id) === String(rowId));
+        if(!r) return;
+        _attemptReopen(r, btn);
+      });
+    });
+  }
+
+  // Reabre uma tentativa: DELETE da linha em simulado_attempts.
+  // Respostas em simulado_responses são PRESERVADAS (aluno volta com
+  // suas respostas e pode editar antes de finalizar de novo).
+  async function _attemptReopen(r, btnEl){
+    const confirmMsg =
+      'REABRIR TENTATIVA #' + (r.attempt_number || 1) + ' de ' + r.student_name + '?\n\n' +
+      '• A tentativa volta ao estado "não enviada"\n' +
+      '• As respostas atuais do aluno são PRESERVADAS\n' +
+      '• O aluno poderá editar e finalizar novamente\n' +
+      '• Esta ação NÃO PODE SER DESFEITA pelo histórico\n\n' +
+      'Tem certeza?';
+    if(!confirm(confirmMsg)) return;
+    btnEl.disabled = true;
+    btnEl.textContent = 'Reabrindo…';
+    try{
+      const { error } = await window._sb.schema('aluno').from('simulado_attempts')
+        .delete().eq('id', r.id);
+      if(error){
+        alert('Erro ao reabrir: ' + error.message);
+        btnEl.disabled = false;
+        btnEl.textContent = 'Reabrir';
+        return;
+      }
+      // Remove do cache local + re-renderiza
+      _attReviewRows = _attReviewRows.filter(x => String(x.id) !== String(r.id));
+      // Recalcula isLastAttempt (pode ter promovido a tentativa anterior do aluno)
+      const lastByUser = {};
+      _attReviewRows.forEach(x => {
+        const cur = lastByUser[x.user_id];
+        if(!cur || x.attempt_number > cur) lastByUser[x.user_id] = x.attempt_number;
+      });
+      _attReviewRows.forEach(x => { x.isLastAttempt = x.attempt_number === lastByUser[x.user_id]; });
+      renderStatsAttempts();
+      // Invalida cache da Visão Geral (KPIs vão mudar)
+      _ssOverviewCacheKey = null;
+    }catch(e){
+      console.warn('[attempt reopen]', e);
+      alert('Erro inesperado ao reabrir.');
+      btnEl.disabled = false;
+      btnEl.textContent = 'Reabrir';
     }
   }
 
@@ -40944,6 +41174,20 @@
       _ssSwitchTab(btn.getAttribute('data-ss-tab'));
     });
   });
+  // Filtros da aba Tentativas
+  document.getElementById('attReviewFltStatus').addEventListener('change', (e) => {
+    _attReviewFilters.status = e.target.value;
+    renderStatsAttempts();
+  });
+  document.getElementById('attReviewFltSearch').addEventListener('input', (e) => {
+    _attReviewFilters.search = e.target.value;
+    renderStatsAttempts();
+  });
+  document.getElementById('attReviewFltPeriod').addEventListener('change', (e) => {
+    _attReviewFilters.period = e.target.value;
+    renderStatsAttempts();
+  });
+
   document.getElementById('essayReviewFltStatus').addEventListener('change', (e) => {
     _essayReviewFilters.status = e.target.value;
     renderEssayReviewList();
