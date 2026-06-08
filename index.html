@@ -13491,6 +13491,16 @@ Blocks.essay = {
     const LB = window.LearningBlocks || {};
     const sanitize = LB.sanitizeRichHTML ? LB.sanitizeRichHTML : function(x){ return x; };
 
+    // Bug #18 — Em SIMULADO EM ANDAMENTO (não submetido ainda):
+    //   - Botão diz "Salvar resposta" (não "Enviar para Avaliação")
+    //   - Aside (critérios/padrão/modelos) fica OCULTO até finalizar
+    //   - Toggle "Mostrar critérios" também sumido
+    //   - Click salva texto puro no Store, NÃO chama IA
+    // A correção pela IA acontece em massa no handler "Finalizar simulado"
+    // (Fase C do Bug #4). Após Finalizar, ctx.simuladoMode vira false e o
+    // render mostra tudo normalmente — incluindo a caixa de avaliação.
+    const isSimAndamento = !!(ctx && ctx.simuladoMode);
+
     const items = (block.items||[]).map((rawItem, i) => {
       const it = _resolveEssayItem(rawItem) || {};
       const itemId = it._bank_id || it.id || ('essay-' + i);
@@ -13715,19 +13725,19 @@ Blocks.essay = {
             <div class="essay-meta"></div>
           </div>
         </div>
-        <div class="essay-layout${(!hasAside || !prior) ? ' essay-layout--solo' : ''}">
+        <div class="essay-layout${(!hasAside || !prior || isSimAndamento) ? ' essay-layout--solo' : ''}">
           <div>
             <div class="essay-panel">
               <div class="essay-panel-label">Sua resposta</div>
               <textarea class="essay-textarea" placeholder="Escreva sua resposta aqui…">${Util.esc(prior?prior.text:'')}</textarea>
               <div class="essay-textarea-foot">
                 ${linesHint}
-                <button class="btn-primary essay-submit">Enviar para Avaliação</button>
-                ${hasAside ? `<button class="btn-ghost essay-toggle-aside" type="button">${prior ? 'Ocultar critérios' : 'Mostrar critérios'}</button>` : ''}
+                <button class="btn-primary essay-submit">${isSimAndamento ? 'Salvar resposta' : 'Enviar para Avaliação'}</button>
+                ${(hasAside && !isSimAndamento) ? `<button class="btn-ghost essay-toggle-aside" type="button">${prior ? 'Ocultar critérios' : 'Mostrar critérios'}</button>` : ''}
               </div>
             </div>
           </div>
-          ${hasAside ? `<aside class="essay-aside"${prior ? '' : ' style="display:none"'}>
+          ${(hasAside && !isSimAndamento) ? `<aside class="essay-aside"${prior ? '' : ' style="display:none"'}>
             ${toggleHtml}
             ${crits}
             ${officialSection}
@@ -13759,6 +13769,27 @@ Blocks.essay = {
         submitBtn.addEventListener('click', async () => {
           const text = ta.value.trim();
           if(!text){ ta.focus(); return; }
+
+          // Bug #18 — Em SIMULADO EM ANDAMENTO o botão "Salvar resposta" só
+          // grava o texto (Store.updateEssay → desvio __sim_ →
+          // _syncSimuladoEssayResponseToSupabase com aiCorrected:false).
+          // NÃO chama IA aqui — a correção em massa ocorre quando o aluno
+          // clica "Finalizar e enviar simulado" (Fase C do Bug #4).
+          const _isSimAndamento = !!(ctx && ctx.simuladoMode);
+          if(_isSimAndamento){
+            const originalLabel = submitBtn.textContent;
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Salvando…';
+            try{
+              ctx.store.updateEssay(ctx.unitId, block.id, itemId, { text });
+              if(typeof window.ueToast === 'function'){
+                window.ueToast('Resposta salva. Será corrigida ao finalizar o simulado.', 'success');
+              }
+            }catch(e){ console.warn('[essay sim save] erro:', e); }
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalLabel;
+            return;
+          }
 
           // Loading state — Claude pode demorar até ~60s para correção
           // longa; UX clara evita que o aluno ache que travou.
@@ -18636,6 +18667,13 @@ Renderers.simuladoDetail = function(route){
     if(_st){
       _st.quizAnswers = _st.quizAnswers || {};
       _st.quizAnswers['__sim_' + sim.id] = {};
+      // Bug #18 — Refazer deve limpar também as DISCURSIVAS em memória.
+      // Antes só limpava objetivas (quizAnswers), o que fazia o textarea
+      // nascer pré-preenchido com a resposta da tentativa anterior. O
+      // banco preserva os registros das tentativas antigas (são
+      // identificados por attempt_number) — só o cache local é limpo.
+      _st.essays = _st.essays || {};
+      _st.essays['__sim_' + sim.id] = {};
     }
   }
 
