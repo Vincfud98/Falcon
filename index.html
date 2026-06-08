@@ -8104,6 +8104,10 @@ window.TAG_REGISTRY = {
             essayCount: essayCount,
             locked: false,
             attemptMode: (me.attempt_mode === 'estudo') ? 'estudo' : 'prova',
+            // Bug #4 Fase C — toggle de correção IA das discursivas (default true se ausente).
+            // Usado em Renderers.simuladoDetail (handler "Finalizar") para decidir
+            // se invoca a Edge Function correct-essay automaticamente ao submeter.
+            correcaoIaAtiva: (me.correcao_ia_ativa !== false),
             blocks: blocks,
           };
         });
@@ -13109,6 +13113,98 @@ function _mapClaudeEssayPayload(claude, item, text){
   };
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Bug #4 Fase C — função extraída de Blocks.essay (linha ~13680).
+// Mesma lógica que o quiz normal usava inline, agora reutilizável também
+// pelo fluxo de "Finalizar simulado" (corrige todas as discursivas em
+// sequência se sim.correcaoIaAtiva === true).
+//
+// Retorna { payload, usedAI:true } se a IA respondeu e mapeou OK.
+// Retorna null se: Supabase off, Edge Function falhou, timeout (120s),
+// resposta em formato inesperado, ou exception. O chamador decide se cai
+// pro mock ou deixa a discursiva pendente pra correção manual no admin.
+// ──────────────────────────────────────────────────────────────────────
+async function _correctEssayViaAI(item, essayText){
+  if(!(window._sb && window.UBIQUE_USE_SUPABASE)) return null;
+  try{
+    // STRIP HTML — campos officialAnswer/modelAnswer vêm do editor rich-text.
+    // Markup confunde o Claude na comparação semântica contra a resposta do
+    // aluno (que vem em texto puro). Limpa antes de enviar.
+    const _stripHtml = function(html){
+      if(!html) return '';
+      return String(html)
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|h\d|li|tr)>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    };
+    // Edge Function espera item.modelAnswer (singular). Banco entrega
+    // item.modelAnswers[] (plural). Concatena preservando os títulos.
+    const _modelAnswerClean = Array.isArray(item.modelAnswers) && item.modelAnswers.length
+      ? item.modelAnswers.map(function(m, i){
+          const t = m.title || m.author || ('Modelo ' + (i + 1));
+          return '### ' + t + '\n' + _stripHtml(m.body || '');
+        }).join('\n\n---\n\n')
+      : _stripHtml(item.modelAnswer || '');
+    const _officialAnswerClean = _stripHtml(item.officialAnswer || '');
+    // Discursivas sem critérios cadastrados ganham um critério SINTÉTICO
+    // "Avaliação global" peso 100 APENAS pro Claude — escala 0-100 clara.
+    const _criteriaForAI = Array.isArray(item.criteria) && item.criteria.length
+      ? item.criteria
+      : [{
+          id: 'global',
+          label: 'Avaliação global',
+          maxScore: 100,
+          description: 'Avaliação global da resposta na escala 0-100, considerando: domínio do tema, organização, profundidade da argumentação, precisão factual e clareza.'
+        }];
+    const _enrichedItem = Object.assign({}, item, {
+      criteria: _criteriaForAI,
+      modelAnswer: _modelAnswerClean,
+      officialAnswer: _officialAnswerClean
+    });
+    console.log('[essay AI] enviando item:', {
+      hasStatement: !!_enrichedItem.statement,
+      criteriaCount: (_enrichedItem.criteria||[]).length,
+      modelAnswerLen: _modelAnswerClean.length,
+      officialLen: _officialAnswerClean.length,
+      modelPreview: _modelAnswerClean.slice(0, 100),
+      officialPreview: _officialAnswerClean.slice(0, 100)
+    });
+    const racing = await Promise.race([
+      window._sb.functions.invoke('correct-essay', { body: { item: _enrichedItem, essay_text: essayText } }),
+      new Promise(r => setTimeout(() => r({ error: { message: 'timeout 120s' } }), 120000))
+    ]);
+    if(!racing.error && racing.data && !racing.data.error){
+      const mapped = _mapClaudeEssayPayload(racing.data, item, essayText);
+      if(mapped){
+        console.log('[essay AI] ✅ corrigido via', mapped.aiProvider, mapped.aiModel, '— score:', mapped.score, '/', mapped.maxScore);
+        return { payload: mapped, usedAI: true };
+      } else {
+        console.warn('[essay AI] resposta da Edge Function em formato inesperado. Raw:', racing.data);
+      }
+    } else {
+      console.warn('[essay AI] indisponível. Detalhes:', {
+        invokeError: racing.error,
+        responseError: racing.data && racing.data.error,
+        responseStatus: racing.data && racing.data.status,
+        responseFinishReason: racing.data && racing.data.finishReason,
+        responseUsage: racing.data && racing.data.usage,
+        responseBody: racing.data && racing.data.body,
+        responsePartial: racing.data && racing.data.partial,
+        responseRawPreview: racing.data && racing.data.rawPreview,
+      });
+    }
+  }catch(e){ console.warn('[essay AI] exception:', e); }
+  return null;
+}
+
 function generateMockEssayFeedback(item, text){
   // deterministic pseudo-random based on item.id + text length
   function hash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; } return Math.abs(h); }
@@ -13673,99 +13769,13 @@ Blocks.essay = {
           let payload = null;
           let usedAI = false;
 
-          // 1) Tenta IA real via Edge Function correct-essay
-          //    (timeout 120s; LLM de qualidade leva 30–60s em prompts longos.
-          //     Anteriormente eram 30s, mas a correção real chegava ~56s e o
-          //     front desistia antes — caía no mock indevidamente.)
-          if(window._sb && window.UBIQUE_USE_SUPABASE){
-            try{
-              // A Edge Function espera `item.modelAnswer` (singular), mas o item
-              // resolvido do banco tem `modelAnswers[]` (plural). Concatena
-              // todos os modelos como string, separados por título — mantém o
-              // shape compatível sem perder informação.
-              //
-              // ⚠️ STRIP HTML: os campos officialAnswer/modelAnswer vêm como
-              // HTML (vindos do editor rich-text). Enviar HTML cru pro Claude
-              // adiciona ruído de markup e degrada a comparação semântica
-              // contra a resposta do aluno (que vem em texto puro). Stripamos
-              // antes de enviar — qualidade da avaliação melhora.
-              const _stripHtml = function(html){
-                if(!html) return '';
-                return String(html)
-                  .replace(/<br\s*\/?>/gi, '\n')
-                  .replace(/<\/(p|div|h\d|li|tr)>/gi, '\n')
-                  .replace(/<[^>]+>/g, '')
-                  .replace(/&nbsp;/g, ' ')
-                  .replace(/&amp;/g, '&')
-                  .replace(/&lt;/g, '<')
-                  .replace(/&gt;/g, '>')
-                  .replace(/&quot;/g, '"')
-                  .replace(/&#39;/g, "'")
-                  .replace(/\n{3,}/g, '\n\n')
-                  .trim();
-              };
-              const _modelAnswerClean = Array.isArray(item.modelAnswers) && item.modelAnswers.length
-                ? item.modelAnswers.map(function(m, i){
-                    const t = m.title || m.author || ('Modelo ' + (i + 1));
-                    return '### ' + t + '\n' + _stripHtml(m.body || '');
-                  }).join('\n\n---\n\n')
-                : _stripHtml(item.modelAnswer || '');
-              const _officialAnswerClean = _stripHtml(item.officialAnswer || '');
-              // Bug 1 fix — discursivas sem critérios cadastrados ganham um
-              // critério SINTÉTICO "Avaliação global" peso 100 APENAS pro
-              // Claude. Garante que a IA tenha escala 0-100 clara mesmo
-              // quando o admin não definiu rubrica fina. Não é mostrado
-              // pro aluno (só vai no enrichedItem enviado ao Claude).
-              const _criteriaForAI = Array.isArray(item.criteria) && item.criteria.length
-                ? item.criteria
-                : [{
-                    id: 'global',
-                    label: 'Avaliação global',
-                    maxScore: 100,
-                    description: 'Avaliação global da resposta na escala 0-100, considerando: domínio do tema, organização, profundidade da argumentação, precisão factual e clareza.'
-                  }];
-              const _enrichedItem = Object.assign({}, item, {
-                criteria: _criteriaForAI,
-                modelAnswer: _modelAnswerClean,
-                officialAnswer: _officialAnswerClean
-              });
-              console.log('[essay AI] enviando item:', {
-                hasStatement: !!_enrichedItem.statement,
-                criteriaCount: (_enrichedItem.criteria||[]).length,
-                modelAnswerLen: _modelAnswerClean.length,
-                officialLen: _officialAnswerClean.length,
-                // Previews curtos pra confirmar que HTML foi stripado e fonte chegou
-                modelPreview: _modelAnswerClean.slice(0, 100),
-                officialPreview: _officialAnswerClean.slice(0, 100)
-              });
-              const racing = await Promise.race([
-                window._sb.functions.invoke('correct-essay', { body: { item: _enrichedItem, essay_text: text } }),
-                new Promise(r => setTimeout(() => r({ error: { message: 'timeout 120s' } }), 120000))
-              ]);
-              if(!racing.error && racing.data && !racing.data.error){
-                // Mapeia o JSON do Claude (PT-BR) pro shape interno do front.
-                // Se o mapeamento falhar (formato inesperado), cai pro mock.
-                const mapped = _mapClaudeEssayPayload(racing.data, item, text);
-                if(mapped){
-                  payload = mapped;
-                  usedAI = true;
-                  console.log('[essay AI] ✅ corrigido via', payload.aiProvider, payload.aiModel, '— score:', payload.score, '/', payload.maxScore);
-                } else {
-                  console.warn('[essay AI] resposta da Edge Function em formato inesperado, fallback mock. Raw:', racing.data);
-                }
-              } else {
-                console.warn('[essay AI] indisponível, fallback mock. Detalhes:', {
-                  invokeError: racing.error,
-                  responseError: racing.data && racing.data.error,
-                  responseStatus: racing.data && racing.data.status,
-                  responseFinishReason: racing.data && racing.data.finishReason,
-                  responseUsage: racing.data && racing.data.usage,
-                  responseBody: racing.data && racing.data.body,
-                  responsePartial: racing.data && racing.data.partial,
-                  responseRawPreview: racing.data && racing.data.rawPreview,
-                });
-              }
-            }catch(e){ console.warn('[essay AI] exception:', e); }
+          // 1) Tenta IA real via Edge Function correct-essay (timeout 120s).
+          //    Lógica extraída em _correctEssayViaAI (Bug #4 Fase C) pra ser
+          //    reusada também pelo handler "Finalizar simulado".
+          const _aiResult = await _correctEssayViaAI(item, text);
+          if(_aiResult){
+            payload = _aiResult.payload;
+            usedAI = true;
           }
 
           // 2) Fallback mock se IA não respondeu
@@ -18743,9 +18753,14 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
     // Submit button
     const submitBtn = stageEl.querySelector('#simSubmitBtn');
     if(submitBtn){
-      submitBtn.addEventListener('click', () => {
+      // Bug #4 Fase C — handler agora é async: além de gravar as objetivas,
+      // dispara a correção IA das discursivas em sequência (se o simulado
+      // tem sim.correcaoIaAtiva true). Cada chamada pode levar 30-60s, então
+      // o loop é sequencial pra não esgotar o orçamento da Edge Function.
+      submitBtn.addEventListener('click', async () => {
         if(!confirm('Tem certeza? Após o envio, o gabarito será revelado e não será possível alterar suas respostas.')) return;
-        // Calculate score
+        const _originalBtnText = submitBtn.textContent;
+        // Calculate score (objetivas)
         const selections = window._simSelections || {};
         let correct = 0, total = 0;
         sim.blocks.forEach(b => {
@@ -18764,6 +18779,67 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
             }
           }));
         });
+
+        // Bug #4 Fase C — Correção IA das discursivas (se ativada no simulado).
+        // Itera sequencialmente os blocos type='essay'. Pra cada item respondido
+        // (texto não vazio), invoca _correctEssayViaAI. Se IA OK → grava score +
+        // feedback + ai_corrected_at via Store.updateEssay (que desvia pelo
+        // __sim_ pra _syncSimuladoEssayResponseToSupabase). Se IA falhar →
+        // resposta fica pendente pra correção manual no admin (Fase E).
+        if(sim.correcaoIaAtiva){
+          // Coleta discursivas respondidas a partir do Store (já hidratado da
+          // tabela aluno.simulado_essay_responses no boot do simulado).
+          const essaysBucket = (Store.get().essays || {})['__sim_'+sim.id] || {};
+          const toCorrect = [];
+          (sim.blocks || []).forEach(b => {
+            if(b.type !== 'essay') return;
+            (b.items || []).forEach(it => {
+              const ans = essaysBucket[b.id] && essaysBucket[b.id][it.id];
+              const txt = ans && typeof ans.text === 'string' ? ans.text.trim() : '';
+              if(txt){
+                // Só processa se ainda NÃO foi corrigida pela IA na tentativa atual.
+                // Ex: se aluno volta pro simulado e clica Finalizar de novo (race),
+                // não re-cobra a Edge Function.
+                if(!ans.aiCorrected){
+                  toCorrect.push({ block: b, item: it, text: txt });
+                }
+              }
+            });
+          });
+          if(toCorrect.length){
+            submitBtn.disabled = true;
+            let done = 0;
+            for(const ent of toCorrect){
+              done++;
+              submitBtn.textContent = `Corrigindo discursivas pela IA… ${done}/${toCorrect.length}`;
+              try{
+                // Resolve item rico (com critérios, modelos, refs) — mesma função
+                // que Blocks.essay usa pra renderizar (consistência total).
+                const enriched = (typeof _resolveEssayItem === 'function')
+                  ? (_resolveEssayItem(ent.item) || ent.item)
+                  : ent.item;
+                const aiResult = await _correctEssayViaAI(enriched, ent.text);
+                if(aiResult && aiResult.payload){
+                  // Salva com flag aiCorrected:true → _syncSimuladoEssayResponseToSupabase
+                  // preenche ai_corrected_at. Preserva o text original.
+                  const finalPayload = Object.assign({}, aiResult.payload, {
+                    text: ent.text,
+                    aiCorrected: true
+                  });
+                  Store.updateEssay('__sim_'+sim.id, ent.block.id, ent.item.id, finalPayload);
+                } else {
+                  // IA falhou → mantém só texto, sem score. Admin corrige depois.
+                  console.warn('[sim essay] IA não retornou pra item', ent.item.id, '— ficará pendente pra correção manual.');
+                }
+              }catch(e){
+                console.warn('[sim essay] exception ao corrigir item', ent.item.id, e);
+              }
+            }
+            submitBtn.textContent = _originalBtnText;
+            submitBtn.disabled = false;
+          }
+        }
+
         // Save submission + reveal by re-rendering the page
         Store.submitSimulado(sim.id, correct, total, activeAttempt);
         // Consome a flag de "refazer" agora que a nova tentativa foi enviada.
