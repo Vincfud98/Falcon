@@ -10178,25 +10178,22 @@
           <div class="classif-section" style="display:none">
             <div class="classif-head">
               <h4>Dificuldade</h4>
-              <span class="hint" id="diff-hint">padrão: Média</span>
+              <span class="hint" id="diff-hint">calculada pelo uso real</span>
             </div>
-            <div class="diff-row" id="q-difficulty-row">
-              <label class="diff-opt" data-diff="facil">
-                <input type="radio" name="q-difficulty" value="facil">
-                <span class="dot"></span>
-                <span>Fácil</span>
-              </label>
-              <label class="diff-opt active" data-diff="media">
-                <input type="radio" name="q-difficulty" value="media" checked>
-                <span class="dot"></span>
-                <span>Média</span>
-              </label>
-              <label class="diff-opt" data-diff="dificil">
-                <input type="radio" name="q-difficulty" value="dificil">
-                <span class="dot"></span>
-                <span>Difícil</span>
-              </label>
-            </div>
+            <!-- Pacote #10 — Difficulty não é mais input manual do admin.
+                 É derivada de aluno.student_responses via RPC question_stats
+                 (apenas respostas em UNIDADE; simulado é universo isolado).
+                 O input radio sumiu; em seu lugar um badge read-only mostra
+                 o tier calculado + % acerto + total de respostas.
+                 modalSelectedDifficulty continua existindo no JS (sempre
+                 'media') só pra preservar o save da coluna q.difficulty
+                 (NOT NULL no schema atual). -->
+            <div id="q-difficulty-badge" style="margin-top:.5rem"></div>
+            <p class="hint" style="margin-top:.4rem;font-size:.65rem;line-height:1.5;color:var(--text-mute)">
+              A dificuldade é calculada automaticamente pelo desempenho dos alunos na unidade.
+              Respostas em simulado <strong>não contam</strong> (universo isolado).
+              Os tiers são: 86–100% Muito Fácil · 71–85% Fácil · 51–70% Regular · 31–50% Difícil · 0–30% Muito Difícil.
+            </p>
           </div>
 
           <div class="classif-section">
@@ -19984,7 +19981,14 @@
             if(['exam_id', 'year', 'subject_id'].includes(key)){
               populateQuestionFilters();
             }
-            renderQuestionsList();
+            // Pacote #10 — se o filtro de dificuldade foi ativado e ainda
+            // não temos stats em cache, busca tudo antes de re-renderizar
+            // (uma requisição só, depois fica no cache).
+            if(key === 'difficulty' && f.difficulty && f.difficulty.length > 0 && typeof window._qStatsEnsureAll === 'function'){
+              window._qStatsEnsureAll().then(function(){ renderQuestionsList(); }).catch(function(){ renderQuestionsList(); });
+            } else {
+              renderQuestionsList();
+            }
           },
         });
       }
@@ -20097,12 +20101,41 @@
     // - MC/essay: q.difficulty em algum dos selecionados
     // - TF: tem pelo menos 1 item com difficulty em algum dos selecionados
     if(f.difficulty && f.difficulty.length > 0){
-      filtered = filtered.filter(q => {
+      // Pacote #10 — Filtro agora usa difficulty CALCULADA (RPC
+      // question_stats) em vez de q.difficulty (coluna do banco, que
+      // sempre fica 'media' default). Mapeia tier 5-cores (Muito Fácil/
+      // Fácil/Regular/Difícil/Muito Difícil) pros 3 valores legacy do
+      // filtro (facil/media/dificil) por proximidade — UI legacy
+      // continua compatível até a esteira de UI ampliar pros 5 tiers.
+      const want = new Set(f.difficulty);
+      const tierToLegacy = function(tier){
+        if(!tier) return 'media';
+        if(tier.key === 'muito-facil' || tier.key === 'facil') return 'facil';
+        if(tier.key === 'muito-dificil' || tier.key === 'dificil') return 'dificil';
+        return 'media'; // regular cai em media
+      };
+      filtered = filtered.filter(function(q){
+        let itemIds;
         if(q.type === 'true_false'){
-          return tfItemsCache.some(i =>
-            i.question_id === q.id && f.difficulty.includes(i.difficulty));
+          itemIds = (tfItemsCache || [])
+            .filter(function(t){ return String(t.question_id) === String(q.id); })
+            .map(function(t){ return String(t.id); });
+        } else {
+          itemIds = [String(q.id)];
         }
-        return f.difficulty.includes(q.difficulty);
+        let total = 0, correct = 0;
+        itemIds.forEach(function(id){
+          const s = (typeof window._qStatsGet === 'function') ? window._qStatsGet(id) : null;
+          if(s){ total += s.total; correct += s.correct; }
+        });
+        if(total === 0){
+          // Sem respostas → cai em "media" por convenção (legacy também
+          // mostrava como 'media' por default). Aceita se filtro inclui media.
+          return want.has('media');
+        }
+        const pct = Math.round((correct / total) * 100);
+        const legacy = tierToLegacy(_classifyDifficultyFromPct(pct));
+        return want.has(legacy);
       });
     }
 
@@ -20443,12 +20476,13 @@
     modalSelectedDifficulty = 'media';
     document.getElementById('topics-search').value = '';
 
-    // Re-wire do radio de dificuldade da questão (reset visual)
-    wireDifficultyRow(
-      document.getElementById('q-difficulty-row'),
-      'media',
-      setQuestionDifficulty
-    );
+    // Pacote #10 — placeholder do badge de dificuldade. Será populado
+    // mais abaixo quando carregar a questão existente (no edit) ou
+    // ficar como "Sem dados" pra questão nova.
+    const _diffBadge = document.getElementById('q-difficulty-badge');
+    if(_diffBadge){
+      _diffBadge.innerHTML = '<span style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute);font-style:italic">A dificuldade aparecerá quando alunos responderem esta questão.</span>';
+    }
 
     // Reset estado da aba Conteúdo
     modalTfItems = [];
@@ -20525,16 +20559,29 @@
       refreshModalPhases(false);
       document.getElementById('q-phase').value = q.phase_numero || '';
 
-      // Carregar dificuldade da questão
+      // Pacote #10 — Difficulty agora é DERIVADA das respostas reais
+      // (RPC aluno.question_stats). Apenas guardamos q.difficulty
+      // herdado pra preservar o save (coluna NOT NULL). UI mostra badge
+      // calculado: pra MC/essay item_id é q.id; pra TF, soma de todos
+      // os tf_items dessa question.
       modalSelectedDifficulty = q.difficulty || 'media';
-      wireDifficultyRow(
-        document.getElementById('q-difficulty-row'),
-        modalSelectedDifficulty,
-        setQuestionDifficulty
-      );
-      document.getElementById('diff-hint').textContent =
-        modalSelectedDifficulty === 'facil' ? 'Fácil'
-          : modalSelectedDifficulty === 'dificil' ? 'Difícil' : 'Média';
+      try {
+        const badge = document.getElementById('q-difficulty-badge');
+        if(badge){
+          let itemIds = [];
+          if(q.type === 'true_false'){
+            itemIds = (tfItemsCache || [])
+              .filter(t => String(t.question_id) === String(q.id))
+              .map(t => String(t.id));
+          } else {
+            // MC ou essay: a própria question é o item respondível.
+            itemIds = [String(q.id)];
+          }
+          if(typeof window._renderDifficultyBadge === 'function'){
+            window._renderDifficultyBadge(itemIds, badge);
+          }
+        }
+      } catch(e){ console.warn('[difficulty badge]', e); }
 
       // Popular matérias e selecionar
       refreshModalSubjects(q.exam_id);
@@ -21760,44 +21807,105 @@
    * @param {string} currentValue - valor atual ('facil' | 'media' | 'dificil')
    * @param {(v:string) => void} onChange - callback disparado ao clicar
    */
-  function wireDifficultyRow(rowEl, currentValue, onChange){
-    rowEl.querySelectorAll('.diff-opt').forEach(opt => {
-      const val = opt.dataset.diff;
-      const input = opt.querySelector('input[type="radio"]');
-      if(val === currentValue){
-        opt.classList.add('active');
-        input.checked = true;
-      } else {
-        opt.classList.remove('active');
-        input.checked = false;
-      }
-      opt.addEventListener('click', (e) => {
-        e.preventDefault();
-        rowEl.querySelectorAll('.diff-opt').forEach(o => o.classList.remove('active'));
-        opt.classList.add('active');
-        input.checked = true;
-        onChange(val);
-      });
-    });
-  }
-
-  // Dificuldade da questão (aba Classificação)
+  // Pacote #10 — wireDifficultyRow VIRA NO-OP. A UI antiga (3 radios)
+  // foi removida do DOM e substituída pelo badge calculado. A função fica
+  // só pra compatibilidade dos chamadores antigos (openQuestionModal seta
+  // o radio inicial, depois reescreve no carregamento da questão existente).
+  // modalSelectedDifficulty permanece como 'media' default técnico.
+  function wireDifficultyRow(){ /* no-op desde #10 */ }
   function setQuestionDifficulty(val){
-    modalSelectedDifficulty = val;
-    modalDirty = true;
-    document.getElementById('diff-hint').textContent = val === 'facil' ? 'Fácil'
-      : val === 'dificil' ? 'Difícil' : 'Média';
-    // Se TF, propaga como template para items NOVOS (items antigos mantêm)
-    // Opcionalmente, pergunta se quer sobrescrever todos os items existentes
-    // Por ora: só atualiza o template — items novos vão herdar via addTfItem()
+    // Mantido pra compat. O save ainda lê modalSelectedDifficulty (linha 21187).
+    modalSelectedDifficulty = val || 'media';
   }
 
-  // Wiring inicial (uma vez só — depois wireDifficultyRow será re-chamado em openModal)
-  wireDifficultyRow(
-    document.getElementById('q-difficulty-row'),
-    'media',
-    setQuestionDifficulty
-  );
+  // ─────────────────────────────────────────────────────────────────────
+  // Pacote #10 — Difficulty Badge (calculado via RPC aluno.question_stats)
+  // Lê total + correct por item_id real (= q.id pra MC/essay, tf_item.id
+  // pra C/E). Tiers idênticos aos do aluno (classifyDifficulty no
+  // index.html) pra UX consistente. Cache em memória pra não martelar
+  // o RPC: 1 batch por sessão de admin.
+  // ─────────────────────────────────────────────────────────────────────
+  const DIFFICULTY_TIERS = [
+    { min: 86, key: 'muito-facil',   label: 'Muito Fácil',   color: '#4caf50', icon: '🟢' },
+    { min: 71, key: 'facil',         label: 'Fácil',         color: '#7eb547', icon: '🟢' },
+    { min: 51, key: 'regular',       label: 'Regular',       color: '#d4a04a', icon: '🟡' },
+    { min: 31, key: 'dificil',       label: 'Difícil',       color: '#d97757', icon: '🔴' },
+    { min:  0, key: 'muito-dificil', label: 'Muito Difícil', color: '#c25450', icon: '🔴' },
+  ];
+  function _classifyDifficultyFromPct(pct){
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    return DIFFICULTY_TIERS.find(t => p >= t.min) || DIFFICULTY_TIERS[DIFFICULTY_TIERS.length - 1];
+  }
+  const _qStatsCache = {};   // item_id -> { total, correct }
+  let _qStatsAllLoaded = false;
+  async function _fetchQuestionStats(itemIds){
+    if(!window._sb) return;
+    try{
+      const args = (itemIds && itemIds.length) ? { p_item_ids: itemIds.map(String) } : {};
+      const { data, error } = await window._sb.schema('aluno').rpc('question_stats', args);
+      if(error){ console.warn('[admin question_stats]', error); return; }
+      (data || []).forEach(r => {
+        if(r && r.item_id != null){
+          _qStatsCache[String(r.item_id)] = { total: Number(r.total) || 0, correct: Number(r.correct) || 0 };
+        }
+      });
+      (itemIds || []).forEach(id => { const k = String(id); if(!(k in _qStatsCache)) _qStatsCache[k] = { total: 0, correct: 0 }; });
+    }catch(e){ console.warn('[admin question_stats ex]', e); }
+  }
+  async function _ensureQStats(itemIds){
+    const miss = (itemIds || []).map(String).filter(id => !(id in _qStatsCache));
+    if(miss.length) await _fetchQuestionStats(miss);
+  }
+  async function _ensureAllQStats(){
+    if(_qStatsAllLoaded) return;
+    _qStatsAllLoaded = true;
+    await _fetchQuestionStats(null);
+  }
+  window._qStatsGet = function(itemId){ return _qStatsCache[String(itemId)] || null; };
+  window._qStatsInvalidate = function(itemId){ if(itemId != null) delete _qStatsCache[String(itemId)]; _qStatsAllLoaded = false; };
+  window._qStatsEnsureAll = _ensureAllQStats;
+  window._qStatsEnsure = _ensureQStats;
+
+  /**
+   * Renderiza o badge de dificuldade pra UM item_id no container indicado.
+   * Faz lookup em _qStatsCache; se não tiver, busca via RPC. Atualiza
+   * inline assim que os dados chegarem.
+   */
+  window._renderDifficultyBadge = async function(itemIds, container, opts){
+    if(!container) return;
+    opts = opts || {};
+    const ids = (Array.isArray(itemIds) ? itemIds : [itemIds]).filter(Boolean).map(String);
+    if(!ids.length){
+      container.innerHTML = '<span style="font-family:var(--mono);font-size:.72rem;color:var(--text-mute)">— sem item</span>';
+      return;
+    }
+    // Skeleton enquanto busca
+    container.innerHTML = '<span style="font-family:var(--mono);font-size:.72rem;color:var(--text-mute)">calculando…</span>';
+    await _ensureQStats(ids);
+    // Agrega: pra TF, vários tf_items por questão. Soma total + correct
+    // e tira % geral. Pra MC/essay singular, é 1:1.
+    let total = 0, correct = 0;
+    ids.forEach(id => { const s = _qStatsCache[id]; if(s){ total += s.total; correct += s.correct; }});
+    if(total === 0){
+      container.innerHTML =
+        '<span style="display:inline-flex;align-items:center;gap:.4rem;padding:.3rem .7rem;border-radius:999px;background:var(--bg-elev);border:1px solid var(--accent-border-soft);font-family:var(--mono);font-size:.7rem;color:var(--text-mute)">' +
+          '<span style="font-size:.85rem;line-height:1">⚪</span>' +
+          '<span><strong>Sem dados</strong> · ' + ids.length + ' item' + (ids.length === 1 ? '' : 's') + ' · 0 respostas</span>' +
+        '</span>';
+      return;
+    }
+    const pct = Math.round((correct / total) * 100);
+    const tier = _classifyDifficultyFromPct(pct);
+    container.innerHTML =
+      '<span style="display:inline-flex;align-items:center;gap:.4rem;padding:.3rem .7rem;border-radius:999px;background:var(--bg-elev);border:1px solid ' + tier.color + ';font-family:var(--mono);font-size:.7rem;color:var(--text)" title="Calculado de aluno.student_responses (unidade — simulado não conta)">' +
+        '<span style="font-size:.85rem;line-height:1">' + tier.icon + '</span>' +
+        '<strong style="color:' + tier.color + '">' + tier.label + '</strong>' +
+        '<span style="color:var(--text-mute)">·</span>' +
+        '<span>' + pct + '% acerto</span>' +
+        '<span style="color:var(--text-mute)">·</span>' +
+        '<span>' + total + ' resp.</span>' +
+      '</span>';
+  };
 
   // ═══════════════════════════════════════════════════════════
   // MODAL — ABA REFERÊNCIAS
@@ -44423,6 +44531,54 @@
       if(toggle){ toggle.textContent = '▸'; }
     });
     el.scrollTop = scrollTop;
+    // Pacote #10 — popula badges de difficulty nos slots data-diff-slot
+    // (renderGroup dos blocos objetivos com bank_question_id). Async
+    // pra não bloquear o paint inicial.
+    setTimeout(function(){ _ueFillDifficultyBadges(el); }, 0);
+  }
+
+  // Lê o estado atual dos blocos e popula cada [data-diff-slot] com o
+  // badge calculado. Suporta MC (1 question_id), TF (todos os tf_items
+  // do question) e essay (1 question_id — mas RPC só agrega quiz; pra
+  // essay vai dar "Sem dados", o que é correto: difficulty só faz
+  // sentido pra objetivas).
+  function _ueFillDifficultyBadges(scope){
+    if(!scope) return;
+    const slots = scope.querySelectorAll('[data-diff-slot]');
+    if(!slots.length) return;
+    slots.forEach(function(slot){
+      try{
+        // O slot está dentro de um card de grupo "do banco". O grupo
+        // tem `bank_question_id` que mapeamos pra questionsCache pra
+        // descobrir o tipo e os tf_items.
+        const card = slot.closest('[data-block-card]');
+        if(!card) return;
+        // O grupo é encontrado pelo índice dentro do bloco; usamos o
+        // próprio `data-diff-slot` que codifica "bid-gIdx".
+        const parts = String(slot.getAttribute('data-diff-slot')).split('-');
+        const bid = parseInt(parts[0], 10);
+        const gIdx = parseInt(parts[1], 10);
+        const blk = _ueGetBlock(bid);
+        if(!blk || !blk.content || !Array.isArray(blk.content.groups)) return;
+        const g = blk.content.groups[gIdx];
+        if(!g || !g.bank_question_id) return;
+        const q = (questionsCache || []).find(function(x){ return String(x.id) === String(g.bank_question_id); });
+        if(!q) return;
+        let itemIds = [];
+        if(q.type === 'true_false'){
+          const subset = Array.isArray(g.bank_item_ids) && g.bank_item_ids.length ? g.bank_item_ids.map(String) : null;
+          itemIds = (tfItemsCache || [])
+            .filter(function(t){ return String(t.question_id) === String(q.id); })
+            .map(function(t){ return String(t.id); });
+          if(subset) itemIds = itemIds.filter(function(id){ return subset.indexOf(id) >= 0; });
+        } else {
+          itemIds = [String(q.id)];
+        }
+        if(typeof window._renderDifficultyBadge === 'function'){
+          window._renderDifficultyBadge(itemIds, slot);
+        }
+      }catch(e){ console.warn('[diff slot fill]', e); }
+    });
   }
 
   function ueBlockHTML(b, i){
@@ -48560,11 +48716,13 @@
               '<input class="field-input" id="' + tagsInputId + '" value="' + esc(tagsCsv) + '" oninput="ueOqTagsUpdate(' + bid + ',' + gIdx + ',' + qIdx + ',this.value)" placeholder="café, D. Pedro II, Brasil Colônia" style="font-size:.78rem">' +
               knownTagsList +
             '</div>' +
-            // Stats mockadas (read-only)
-            '<div style="display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.5rem;padding-top:.4rem;border-top:1px dashed var(--accent-border-soft)">' +
-              '<span class="card-label" style="background:var(--bg-elev);border:1px solid var(--accent-border-soft);padding:.1rem .4rem;border-radius:999px;font-size:.6rem;color:var(--text-mute)" title="% de acerto (mockado)">acerto: ' + (stats.correct_pct || 0) + '%</span>' +
-              '<span class="card-label" style="background:var(--bg-elev);border:1px solid var(--accent-border-soft);padding:.1rem .4rem;border-radius:999px;font-size:.6rem;color:var(--text-mute)" title="% de erro (mockado)">erro: ' + (stats.wrong_pct || 0) + '%</span>' +
-              '<span class="card-label" style="background:var(--bg-elev);border:1px solid var(--accent-border-soft);padding:.1rem .4rem;border-radius:999px;font-size:.6rem;color:var(--text-mute)" title="% que marcou em dúvida (mockado)">chute: ' + (stats.guess_pct || 0) + '%</span>' +
+            // Pacote #10 — Stats antes MOCKADAS (acerto/erro/chute zerados)
+            // foram retiradas. Questão INLINE não está no banco real
+            // (questoes.questions), então o RPC question_stats não tem
+            // dados pra ela. Sugestão pro admin: criar no banco pra ter
+            // estatísticas reais.
+            '<div style="margin-top:.5rem;padding-top:.4rem;border-top:1px dashed var(--accent-border-soft);font-family:var(--mono);font-size:.6rem;color:var(--text-mute);font-style:italic">' +
+              'Estatísticas reais aparecem só pra questões salvas no banco (use "Criar no banco" no topo do bloco).' +
             '</div>' +
           '</div>';
         }
@@ -48612,6 +48770,12 @@
               '</div>' +
               '<div style="font-family:var(--serif);font-size:.85rem;line-height:1.4;color:var(--text);margin-bottom:.3rem">' + esc(enun) + (enun.length >= 200 ? '…' : '') + '</div>' +
               qListHtml +
+              // Pacote #10 — Badge calculado de difficulty. Renderiza após
+              // o DOM ser inserido via setTimeout(0) — busca todos os
+              // item_ids do grupo (todos tf_items pra TF, ou q.id pra MC)
+              // e mostra um badge agregado. Container `data-diff-slot`
+              // identificável por bid+gIdx.
+              '<div data-diff-slot="' + bid + '-' + gIdx + '" style="margin-top:.5rem;padding-top:.4rem;border-top:1px dashed var(--accent-border-soft)"></div>' +
               '<div style="margin-top:.4rem"><a href="javascript:void(0)" onclick="ueOqEditBankQuestion(\'' + esc(String(g.bank_question_id)) + '\')" style="font-size:.72rem;color:var(--accent)">editar no banco →</a></div>' +
             '</div>';
           }
