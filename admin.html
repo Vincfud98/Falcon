@@ -40468,6 +40468,8 @@
     _essayReviewSimuladoTitle = simuladoTitle || '';
     _essayReviewActiveId = null;
     _essayReviewFilters = { status: 'todos', search: '', period: '30' };
+    // Reset do cache do overview — força reload se reabrir o modal
+    _ssOverviewCacheKey = null;
     document.getElementById('simuladoStatsTitle').textContent = simuladoTitle || 'Simulado';
     // Reset filtros visíveis
     document.getElementById('essayReviewFltStatus').value = 'todos';
@@ -40475,21 +40477,29 @@
     document.getElementById('essayReviewFltPeriod').value = '30';
     document.getElementById('essayReviewList').innerHTML = '<div class="loading" style="padding:2rem;text-align:center;color:var(--text-mute)">Carregando…</div>';
     document.getElementById('essayReviewDetail').innerHTML = '<div style="text-align:center;color:var(--text-mute);padding:3rem 1rem;font-family:var(--sans);font-size:.9rem">Selecione uma resposta à esquerda para revisar.</div>';
-    // Abre modal e ativa aba padrão
+    // Abre modal e ativa aba padrão (Visão Geral) com loading visível.
+    // Importante: NÃO disparamos loadAndRenderStatsOverview daqui pra
+    // evitar race condition — discursivas precisam estar carregadas
+    // ANTES (KPI "média discursivas" lê de _essayReviewRows). Por isso
+    // fazemos sequencial: discursivas → overview.
     document.getElementById('simuladoStatsModal').classList.add('active');
-    // Aba inicial: Visão Geral (será preenchida nas próximas etapas).
-    // Mas como Discursivas é o que já funciona, carregamos seus dados
-    // em paralelo — assim quando o admin clicar na aba "Discursivas",
-    // já está pronto.
-    _ssSwitchTab('overview');
+    _ssSwitchTab('overview', /*skipAutoLoad=*/true);
+    // Mostra placeholder de loading na aba Visão Geral até tudo chegar
+    const ovPane = document.querySelector('#simuladoStatsModal [data-ss-pane="overview"]');
+    if(ovPane) ovPane.innerHTML = '<div style="text-align:center;padding:3rem 1rem;color:var(--text-mute);font-family:var(--mono);font-size:.85rem">Carregando estatísticas…</div>';
+
+    // Carrega discursivas (precisamos delas pra calcular KPI das discursivas
+    // E pra a aba Discursivas funcionar quando o admin clicar nela).
     _essayReviewRows = await loadSimuladoEssayResponsesForAdmin(simuladoId);
-    // Atualiza contador no header da aba Discursivas
     const cntEl = document.getElementById('ssEssaysCount');
     if(cntEl){
       const pending = _essayReviewRows.filter(r => !r.human_reviewed_at).length;
       cntEl.textContent = _essayReviewRows.length ? '(' + pending + '/' + _essayReviewRows.length + ')' : '';
     }
     renderEssayReviewList();
+
+    // Agora dispara o load da Visão Geral (discursivas em cache).
+    loadAndRenderStatsOverview(simuladoId);
   }
   function closeSimuladoStatsModal(){
     document.getElementById('simuladoStatsModal').classList.remove('active');
@@ -40500,8 +40510,9 @@
 
   // S8+S11 — Troca aba ativa do modal de estatísticas.
   // Aplica estilo (border-bottom dourado, cor) no botão da aba selecionada
-  // e mostra/oculta painéis correspondentes via display.
-  function _ssSwitchTab(tabKey){
+  // e mostra/oculta painéis correspondentes via display. Faz lazy load
+  // das abas pesadas (overview) — só carrega no primeiro acesso.
+  function _ssSwitchTab(tabKey, skipAutoLoad){
     _ssActiveTab = tabKey;
     document.querySelectorAll('#simuladoStatsModal .ss-tab').forEach(b => {
       const isActive = b.getAttribute('data-ss-tab') === tabKey;
@@ -40512,6 +40523,200 @@
       const isActive = p.getAttribute('data-ss-pane') === tabKey;
       p.style.display = isActive ? (tabKey === 'essays' ? 'flex' : 'block') : 'none';
     });
+    // Lazy load por aba (cache evita re-fetch). skipAutoLoad=true é usado
+    // por openSimuladoStatsModal pra sequenciar discursivas → overview.
+    if(!skipAutoLoad && tabKey === 'overview' && _essayReviewSimuladoId && !_ssOverviewCacheKey){
+      loadAndRenderStatsOverview(_essayReviewSimuladoId);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // S8+S11 Etapa 2 — VISÃO GERAL (KPIs + distribuição + top erradas)
+  // ═══════════════════════════════════════════════════════════════════
+  // Cache evita re-fetch dos dados toda vez que o admin troca de aba e
+  // volta. Invalidado ao fechar o modal (key = simuladoId).
+  let _ssOverviewCacheKey = null;
+
+  // Carrega tudo necessário pra Visão Geral em paralelo:
+  //   1. simulado_attempts → tentativas + nota das objetivas (pct)
+  //   2. simulado_responses → respostas item-a-item (pra ranking de erros)
+  //   3. _essayReviewRows (já carregado) → nota média discursivas
+  // Agrega no front e renderiza.
+  async function loadAndRenderStatsOverview(simuladoId){
+    const pane = document.querySelector('#simuladoStatsModal [data-ss-pane="overview"]');
+    if(!pane) return;
+    pane.innerHTML = '<div style="text-align:center;padding:3rem 1rem;color:var(--text-mute);font-family:var(--mono);font-size:.85rem">Carregando estatísticas…</div>';
+
+    try{
+      const aSb = window._sb.schema('aluno');
+      const [attemptsR, responsesR] = await Promise.all([
+        aSb.from('simulado_attempts')
+          .select('user_id, score, total, pct, attempt_number, submitted_at')
+          .eq('simulado_id', simuladoId),
+        aSb.from('simulado_responses')
+          .select('user_id, item_id, correct, attempt_number')
+          .eq('simulado_id', simuladoId)
+      ]);
+      if(attemptsR.error){ throw attemptsR.error; }
+      if(responsesR.error){ throw responsesR.error; }
+
+      const attempts = attemptsR.data || [];
+      const responses = responsesR.data || [];
+      // Discursivas (já hidratado por openSimuladoStatsModal). Defensivo
+      // caso aluno troque de aba antes do load terminar.
+      const essays = Array.isArray(_essayReviewRows) ? _essayReviewRows : [];
+
+      _ssOverviewCacheKey = simuladoId;
+      renderStatsOverview({ attempts, responses, essays });
+    }catch(e){
+      console.warn('[stats overview] erro:', e);
+      pane.innerHTML = '<div style="text-align:center;padding:2rem 1rem;color:#c77272;font-family:var(--mono);font-size:.85rem">Erro ao carregar: ' + esc(e.message || String(e)) + '</div>';
+    }
+  }
+
+  function renderStatsOverview(data){
+    const pane = document.querySelector('#simuladoStatsModal [data-ss-pane="overview"]');
+    if(!pane) return;
+    const { attempts, responses, essays } = data;
+
+    // ── KPI 1 — Total tentativas (submetidas) ────────────────────────
+    const submittedAttempts = attempts.filter(a => a.submitted_at);
+    const totalAttempts = submittedAttempts.length;
+
+    // ── KPI 2 — Alunos únicos (que JÁ submeteram pelo menos 1 tentativa) ─
+    const uniqueStudents = new Set(submittedAttempts.map(a => a.user_id)).size;
+
+    // ── KPI 3 — Nota média objetivas (média de pct, em %) ─────────────
+    const pctValues = submittedAttempts.map(a => parseFloat(a.pct)).filter(v => !isNaN(v));
+    const avgObjPct = pctValues.length ? (pctValues.reduce((s,v) => s+v, 0) / pctValues.length) : null;
+
+    // ── KPI 4 — Nota média discursivas (média de score/max em %) ──────
+    const essayWithScore = essays.filter(e => typeof e.score === 'number' && typeof e.max_score === 'number' && e.max_score > 0);
+    const essayPcts = essayWithScore.map(e => e.score / e.max_score);
+    const avgEssayPct = essayPcts.length ? (essayPcts.reduce((s,v) => s+v, 0) / essayPcts.length) : null;
+
+    // ── KPI 5 — Discursivas pendentes de revisão humana ───────────────
+    const essaysPending = essays.filter(e => !e.human_reviewed_at).length;
+    const essaysTotal = essays.length;
+
+    // ── Distribuição de notas (objetivas, 10 buckets) ────────────────
+    // bucket 0 = 0-9.99%, bucket 1 = 10-19.99%, ..., bucket 9 = 90-100%
+    const buckets = Array(10).fill(0);
+    pctValues.forEach(v => {
+      const pct100 = v * 100;
+      let idx = Math.floor(pct100 / 10);
+      if(idx > 9) idx = 9; // 100% cai no último bucket
+      if(idx < 0) idx = 0;
+      buckets[idx]++;
+    });
+    const bucketMax = Math.max(1, ...buckets);
+
+    // ── Top 5 questões mais erradas ───────────────────────────────────
+    // Agrega responses por item_id, calcula % erro = wrong/total.
+    // Filtra itens com pelo menos 3 respostas pra não ranquear ruído.
+    const byItem = {};
+    responses.forEach(r => {
+      const k = String(r.item_id);
+      if(!byItem[k]) byItem[k] = { item_id: r.item_id, total: 0, wrong: 0 };
+      byItem[k].total++;
+      if(r.correct === false) byItem[k].wrong++;
+    });
+    const ranking = Object.values(byItem)
+      .filter(x => x.total >= 1)
+      .map(x => Object.assign({}, x, { errPct: x.total ? (x.wrong / x.total) : 0 }))
+      .sort((a, b) => b.errPct - a.errPct || b.total - a.total)
+      .slice(0, 5);
+
+    // Resolve texto da questão pra cada item do ranking (tf_items → questions)
+    // Tem que cobrir 3 casos: tf_item id (text de número), question.id (uuid) ou nada.
+    const ranked = ranking.map(x => {
+      let label = '—', context = '';
+      const tf = (tfItemsCache || []).find(t => String(t.id) === String(x.item_id));
+      if(tf){
+        const q = (questionsCache || []).find(q => String(q.id) === String(tf.question_id));
+        label = String(tf.assertiva || '').replace(/<[^>]+>/g, '').slice(0, 140);
+        context = q ? (q.origin || ('Tópico ' + (q.numero || ''))) : '';
+      } else {
+        const q = (questionsCache || []).find(q => String(q.id) === String(x.item_id));
+        if(q){
+          label = String(q.enunciado || q.command || '').replace(/<[^>]+>/g, '').slice(0, 140);
+          context = q.origin || '';
+        }
+      }
+      return Object.assign({}, x, { label, context });
+    });
+
+    // ── Render ───────────────────────────────────────────────────────
+    const fmtPct = v => v == null ? '—' : (Math.round(v * 1000) / 10) + '%';
+    const card = (label, value, sub, accentColor) => `
+      <div style="background:var(--accent-lo);border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:1rem 1.1rem">
+        <div style="font-family:var(--mono);font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);margin-bottom:.4rem">${esc(label)}</div>
+        <div style="font-family:var(--serif);font-size:1.6rem;color:${accentColor || 'var(--text)'};line-height:1.1">${value}</div>
+        ${sub ? `<div style="font-family:var(--mono);font-size:.68rem;color:var(--text-mute);margin-top:.3rem">${esc(sub)}</div>` : ''}
+      </div>`;
+
+    // Histograma — barras horizontais com largura proporcional + label de count
+    const histRows = buckets.map((cnt, i) => {
+      const lo = i * 10;
+      const hi = i === 9 ? 100 : (i * 10 + 9);
+      const range = `${lo}-${hi}%`;
+      const pctOfMax = cnt / bucketMax;
+      const w = Math.round(pctOfMax * 100);
+      // Cor: vermelho (baixo), amarelo (médio), verde (alto)
+      const barColor = i < 3 ? '#c77272' : i < 6 ? '#e8a857' : i < 8 ? '#bea05a' : '#88c391';
+      return `<div style="display:grid;grid-template-columns:80px 1fr 50px;gap:.6rem;align-items:center;margin-bottom:.35rem">
+        <div style="font-family:var(--mono);font-size:.72rem;color:var(--text-mute);text-align:right">${esc(range)}</div>
+        <div style="background:var(--accent-lo);border-radius:var(--radius);overflow:hidden;height:18px;position:relative">
+          <div style="background:${barColor};width:${w}%;height:100%;transition:width .4s var(--ease,ease)"></div>
+        </div>
+        <div style="font-family:var(--mono);font-size:.78rem;color:var(--text);font-weight:600">${cnt}</div>
+      </div>`;
+    }).join('');
+
+    // Top 5 erradas
+    const rankedHtml = ranked.length === 0
+      ? '<p class="client-panel-hint" style="text-align:center;padding:1.5rem;color:var(--text-mute);font-size:.82rem;margin:0">Ainda não há respostas suficientes pra ranquear questões.</p>'
+      : ranked.map((x, i) => `
+        <div style="display:grid;grid-template-columns:32px 1fr 90px;gap:.7rem;align-items:center;padding:.65rem .8rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius);background:var(--accent-lo);margin-bottom:.45rem">
+          <div style="font-family:var(--mono);font-size:1.15rem;color:#c77272;font-weight:600;text-align:center">${i+1}</div>
+          <div style="min-width:0">
+            ${x.context ? `<div style="font-family:var(--mono);font-size:.62rem;color:var(--accent);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.2rem">${esc(x.context)}</div>` : ''}
+            <div style="font-family:var(--serif);font-size:.86rem;line-height:1.4;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${esc(x.label || '(sem texto)')}${x.label && x.label.length >= 140 ? '…' : ''}</div>
+          </div>
+          <div style="text-align:right">
+            <div style="font-family:var(--mono);font-size:1.05rem;color:#c77272;font-weight:600">${Math.round(x.errPct * 100)}%</div>
+            <div style="font-family:var(--mono);font-size:.62rem;color:var(--text-mute)">${x.wrong}/${x.total} erro${x.wrong===1?'':'s'}</div>
+          </div>
+        </div>`).join('');
+
+    pane.innerHTML = `
+      <!-- KPIs em 5 cards -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));gap:.7rem;margin-bottom:1.4rem">
+        ${card('Tentativas', totalAttempts, totalAttempts === 0 ? '' : 'submetidas no total')}
+        ${card('Alunos únicos', uniqueStudents, uniqueStudents === 0 ? '' : 'que finalizaram pelo menos 1 tentativa')}
+        ${card('Média objetivas', fmtPct(avgObjPct), pctValues.length + ' tentativa' + (pctValues.length===1?'':'s'), avgObjPct == null ? null : avgObjPct >= 0.7 ? '#88c391' : avgObjPct >= 0.4 ? '#e8a857' : '#c77272')}
+        ${card('Média discursivas', fmtPct(avgEssayPct), essayWithScore.length + ' nota' + (essayWithScore.length===1?'':'s'), avgEssayPct == null ? null : avgEssayPct >= 0.7 ? '#88c391' : avgEssayPct >= 0.4 ? '#e8a857' : '#c77272')}
+        ${card('Discursivas pendentes', essaysPending, essaysTotal ? ('de ' + essaysTotal + ' enviadas') : 'sem discursivas no simulado', essaysPending > 0 ? '#e8a857' : null)}
+      </div>
+
+      <!-- Distribuição de notas + Top erradas em 2 colunas (vira coluna única em telas estreitas) -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(380px, 1fr));gap:1.2rem">
+        <!-- Histograma -->
+        <section>
+          <div style="font-family:var(--mono);font-size:.7rem;color:var(--accent);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.7rem">Distribuição das notas (objetivas)</div>
+          ${pctValues.length === 0
+            ? '<p class="client-panel-hint" style="text-align:center;padding:1.5rem;color:var(--text-mute);font-size:.82rem;margin:0">Sem tentativas submetidas ainda.</p>'
+            : '<div>' + histRows + '</div>'}
+          ${pctValues.length > 0 ? `<div style="font-family:var(--mono);font-size:.65rem;color:var(--text-mute);margin-top:.5rem;text-align:right">Total: ${pctValues.length} tentativa${pctValues.length===1?'':'s'}</div>` : ''}
+        </section>
+
+        <!-- Top 5 questões erradas -->
+        <section>
+          <div style="font-family:var(--mono);font-size:.7rem;color:var(--accent);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.7rem">Top 5 questões com mais erro</div>
+          ${rankedHtml}
+        </section>
+      </div>
+    `;
   }
 
   // Aplica filtros e retorna o subset visível.
