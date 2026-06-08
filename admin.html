@@ -46536,16 +46536,33 @@
       (modality === 'multiple_choice') ? 'multiple_choice' :
       (modality === 'essay')           ? 'essay' :
       'true_false';
-    // Origin (raw_id antigo OU origin novo)
+    // Origin (raw_id antigo OU origin novo) — agora com SANITIZAÇÃO robusta.
+    // IA geradora costuma escrever "Ubique", "inédita", "Original" no campo
+    // origin quando a questão é inédita, em vez de OMITIR o campo. Isso
+    // antes era salvo literal no banco, deixando a questão como past_exam
+    // com origin lixo (código do CACD ficava com "Ubique" escrito).
+    // Conserto: detecta marcadores de "não tem origem" → reseta pra vazio.
     let originSrc = raw.origin || raw.raw_id || '';
     originSrc = String(originSrc).trim();
-    // Se veio sem colchetes/sem #, tenta normalizar
-    if(originSrc && !/^\s*\[/.test(originSrc) && !/^\s*#/.test(originSrc)){
-      // ex: "15-2/2023" → "[#15-2/2023]"
+    // Marcadores de inexistência (questão Ubique declarada com texto em
+    // vez de omitir o campo). Comparação normalizando acento + lowercase.
+    const originLower = originSrc.toLowerCase().replace(/[áàâã]/g,'a').replace(/[éèê]/g,'e').replace(/[íìî]/g,'i').replace(/[óòôõ]/g,'o').replace(/[úùû]/g,'u');
+    const UBIQUE_MARKERS = ['', '-', 'none', 'null', 'ubique', 'inedita', 'inedito', 'original', 'sem origem', 'sem origin', 'n/a', 'nao se aplica', 'autoral'];
+    if(UBIQUE_MARKERS.indexOf(originLower) >= 0){
+      originSrc = '';
+    } else if(!/^\s*\[/.test(originSrc) && !/^\s*#/.test(originSrc)){
+      // Veio sem colchetes/sem #: tenta normalizar formatos numéricos.
+      // Ex: "15-2/2023" → "[#15-2/2023]"
       if(/^\s*(?:\d+-)?\d+\/\d+\s*$/.test(originSrc)){
         originSrc = '[#' + originSrc.trim() + ']';
+      } else {
+        // String não-parseável (ex: "CACD 2015 prova", "Q5 2018"). Não dá
+        // pra inferir; descarta e avisa. Admin deve corrigir manualmente
+        // ou usar o formato [#N/YYYY].
+        console.warn('[import] origin não-parseável descartado:', JSON.stringify(originSrc));
+        originSrc = '';
       }
-    } else if(originSrc && /^\s*#/.test(originSrc)){
+    } else if(/^\s*#/.test(originSrc)){
       // ex: "#15-2/2023" → "[#15-2/2023]"
       originSrc = '[' + originSrc.trim() + ']';
     }
@@ -46667,9 +46684,20 @@
     if(!g.enunciado && raw.title && /julgue|leia|considere|considerando|com base|com rela|assinale|disserte/i.test(String(raw.title))){
       g.enunciado = raw.title;
     }
-    // Normaliza origin com colchetes se faltar
-    if(g.origin && !/^\s*\[/.test(g.origin) && /^\s*#?\s*\d/.test(g.origin)){
-      g.origin = '[' + g.origin.replace(/^\s*#?\s*/, '#').trim() + ']';
+    // Sanitiza origin do GRUPO com a mesma lógica de _ueOqNormalizeImportedQuestion:
+    // marcadores Ubique → vazio; numérico solto → envolve em [#...]; outros → descarta.
+    {
+      const orig = String(g.origin || '').trim();
+      const lower = orig.toLowerCase().replace(/[áàâã]/g,'a').replace(/[éèê]/g,'e').replace(/[íìî]/g,'i').replace(/[óòôõ]/g,'o').replace(/[úùû]/g,'u');
+      const UBIQUE_MARKERS_G = ['', '-', 'none', 'null', 'ubique', 'inedita', 'inedito', 'original', 'sem origem', 'sem origin', 'n/a', 'nao se aplica', 'autoral'];
+      if(UBIQUE_MARKERS_G.indexOf(lower) >= 0){
+        g.origin = '';
+      } else if(!/^\s*\[/.test(orig) && /^\s*#?\s*\d/.test(orig)){
+        g.origin = '[' + orig.replace(/^\s*#?\s*/, '#').trim() + ']';
+      } else if(!/^\s*\[/.test(orig) && !/^\s*#/.test(orig)){
+        console.warn('[import] origin do grupo não-parseável descartado:', JSON.stringify(orig));
+        g.origin = '';
+      }
     }
     // Schema novo — reference_texts[] rico (espelho da tabela).
     if(Array.isArray(raw.reference_texts)){
@@ -47648,6 +47676,22 @@
     const gm = code.match(/#(\d+)/);
     const numero = gm ? parseInt(gm[1], 10) : null;
     const isUbique = !code;
+
+    console.log('[import] criando essay no banco', {
+      origin: code || '(vazio → Ubique)',
+      year,
+      numero,
+      isUbique,
+      subjectId,
+      examId,
+      enunciadoLen:  (g.enunciado || '').length,
+      commandLen:    (q.command || '').length,
+      max_lines:     q.max_lines || null,
+      criteriaCount: Array.isArray(q.criteria) ? q.criteria.length : 0,
+      modelsCount:   Array.isArray(q.models) ? q.models.length : 0,
+      refsCount:     Array.isArray(g.reference_texts) ? g.reference_texts.length : 0,
+      hasImage:      !!(g.image_url || q.reference_image),
+    });
 
     // Bug 2 — q.enunciado (banco) recebe o enunciado/comando do GRUPO;
     //         q.command (banco) recebe o comando da QUESTÃO.
