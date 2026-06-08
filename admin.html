@@ -40295,14 +40295,14 @@
   let _essayReviewActiveId = null;     // id da resposta selecionada no detalhe
   let _essayReviewFilters = { status: 'todos', search: '', period: '30' };
 
-  // Carrega respostas de discursivas de UM simulado + enriquece com nome.
-  // Sem RPC: 2 SELECTs (essays + crm.app_users por user_id distinct) e join no
-  // front. Mantém a chamada simples e independente de policies cruzadas
-  // (mais robusto contra mudanças de RLS).
+  // Carrega respostas de discursivas de UM simulado + enriquece com nome/foto.
+  // 3 SELECTs paralelos (essays + crm.app_users + crm.user_profiles) e join
+  // no front. Mantém a chamada simples e independente de policies cruzadas.
   //
-  // Importante: usa crm.app_users (NÃO public.app_users) — public é stub vazio
-  // com IDs mas full_name NULL. CRM tem full_name + nickname + email reais.
-  // Ordem de prioridade pra exibir: nickname → full_name → email → fallback.
+  // crm.app_users      → nickname, full_name, email
+  // crm.user_profiles  → photo_url, photo_transform (crop escolhido pelo aluno)
+  //
+  // Ordem de prioridade pra nome exibido: nickname → full_name → email → '(sem nome)'.
   async function loadSimuladoEssayResponsesForAdmin(simuladoId){
     try{
       const { data, error } = await window._sb.schema('aluno').from('simulado_essay_responses')
@@ -40313,21 +40313,85 @@
       const rows = data || [];
       const userIds = [...new Set(rows.map(r => r.user_id).filter(Boolean))];
       const usersById = {};
+      const profilesByUserId = {};
       if(userIds.length){
-        const { data: udata, error: uerr } = await window._sb.schema('crm').from('app_users')
-          .select('id, full_name, nickname, email').in('id', userIds);
-        if(uerr){ console.warn('[essay reviews users]', uerr); }
-        (udata || []).forEach(u => usersById[u.id] = u);
+        const [uResp, pResp] = await Promise.all([
+          window._sb.schema('crm').from('app_users')
+            .select('id, full_name, nickname, email').in('id', userIds),
+          window._sb.schema('crm').from('user_profiles')
+            .select('user_id, photo_url, photo_transform').in('user_id', userIds)
+        ]);
+        if(uResp.error) console.warn('[essay reviews app_users]', uResp.error);
+        if(pResp.error) console.warn('[essay reviews user_profiles]', pResp.error);
+        (uResp.data || []).forEach(u => usersById[u.id] = u);
+        (pResp.data || []).forEach(p => profilesByUserId[p.user_id] = p);
       }
       return rows.map(r => {
         const u = usersById[r.user_id] || {};
+        const p = profilesByUserId[r.user_id] || {};
         const displayName = u.nickname || u.full_name || u.email || '(aluno sem nome)';
         return Object.assign({}, r, {
           student_name: displayName,
-          student_email: u.email || ''
+          student_nickname: u.nickname || '',
+          student_fullname: u.full_name || '',
+          student_email: u.email || '',
+          student_photo_url: p.photo_url || '',
+          student_photo_transform: p.photo_transform || null
         });
       });
     }catch(e){ console.warn('[essay reviews exception]', e); return []; }
+  }
+
+  // ─── Helper: renderiza avatar redondo com crop (transform {x,y,scale}) ──
+  // Mesma lógica de renderAvatarInto() do index.html (que admin não inclui).
+  // Por que assim: photo_transform foi calibrado pelo aluno na tela do perfil
+  // com este mesmo cálculo. Reusar a lógica preserva o crop pixel-perfect.
+  // Se url vazio, mostra iniciais coloridas como placeholder.
+  function _renderAdminAvatarInto(targetEl, url, transform, fallbackName){
+    if(!targetEl) return;
+    // Limpa estado anterior
+    targetEl.innerHTML = '';
+    targetEl.style.position = 'relative';
+    targetEl.style.overflow = 'hidden';
+    targetEl.style.borderRadius = '50%';
+    targetEl.style.background = 'var(--accent-lo)';
+    targetEl.style.border = '1px solid var(--accent-border-soft)';
+    targetEl.style.flexShrink = '0';
+    if(!url){
+      // Fallback: iniciais sobre fundo accent
+      const initials = (fallbackName || '?').trim().split(/\s+/).slice(0,2).map(s => s[0] ? s[0].toUpperCase() : '').join('') || '?';
+      targetEl.style.display = 'flex';
+      targetEl.style.alignItems = 'center';
+      targetEl.style.justifyContent = 'center';
+      targetEl.style.color = 'var(--accent)';
+      targetEl.style.fontFamily = 'var(--mono)';
+      targetEl.style.fontWeight = '600';
+      targetEl.style.fontSize = (parseInt(getComputedStyle(targetEl).width, 10) * 0.36) + 'px';
+      targetEl.textContent = initials;
+      return;
+    }
+    const t = transform || { x:0, y:0, scale:1 };
+    const img = document.createElement('img');
+    img.alt = '';
+    img.style.position = 'absolute';
+    img.style.left = '50%';
+    img.style.top = '50%';
+    img.style.userSelect = 'none';
+    img.style.pointerEvents = 'none';
+    targetEl.appendChild(img);
+    const apply = function(){
+      if(!img.naturalWidth || !img.naturalHeight) return;
+      const frameSize = targetEl.offsetWidth || 64;
+      const fit = Math.max(frameSize / img.naturalWidth, frameSize / img.naturalHeight);
+      const final = fit * (t.scale || 1);
+      img.style.width  = (img.naturalWidth  * final) + 'px';
+      img.style.height = (img.naturalHeight * final) + 'px';
+      const tx = (t.x || 0) * frameSize / 100;
+      const ty = (t.y || 0) * frameSize / 100;
+      img.style.transform = 'translate(-50%, -50%) translate(' + tx + 'px, ' + ty + 'px)';
+    };
+    img.onload = apply;
+    img.src = url;
   }
 
   // Computa contador de pendentes (não revisadas por humano ainda) pra
@@ -40426,17 +40490,25 @@
         : 'sem nota';
       const dt = r.answered_at ? new Date(r.answered_at).toLocaleDateString('pt-BR', { day:'2-digit', month:'short' }) : '';
       const isActive = String(r.id) === String(_essayReviewActiveId);
-      return '<div class="er-row" data-id="' + esc(String(r.id)) + '" style="padding:.75rem .9rem;border-bottom:1px solid var(--accent-border-soft);cursor:pointer;' + (isActive ? 'background:var(--accent-lo);border-left:2px solid var(--accent)' : 'border-left:2px solid transparent') + '">' +
-        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.3rem">' +
-          '<strong style="font-family:var(--serif);font-size:.92rem;color:var(--text)">' + esc(r.student_name) + '</strong>' +
-          '<span style="font-family:var(--mono);font-size:.62rem;color:' + statusColor + ';padding:.05rem .4rem;border:1px solid currentColor;border-radius:999px;white-space:nowrap">' + esc(status) + '</span>' +
-        '</div>' +
-        '<div style="font-family:var(--mono);font-size:.65rem;color:var(--text-mute);display:flex;justify-content:space-between;gap:.4rem">' +
-          '<span>Tentativa #' + (r.attempt_number || 1) + ' · ' + esc(dt) + '</span>' +
-          '<span style="color:var(--text)">' + esc(scoreStr) + '</span>' +
+      return '<div class="er-row" data-id="' + esc(String(r.id)) + '" style="padding:.75rem .9rem;border-bottom:1px solid var(--accent-border-soft);cursor:pointer;display:flex;gap:.65rem;align-items:flex-start;' + (isActive ? 'background:var(--accent-lo);border-left:2px solid var(--accent)' : 'border-left:2px solid transparent') + '">' +
+        '<div class="er-avatar" data-row-id="' + esc(String(r.id)) + '" style="width:38px;height:38px;flex-shrink:0;margin-top:.1rem"></div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem;margin-bottom:.3rem">' +
+            '<strong style="font-family:var(--serif);font-size:.92rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(r.student_name) + '</strong>' +
+            '<span style="font-family:var(--mono);font-size:.62rem;color:' + statusColor + ';padding:.05rem .4rem;border:1px solid currentColor;border-radius:999px;white-space:nowrap">' + esc(status) + '</span>' +
+          '</div>' +
+          '<div style="font-family:var(--mono);font-size:.65rem;color:var(--text-mute);display:flex;justify-content:space-between;gap:.4rem">' +
+            '<span>Tentativa #' + (r.attempt_number || 1) + ' · ' + esc(dt) + '</span>' +
+            '<span style="color:var(--text)">' + esc(scoreStr) + '</span>' +
+          '</div>' +
         '</div>' +
       '</div>';
     }).join('');
+    // Render dos avatares (após o DOM estar montado, pra ter offsetWidth)
+    visible.forEach(r => {
+      const avEl = listEl.querySelector('.er-avatar[data-row-id="' + r.id + '"]');
+      if(avEl) _renderAdminAvatarInto(avEl, r.student_photo_url, r.student_photo_transform, r.student_name);
+    });
     listEl.querySelectorAll('.er-row').forEach(row => {
       row.addEventListener('click', () => {
         _essayReviewActiveId = row.getAttribute('data-id');
@@ -40471,10 +40543,21 @@
     const overall = fb.overallComment || fb.feedback || '';
     const respText = r.essay_text || '';
     const reviewedStr = r.human_reviewed_at ? new Date(r.human_reviewed_at).toLocaleString('pt-BR') : '';
+    // Bloco "Aluno" com avatar + apelido · nome completo · email.
+    // Cada peça só aparece se preenchida e distinta da anterior (evita
+    // "Guida · Guida ·" se nickname == full_name).
+    const idParts = [];
+    if(r.student_nickname) idParts.push('<strong style="font-family:var(--serif);font-size:1.1rem;color:var(--text)">' + esc(r.student_nickname) + '</strong>');
+    if(r.student_fullname && r.student_fullname !== r.student_nickname) idParts.push('<span style="font-family:var(--serif);font-size:.95rem;color:var(--text)">' + esc(r.student_fullname) + '</span>');
+    if(r.student_email) idParts.push('<span style="font-family:var(--mono);font-size:.78rem;color:var(--text-mute)">' + esc(r.student_email) + '</span>');
+    if(!idParts.length) idParts.push('<strong style="font-family:var(--serif);font-size:1.1rem;color:var(--text)">' + esc(r.student_name || '(aluno sem nome)') + '</strong>');
     detailEl.innerHTML =
-      '<div style="margin-bottom:1rem">' +
-        '<div style="font-family:var(--mono);font-size:.62rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.25rem">Aluno</div>' +
-        '<div style="font-family:var(--serif);font-size:1.05rem">' + esc(r.student_name) + ' <span style="color:var(--text-mute);font-size:.8rem;font-family:var(--mono)">· ' + esc(r.student_email || '') + '</span></div>' +
+      '<div style="margin-bottom:1rem;display:flex;gap:.85rem;align-items:center">' +
+        '<div id="er-detail-avatar" style="width:60px;height:60px;flex-shrink:0"></div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-family:var(--mono);font-size:.62rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.25rem">Aluno</div>' +
+          '<div style="display:flex;flex-direction:column;gap:.15rem">' + idParts.join('') + '</div>' +
+        '</div>' +
       '</div>' +
       // QUESTÃO
       (enunciadoHtml ? '<details style="margin-bottom:.7rem"><summary style="cursor:pointer;font-family:var(--mono);font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:var(--accent);padding:.3rem 0">Enunciado / texto-base</summary><div style="padding:.7rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius);background:var(--accent-lo);font-family:var(--serif);font-size:.85rem;line-height:1.5">' + enunciadoHtml + '</div></details>' : '') +
@@ -40515,6 +40598,9 @@
         '</div>' +
         '<div id="erMessage" style="margin-top:.5rem;font-size:.78rem"></div>' +
       '</div>';
+    // Render do avatar grande do painel detalhe
+    const detailAv = document.getElementById('er-detail-avatar');
+    if(detailAv) _renderAdminAvatarInto(detailAv, r.student_photo_url, r.student_photo_transform, r.student_name);
     // Wire dos botões
     document.getElementById('erCancelBtn').addEventListener('click', () => {
       document.getElementById('erFinalScore').value = (typeof r.score === 'number') ? String(r.score) : '';
