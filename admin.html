@@ -13735,11 +13735,37 @@
         </div>
       </div>
 
-      <!-- ABA: QUESTÕES (Etapa 4) -->
-      <div class="ss-tab-content" data-ss-pane="questions" style="flex:1;overflow-y:auto;padding:1.4rem;display:none">
-        <p class="client-panel-hint" style="text-align:center;padding:3rem 1rem;color:var(--text-mute)">
-          Análise por questão em construção. Próxima etapa: % de acerto por questão, distribuição de respostas, anular questão (retroativo).
-        </p>
+      <!-- ABA: QUESTÕES (taxa de erro + anular retroativo) -->
+      <div class="ss-tab-content" data-ss-pane="questions" style="flex:1;display:none;flex-direction:column;min-height:0">
+        <!-- Filtros -->
+        <div style="padding:.8rem 1.2rem;border-bottom:1px solid var(--accent-border-soft);display:flex;gap:.7rem;flex-wrap:wrap;align-items:center;background:var(--accent-lo)">
+          <div class="field" style="margin:0">
+            <label style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);display:block;margin-bottom:.2rem">Tipo</label>
+            <select id="qReviewFltType" style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--accent-border-soft);border-radius:var(--radius);color:var(--text);font-family:var(--sans);font-size:.8rem">
+              <option value="todos">Todos</option>
+              <option value="true_false">Certo/Errado</option>
+              <option value="multiple_choice">Múltipla escolha</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0">
+            <label style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);display:block;margin-bottom:.2rem">Status</label>
+            <select id="qReviewFltStatus" style="padding:.35rem .5rem;background:var(--bg);border:1px solid var(--accent-border-soft);border-radius:var(--radius);color:var(--text);font-family:var(--sans);font-size:.8rem">
+              <option value="todos">Todas</option>
+              <option value="ativa">Ativas</option>
+              <option value="anulada">Anuladas</option>
+              <option value="problematica">Problemáticas (&gt;60% erro)</option>
+            </select>
+          </div>
+          <div class="field" style="margin:0;flex:1;min-width:200px">
+            <label style="font-size:.6rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-mute);display:block;margin-bottom:.2rem">Buscar enunciado</label>
+            <input type="text" id="qReviewFltSearch" placeholder="trecho da assertiva ou comando…" style="width:100%;padding:.35rem .5rem;background:var(--bg);border:1px solid var(--accent-border-soft);border-radius:var(--radius);color:var(--text);font-family:var(--sans);font-size:.8rem">
+          </div>
+          <span style="margin-left:auto;font-family:var(--mono);font-size:.7rem;color:var(--text-mute)" id="qReviewCountInfo"></span>
+        </div>
+        <!-- Lista de questões -->
+        <div id="qReviewList" style="flex:1;overflow-y:auto;padding:1rem 1.2rem">
+          <div class="loading" style="padding:2rem;text-align:center;color:var(--text-mute)">Carregando…</div>
+        </div>
       </div>
 
     </div>
@@ -40500,6 +40526,9 @@
     _ssAttemptsCacheKey = null;
     _attReviewRows = [];
     _attReviewFilters = { status: 'todos', search: '', period: '30' };
+    _ssQuestionsCacheKey = null;
+    _qReviewRows = [];
+    _qReviewFilters = { type: 'todos', status: 'todos', search: '' };
     document.getElementById('simuladoStatsTitle').textContent = simuladoTitle || 'Simulado';
     // Reset filtros visíveis
     document.getElementById('essayReviewFltStatus').value = 'todos';
@@ -40551,8 +40580,8 @@
     });
     document.querySelectorAll('#simuladoStatsModal .ss-tab-content').forEach(p => {
       const isActive = p.getAttribute('data-ss-pane') === tabKey;
-      // Discursivas e Tentativas usam flex (têm layout column interno)
-      p.style.display = isActive ? ((tabKey === 'essays' || tabKey === 'attempts') ? 'flex' : 'block') : 'none';
+      // Discursivas, Tentativas e Questões usam flex (têm layout column interno)
+      p.style.display = isActive ? ((tabKey === 'essays' || tabKey === 'attempts' || tabKey === 'questions') ? 'flex' : 'block') : 'none';
     });
     // Lazy load por aba (cache evita re-fetch). skipAutoLoad=true é usado
     // por openSimuladoStatsModal pra sequenciar discursivas → overview.
@@ -40561,6 +40590,9 @@
     }
     if(!skipAutoLoad && tabKey === 'attempts' && _essayReviewSimuladoId && !_ssAttemptsCacheKey){
       loadAndRenderStatsAttempts(_essayReviewSimuladoId);
+    }
+    if(!skipAutoLoad && tabKey === 'questions' && _essayReviewSimuladoId && !_ssQuestionsCacheKey){
+      loadAndRenderStatsQuestions(_essayReviewSimuladoId);
     }
   }
 
@@ -40757,6 +40789,354 @@
       alert('Erro inesperado ao reabrir.');
       btnEl.disabled = false;
       btnEl.textContent = 'Reabrir';
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // S8+S11 Etapa 4 — QUESTÕES (taxa de erro + anular retroativo)
+  // ═══════════════════════════════════════════════════════════════════
+  let _ssQuestionsCacheKey = null;
+  let _qReviewRows = [];
+  let _qReviewFilters = { type: 'todos', status: 'todos', search: '' };
+
+  // Carrega questões do simulado + respostas + estado de anulação.
+  // 3 SELECTs paralelos:
+  //   1. mock_exam_questions → questões do simulado
+  //   2. simulado_responses → respostas pra calcular taxa de erro
+  //   3. mock_exams.voided_question_ids → lista de anuladas
+  // Resolve texto/tipo de cada questão via questionsCache + tfItemsCache.
+  async function loadAndRenderStatsQuestions(simuladoId){
+    const listEl = document.getElementById('qReviewList');
+    if(!listEl) return;
+    listEl.innerHTML = '<div class="loading" style="padding:2rem;text-align:center;color:var(--text-mute)">Carregando questões…</div>';
+    try{
+      const [meqResp, respResp, meResp] = await Promise.all([
+        window._sb.schema('conteudo').from('mock_exam_questions')
+          .select('question_id, mock_exam_id, tf_item_ids, ordem')
+          .eq('mock_exam_id', simuladoId)
+          .order('ordem'),
+        window._sb.schema('aluno').from('simulado_responses')
+          .select('user_id, item_id, correct, attempt_number')
+          .eq('simulado_id', simuladoId),
+        window._sb.schema('conteudo').from('mock_exams')
+          .select('voided_question_ids')
+          .eq('id', simuladoId)
+          .single()
+      ]);
+      if(meqResp.error) throw meqResp.error;
+      if(respResp.error) throw respResp.error;
+      if(meResp.error) throw meResp.error;
+
+      const meqs = meqResp.data || [];
+      const responses = respResp.data || [];
+      const voidedSet = new Set((meResp.data && meResp.data.voided_question_ids) || []);
+
+      // Agrega respostas por item_id (count total + count correct)
+      const aggByItem = {};
+      responses.forEach(r => {
+        const k = String(r.item_id);
+        if(!aggByItem[k]) aggByItem[k] = { total: 0, correct: 0 };
+        aggByItem[k].total++;
+        if(r.correct === true) aggByItem[k].correct++;
+      });
+
+      // Pra cada meq, expandir em "items individuais" (porque uma question pode
+      // ter N tf_items C/E ou 1 alternativa MC). Cada item vira 1 linha na lista.
+      const rows = [];
+      meqs.forEach(meq => {
+        const q = (questionsCache || []).find(x => String(x.id) === String(meq.question_id));
+        if(!q) return;
+        const type = q.type || 'true_false';
+        if(type === 'multiple_choice'){
+          // MC: 1 item por question
+          const k = String(q.id);
+          const agg = aggByItem[k] || { total: 0, correct: 0 };
+          rows.push({
+            item_id: q.id,
+            ordem: meq.ordem,
+            type,
+            text: String(q.enunciado || q.command || '').replace(/<[^>]+>/g, '').slice(0, 200),
+            context: q.origin || '',
+            total: agg.total,
+            correct: agg.correct,
+            errPct: agg.total ? ((agg.total - agg.correct) / agg.total) : 0,
+            voided: voidedSet.has(String(q.id))
+          });
+        } else if(type === 'true_false'){
+          // C/E: pode ter N tf_items por question. Se tf_item_ids foi especificado,
+          // usa essa filtragem; senão pega todos os tf_items da question.
+          const tfIds = Array.isArray(meq.tf_item_ids) && meq.tf_item_ids.length
+            ? meq.tf_item_ids.map(String)
+            : (tfItemsCache || []).filter(t => String(t.question_id) === String(q.id)).map(t => String(t.id));
+          tfIds.forEach(tfId => {
+            const tf = (tfItemsCache || []).find(t => String(t.id) === String(tfId));
+            if(!tf) return;
+            const agg = aggByItem[String(tfId)] || { total: 0, correct: 0 };
+            rows.push({
+              item_id: tfId,
+              ordem: meq.ordem,
+              type,
+              text: String(tf.assertiva || '').replace(/<[^>]+>/g, '').slice(0, 200),
+              context: q.origin || '',
+              total: agg.total,
+              correct: agg.correct,
+              errPct: agg.total ? ((agg.total - agg.correct) / agg.total) : 0,
+              voided: voidedSet.has(String(tfId))
+            });
+          });
+        }
+        // type === 'essay': ignorado (discursivas têm aba própria — não fazem
+        // sentido aqui porque não têm "correct=true/false")
+      });
+
+      _qReviewRows = rows;
+      _ssQuestionsCacheKey = simuladoId;
+      renderStatsQuestions();
+    }catch(e){
+      console.warn('[questions load] erro:', e);
+      listEl.innerHTML = '<div style="text-align:center;padding:2rem 1rem;color:#c77272;font-family:var(--mono);font-size:.85rem">Erro ao carregar: ' + esc(e.message || String(e)) + '</div>';
+    }
+  }
+
+  function _qReviewGetFiltered(){
+    const f = _qReviewFilters;
+    let arr = _qReviewRows.slice();
+    if(f.type && f.type !== 'todos'){
+      arr = arr.filter(r => r.type === f.type);
+    }
+    if(f.status && f.status !== 'todos'){
+      arr = arr.filter(r => {
+        if(f.status === 'ativa') return !r.voided;
+        if(f.status === 'anulada') return r.voided;
+        if(f.status === 'problematica') return r.errPct > 0.6 && !r.voided;
+        return true;
+      });
+    }
+    if(f.search){
+      const s = f.search.toLowerCase();
+      arr = arr.filter(r => (r.text||'').toLowerCase().includes(s) || (r.context||'').toLowerCase().includes(s));
+    }
+    // Sort: anuladas no fim, depois por errPct DESC
+    arr.sort((a, b) => {
+      if(a.voided !== b.voided) return a.voided ? 1 : -1;
+      return (b.errPct - a.errPct) || (b.total - a.total);
+    });
+    return arr;
+  }
+
+  function renderStatsQuestions(){
+    const listEl = document.getElementById('qReviewList');
+    if(!listEl) return;
+    const visible = _qReviewGetFiltered();
+    const total = _qReviewRows.length;
+    const cntEl = document.getElementById('qReviewCountInfo');
+    if(cntEl) cntEl.textContent = visible.length + ' de ' + total + ' questão' + (total===1?'':'ões');
+
+    if(!visible.length){
+      listEl.innerHTML = '<p class="client-panel-hint" style="padding:2rem;text-align:center;color:var(--text-mute);font-size:.85rem;margin:0">' + (total === 0 ? 'Sem questões objetivas neste simulado.' : 'Nenhuma questão com os filtros atuais.') + '</p>';
+      return;
+    }
+
+    listEl.innerHTML = visible.map((r, i) => {
+      const errPct100 = r.total > 0 ? Math.round(r.errPct * 100) : null;
+      const errColor = errPct100 == null ? 'var(--text-mute)' : errPct100 >= 60 ? '#c77272' : errPct100 >= 30 ? '#e8a857' : '#88c391';
+      const errLabel = errPct100 == null ? 'sem respostas' : errPct100 + '% erro';
+      const typeBadge = r.type === 'multiple_choice' ? 'MC' : 'C/E';
+      const actionBtn = r.voided
+        ? '<button class="q-unvoid-btn" data-item-id="' + esc(String(r.item_id)) + '" style="padding:.4rem .85rem;background:transparent;border:1px solid #88c391;color:#88c391;font-family:var(--mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;border-radius:var(--radius);cursor:pointer">Desanular</button>'
+        : '<button class="q-void-btn" data-item-id="' + esc(String(r.item_id)) + '" style="padding:.4rem .85rem;background:transparent;border:1px solid #c77272;color:#c77272;font-family:var(--mono);font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;border-radius:var(--radius);cursor:pointer' + (r.total === 0 ? ';opacity:.5;pointer-events:none' : '') + '">Anular</button>';
+      const statusChip = r.voided
+        ? '<span style="font-family:var(--mono);font-size:.62rem;color:#88c391;padding:.1rem .5rem;border:1px solid currentColor;border-radius:999px;background:rgba(136,195,145,.08)">ANULADA</span>'
+        : '';
+      return '<article class="q-row" style="display:grid;grid-template-columns:auto 1fr auto auto;gap:.85rem;align-items:center;padding:.85rem 1rem;border:1px solid ' + (r.voided ? '#88c391' : 'var(--accent-border-soft)') + ';border-radius:var(--radius);background:' + (r.voided ? 'rgba(136,195,145,.04)' : 'var(--accent-lo)') + ';margin-bottom:.55rem">' +
+        '<span style="font-family:var(--mono);font-size:.62rem;color:var(--accent);padding:.1rem .4rem;border:1px solid var(--accent-border);border-radius:999px;background:var(--accent-lo)">' + typeBadge + '</span>' +
+        '<div style="min-width:0">' +
+          '<div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.2rem">' +
+            (r.context ? '<span style="font-family:var(--mono);font-size:.62rem;color:var(--text-mute)">' + esc(r.context) + '</span>' : '') +
+            statusChip +
+          '</div>' +
+          '<div style="font-family:var(--serif);font-size:.85rem;line-height:1.4;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">' + esc(r.text || '(sem texto)') + (r.text.length >= 200 ? '…' : '') + '</div>' +
+        '</div>' +
+        '<div style="text-align:right;min-width:90px">' +
+          '<div style="font-family:var(--mono);font-size:1.05rem;color:' + errColor + ';font-weight:600">' + (errPct100 == null ? '—' : (errPct100 + '%')) + '</div>' +
+          '<div style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">' + (r.total - r.correct) + '/' + r.total + ' erros</div>' +
+        '</div>' +
+        '<div>' + actionBtn + '</div>' +
+      '</article>';
+    }).join('');
+
+    // Wire dos botões Anular/Desanular
+    listEl.querySelectorAll('.q-void-btn').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const itemId = btn.getAttribute('data-item-id');
+        const r = _qReviewRows.find(x => String(x.item_id) === String(itemId));
+        if(r) _questionVoid(r, btn, true);
+      });
+    });
+    listEl.querySelectorAll('.q-unvoid-btn').forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const itemId = btn.getAttribute('data-item-id');
+        const r = _qReviewRows.find(x => String(x.item_id) === String(itemId));
+        if(r) _questionVoid(r, btn, false);
+      });
+    });
+  }
+
+  // Anula (ou desanula) uma questão retroativamente.
+  //
+  // Anular:
+  //   1. UPDATE mock_exams.voided_question_ids ← append item_id
+  //   2. UPDATE simulado_responses SET correct=true WHERE item_id (todas viraram acerto)
+  //   3. Recalcula simulado_attempts.score + pct pra cada (user_id, attempt_number)
+  //      afetado (= que respondeu essa questão)
+  //
+  // Desanular:
+  //   1. UPDATE mock_exams.voided_question_ids ← remove item_id
+  //   2. UPDATE simulado_responses: restaura `correct` baseado no gabarito
+  //      (key do tf_item ou multiple_choice). Sem cache do "correct original",
+  //      precisamos recalcular do zero. ESCOLHA: ler answer_value × key e
+  //      recomputar.
+  //   3. Recalcula scores afetados.
+  async function _questionVoid(r, btnEl, voiding){
+    const simId = _essayReviewSimuladoId;
+    if(!simId) return;
+    const action = voiding ? 'ANULAR' : 'DESANULAR';
+    const consequencias = voiding
+      ? '• A questão é tratada como ACERTO pra todos os alunos\n' +
+        '• ' + (r.total - r.correct) + ' resposta(s) errada(s) viram acerto\n' +
+        '• ' + r.total + ' tentativa(s) terão a nota recalculada\n' +
+        '• Reversível: você pode "Desanular" depois'
+      : '• A questão volta a ser cobrada normalmente\n' +
+        '• Respostas voltam ao estado original (acerto/erro pelo gabarito)\n' +
+        '• ' + r.total + ' tentativa(s) terão a nota recalculada';
+    const confirmMsg = action + ' esta questão?\n\n"' + (r.text || '').slice(0, 100) + '..."\n\n' + consequencias + '\n\nConfirmar?';
+    if(!confirm(confirmMsg)) return;
+
+    btnEl.disabled = true;
+    const originalText = btnEl.textContent;
+    btnEl.textContent = voiding ? 'Anulando…' : 'Desanulando…';
+
+    try{
+      const aSb = window._sb.schema('aluno');
+      const cSb = window._sb.schema('conteudo');
+
+      // Step 1: atualizar voided_question_ids no mock_exam.
+      // Lê atual, modifica array, salva.
+      const meR = await cSb.from('mock_exams').select('voided_question_ids').eq('id', simId).single();
+      if(meR.error) throw meR.error;
+      let voided = Array.isArray(meR.data.voided_question_ids) ? meR.data.voided_question_ids.slice() : [];
+      const itemIdStr = String(r.item_id);
+      if(voiding){
+        if(!voided.includes(itemIdStr)) voided.push(itemIdStr);
+      } else {
+        voided = voided.filter(x => String(x) !== itemIdStr);
+      }
+      const updMeR = await cSb.from('mock_exams').update({ voided_question_ids: voided }).eq('id', simId);
+      if(updMeR.error) throw updMeR.error;
+
+      // Step 2: atualizar simulado_responses dessa questão.
+      if(voiding){
+        // Anulando: todas viram correct=true.
+        const updRespR = await aSb.from('simulado_responses')
+          .update({ correct: true })
+          .eq('simulado_id', simId)
+          .eq('item_id', itemIdStr);
+        if(updRespR.error) throw updRespR.error;
+      } else {
+        // Desanulando: recalcula correct comparando answer_value com a chave (key)
+        // do tf_item. Pra C/E: answer_value é "Certo"/"Errado", key é true/false.
+        // Pra MC: precisaríamos da letra correta — mas anular MC é mais raro;
+        // por simplicidade, marcamos correct=null (admin pode recalcular manualmente
+        // ou aluno pode refazer). Pra C/E (caso comum), recalculamos.
+        if(r.type === 'true_false'){
+          const tf = (tfItemsCache || []).find(t => String(t.id) === itemIdStr);
+          const keyBool = tf && tf.key === true;
+          const correctValue = keyBool ? 'Certo' : 'Errado';
+          // Busca todas as respostas dessa questão pra recompor correct uma por uma
+          const respR = await aSb.from('simulado_responses')
+            .select('id, answer_value, selected')
+            .eq('simulado_id', simId)
+            .eq('item_id', itemIdStr);
+          if(respR.error) throw respR.error;
+          const responses = respR.data || [];
+          // UPDATE em lote: agrupa por correct/incorrect
+          const ids_correct = responses.filter(x => String((x.answer_value || x.selected || '')).trim() === correctValue).map(x => x.id);
+          const ids_wrong = responses.filter(x => !ids_correct.includes(x.id)).map(x => x.id);
+          if(ids_correct.length){
+            const u1 = await aSb.from('simulado_responses').update({ correct: true }).in('id', ids_correct);
+            if(u1.error) throw u1.error;
+          }
+          if(ids_wrong.length){
+            const u2 = await aSb.from('simulado_responses').update({ correct: false }).in('id', ids_wrong);
+            if(u2.error) throw u2.error;
+          }
+        } else if(r.type === 'multiple_choice'){
+          // Pra MC, recalcular sem key cadastrada é arriscado. Por isso, no DESANULAR
+          // pra MC, mantemos como estava pré-anulação seria ideal; sem esse histórico,
+          // alertamos o admin que correct ficou true (desfazer manual se precisar).
+          console.warn('[unvoid MC]', 'Desanular MC: respostas mantidas como correct=true. Admin precisa decidir manualmente se quiser estado original.');
+        }
+      }
+
+      // Step 3: recalcula simulado_attempts.score + pct pra todos os alunos
+      // que têm tentativas neste simulado. Mais simples = re-agrega tudo.
+      // (Otimização: só recompute users afetados; mas pra escala atual <100,
+      // recompute total é mais simples e robusto.)
+      const allRespR = await aSb.from('simulado_responses')
+        .select('user_id, attempt_number, correct')
+        .eq('simulado_id', simId);
+      if(allRespR.error) throw allRespR.error;
+      const byUserAttempt = {};
+      (allRespR.data || []).forEach(x => {
+        const k = x.user_id + '::' + (x.attempt_number || 1);
+        if(!byUserAttempt[k]) byUserAttempt[k] = { user_id: x.user_id, attempt_number: x.attempt_number || 1, score: 0, total: 0 };
+        byUserAttempt[k].total++;
+        if(x.correct === true) byUserAttempt[k].score++;
+      });
+      // Aplica UPDATEs em paralelo
+      const updates = Object.values(byUserAttempt).map(b =>
+        aSb.from('simulado_attempts')
+          .update({ score: b.score, total: b.total, pct: b.total ? (b.score / b.total) : 0 })
+          .eq('simulado_id', simId)
+          .eq('user_id', b.user_id)
+          .eq('attempt_number', b.attempt_number)
+      );
+      await Promise.all(updates);
+
+      // Atualiza estado local + re-renderiza
+      r.voided = voiding;
+      if(voiding){
+        // Marcando como anulada: respostas em cache agora viram todas corretas
+        r.correct = r.total;
+        r.errPct = 0;
+      } else if(r.type === 'true_false'){
+        // Desanulando C/E: recalcula agregado local com base no gabarito
+        const tf = (tfItemsCache || []).find(t => String(t.id) === String(r.item_id));
+        const keyBool = tf && tf.key === true;
+        const correctValue = keyBool ? 'Certo' : 'Errado';
+        const respR2 = await aSb.from('simulado_responses')
+          .select('answer_value, selected, correct')
+          .eq('simulado_id', simId)
+          .eq('item_id', String(r.item_id));
+        if(!respR2.error){
+          const arr = respR2.data || [];
+          r.total = arr.length;
+          r.correct = arr.filter(x => String((x.answer_value || x.selected || '')).trim() === correctValue).length;
+          r.errPct = r.total ? ((r.total - r.correct) / r.total) : 0;
+        }
+      }
+      renderStatsQuestions();
+
+      // Invalida caches das outras abas (KPIs e tentativas mudaram)
+      _ssOverviewCacheKey = null;
+      _ssAttemptsCacheKey = null;
+    }catch(e){
+      console.warn('[void/unvoid]', e);
+      alert('Erro: ' + (e.message || String(e)));
+      btnEl.disabled = false;
+      btnEl.textContent = originalText;
     }
   }
 
@@ -41174,6 +41554,20 @@
       _ssSwitchTab(btn.getAttribute('data-ss-tab'));
     });
   });
+  // Filtros da aba Questões
+  document.getElementById('qReviewFltType').addEventListener('change', (e) => {
+    _qReviewFilters.type = e.target.value;
+    renderStatsQuestions();
+  });
+  document.getElementById('qReviewFltStatus').addEventListener('change', (e) => {
+    _qReviewFilters.status = e.target.value;
+    renderStatsQuestions();
+  });
+  document.getElementById('qReviewFltSearch').addEventListener('input', (e) => {
+    _qReviewFilters.search = e.target.value;
+    renderStatsQuestions();
+  });
+
   // Filtros da aba Tentativas
   document.getElementById('attReviewFltStatus').addEventListener('change', (e) => {
     _attReviewFilters.status = e.target.value;
