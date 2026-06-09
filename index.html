@@ -8770,6 +8770,12 @@ window.TAG_REGISTRY = {
             // Banco já recalcula simulado_attempts.score quando admin anula, mas
             // o front também precisa pra eventual exibição (badge "Anulada").
             voidedQuestionIds: Array.isArray(me.voided_question_ids) ? me.voided_question_ids.map(String) : [],
+            // S10 — liberação do gabarito. gabaritoLiberado = !retido OU já
+            // liberado OU passou da data agendada. Quando false, o aluno envia
+            // mas NÃO vê gabarito/nota/correção/ranking até o admin liberar.
+            gabaritoRetido: !!me.gabarito_retido,
+            gabaritoLiberadoEm: me.gabarito_liberado_em || null,
+            gabaritoLiberarEm: me.gabarito_liberar_em || null,
             blocks: blocks,
           };
         });
@@ -17847,6 +17853,13 @@ function _notifRenderItem(n){
       const href = '#/m/' + encodeURIComponent(p.module_id) + (p.chapter_id ? '/c/' + encodeURIComponent(p.chapter_id) : '') + '/u/' + encodeURIComponent(p.unit_id);
       actions = `<div class="notif-actions"><a class="btn-ghost" href="${href}" data-notif-id="${Util.attr(n.id)}">Abrir unidade →</a></div>`;
     }
+  } else if(n.type === 'gabarito_liberado'){
+    // S10 — gabarito de simulado liberado pelo professor
+    line = `O gabarito do simulado <strong>${Util.esc(p.simulado_title || 'simulado')}</strong> foi liberado! Veja sua nota e a correção.`;
+    if(p.simulado_id){
+      const href = '#/simulados/' + encodeURIComponent(p.simulado_id) + '/performance';
+      actions = `<div class="notif-actions"><a class="btn-ghost" href="${href}" data-notif-id="${Util.attr(n.id)}">Ver desempenho →</a></div>`;
+    }
   } else {
     line = Util.esc(n.type) + ' (tipo desconhecido)';
   }
@@ -19372,6 +19385,15 @@ Renderers.simulados.mount = function(stageEl, route){
 };
 
 /* ═══════════ SIMULADO DETAIL — take a mock test ═══════════ */
+// S10 — true se o gabarito/resultado do simulado está visível pro aluno.
+// !retido (sempre visível) OU liberado manualmente OU passou da data agendada.
+function _simGabaritoLiberado(sim){
+  if(!sim || !sim.gabaritoRetido) return true;
+  if(sim.gabaritoLiberadoEm) return true;
+  if(sim.gabaritoLiberarEm) return new Date(sim.gabaritoLiberarEm).getTime() <= Date.now();
+  return false;
+}
+
 Renderers.simuladoDetail = function(route){
   const sims = window.SIMULADOS || [];
   const sim = sims.find(s => s.id === route.params.simuladoId);
@@ -19415,6 +19437,26 @@ Renderers.simuladoDetail = function(route){
   // "revelado" (gabarito visível, opções congeladas pelo simStage no mount). NÃO
   // bloqueia o conteúdo — o aluno pode revisar respostas+gabarito; só não pode trocar.
   const submitted = submittedAttempt > 0 && activeAttempt === submittedAttempt && !inProgress;
+
+  // S10 — Gabarito retido: aluno enviou mas o resultado (gabarito/nota/
+  // correção) ainda não foi liberado. Mostra tela de "aguardando" em vez
+  // de revelar. Não cai aqui se ainda não enviou (segue fluxo normal).
+  if(submitted && !_simGabaritoLiberado(sim)){
+    const prevista = sim.gabaritoLiberarEm
+      ? ' Liberação prevista: <strong>' + Util.esc(new Date(sim.gabaritoLiberarEm).toLocaleString('pt-BR')) + '</strong>.'
+      : '';
+    return `<div class="sim-start-screen"><div class="sss-card">
+      <span class="sss-eyebrow">Simulado enviado</span>
+      <h1 class="sss-title">${Util.esc(sim.name)}</h1>
+      <div class="sss-warning">
+        <span class="sss-warning-icon">⏳</span>
+        <span>Sua prova foi <strong>enviada com sucesso</strong>. O gabarito, a nota e a correção serão <strong>liberados pelo professor</strong> — você será notificado quando estiverem disponíveis.${prevista}</span>
+      </div>
+      <div class="sss-actions">
+        <a class="sss-back" href="#/simulados">${Icons.chevron||'‹'} Voltar aos simulados</a>
+      </div>
+    </div></div>`;
+  }
 
   // S7 A2 — tela "Antes de começar":
   // Renderiza quando aluno ainda NÃO clicou "Iniciar" (não há startedAt na
@@ -20443,6 +20485,14 @@ Renderers.simuladoRanking.mount = function(stageEl, route){
   const sim = sims.find(s => s.id === route.params.simuladoId);
   if(!sim) return;
   const bodyEl = stageEl.querySelector('#rankBody');
+  // S10 — ranking só aparece depois do gabarito liberado (a nota é o que ordena)
+  if(!_simGabaritoLiberado(sim)){
+    const countEl = stageEl.querySelector('#rankCount');
+    if(countEl) countEl.textContent = 'Aguardando liberação do gabarito';
+    if(bodyEl) bodyEl.innerHTML = '<div class="rank-empty">O ranking será divulgado quando o professor <strong>liberar o gabarito</strong> deste simulado.</div>';
+    const optinBar = stageEl.querySelector('#rankOptinBar'); if(optinBar) optinBar.innerHTML = '';
+    return;
+  }
   if(!window._sb || typeof window._sb.rpc !== 'function'){
     if(bodyEl) bodyEl.innerHTML = '<div class="rank-loading">Ranking indisponível offline.</div>';
     return;
@@ -20458,6 +20508,23 @@ Renderers.simuladoPerformance = function(route){
   const sims = window.SIMULADOS || [];
   const sim = sims.find(s => s.id === route.params.simuladoId);
   if(!sim) return `<div class="empty"><div class="empty-title">Simulado não encontrado</div></div>`;
+
+  // S10 — resultado retido até o gabarito ser liberado
+  if(!_simGabaritoLiberado(sim)){
+    const prevista = sim.gabaritoLiberarEm
+      ? ' Liberação prevista: <strong>' + Util.esc(new Date(sim.gabaritoLiberarEm).toLocaleString('pt-BR')) + '</strong>.'
+      : '';
+    return `<div class="hero">
+      <span class="s-label" data-a="1">Desempenho do simulado</span>
+      <h1 class="s-title hero" data-a="2">${Util.esc(sim.name)}</h1>
+      <div class="s-divider" data-a="3"></div>
+      <div class="cta-row" data-a="4"><a class="btn-ghost" href="#/simulados">${Icons.chevron} Voltar aos simulados</a></div>
+    </div>
+    <div class="sss-warning" data-a="5" style="max-width:780px">
+      <span class="sss-warning-icon">⏳</span>
+      <span>O resultado (nota, gabarito e correção) deste simulado <strong>ainda não foi liberado</strong> pelo professor. Você será notificado quando estiver disponível.${prevista}</span>
+    </div>`;
+  }
 
   const state = Store.get();
   const unitId = '__sim_'+sim.id;
