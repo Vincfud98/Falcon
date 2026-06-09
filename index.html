@@ -671,6 +671,8 @@ html[data-theme="light"] .topbar{background:rgba(244,241,236,.92)}
 }
 .sim-exam-main{ min-width:0; }
 .sim-exam-main .sim-stage{ margin:0; }
+/* Modo revisão (pós-envio): topbar é a normal (mais baixa) — ajusta o sticky */
+.sim-exam-layout.is-revealed .sim-exam-map{ top:calc(var(--nav-h, 60px) + .8rem); }
 
 /* Sidebar mapa — sticky abaixo da topbar. Padding generoso pra os ✓ não
    serem cortados pelo overflow do container. */
@@ -19069,12 +19071,18 @@ Renderers.simuladoDetail = function(route){
   const submittedAttempt = (simState && simState.submittedAt)
     ? (simState.attemptNumber || 1)
     : 0;
-  let activeAttempt = submittedAttempt || 1;
-  if(isEstudo && refazerIntent){
-    activeAttempt = submittedAttempt + 1; // 0+1=1 se nunca enviou (caso raro), senão last+1
-    // Mantém a flag até o envio da nova tentativa (em submitSimulado abaixo,
-    // a gente limpa a flag de sessionStorage). Assim o reload no meio do simulado
-    // ainda mostra a tela limpa da #N.
+  // S7 fix — tentativa EM ANDAMENTO (iniciada via "Iniciar", ainda não enviada)
+  // mantém SEU número. Sem isto, ao iniciar uma tentativa de "refazer" o render
+  // revertia activeAttempt pra 1 (porque submittedAt fica null nesse meio-tempo),
+  // gravando por cima da tentativa #1 e travando o contador eternamente em "2ª".
+  const inProgress = !!(simState && simState.startedAt && !simState.submittedAt);
+  let activeAttempt;
+  if(inProgress){
+    activeAttempt = simState.attemptNumber || 1;
+  } else if(isEstudo && refazerIntent){
+    activeAttempt = (submittedAttempt || 0) + 1; // próxima tentativa
+  } else {
+    activeAttempt = submittedAttempt || 1;
   }
   window._simCurrentAttempt = window._simCurrentAttempt || {};
   const _prevAttempt = window._simCurrentAttempt[sim.id];
@@ -19083,7 +19091,7 @@ Renderers.simuladoDetail = function(route){
   // submitted = a tentativa atual já foi enviada. Quando true, o ctx entra em modo
   // "revelado" (gabarito visível, opções congeladas pelo simStage no mount). NÃO
   // bloqueia o conteúdo — o aluno pode revisar respostas+gabarito; só não pode trocar.
-  const submitted = submittedAttempt > 0 && activeAttempt === submittedAttempt;
+  const submitted = submittedAttempt > 0 && activeAttempt === submittedAttempt && !inProgress;
 
   // S7 A2 — tela "Antes de começar":
   // Renderiza quando aluno ainda NÃO clicou "Iniciar" (não há startedAt na
@@ -19227,19 +19235,17 @@ Renderers.simuladoDetail = function(route){
     </div>`}
   </div>`;
 
-  // S7 A3 — em modo prova (não submetido), usa layout de colunas: mapa de
-  // questões à esquerda (15%) + questões no centro. A coluna direita (notas)
-  // virá numa próxima etapa. Quando submetido, layout normal (hero + stage).
-  if(!submitted){
-    return `${examTopbar}${heroHtml}
-    <div class="sim-exam-layout">
-      <aside class="sim-exam-map" id="simExamMap" aria-label="Mapa de questões">
-        <div class="sem-map-loading">Carregando mapa…</div>
-      </aside>
-      <div class="sim-exam-main">${stageHtml}</div>
-    </div>`;
-  }
-  return `${examTopbar}${heroHtml}${stageHtml}`;
+  // S7 A3 — layout de colunas: mapa de questões à esquerda + questões no centro.
+  // Usado TANTO em modo prova quanto na revisão pós-envio (submitted) — o aluno
+  // continua navegando pelo mapa pra revisar respostas/gabarito. A topbar de
+  // prova (examTopbar) só aparece quando !submitted; na revisão volta a normal.
+  return `${examTopbar}${heroHtml}
+  <div class="sim-exam-layout${submitted ? ' is-revealed' : ''}">
+    <aside class="sim-exam-map" id="simExamMap" aria-label="Mapa de questões">
+      <div class="sem-map-loading">Carregando mapa…</div>
+    </aside>
+    <div class="sim-exam-main">${stageHtml}</div>
+  </div>`;
 };
 // S7 A3 — Constrói o mapa de questões (sidebar esquerda) lendo o DOM já
 // renderizado. Robusto: reflete exatamente os data-item-id que existem.
@@ -19341,7 +19347,8 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
   const activeAttempt = (window._simCurrentAttempt && window._simCurrentAttempt[sim.id]) || 1;
   // submitted = a tentativa ATUAL já foi enviada (mesma normalização do render)
   const submittedAttempt = (simState && simState.submittedAt) ? (simState.attemptNumber || 1) : 0;
-  const submitted = submittedAttempt > 0 && activeAttempt === submittedAttempt;
+  const inProgress = !!(simState && simState.startedAt && !simState.submittedAt);
+  const submitted = submittedAttempt > 0 && activeAttempt === submittedAttempt && !inProgress;
 
   // S7 A2 — Tela "Antes de começar": wire do botão Iniciar
   const startBtn = document.getElementById('simStartBtn');
@@ -19375,6 +19382,11 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
     if(window._simExamTimerInt){ clearInterval(window._simExamTimerInt); window._simExamTimerInt = null; }
   }catch(_){}
   if(!submitted){
+    // S7 fix — reseta flags por tentativa (senão travam entre simulados:
+    // _simAutoSubmitted impediria auto-submit do próximo; _simExamFinishing
+    // ficaria preso). Resetadas aqui, no setup de cada cronômetro.
+    window._simAutoSubmitted = false;
+    window._simExamFinishing = false;
     const timerEl = document.getElementById('simExamTimer');
     const timerValEl = timerEl && timerEl.querySelector('.set-timer-value');
     const tLimMin = sim.timeLimitMinutes;
@@ -19455,6 +19467,16 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
     }
   });
 
+  // S7 A3 — Constrói o mapa de questões SEMPRE (modo prova E revisão pós-envio).
+  // O build renumera as questões (contínuo) e o refresh marca ✓ nas respondidas.
+  // Refreshes com delay capturam respostas hidratadas de forma assíncrona.
+  try{
+    _buildSimExamMap(stageEl);
+    _refreshSimExamMap(stageEl, sim);
+    setTimeout(() => { try{ _refreshSimExamMap(stageEl, sim); }catch(_){} }, 400);
+    setTimeout(() => { try{ _refreshSimExamMap(stageEl, sim); }catch(_){} }, 1200);
+  }catch(e){ console.warn('[sim map build]', e); }
+
   // S2.2 — Simulado JÁ enviado: bloqueia cliques nas opções por completo
   // (cinto-e-suspensório com o CSS .sim-revealed). Aluno revisa, não troca.
   if(submitted){
@@ -19523,18 +19545,13 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
       }, true); // capture phase to override existing handlers
     });
 
-    // S7 A3 — Mapa de questões: constrói + refresh inicial. Refresh extra com
-    // delay pra capturar respostas hidratadas de forma assíncrona (banco).
-    // Também escuta input nos textareas de discursiva pra marcar ✓ ao digitar.
+    // S7 A3 — em modo prova: escuta input nos textareas de discursiva pra
+    // marcar ✓ no mapa ao digitar. (O build do mapa já rodou acima, universal.)
     try{
-      _buildSimExamMap(stageEl);
-      _refreshSimExamMap(stageEl, sim);
-      setTimeout(() => { try{ _refreshSimExamMap(stageEl, sim); }catch(_){} }, 400);
-      setTimeout(() => { try{ _refreshSimExamMap(stageEl, sim); }catch(_){} }, 1200);
       stageEl.querySelectorAll('.essay-textarea').forEach(ta => {
         ta.addEventListener('input', () => { try{ _refreshSimExamMap(stageEl, sim); }catch(_){} });
       });
-    }catch(e){ console.warn('[sim map]', e); }
+    }catch(e){ console.warn('[sim map input]', e); }
 
     // S7 Bloco A1 — botão "Finalizar" da sim-exam-topbar dispara o mesmo
     // clique do botão de submit que já existe no rodapé. Assim a lógica de
@@ -19557,6 +19574,14 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
       // o loop é sequencial pra não esgotar o orçamento da Edge Function.
       submitBtn.addEventListener('click', async () => {
         if(!confirm('Tem certeza? Após o envio, o gabarito será revelado e não será possível alterar suas respostas.')) return;
+        // S7 fix — PARA o cronômetro IMEDIATAMENTE ao finalizar. Sem isto, se o
+        // aluno termina faltando 30s e a correção da IA leva 1min, o timer
+        // chegaria a zero e dispararia auto-submit "fantasma" durante a correção.
+        // O tempo do aluno acabou no clique — o que vem depois é processamento.
+        try{
+          if(window._simExamTimerInt){ clearInterval(window._simExamTimerInt); window._simExamTimerInt = null; }
+        }catch(_){}
+        window._simExamFinishing = true; // trava reativação do timer
         const _originalBtnText = submitBtn.textContent;
         // Calculate score (objetivas)
         const selections = window._simSelections || {};
