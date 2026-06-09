@@ -2462,6 +2462,7 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 .sim-card-stat strong{color:var(--text);font-weight:500}
 .sim-card-footer{
   display:flex;align-items:center;justify-content:space-between;
+  flex-wrap:wrap;gap:.4rem;
   padding:.7rem 1.2rem;border-top:1px solid var(--border);
   background:rgba(200,169,126,.03);
 }
@@ -7410,6 +7411,24 @@ html[data-theme="light"] .hl-mark[data-hl-color="veil"]{background:var(--text);c
 .perf-tab.is-active{ color:var(--accent); border-bottom-color:var(--accent); }
 .perf-tab-count{ font-family:var(--mono); font-size:.62rem; color:var(--text-mute); }
 .perf-tab.is-active .perf-tab-count{ color:var(--accent); }
+
+/* Gráfico evolutivo (barras por tentativa — modo Estudo) */
+.perf-evo-chart{
+  display:flex; align-items:stretch; gap:1.2rem; height:200px;
+  padding:1rem 0 .5rem; overflow-x:auto;
+}
+.evo-col{ display:flex; flex-direction:column; align-items:center; gap:.45rem; height:100%; flex:0 0 auto; }
+.evo-pct{ font-family:var(--mono); font-size:.72rem; color:var(--text); font-weight:600; }
+.evo-bar-wrap{ flex:1; width:44px; display:flex; align-items:flex-end; background:var(--accent-lo); border-radius:2px; }
+.evo-bar{ width:100%; border-radius:2px 2px 0 0; min-height:3px; transition:height .6s var(--ease); }
+.evo-label{ font-family:var(--mono); font-size:.64rem; color:var(--text-mute); letter-spacing:.05em; }
+.evo-trend{
+  display:flex; flex-direction:column; align-items:flex-start; justify-content:center;
+  gap:.35rem; margin-left:.6rem; padding-left:1.2rem;
+  border-left:1px solid var(--accent-border-soft);
+}
+.evo-trend-label{ font-family:var(--sans); font-weight:300; font-size:.58rem; letter-spacing:.16em; text-transform:uppercase; color:var(--text-mute); }
+.evo-trend-val{ font-family:var(--serif); font-size:1.4rem; line-height:1; }
 .perf-summary-card{
   padding:1.2rem 1.3rem;background:var(--bg-card);
   border:1px solid var(--border);border-radius:4px;
@@ -19102,15 +19121,18 @@ Renderers.simulados = function(route){
     if(locked){
       footerInner = `<span class="sim-card-price">${Util.esc(s.price||'')}</span><span class="sim-card-cta">Adquirir</span>`;
     } else if(done && isEstudo){
-      // Estudo já feito: Ver resultado + Refazer
+      // Estudo já feito: Ver resultado + Revisar + Refazer
+      // "Ver resultado" → desempenho (pizza/barras/abas). "Revisar" → questões
+      // com gabarito na interface original. "Refazer" → nova tentativa.
       footerInner =
-        `<a class="sim-card-cta sim-card-cta-ghost" href="#/simulados/${s.id}/performance">Ver resultado${tentTxt}</a>` +
+        `<a class="sim-card-cta sim-card-cta-ghost" href="#/simulados/${s.id}/performance">Resultado${tentTxt}</a>` +
+        `<a class="sim-card-cta sim-card-cta-ghost" href="#/simulados/${s.id}">Revisar</a>` +
         `<a class="sim-card-cta" href="javascript:void(0)" data-sim-refazer="${Util.attr(s.id)}">Refazer</a>`;
     } else if(done){
-      // Prova já feita: só Ver resultado
+      // Prova já feita: Revisar (questões+gabarito) + Ver resultado (desempenho)
       footerInner =
-        `<span class="sim-card-price" style="font-size:.7rem;color:var(--text-mute);font-family:var(--mono)">Tentativa única já enviada</span>` +
-        `<a class="sim-card-cta" href="#/simulados/${s.id}/performance">Ver resultado${tentTxt}</a>`;
+        `<a class="sim-card-cta sim-card-cta-ghost" href="#/simulados/${s.id}">Revisar</a>` +
+        `<a class="sim-card-cta" href="#/simulados/${s.id}/performance">Resultado${tentTxt}</a>`;
     } else {
       // Ainda não fez
       footerInner =
@@ -20412,6 +20434,10 @@ Renderers.simuladoPerformance = function(route){
     </div>
   </div>
   ${visualSummary}
+  <section class="perf-section perf-evolution" id="perfEvolution" data-a="5b" style="display:none">
+    <div class="perf-section-label">Evolução das tentativas</div>
+    <div class="perf-evo-chart" id="perfEvoChart"></div>
+  </section>
   <section class="perf-section" data-a="6">
     <div class="perf-section-label">Desempenho por seção</div>
     <div class="perf-table-wrap"><table class="perf-table">
@@ -20463,6 +20489,49 @@ Renderers.simuladoPerformance.mount = function(stageEl, route){
       }).catch(e => console.warn('[sim media ex]', e));
     }
   }catch(e){ console.warn('[sim media]', e); }
+
+  // Melhorias pequenas — Gráfico evolutivo: barras por tentativa (modo Estudo
+  // tem várias). Busca as tentativas do PRÓPRIO aluno (RLS own permite).
+  // Só exibe a seção com 2+ tentativas enviadas.
+  try{
+    const u = (window.Auth && typeof Auth.getUser === 'function') ? Auth.getUser() : null;
+    const uid = u && u.id;
+    if(uid && window._sb){
+      window._sb.schema('aluno').from('simulado_attempts')
+        .select('attempt_number, score, total, pct, submitted_at')
+        .eq('user_id', uid).eq('simulado_id', String(sim.id))
+        .not('submitted_at', 'is', null)
+        .order('attempt_number', { ascending: true })
+        .then(({ data, error }) => {
+          if(error){ console.warn('[evo]', error); return; }
+          const rows = (data || []).filter(r => r.submitted_at);
+          if(rows.length < 2) return; // evolução só faz sentido com 2+ tentativas
+          const sec = stageEl.querySelector('#perfEvolution');
+          const chart = stageEl.querySelector('#perfEvoChart');
+          if(!sec || !chart) return;
+          // Tendência: compara primeira e última
+          const firstPct = Math.round((parseFloat(rows[0].pct)||0)*100);
+          const lastPct = Math.round((parseFloat(rows[rows.length-1].pct)||0)*100);
+          const delta = lastPct - firstPct;
+          chart.innerHTML = rows.map(r => {
+            const pct = Math.round((parseFloat(r.pct)||0)*100);
+            const color = pct >= 70 ? '#88c391' : pct >= 40 ? '#e8a857' : '#c77272';
+            return '<div class="evo-col">' +
+              '<span class="evo-pct">' + pct + '%</span>' +
+              '<div class="evo-bar-wrap"><div class="evo-bar" style="height:' + Math.max(2, pct) + '%;background:' + color + '"></div></div>' +
+              '<span class="evo-label">T' + (r.attempt_number || 1) + '</span>' +
+            '</div>';
+          }).join('') +
+            '<div class="evo-trend">' +
+              '<span class="evo-trend-label">Da 1ª à última</span>' +
+              '<span class="evo-trend-val" style="color:' + (delta > 0 ? '#88c391' : delta < 0 ? '#c77272' : 'var(--text-mute)') + '">' +
+                (delta > 0 ? '+' : '') + delta + ' pts' +
+              '</span>' +
+            '</div>';
+          sec.style.display = '';
+        }).catch(e => console.warn('[evo ex]', e));
+    }
+  }catch(e){ console.warn('[evo]', e); }
 };
 
 function formatReleaseCountdown(dateString){
