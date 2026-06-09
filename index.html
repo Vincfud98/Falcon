@@ -10384,13 +10384,25 @@ const Store = (function(){
       _state.simulados = _state.simulados || {};
       (data || []).forEach(row => {
         // Já está ordenado desc por attempt_number; o primeiro hit por simulado é o último.
-        if(_state.simulados[row.simulado_id]) return;
+        const existing = _state.simulados[row.simulado_id];
+        const dbStartedAt = row.started_at ? new Date(row.started_at).getTime() : null;
+        if(existing){
+          // S7 A2 — MERGE: banco é autoritativo pra started_at/submitted_at.
+          // Se o estado local (legado) não tem startedAt mas o banco tem
+          // (aluno iniciou em outra sessão/aparelho), traz do banco. Sem isso,
+          // o localStorage stale venceria e o cronômetro nasceria sem âncora.
+          if(dbStartedAt && !existing.startedAt && (existing.attemptNumber || 1) === (row.attempt_number || 1)){
+            existing.startedAt = dbStartedAt;
+            n++;
+          }
+          return;
+        }
         _state.simulados[row.simulado_id] = {
           score: row.score,
           total: row.total,
           pct: row.pct,
           submittedAt: row.submitted_at ? new Date(row.submitted_at).getTime() : null,
-          startedAt: row.started_at ? new Date(row.started_at).getTime() : null,
+          startedAt: dbStartedAt,
           attemptNumber: row.attempt_number || 1,
           userName: (window.MOCK_USER && window.MOCK_USER.name) || ''
         };
@@ -19158,11 +19170,20 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
   try{
     if(window._simExamTimerInt){ clearInterval(window._simExamTimerInt); window._simExamTimerInt = null; }
   }catch(_){}
-  if(!submitted && simState && simState.startedAt){
+  if(!submitted){
     const timerEl = document.getElementById('simExamTimer');
     const timerValEl = timerEl && timerEl.querySelector('.set-timer-value');
     const tLimMin = sim.timeLimitMinutes;
-    const startedAt = simState.startedAt;
+    // S7 A2 (robustez) — startedAt SEMPRE garantido em modo prova.
+    // Se por qualquer motivo (estado legado, hidratação stale) chegou aqui
+    // sem startedAt, inicializa agora. Sem isso o cronômetro ficava travado
+    // em "--:--:--". Store.startSimulado é idempotente (não reseta se já há).
+    let startedAt = (simState && simState.startedAt) || null;
+    if(!startedAt){
+      console.warn('[sim timer] modo prova sem startedAt — auto-inicializando agora');
+      startedAt = Store.startSimulado(sim.id, activeAttempt);
+    }
+    console.log('[sim timer] iniciado', { startedAt, timeLimitMinutes: tLimMin, agora: Date.now() });
     const tick = function(){
       const elapsedMs = Date.now() - startedAt;
       if(tLimMin){
