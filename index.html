@@ -2534,6 +2534,10 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 /* Ranking table */
 /* S3b — Leaderboard real (lista com avatar + apelido) */
 .rank-list{ margin-top:1.5rem; display:flex; flex-direction:column; gap:.5rem; }
+/* Bloqueado: aluno que não participou não vê as posições (turvo) */
+.rank-list.rank-blocked{
+  filter:blur(8px); pointer-events:none; user-select:none; opacity:.55;
+}
 .rank-loading, .rank-empty{
   text-align:center; padding:2.5rem 1rem; color:var(--text-mute);
   font-family:var(--mono); font-size:.82rem;
@@ -20277,41 +20281,51 @@ Renderers.simuladoRanking = function(route){
   </div>`;
 };
 
-// S3b — barra "você está fora do ranking" (quando opt-out na última tentativa)
-function _renderRankOptinBar(barEl, sim, attempt){
+// S3b — barra "você está fora do ranking". hasAttempt = já submeteu (pode entrar).
+function _renderRankOptinBar(barEl, sim, attempt, hasAttempt){
   if(!barEl) return;
-  barEl.innerHTML = '<div class="rank-optin-bar">' +
-    '<span class="rank-optin-bar-txt">Você está <strong>fora do ranking</strong> nesta tentativa. Entre com seu apelido e foto pra aparecer.</span>' +
-    '<button class="rank-optin-btn" id="rankOptinEnter">Entrar no ranking</button>' +
-  '</div>';
-  const btn = barEl.querySelector('#rankOptinEnter');
-  if(btn) btn.addEventListener('click', () => _showRankOptinModal(sim, attempt));
+  if(hasAttempt){
+    barEl.innerHTML = '<div class="rank-optin-bar">' +
+      '<span class="rank-optin-bar-txt">O ranking fica <strong>oculto</strong> até você participar. Entre com seu apelido e foto pra ver as posições.</span>' +
+      '<button class="rank-optin-btn" id="rankOptinEnter">Entrar no ranking</button>' +
+    '</div>';
+    const btn = barEl.querySelector('#rankOptinEnter');
+    if(btn) btn.addEventListener('click', () => _showRankOptinModal(sim, attempt, true));
+  } else {
+    barEl.innerHTML = '<div class="rank-optin-bar">' +
+      '<span class="rank-optin-bar-txt"><strong>Finalize o simulado</strong> para participar do ranking e ver as posições.</span>' +
+      '<a class="rank-optin-btn" href="#/simulados/' + sim.id + '">Ir para o simulado</a>' +
+    '</div>';
+  }
 }
 
-// S3b — modal explicativo do opt-in
-function _showRankOptinModal(sim, attempt){
+// S3b — modal explicativo do opt-in. Sem "ver como anônimo": o ranking só é
+// revelado a quem participa (instiga a entrar). hasAttempt = já submeteu.
+function _showRankOptinModal(sim, attempt, hasAttempt){
   let bk = document.getElementById('rankOptinBackdrop');
   if(bk) bk.remove();
   bk = document.createElement('div');
   bk.id = 'rankOptinBackdrop';
   bk.className = 'rank-optin-backdrop';
+  const actions = hasAttempt
+    ? '<a class="btn-ghost" href="#/simulados/' + sim.id + '">Voltar ao simulado</a>' +
+      '<button class="rank-optin-btn" id="rankOptinConfirm">Entrar com meu apelido</button>'
+    : '<a class="rank-optin-btn" href="#/simulados/' + sim.id + '">Ir para o simulado</a>';
   bk.innerHTML = '<div class="rank-optin-modal">' +
-    '<h3>Entrar no ranking?</h3>' +
-    '<p>O ranking lista quem fez este simulado, em ordem de nota, com <strong>apelido e foto</strong>. A participação é <strong>opcional</strong> e vale por tentativa — cada vez que você refaz, decide de novo (a nota muda).</p>' +
-    '<p>Se entrar, a nota <strong>desta tentativa</strong> aparece pra todo mundo. Se preferir não entrar, você continua vendo o ranking, mas aparece como <strong>Anônimo</strong>.</p>' +
-    '<div class="rank-optin-modal-actions">' +
-      '<button class="btn-ghost" id="rankOptinCancel">Ver como anônimo</button>' +
-      '<button class="rank-optin-btn" id="rankOptinConfirm">Entrar com meu apelido</button>' +
-    '</div>' +
+    '<h3>Entre para ver o ranking</h3>' +
+    '<p>O ranking lista quem fez este simulado, em ordem de nota, com <strong>apelido e foto</strong>. Pra ver as posições, você precisa <strong>participar</strong> — assim o ranking fica justo e todo mundo aparece de cara limpa.</p>' +
+    (hasAttempt
+      ? '<p>Sua participação vale <strong>por tentativa</strong> (a nota muda quando você refaz). Ao entrar, a nota <strong>desta tentativa</strong> aparece pra todos. Quem prefere não entrar fica como <strong>Anônimo</strong> na lista — sem nome, só ocupando a posição.</p>'
+      : '<p>Você ainda não finalizou este simulado. Faça o simulado e, ao entrar no ranking, verá sua posição e a dos demais.</p>') +
+    '<div class="rank-optin-modal-actions">' + actions + '</div>' +
   '</div>';
   document.body.appendChild(bk);
   const close = () => bk.remove();
   bk.addEventListener('click', e => { if(e.target === bk) close(); });
-  bk.querySelector('#rankOptinCancel').addEventListener('click', close);
-  bk.querySelector('#rankOptinConfirm').addEventListener('click', () => {
+  const confirm = bk.querySelector('#rankOptinConfirm');
+  if(confirm) confirm.addEventListener('click', () => {
     Store.setSimuladoLeaderboardOptin(sim.id, attempt, true);
     close();
-    // recarrega a página de ranking pra refletir
     const h = location.hash;
     location.hash = '#/__reload';
     setTimeout(() => { location.hash = h; }, 10);
@@ -20375,16 +20389,25 @@ Renderers.simuladoRanking.mount = function(stageEl, route){
         else { el.classList.add('rank-av-anon'); el.textContent = r.is_you ? '·' : (r.optin && r.nickname ? r.nickname[0].toUpperCase() : '?'); }
       });
     }
-    // Opt-in: se o próprio aluno submeteu mas está fora (opt-out)
+    // S3b — gating: o ranking só é REVELADO a quem participa (opt-in da
+    // última tentativa). Se o aluno está fora (não submeteu ou opt-out), a
+    // lista fica borrada e ele não vê as posições — só o convite pra entrar.
     const me = rows.find(r => r.is_you);
-    if(me && !me.optin){
-      _renderRankOptinBar(optinBar, sim, myAttempt);
+    const hasAttempt = !!me;          // submeteu alguma tentativa
+    const blocked = !me || !me.optin; // não participou OU optou por ficar fora
+    if(blocked){
+      if(bodyEl) bodyEl.classList.add('rank-blocked');
+      if(countEl) countEl.textContent = 'Entre para ver as posições';
+      _renderRankOptinBar(optinBar, sim, myAttempt, hasAttempt);
       window._rankOptinShown = window._rankOptinShown || {};
       if(!window._rankOptinShown[sim.id]){
         window._rankOptinShown[sim.id] = true;
-        setTimeout(() => _showRankOptinModal(sim, myAttempt), 300);
+        setTimeout(() => _showRankOptinModal(sim, myAttempt, hasAttempt), 300);
       }
-    } else if(optinBar){ optinBar.innerHTML = ''; }
+    } else {
+      if(bodyEl) bodyEl.classList.remove('rank-blocked');
+      if(optinBar) optinBar.innerHTML = '';
+    }
   }).catch(e => { console.warn('[leaderboard ex]', e); if(bodyEl) bodyEl.innerHTML = '<div class="rank-loading">Erro ao carregar.</div>'; });
 };
 
