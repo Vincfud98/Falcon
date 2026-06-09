@@ -939,10 +939,36 @@ html[data-theme="light"] .sim-exam-topbar{
   color:var(--text-dim);
   font-family:var(--sans); font-weight:300; font-size:.64rem;
   letter-spacing:.14em; text-transform:uppercase;
-  cursor:not-allowed; opacity:.55;
+  cursor:pointer;
   transition:all .3s var(--ease);
 }
+.sim-exam-topbar .set-view-toggle:hover{
+  border-color:var(--accent); color:var(--accent); background:var(--accent-xlo);
+}
 .sim-exam-topbar .set-view-toggle strong{ color:var(--text); font-weight:400; }
+
+/* S7 Bloco E — Modo grupo-a-grupo (paged): mostra um .block-section por vez */
+.sim-exam-main.mode-paged .block-section{ display:none; }
+.sim-exam-main.mode-paged .block-section.is-active-page{ display:block; animation:su .4s var(--ease) both; }
+.sim-page-nav{
+  display:flex; align-items:center; justify-content:space-between; gap:1rem;
+  margin-top:1.8rem; padding-top:1.4rem;
+  border-top:1px solid var(--accent-border-soft);
+}
+.spn-btn{
+  display:inline-flex; align-items:center; gap:.4rem;
+  padding:.6rem 1.3rem; background:transparent;
+  border:1px solid var(--accent-border); border-radius:var(--radius);
+  color:var(--accent); font-family:var(--sans); font-weight:300;
+  font-size:.7rem; letter-spacing:.16em; text-transform:uppercase;
+  cursor:pointer; transition:all .3s var(--ease);
+}
+.spn-btn:hover:not(:disabled){ background:var(--accent-lo); }
+.spn-btn:disabled{ opacity:.35; cursor:not-allowed; color:var(--text-mute); border-color:var(--accent-border-soft); }
+.spn-indicator{
+  font-family:var(--mono); font-size:.72rem; color:var(--text-dim);
+  letter-spacing:.05em;
+}
 
 /* Finalizar = btn-primary do saas-components (preenchido, invertido no hover) */
 .sim-exam-topbar .set-finish-btn{
@@ -19291,8 +19317,8 @@ Renderers.simuladoDetail = function(route){
       </div>
     </div>
     <div class="set-right">
-      <button class="set-view-toggle" id="simExamViewToggle" title="Modo de visualização (em construção)" disabled>
-        <span>Modo: <strong>Rolagem</strong></span>
+      <button class="set-view-toggle" id="simExamViewToggle" title="Alternar entre rolagem e grupo-a-grupo">
+        <span>Modo: <strong id="simExamViewLabel">Rolagem</strong></span>
       </button>
       <button class="set-finish-btn" id="simExamFinishBtn">${Icons.check} Finalizar</button>
     </div>
@@ -19393,13 +19419,21 @@ function _buildSimExamMap(stageEl){
       <div class="sem-grid">${cells}</div>
     </div>`;
   }).join('');
-  // Wire clique → scroll suave até a questão
+  // Wire clique → scroll suave até a questão. No modo grupo-a-grupo (paged),
+  // primeiro troca pra página (grupo) da questão, depois rola até ela.
   mapEl.querySelectorAll('.sem-q').forEach(btn => {
     btn.addEventListener('click', () => {
       const id = btn.getAttribute('data-target-item');
       const target = stageEl.querySelector('.q-item[data-item-id="' + CSS.escape(id) + '"], .essay-item[data-item-id="' + CSS.escape(id) + '"]');
       if(target){
-        target.scrollIntoView({ behavior:'smooth', block:'center' });
+        if((window._simViewMode || 'scroll') === 'paged'){
+          const blockEl = target.closest('.block-section');
+          const blocks = Array.from(stageEl.querySelectorAll('.block-section'));
+          const idx = blocks.indexOf(blockEl);
+          if(idx >= 0 && typeof _showSimPage === 'function') _showSimPage(stageEl, idx);
+        }
+        // pequeno delay pra o display:block do grupo aplicar antes do scroll
+        setTimeout(() => { try{ target.scrollIntoView({ behavior:'smooth', block:'center' }); }catch(_){} }, 30);
         mapEl.querySelectorAll('.sem-q.is-current').forEach(b => b.classList.remove('is-current'));
         btn.classList.add('is-current');
       }
@@ -19557,6 +19591,68 @@ function _mountSimNotes(stageEl, sim){
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// S7 Bloco E — Modo de visualização: "scroll" (rolagem) vs "paged"
+// (grupo-a-grupo, uma .block-section por vez com avançar/voltar).
+// Estado persiste em localStorage. Aplicado via classe/DOM (sem re-render),
+// preservando respostas e notas já digitadas.
+// ─────────────────────────────────────────────────────────────────────
+function _loadSimViewMode(){
+  if(window._simViewMode) return window._simViewMode;
+  try{ window._simViewMode = localStorage.getItem('ubique.simViewMode') || 'scroll'; }
+  catch(_){ window._simViewMode = 'scroll'; }
+  return window._simViewMode;
+}
+function _setSimViewMode(mode){
+  window._simViewMode = mode;
+  try{ localStorage.setItem('ubique.simViewMode', mode); }catch(_){}
+}
+function _showSimPage(stageEl, idx){
+  const main = stageEl.querySelector('.sim-exam-main');
+  if(!main) return;
+  const blocks = Array.from(stageEl.querySelectorAll('.block-section'));
+  if(!blocks.length) return;
+  idx = Math.max(0, Math.min(idx, blocks.length - 1));
+  window._simPageIdx = idx;
+  blocks.forEach((b, i) => b.classList.toggle('is-active-page', i === idx));
+  // Esconde dividers no modo paged (cada grupo vem isolado)
+  stageEl.querySelectorAll('.block-divider').forEach(h => h.style.display = 'none');
+  // Navegação (cria/atualiza) — inserida no fim do #simStage
+  const stage = stageEl.querySelector('#simStage');
+  if(!stage) return;
+  let nav = stage.querySelector('.sim-page-nav');
+  if(!nav){
+    nav = document.createElement('div');
+    nav.className = 'sim-page-nav';
+    stage.appendChild(nav);
+  }
+  nav.innerHTML =
+    '<button class="spn-btn spn-prev" type="button"' + (idx === 0 ? ' disabled' : '') + '>' + (Icons.chevron || '‹') + ' Voltar</button>' +
+    '<span class="spn-indicator">Grupo ' + (idx + 1) + ' de ' + blocks.length + '</span>' +
+    '<button class="spn-btn spn-next" type="button"' + (idx === blocks.length - 1 ? ' disabled' : '') + '>Avançar ' + (Icons.chevron ? '<span style="transform:rotate(180deg);display:inline-block">' + Icons.chevron + '</span>' : '›') + '</button>';
+  const prev = nav.querySelector('.spn-prev');
+  const next = nav.querySelector('.spn-next');
+  if(prev) prev.onclick = () => { _showSimPage(stageEl, idx - 1); const s = stageEl.querySelector('#simStage'); if(s) s.scrollIntoView({ behavior:'smooth', block:'start' }); };
+  if(next) next.onclick = () => { _showSimPage(stageEl, idx + 1); const s = stageEl.querySelector('#simStage'); if(s) s.scrollIntoView({ behavior:'smooth', block:'start' }); };
+}
+function _applySimViewMode(stageEl){
+  const main = stageEl.querySelector('.sim-exam-main');
+  if(!main) return;
+  const mode = _loadSimViewMode();
+  const label = document.getElementById('simExamViewLabel');
+  if(label) label.textContent = mode === 'paged' ? 'Grupos' : 'Rolagem';
+  if(mode === 'paged'){
+    main.classList.add('mode-paged');
+    if(window._simPageIdx == null) window._simPageIdx = 0;
+    _showSimPage(stageEl, window._simPageIdx);
+  } else {
+    main.classList.remove('mode-paged');
+    stageEl.querySelectorAll('.block-section').forEach(b => b.classList.remove('is-active-page'));
+    stageEl.querySelectorAll('.block-divider').forEach(h => h.style.display = '');
+    const nav = stageEl.querySelector('.sim-page-nav'); if(nav) nav.remove();
+  }
+}
+
 Renderers.simuladoDetail.mount = function(stageEl, route){
   const sims = window.SIMULADOS || [];
   const sim = sims.find(s => s.id === route.params.simuladoId);
@@ -19698,6 +19794,21 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
   }catch(e){ console.warn('[sim map build]', e); }
   // S7 Bloco D — liga o bloco de notas (rascunho)
   try{ _mountSimNotes(stageEl, sim); }catch(e){ console.warn('[sim notes]', e); }
+
+  // S7 Bloco E — aplica modo de visualização (scroll/paged) + wire do toggle
+  try{
+    _applySimViewMode(stageEl);
+    const vToggle = document.getElementById('simExamViewToggle');
+    if(vToggle && !vToggle.dataset.bound){
+      vToggle.dataset.bound = '1';
+      vToggle.addEventListener('click', () => {
+        const cur = _loadSimViewMode();
+        _setSimViewMode(cur === 'paged' ? 'scroll' : 'paged');
+        window._simPageIdx = 0;
+        _applySimViewMode(stageEl);
+      });
+    }
+  }catch(e){ console.warn('[sim view mode]', e); }
 
   // S2.2 — Simulado JÁ enviado: bloqueia cliques nas opções por completo
   // (cinto-e-suspensório com o CSS .sim-revealed). Aluno revisa, não troca.
