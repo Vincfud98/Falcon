@@ -2534,10 +2534,14 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 
 /* Ranking table */
 /* S3b — Leaderboard real (lista com avatar + apelido) */
-.rank-list{ margin-top:1.5rem; display:flex; flex-direction:column; gap:.5rem; }
-/* Bloqueado: aluno que não participou não vê as posições (turvo) */
+.rank-list{
+  margin-top:1.5rem; display:flex; flex-direction:column; gap:.5rem;
+  transition:filter .5s var(--ease), opacity .5s var(--ease);
+}
+/* Bloqueado: aluno que não participou não vê as posições (turvo).
+   A transição faz o blur sumir suave ao entrar no ranking. */
 .rank-list.rank-blocked{
-  filter:blur(8px); pointer-events:none; user-select:none; opacity:.55;
+  filter:blur(8px); pointer-events:none; user-select:none; opacity:.5;
 }
 .rank-loading, .rank-empty{
   text-align:center; padding:2.5rem 1rem; color:var(--text-mute);
@@ -2596,8 +2600,9 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 .rank-optin-backdrop{
   position:fixed; inset:0; background:rgba(0,0,0,.65); z-index:9000;
   display:flex; align-items:center; justify-content:center; padding:1.5rem;
-  animation:fadeIn .2s ease;
+  animation:fadeIn .25s ease; transition:opacity .2s ease;
 }
+.rank-optin-backdrop.is-closing{ opacity:0; }
 .rank-optin-modal{
   max-width:520px; width:100%; padding:2rem 2.2rem;
   background:var(--bg); border:1px solid var(--accent-border-soft); border-radius:var(--radius-lg,4px);
@@ -20324,50 +20329,67 @@ function _showRankOptinModal(sim, attempt, hasAttempt){
     '<div class="rank-optin-modal-actions">' + actions + '</div>' +
   '</div>';
   document.body.appendChild(bk);
-  const close = () => bk.remove();
+  const close = () => { bk.classList.add('is-closing'); setTimeout(() => bk.remove(), 200); };
   bk.addEventListener('click', e => { if(e.target === bk) close(); });
   const confirm = bk.querySelector('#rankOptinConfirm');
-  if(confirm) confirm.addEventListener('click', () => {
-    Store.setSimuladoLeaderboardOptin(sim.id, attempt, true);
+  if(confirm) confirm.addEventListener('click', async () => {
+    confirm.disabled = true; confirm.textContent = 'Entrando…';
+    const ok = await _enterLeaderboard(sim.id);
     close();
-    const h = location.hash;
-    location.hash = '#/__reload';
-    setTimeout(() => { location.hash = h; }, 10);
+    // Re-renderiza o ranking no lugar (sem reload de página): o blur some
+    // suave e as posições aparecem.
+    if(ok && window._rankStageEl && window._rankSim){
+      _loadAndRenderLeaderboard(window._rankStageEl, window._rankSim);
+    } else if(!ok){
+      alert('Não consegui entrar no ranking agora. Tente novamente.');
+    }
   });
 }
 
-Renderers.simuladoRanking.mount = function(stageEl, route){
-  const sims = window.SIMULADOS || [];
-  const sim = sims.find(s => s.id === route.params.simuladoId);
-  if(!sim) return;
+// S3b — entra no ranking: faz UPDATE na ÚLTIMA tentativa SUBMETIDA do aluno
+// (buscada do banco, não do estado local — que pode estar com attempt errado).
+// Retorna true se gravou. Usa RLS (UPDATE own) — sem migração extra.
+async function _enterLeaderboard(simId){
+  try{
+    const u = (window.Auth && typeof Auth.getUser === 'function') ? Auth.getUser() : null;
+    const userId = u && u.id;
+    if(!userId || !window._sb) return false;
+    const aSb = window._sb.schema('aluno');
+    const { data, error } = await aSb.from('simulado_attempts')
+      .select('attempt_number')
+      .eq('user_id', userId).eq('simulado_id', String(simId))
+      .not('submitted_at', 'is', null)
+      .order('attempt_number', { ascending: false }).limit(1);
+    if(error){ console.warn('[enter lb select]', error); return false; }
+    const attempt = data && data[0] && data[0].attempt_number;
+    if(!attempt) return false;
+    const upd = await aSb.from('simulado_attempts')
+      .update({ show_in_leaderboard: true })
+      .eq('user_id', userId).eq('simulado_id', String(simId)).eq('attempt_number', attempt);
+    if(upd.error){ console.warn('[enter lb update]', upd.error); return false; }
+    // espelha no estado local
+    try{ const st = Store.getSimuladoState(simId); if(st) st.showInLeaderboard = true; }catch(_){}
+    return true;
+  }catch(e){ console.warn('[enter lb ex]', e); return false; }
+}
+
+// S3b — busca o leaderboard e renderiza (reutilizável: mount + após entrar).
+function _loadAndRenderLeaderboard(stageEl, sim){
   const bodyEl = stageEl.querySelector('#rankBody');
   const countEl = stageEl.querySelector('#rankCount');
   const optinBar = stageEl.querySelector('#rankOptinBar');
-  if(!window._sb || typeof window._sb.rpc !== 'function'){
-    if(bodyEl) bodyEl.innerHTML = '<div class="rank-loading">Ranking indisponível offline.</div>';
-    return;
-  }
-  // Foto/transform locais do próprio aluno (pra a linha "Você")
+  if(!bodyEl) return;
   let myProf = null;
   try{
     const u = (window.Auth && typeof Auth.getUser === 'function') ? Auth.getUser() : null;
     if(u && window.Profile && Profile.get) myProf = Profile.get(u.id);
   }catch(_){}
-  const myAttempt = (window._simCurrentAttempt && window._simCurrentAttempt[sim.id])
-    || ((Store.getSimuladoState(sim.id)||{}).attemptNumber) || 1;
-
   window._sb.rpc('simulado_leaderboard', { p_simulado_id: sim.id }).then(({ data, error }) => {
-    if(error){ console.warn('[leaderboard]', error); if(bodyEl) bodyEl.innerHTML = '<div class="rank-loading">Erro ao carregar o ranking.</div>'; return; }
+    if(error){ console.warn('[leaderboard]', error); bodyEl.innerHTML = '<div class="rank-loading">Erro ao carregar o ranking.</div>'; return; }
     const rows = data || [];
-    if(countEl) countEl.textContent = rows.length + ' participante' + (rows.length===1?'':'s');
     if(!rows.length){
       bodyEl.innerHTML = '<div class="rank-empty">Ainda sem participantes no ranking. Entre ao finalizar o simulado!</div>';
     } else {
-      // S3b — usa SEMPRE a foto/crop do banco (RPC), inclusive pro "Você".
-      // O cache local (myProf) pode estar com um transform desatualizado, o
-      // que deixava o crop do próprio aluno torto. O banco tem o crop atual
-      // (mesmo que a página Conta/topbar usam após salvar). Fallback local
-      // só se a RPC não trouxe (ex.: opt-in recém-feito sem foto sincronizada).
       const resolveAv = (r) => {
         if(r.optin && r.photo_url) return { url: r.photo_url, t: r.photo_transform || null };
         if(r.is_you && myProf && myProf.photoUrl) return { url: myProf.photoUrl, t: myProf.photoTransform || null };
@@ -20388,7 +20410,6 @@ Renderers.simuladoRanking.mount = function(stageEl, route){
           '<span class="rank-item-pct">' + pct + '%</span>' +
         '</div>';
       }).join('');
-      // Avatares (com crop) ou placeholder de iniciais/anônimo
       rows.forEach((r, i) => {
         const el = stageEl.querySelector('#rankav-' + i);
         if(!el) return;
@@ -20397,26 +20418,39 @@ Renderers.simuladoRanking.mount = function(stageEl, route){
         else { el.classList.add('rank-av-anon'); el.textContent = r.is_you ? '·' : (r.optin && r.nickname ? r.nickname[0].toUpperCase() : '?'); }
       });
     }
-    // S3b — gating: o ranking só é REVELADO a quem participa (opt-in da
-    // última tentativa). Se o aluno está fora (não submeteu ou opt-out), a
-    // lista fica borrada e ele não vê as posições — só o convite pra entrar.
     const me = rows.find(r => r.is_you);
-    const hasAttempt = !!me;          // submeteu alguma tentativa
-    const blocked = !me || !me.optin; // não participou OU optou por ficar fora
+    const hasAttempt = !!me;
+    const blocked = !me || !me.optin;
     if(blocked){
-      if(bodyEl) bodyEl.classList.add('rank-blocked');
+      bodyEl.classList.add('rank-blocked');
       if(countEl) countEl.textContent = 'Entre para ver as posições';
-      _renderRankOptinBar(optinBar, sim, myAttempt, hasAttempt);
+      _renderRankOptinBar(optinBar, sim, 0, hasAttempt);
       window._rankOptinShown = window._rankOptinShown || {};
       if(!window._rankOptinShown[sim.id]){
         window._rankOptinShown[sim.id] = true;
-        setTimeout(() => _showRankOptinModal(sim, myAttempt, hasAttempt), 300);
+        setTimeout(() => _showRankOptinModal(sim, 0, hasAttempt), 300);
       }
     } else {
-      if(bodyEl) bodyEl.classList.remove('rank-blocked');
+      bodyEl.classList.remove('rank-blocked');
+      if(countEl) countEl.textContent = rows.length + ' participante' + (rows.length===1?'':'s');
       if(optinBar) optinBar.innerHTML = '';
     }
-  }).catch(e => { console.warn('[leaderboard ex]', e); if(bodyEl) bodyEl.innerHTML = '<div class="rank-loading">Erro ao carregar.</div>'; });
+  }).catch(e => { console.warn('[leaderboard ex]', e); bodyEl.innerHTML = '<div class="rank-loading">Erro ao carregar.</div>'; });
+}
+
+Renderers.simuladoRanking.mount = function(stageEl, route){
+  const sims = window.SIMULADOS || [];
+  const sim = sims.find(s => s.id === route.params.simuladoId);
+  if(!sim) return;
+  const bodyEl = stageEl.querySelector('#rankBody');
+  if(!window._sb || typeof window._sb.rpc !== 'function'){
+    if(bodyEl) bodyEl.innerHTML = '<div class="rank-loading">Ranking indisponível offline.</div>';
+    return;
+  }
+  // Guarda o stageEl pra o modal poder re-renderizar sem reload
+  window._rankStageEl = stageEl;
+  window._rankSim = sim;
+  _loadAndRenderLeaderboard(stageEl, sim);
 };
 
 /* ═══════════ SIMULADO PERFORMANCE ═══════════ */
