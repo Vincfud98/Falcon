@@ -10289,31 +10289,39 @@ const Store = (function(){
       if(error){ console.warn('[hydrate comments]', error); return; }
       if(!_state.comments) _state.comments = {};
 
-      // Batch-fetch perfis dos autores que não temos local (pra ter foto + nome)
-      const uniqUserIds = [...new Set((data||[]).map(r => r.user_id).filter(Boolean))];
-      const missingIds = uniqUserIds.filter(uid => {
-        const u = (typeof window.UserDirectory !== 'undefined') ? window.UserDirectory.getById(uid) : null;
-        return !u;
-      });
-      if(missingIds.length && window.UbiqueStore && window.UbiqueStore.user_profiles){
+      // Batch-fetch perfis de TODOS os participantes do bloco: autores E
+      // mencionados. Busca SEMPRE fresco do banco (não só os que faltam) —
+      // o cache local pode ter @ /nome desatualizados de quem trocou o
+      // perfil depois, e aí a menção não viraria chip nem o nome atualizaria.
+      const uniqUserIds = [...new Set(
+        (data||[]).flatMap(r => {
+          const ids = [r.user_id];
+          const ms = (r.metadata && Array.isArray(r.metadata.mentions)) ? r.metadata.mentions : [];
+          ms.forEach(m => { if(m && m.user_id) ids.push(m.user_id); });
+          return ids;
+        }).filter(Boolean)
+      )];
+      if(uniqUserIds.length && window.UbiqueStore && window.UbiqueStore.user_profiles){
         try{
           const { data: profs, error: pErr } = await window._sb.schema('crm').from('user_profiles')
             .select('user_id, display_name, handle, bio, photo_url, photo_transform')
-            .in('user_id', missingIds);
+            .in('user_id', uniqUserIds);
           if(!pErr && Array.isArray(profs)){
             const list = window.UbiqueStore.user_profiles.list() || [];
             profs.forEach(p => {
+              const existing = list.find(x => x && x.user_id === p.user_id);
               const merged = {
                 user_id:        p.user_id,
                 displayName:    p.display_name || '',
-                nickname:       '',
+                // nickname não vive em user_profiles — preserva o que o
+                // cache local já tiver (ex.: do próprio usuário logado)
+                nickname:       (existing && existing.nickname) || '',
                 handle:         p.handle || '',
                 bio:            p.bio || '',
                 photoUrl:       p.photo_url || '',
                 photoTransform: p.photo_transform || { x:0, y:0, scale:1 },
                 updated_at:     Date.now()
               };
-              const existing = list.find(x => x && x.user_id === p.user_id);
               if(existing) window.UbiqueStore.user_profiles.update(existing.id, merged);
               else window.UbiqueStore.user_profiles.add(Object.assign({ created_at: Date.now() }, merged));
             });
@@ -10325,12 +10333,15 @@ const Store = (function(){
       const legacy = (_state.comments[blockId] || []).filter(c => !_UUID_RE.test(String(c.id||'')));
       const fromDb = (data || []).map(row => {
         const meta = row.metadata || {};
-        // Resolve nome do autor via UserDirectory (cai pra "Autor" se não achar)
-        let authorName = (meta.author && typeof meta.author === 'string') ? meta.author : '';
-        if(!authorName && typeof window.UserDirectory !== 'undefined'){
+        // Nome do autor: SEMPRE o perfil atual (UserDirectory). O nome gravado
+        // no metadata é foto da época do comentário — vira só reserva pra
+        // quando o perfil não existe mais (conta apagada).
+        let authorName = '';
+        if(typeof window.UserDirectory !== 'undefined'){
           const u = window.UserDirectory.getById(row.user_id);
-          if(u) authorName = u.nickname || u.displayName || u.handle || 'Autor';
+          if(u) authorName = u.nickname || u.displayName || u.handle || '';
         }
+        if(!authorName) authorName = (meta.author && typeof meta.author === 'string') ? meta.author : '';
         return {
           id: row.id,
           author: authorName || 'Autor',
@@ -15743,7 +15754,7 @@ function _buildCommentThread(block, ctx){
           <span class="cmt-date">${fmtDate(c.createdAt)}</span>
           ${c.editedAt ? '<span class="cmt-edited-tag">editado</span>' : ''}
         </div>
-        <div class="cmt-text">${(typeof window.linkifyMentions === 'function') ? window.linkifyMentions(c.text||'') : Util.esc(c.text||'')}</div>
+        <div class="cmt-text">${(typeof window.linkifyMentions === 'function') ? window.linkifyMentions(c.text||'', c.mentions) : Util.esc(c.text||'')}</div>
         <div class="cmt-actions">
           <button class="cmt-action-btn" data-action="reply" data-comment-id="${Util.attr(c.id)}">Responder</button>
           ${isOwn ? `<button class="cmt-action-btn" data-action="edit-comment" data-comment-id="${Util.attr(c.id)}">Editar</button>` : ''}
@@ -16193,12 +16204,19 @@ window.parseMentions = parseMentions;
 /* linkifyMentions — converte @handle (válidos) em chips clicáveis HTML.
    Texto que não é menção continua escapado normalmente. Usado ao
    renderizar comentários. */
-function linkifyMentions(text){
+function linkifyMentions(text, mentionsMeta){
   const safe = Util.esc(text || '');
   return safe.replace(/@([a-z0-9_.]{3,24})/gi, (full, h) => {
-    const u = UserDirectory.getByHandle(h);
-    if(!u) return full;  // mantém texto cru se o handle não existe
-    return '<a class="cmt-mention" href="javascript:void(0)" data-user-id="' + Util.attr(u.id) + '" title="' + Util.attr(u.displayName || '@'+h) + '">@' + Util.esc(h) + '</a>';
+    let u = UserDirectory.getByHandle(h);
+    // Autocura: se o @ do texto está desatualizado (pessoa trocou o handle),
+    // resolve pela identidade gravada nos metadados do comentário (user_id).
+    if(!u && Array.isArray(mentionsMeta)){
+      const m = mentionsMeta.find(mm => mm && String(mm.handle || '').toLowerCase() === h.toLowerCase());
+      if(m && m.user_id) u = UserDirectory.getById(m.user_id);
+    }
+    if(!u) return full;  // mantém texto cru se realmente não há dono
+    const shown = u.handle || h;  // exibe sempre o @ ATUAL da pessoa
+    return '<a class="cmt-mention" href="javascript:void(0)" data-user-id="' + Util.attr(u.id) + '" title="' + Util.attr(u.displayName || '@'+shown) + '">@' + Util.esc(shown) + '</a>';
   });
 }
 window.linkifyMentions = linkifyMentions;
