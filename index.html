@@ -17545,7 +17545,14 @@ Renderers.account.mount = function(stageEl){
     });
   }
 
-  // Validação live do @handle
+  // Validação live do @handle.
+  // Camada 1 (instantânea): formato + reservados + cache local.
+  // Camada 2 (debounced): RPC handle_available — confere contra o banco
+  // INTEIRO (o cache local pode não ter todos os perfis). A palavra final
+  // na troca é sempre do rename_handle no servidor (atômico + UNIQUE index).
+  const HANDLE_RESERVED = ['admin','admins','suporte','ubique','sistema','moderador','all','todos'];
+  let _handleCheckTimer = null;
+  let _handleCheckSeq = 0;
   function checkHandle(){
     if(!handleEl || !handleStat) return null;
     const raw = handleEl.value;
@@ -17567,13 +17574,47 @@ Renderers.account.mount = function(stageEl){
       handleStat.className = 'account-handle-status is-bad';
       return null;
     }
+    const currentHandle = Profile.normalizeHandle((Profile.get(user.id) || {}).handle);
+    if(HANDLE_RESERVED.includes(norm) && norm !== currentHandle){
+      handleStat.textContent = '✗ este @ é reservado';
+      handleStat.className = 'account-handle-status is-bad';
+      return null;
+    }
     if(!Profile.handleAvailable(norm, user.id)){
       handleStat.textContent = '✗ já em uso';
       handleStat.className = 'account-handle-status is-bad';
       return null;
     }
-    handleStat.textContent = '✓ disponível';
-    handleStat.className = 'account-handle-status is-good';
+    // Passou no local: se é o próprio handle atual, nem consulta o servidor
+    if(norm === currentHandle){
+      handleStat.textContent = '✓ disponível';
+      handleStat.className = 'account-handle-status is-good';
+      return norm;
+    }
+    // Consulta o banco (debounced 400ms; ignora respostas fora de ordem)
+    handleStat.textContent = 'verificando…';
+    handleStat.className = 'account-handle-status is-empty';
+    clearTimeout(_handleCheckTimer);
+    const seq = ++_handleCheckSeq;
+    _handleCheckTimer = setTimeout(async () => {
+      try{
+        const { data, error } = await window._sb.rpc('handle_available', { p_handle: norm });
+        if(seq !== _handleCheckSeq) return; // resposta antiga, descarta
+        if(error) throw error;
+        if(data === true){
+          handleStat.textContent = '✓ disponível';
+          handleStat.className = 'account-handle-status is-good';
+        } else {
+          handleStat.textContent = '✗ já em uso ou reservado';
+          handleStat.className = 'account-handle-status is-bad';
+        }
+      }catch(e){
+        // Sem rede/RPC: mantém o resultado local (o servidor barra na hora de salvar)
+        if(seq !== _handleCheckSeq) return;
+        handleStat.textContent = '✓ disponível';
+        handleStat.className = 'account-handle-status is-good';
+      }
+    }, 400);
     return norm;
   }
   if(handleEl){
@@ -17772,6 +17813,19 @@ Renderers.account.mount = function(stageEl){
       if(saveFB){ saveFB.textContent = 'Salvando…'; saveFB.className = 'account-save-feedback'; }
       saveBtn.disabled = true;
       try{
+        // Troca de @: operação atômica no servidor (rename_handle valida
+        // formato/reservados/unicidade e reescreve as menções @antigo→@novo
+        // em todos os comentários). Só prossegue se o servidor aprovar.
+        const prevHandle = Profile.normalizeHandle((Profile.get(user.id) || {}).handle);
+        if(h !== prevHandle && window._sb){
+          const { data: rh, error: rhErr } = await window._sb.rpc('rename_handle', { p_new_handle: h });
+          if(rhErr || !rh || rh.ok !== true){
+            const msg = (rh && rh.error) ? rh.error : (rhErr && rhErr.message) || 'erro ao trocar o @';
+            if(saveFB){ saveFB.textContent = '✗ ' + msg; saveFB.className = 'account-save-feedback is-error'; }
+            if(handleEl) handleEl.focus();
+            return;
+          }
+        }
         const patch = {
           displayName: dispName,
           nickname: nick,
