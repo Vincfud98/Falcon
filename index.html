@@ -8950,6 +8950,14 @@ window.TAG_REGISTRY = {
         } else if(error){ console.warn('[hydrate user_profiles] erro:', error); }
       } catch(e){ console.warn('[hydrate user_profiles] exception:', e); }
 
+      // Contato — lista de admins (RPC segura; aluno não lê papéis direto).
+      // Usada pelo autocomplete do "@admin" e pelo registro de menções.
+      try {
+        const { data: adm, error: admErr } = await window._sb.rpc('list_admins');
+        window._ADMINS = (!admErr && Array.isArray(adm)) ? adm : [];
+        console.log('[hydrate admins] ✅', { admins: window._ADMINS.length });
+      } catch(e){ window._ADMINS = []; console.warn('[hydrate admins] exception:', e); }
+
       // Fase 4j — hidrata edital_progress do aluno logado
       try {
         const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
@@ -11468,6 +11476,48 @@ const Store = (function(){
             }
           }).catch(()=>{});
         }
+        // Contato — menções a ADMINS vão pra caixa de entrada do painel
+        // (aluno.admin_mentions). Dois casos:
+        //  • @handle de um admin específico → registra com mentioned_admin_id
+        //    (a notificação no sino dele já saiu pelo fluxo normal acima)
+        //  • @admin (reservado) → registra UMA linha "todos" (admin_id null)
+        //    e notifica cada admin no sino
+        try{
+          const admins = window._ADMINS || [];
+          if(admins.length){
+            const adminIds = new Set(admins.map(a => String(a.user_id)));
+            const rows = [];
+            mentions.forEach(m => {
+              if(m.user_id && adminIds.has(String(m.user_id))) rows.push({ mentioned_admin_id: m.user_id });
+            });
+            if(/@admin(?![a-z0-9_.])/i.test(text)){
+              rows.push({ mentioned_admin_id: null });
+              admins.forEach(a => {
+                if(String(a.user_id) === String(authorId) || notified.has(a.user_id)) return;
+                notified.add(a.user_id);
+                console.log('%c[notif] @admin notificado → admin', 'color:#7bbf7b', a.user_id);
+                Notifications.create(a.user_id, 'mention', _basePayload);
+              });
+            }
+            if(rows.length && window._sb && _UUID_RE.test(String(authorId))){
+              // Hash robusto: rota completa da unidade quando resolvível
+              const robustHash = (modId && chapId && unitId)
+                ? ('#/m/' + modId + '/c/' + chapId + '/u/' + unitId)
+                : _hash;
+              const base = {
+                comment_id: comment.id,
+                from_user_id: authorId,
+                unit_id: unitId != null ? String(unitId) : null,
+                block_id: blockId != null ? String(blockId) : null,
+                text_excerpt: excerpt,
+                target_hash: robustHash
+              };
+              window._sb.schema('aluno').from('admin_mentions')
+                .insert(rows.map(r => Object.assign({}, base, r)))
+                .then(({ error }) => { if(error) console.warn('[admin_mentions insert]', error); });
+            }
+          }
+        }catch(e){ console.warn('[admin mentions]', e); }
       }
       return comment;
     },
@@ -16210,6 +16260,11 @@ window.parseMentions = parseMentions;
 function linkifyMentions(text, mentionsMeta){
   const safe = Util.esc(text || '');
   return safe.replace(/@([a-z0-9_.]{3,24})/gi, (full, h) => {
+    // Contato — "@admin" é reservado: chama todos os administradores.
+    // Vira chip não-clicável (não há UM perfil por trás).
+    if(h.toLowerCase() === 'admin'){
+      return '<span class="cmt-mention" title="Todos os administradores" style="cursor:default">@admin</span>';
+    }
     let u = UserDirectory.getByHandle(h);
     // Autocura: se o @ do texto está desatualizado (pessoa trocou o handle),
     // resolve pela identidade gravada nos metadados do comentário (user_id).
@@ -16346,6 +16401,13 @@ function attachMentionAutocomplete(textareaEl){
       ? UserDirectory.search(rawQ, { excludeUserId: me && me.id, limit: 24 })
       : (UserDirectory.all() || []).filter(u => !me || u.id !== me.id);
     candidates = rawCands.filter(u => u && u.handle && String(u.handle).trim()).slice(0, 8);
+    // Contato — item especial "@admin": chama TODOS os administradores
+    // (handle reservado, nunca pertence a um usuário). Aparece quando o
+    // que foi digitado é prefixo de "admin".
+    if((window._ADMINS || []).length && 'admin'.indexOf(rawQ.toLowerCase()) === 0){
+      candidates = [{ id: '__admins__', handle: 'admin', nickname: 'Chamar todos os administradores' }]
+        .concat(candidates).slice(0, 8);
+    }
     activeIndex = 0;
     render();
   });
