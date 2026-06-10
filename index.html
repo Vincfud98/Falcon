@@ -8926,7 +8926,7 @@ window.TAG_REGISTRY = {
       // veio do mirror do usuário atual / autores de comentários).
       try {
         const { data: profs, error } = await window._sb.schema('crm').from('user_profiles')
-          .select('user_id, display_name, handle, bio, photo_url, photo_transform');
+          .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform');
         if(!error && Array.isArray(profs) && UbiqueStore.user_profiles){
           const list = UbiqueStore.user_profiles.list() || [];
           profs.forEach(p => {
@@ -8934,6 +8934,8 @@ window.TAG_REGISTRY = {
             const merged = {
               user_id:        p.user_id,
               displayName:    p.display_name || '',
+              nickname:       p.nickname || '',
+              namePublic:     p.full_name_public !== false,
               handle:         p.handle || '',
               bio:            p.bio || '',
               photoUrl:       p.photo_url || '',
@@ -10304,7 +10306,7 @@ const Store = (function(){
       if(uniqUserIds.length && window.UbiqueStore && window.UbiqueStore.user_profiles){
         try{
           const { data: profs, error: pErr } = await window._sb.schema('crm').from('user_profiles')
-            .select('user_id, display_name, handle, bio, photo_url, photo_transform')
+            .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform')
             .in('user_id', uniqUserIds);
           if(!pErr && Array.isArray(profs)){
             const list = window.UbiqueStore.user_profiles.list() || [];
@@ -10313,9 +10315,8 @@ const Store = (function(){
               const merged = {
                 user_id:        p.user_id,
                 displayName:    p.display_name || '',
-                // nickname não vive em user_profiles — preserva o que o
-                // cache local já tiver (ex.: do próprio usuário logado)
-                nickname:       (existing && existing.nickname) || '',
+                nickname:       p.nickname || (existing && existing.nickname) || '',
+                namePublic:     p.full_name_public !== false,
                 handle:         p.handle || '',
                 bio:            p.bio || '',
                 photoUrl:       p.photo_url || '',
@@ -10333,13 +10334,14 @@ const Store = (function(){
       const legacy = (_state.comments[blockId] || []).filter(c => !_UUID_RE.test(String(c.id||'')));
       const fromDb = (data || []).map(row => {
         const meta = row.metadata || {};
-        // Nome do autor: SEMPRE o perfil atual (UserDirectory). O nome gravado
-        // no metadata é foto da época do comentário — vira só reserva pra
-        // quando o perfil não existe mais (conta apagada).
+        // Nome do autor: SEMPRE o perfil atual (UserDirectory) e SEMPRE o
+        // apelido (ou @) — o nome completo, mesmo público, só aparece no
+        // modal de perfil. O nome gravado no metadata é foto da época do
+        // comentário — vira só reserva pra conta apagada.
         let authorName = '';
         if(typeof window.UserDirectory !== 'undefined'){
           const u = window.UserDirectory.getById(row.user_id);
-          if(u) authorName = u.nickname || u.displayName || u.handle || '';
+          if(u) authorName = u.nickname || (u.handle ? '@' + u.handle : '');
         }
         if(!authorName) authorName = (meta.author && typeof meta.author === 'string') ? meta.author : '';
         return {
@@ -11394,7 +11396,8 @@ const Store = (function(){
         : ('cmt'+Date.now());
       const comment = {
         id: cid,
-        author: window.MOCK_USER.nickname || window.MOCK_USER.name,
+        // Apelido (ou @) — nunca o nome completo, mesmo público
+        author: (window.Profile && Profile.publicLabel) ? Profile.publicLabel(authorId) : (window.MOCK_USER.nickname || window.MOCK_USER.name),
         authorId,
         text,
         mentions: mentions.map(m => ({ handle: m.handle, user_id: m.user_id })),
@@ -16216,7 +16219,7 @@ function linkifyMentions(text, mentionsMeta){
     }
     if(!u) return full;  // mantém texto cru se realmente não há dono
     const shown = u.handle || h;  // exibe sempre o @ ATUAL da pessoa
-    return '<a class="cmt-mention" href="javascript:void(0)" data-user-id="' + Util.attr(u.id) + '" title="' + Util.attr(u.displayName || '@'+shown) + '">@' + Util.esc(shown) + '</a>';
+    return '<a class="cmt-mention" href="javascript:void(0)" data-user-id="' + Util.attr(u.id) + '" title="' + Util.attr(u.nickname || '@'+shown) + '">@' + Util.esc(shown) + '</a>';
   });
 }
 window.linkifyMentions = linkifyMentions;
@@ -16257,12 +16260,12 @@ function attachMentionAutocomplete(textareaEl){
     if(!candidates.length){ close(); return; }
     const dd = ensureDropdown();
     dd.innerHTML = candidates.map((u, i) => {
-      const init = Util.esc(Util.initials(u.displayName || u.nickname || u.handle || '?'));
+      const init = Util.esc(Util.initials(u.nickname || u.handle || '?'));
       const cls = 'mention-item' + (i === activeIndex ? ' is-active' : '');
       return '<button type="button" class="' + cls + '" data-idx="' + i + '">' +
         '<span class="mention-avatar">' + init + '</span>' +
         '<span class="mention-stack">' +
-          '<span class="mention-name">' + Util.esc(u.displayName || '(sem nome)') + '</span>' +
+          '<span class="mention-name">' + Util.esc(u.nickname || u.handle || '(sem apelido)') + '</span>' +
           '<span class="mention-handle">@' + Util.esc(u.handle || '?') + '</span>' +
         '</span>' +
       '</button>';
@@ -16472,13 +16475,14 @@ async function _ensureProfileLoaded(userId){
   if(UserDirectory.getById(userId)) return; // já temos em memória
   try{
     const { data, error } = await window._sb.schema('crm').from('user_profiles')
-      .select('user_id, display_name, handle, bio, photo_url, photo_transform')
+      .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform')
       .eq('user_id', userId).maybeSingle();
     if(error || !data) return;
     const merged = {
       user_id:        data.user_id,
       displayName:    data.display_name || '',
-      nickname:       '',
+      nickname:       data.nickname || '',
+      namePublic:     data.full_name_public !== false,
       handle:         data.handle || '',
       bio:            data.bio || '',
       photoUrl:       data.photo_url || '',
@@ -16513,8 +16517,19 @@ function openUserProfile(userId){
   const me = Auth.getUser();
   const isSelf = me && me.id === u.id;
 
-  document.getElementById('upmTitle').textContent = u.displayName || 'Usuário';
-  document.getElementById('upmName').textContent  = u.displayName || '(sem nome)';
+  // Topo do modal: APELIDO (identidade pública escolhida). Nome completo só
+  // ao lado da foto e SÓ se o dono marcou "nome público" na Conta.
+  const apelido = u.nickname || (u.handle ? '@' + u.handle : 'Usuário');
+  document.getElementById('upmTitle').textContent = apelido;
+  const upmNameEl = document.getElementById('upmName');
+  if(u.namePublic !== false && u.displayName){
+    upmNameEl.textContent = u.displayName;
+    upmNameEl.style.display = '';
+  } else {
+    // Nome privado: a linha some (não repete o apelido do topo)
+    upmNameEl.textContent = '';
+    upmNameEl.style.display = 'none';
+  }
   document.getElementById('upmHandle').textContent = u.handle ? '@' + u.handle : '@(sem ID)';
   const joined = new Date(u.created_at || Date.now());
   const fmt = joined.toLocaleDateString('pt-BR', { year:'numeric', month:'long' });
@@ -16539,7 +16554,7 @@ function openUserProfile(userId){
         photoEl.appendChild(initSpan);
       }
       initSpan.style.display = '';
-      initSpan.textContent = Util.initials(u.displayName || u.nickname || u.handle || '?');
+      initSpan.textContent = Util.initials(u.nickname || u.handle || '?');
     }
   }
 
@@ -16568,7 +16583,7 @@ function openUserProfile(userId){
       btn.textContent = 'Solicitar seguir';
       btn.addEventListener('click', () => {
         Follows.request(me.id, u.id);
-        if(window.ueToast) window.ueToast('Pedido enviado a ' + (u.displayName || '@' + u.handle), 'info');
+        if(window.ueToast) window.ueToast('Pedido enviado a ' + (u.nickname || '@' + u.handle), 'info');
         openUserProfile(u.id);
       });
       actionsEl.appendChild(btn);
@@ -16615,6 +16630,7 @@ const UserDirectory = (function(){
       role: authUser.role || 'student',
       displayName: p.displayName || authUser.name || '',
       nickname:    p.nickname    || authUser.nickname || '',
+      namePublic:  p.namePublic !== false,
       handle:      p.handle      || _fallbackHandle(authUser),
       bio:         p.bio         || '',
       photoUrl:    p.photoUrl    || '',
@@ -17173,6 +17189,8 @@ const Profile = (function(){
     const upPayload = {
       user_id: userId,
       display_name: profile.display_name || profile.displayName || null,
+      nickname: profile.nickname || null,
+      full_name_public: profile.namePublic !== false,
       handle: profile.handle || null,
       bio: profile.bio || null,
       photo_url: profile.photo_url || profile.photoUrl || null,
@@ -17291,6 +17309,11 @@ Renderers.account = function(route){
           <div class="field">
             <label for="accDisplayName">Nome completo</label>
             <input class="field-input" id="accDisplayName" type="text" maxlength="80" placeholder="Como aparece em certificados e currículos" value="${Util.attr(profile.displayName)}">
+            <label class="field-check" for="accNamePublic" style="display:flex;align-items:center;gap:.5rem;margin-top:.45rem;cursor:pointer;font-family:var(--sans);font-weight:300;font-size:.78rem;color:var(--text-dim)">
+              <input type="checkbox" id="accNamePublic" ${profile.namePublic !== false ? 'checked' : ''} style="accent-color:var(--accent)">
+              Deixar meu nome completo público
+            </label>
+            <span class="field-help">Desmarcado, os colegas veem só seu apelido e @ — o nome completo fica oculto no seu perfil.</span>
           </div>
           <div class="field">
             <label for="accNickname">Apelido (aparece na topbar e nos comentários)</label>
@@ -17419,7 +17442,8 @@ Renderers.account.mount = function(stageEl){
 
   // ── Tab "Colegas de estudo" — render dinâmico ──
   function renderUserCard(u, actionsHtml){
-    const initials = Util.esc(Util.initials(u.displayName || u.nickname || u.handle || '?'));
+    // Privacidade: card mostra APELIDO (ou @) — nome completo só no modal
+    const initials = Util.esc(Util.initials(u.nickname || u.handle || '?'));
     const t = u.photoTransform || { x:0, y:0, scale:1 };
     const photoAttrs = u.photoUrl
       ? `data-photo-url="${Util.attr(u.photoUrl)}" data-photo-x="${t.x||0}" data-photo-y="${t.y||0}" data-photo-s="${t.scale||1}"`
@@ -17429,7 +17453,7 @@ Renderers.account.mount = function(stageEl){
         <span class="peer-card-initials">${initials}</span>
       </div>
       <div class="peer-card-body" data-open-profile="${Util.attr(u.id)}" style="cursor:pointer">
-        <div class="peer-card-name">${Util.esc(u.displayName || '(sem nome)')}</div>
+        <div class="peer-card-name">${Util.esc(u.nickname || '@' + (u.handle || 'sem-id'))}</div>
         <div class="peer-card-handle">@${Util.esc(u.handle || 'sem-id')}</div>
       </div>
       <div class="peer-card-actions">${actionsHtml || ''}</div>
@@ -17844,11 +17868,13 @@ Renderers.account.mount = function(stageEl){
             return;
           }
         }
+        const namePublicEl = stageEl.querySelector('#accNamePublic');
         const patch = {
           displayName: dispName,
           nickname: nick,
           handle: h,
-          bio: bioTxt
+          bio: bioTxt,
+          namePublic: namePublicEl ? !!namePublicEl.checked : true
         };
         if(pendingPhoto != null){
           // Se é base64, tenta upload pro Storage; senão (URL externa), mantém URL
@@ -17977,8 +18003,9 @@ window._scrollToPendingComment = function(){
 function _notifRenderItem(n){
   const p = n.payload || {};
   const from = p.from_user_id ? UserDirectory.getById(p.from_user_id) : null;
-  const fromInitials = from ? Util.initials(from.displayName || from.handle || '?') : '?';
-  const fromName = from ? (from.displayName || ('@' + from.handle)) : 'Usuário';
+  // Privacidade: notificação mostra APELIDO (ou @) — nome completo só no modal
+  const fromInitials = from ? Util.initials(from.nickname || from.handle || '?') : '?';
+  const fromName = from ? (from.nickname || ('@' + from.handle)) : 'Usuário';
   const photoAttrs = from && from.photoUrl
     ? `data-photo-url="${Util.attr(from.photoUrl)}" data-photo-x="${(from.photoTransform&&from.photoTransform.x)||0}" data-photo-y="${(from.photoTransform&&from.photoTransform.y)||0}" data-photo-s="${(from.photoTransform&&from.photoTransform.scale)||1}"`
     : '';
