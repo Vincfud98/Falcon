@@ -2552,6 +2552,12 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
   margin-top:.2rem;
 }
 .sim-diff-free{background:rgba(93,212,159,.15);color:var(--green);border:1px solid rgba(93,212,159,.3)}
+/* S5 — chip "Pago" + CTA bloqueado */
+.sim-diff-paid{background:var(--accent-lo);color:var(--accent);border:1px solid var(--accent-border)}
+.sim-card-cta-locked{
+  border-color:var(--border)!important;color:var(--text-mute)!important;
+  background:transparent!important;cursor:not-allowed;pointer-events:none;
+}
 .sim-card-free{border-color:rgba(93,212,159,.2)}
 .sim-card-free:hover{border-color:var(--green)}
 .sim-card-price{
@@ -8846,6 +8852,13 @@ window.TAG_REGISTRY = {
             gabaritoRetido: !!me.gabarito_retido,
             gabaritoLiberadoEm: me.gabarito_liberado_em || null,
             gabaritoLiberarEm: me.gabarito_liberar_em || null,
+            // S5 — controle de acesso. accessType 'included' (libera pra quem
+            // tem a matéria) ou 'paid' (precisa de grant/compra). subjectIds das
+            // questões — usado pra checar se o aluno tem a matéria.
+            accessType: me.access_type || 'included',
+            priceCents: me.price_cents || null,
+            checkoutUrl: me.checkout_url || null,
+            subjectIds: Array.isArray(me.subject_ids) ? me.subject_ids.map(String) : [],
             // S9 — arquivos PDF anexados ao simulado
             files: allFiles.filter(function(f){ return String(f.mock_exam_id) === String(me.id); })
                            .sort(function(a,b){ return (a.position||0)-(b.position||0); })
@@ -8855,6 +8868,22 @@ window.TAG_REGISTRY = {
         });
         window.SIMULADOS = sims;
         console.log('[hydrate simulados] ✅', { simulados: sims.length });
+        // S5 — hidrata os grants (acessos pagos) do aluno: { mock_exam_id: true }
+        try{
+          const u = (window.Auth && typeof Auth.getUser === 'function') ? Auth.getUser() : null;
+          const uid = u && u.id;
+          window._simGrants = {};
+          if(uid){
+            const gr = await window._sb.schema('aluno').from('simulado_grants')
+              .select('mock_exam_id, expires_at').eq('user_id', uid)
+              .then(r => r, () => ({ data: [] }));
+            (gr.data || []).forEach(function(g){
+              if(!g.expires_at || new Date(g.expires_at).getTime() > Date.now()){
+                window._simGrants[String(g.mock_exam_id)] = true;
+              }
+            });
+          }
+        }catch(e){ console.warn('[sim grants]', e); window._simGrants = window._simGrants || {}; }
       } catch(e){ console.warn('[hydrate simulados] erro:', e && e.message); if(!Array.isArray(window.SIMULADOS)) window.SIMULADOS = []; }
 
       // Fase 4n — hidrata catálogo de tags (admin gerencia, aluno usa pra renderizar chips)
@@ -19325,8 +19354,11 @@ Renderers.simulados = function(route){
     </select></div>`;
 
   const cards = filtered.map((s,i) => {
-    const locked = !!s.locked;
-    const isFree = s.category === 'free';
+    // S5 — gating real de acesso (incluído por matéria / pago avulso)
+    const acc = _simAccessState(s);
+    const locked = acc.locked;
+    const isPaid = (s.accessType === 'paid');
+    const isFree = !isPaid; // "incluído" é grátis pra quem tem a matéria
     const concursoChips = (s.concursos||[]).map(c => `<span class="sim-card-tag">${Util.esc(c)}</span>`).join('');
     const topicChips = (s.topics||[]).slice(0,3).map(id => { const t = Util.getTopic(id); return t ? `<span class="sim-card-tag">${Util.esc(t.number+' '+t.name)}</span>` : ''; }).join('');
 
@@ -19338,8 +19370,13 @@ Renderers.simulados = function(route){
 
     // Constrói o rodapé conforme estado
     let footerInner = '';
-    if(locked){
-      footerInner = `<span class="sim-card-price">${Util.esc(s.price||'')}</span><span class="sim-card-cta">Adquirir</span>`;
+    if(locked && acc.kind === 'paid'){
+      // Pago e ainda não comprado: mostra preço + cadeado (sem ação por ora)
+      footerInner = `<span class="sim-card-price">${Util.esc(_fmtPriceCents(s.priceCents) || 'Pago')}</span>` +
+        (s.checkoutUrl ? `<a class="sim-card-cta" href="${Util.attr(s.checkoutUrl)}" target="_blank" rel="noopener">Comprar</a>` : `<span class="sim-card-cta sim-card-cta-locked">Bloqueado</span>`);
+    } else if(locked && acc.kind === 'included'){
+      // Incluído mas o aluno não tem a matéria
+      footerInner = `<span class="sim-card-price" style="font-size:.62rem;color:var(--text-mute);font-family:var(--mono)">Requer acesso à matéria</span>`;
     } else if(done && isEstudo){
       // Estudo já feito: Ver resultado + Revisar + Refazer
       // "Ver resultado" → desempenho (pizza/barras/abas). "Revisar" → questões
@@ -19354,13 +19391,19 @@ Renderers.simulados = function(route){
         `<a class="sim-card-cta sim-card-cta-ghost" href="#/simulados/${s.id}">Revisar</a>` +
         `<a class="sim-card-cta" href="#/simulados/${s.id}/performance">Resultado${tentTxt}</a>`;
     } else {
-      // Ainda não fez
+      // Ainda não fez (e tem acesso)
       footerInner =
-        (isFree ? '<span class="sim-card-price sim-card-price-free">Acesso livre</span>' : `<span class="sim-card-price">${Util.esc(s.price||'')}</span>`) +
-        `<a class="sim-card-cta" href="#/simulados/${s.id}">${isFree?'Começar agora':'Iniciar'}</a>`;
+        '<span class="sim-card-price sim-card-price-free">' + (isPaid ? 'Liberado' : 'Incluído') + '</span>' +
+        `<a class="sim-card-cta" href="#/simulados/${s.id}">Iniciar</a>`;
     }
 
-    return `<div class="sim-card${locked?' sim-card-locked':''}${isFree?' sim-card-free':''}" data-a="${i+2}">
+    // S5 — chip de acesso no cover: "Incluído" (libera por matéria) ou
+    // "Pago · R$X" (avulso). Cadeado quando o aluno ainda não tem acesso.
+    const accessChip = isPaid
+      ? `<span class="sim-card-diff sim-diff-paid">Pago${s.priceCents ? ' · ' + Util.esc(_fmtPriceCents(s.priceCents)) : ''}</span>`
+      : `<span class="sim-card-diff sim-diff-free">Incluído</span>`;
+
+    return `<div class="sim-card${locked?' sim-card-locked':''}${!isPaid?' sim-card-free':''}" data-a="${i+2}">
       <div class="sim-card-cover" style="background-image:url('${Util.attr(s.cover||'')}')">
         <div class="sim-card-badge">
           <span class="sim-card-diff ${diffClass[s.difficulty]||'sim-diff-medium'}">${Util.esc(diffLabel[s.difficulty]||s.difficulty)}</span>
@@ -19541,11 +19584,62 @@ function _simGabaritoLiberado(sim){
   return false;
 }
 
+// S5 — estado de acesso do simulado pro aluno atual.
+// Retorna { locked, kind } onde kind = 'included' (bloqueado por falta da
+// matéria) | 'paid' (bloqueado, precisa comprar) | null (liberado).
+function _simAccessState(sim){
+  if(!sim) return { locked:false, kind:null };
+  // Admin sempre acessa
+  const user = (window.Auth && typeof Auth.getUser === 'function') ? Auth.getUser() : null;
+  if(user && (user.role === 'admin' || user.role === 'superadmin')) return { locked:false, kind:null };
+  const accessType = sim.accessType || 'included';
+  if(accessType === 'paid'){
+    const grants = window._simGrants || {};
+    if(grants[String(sim.id)]) return { locked:false, kind:null }; // comprou
+    return { locked:true, kind:'paid' };
+  }
+  // included: libera se o aluno tem acesso à matéria do simulado
+  const access = (window.Auth && typeof Auth.loadAccessData === 'function') ? Auth.loadAccessData() : null;
+  if(!access) return { locked:false, kind:null };           // sem platform_access (dev) → libera
+  if(access.access_type === 'full') return { locked:false, kind:null };
+  const sims = (sim.subjectIds || []).map(String);
+  if(!sims.length) return { locked:false, kind:null };       // simulado sem matéria → libera
+  const allowed = new Set((access.subject_ids || []).map(String));
+  if(sims.some(s => allowed.has(s))) return { locked:false, kind:null };
+  return { locked:true, kind:'included' };
+}
+// Formata centavos → "R$ 49,90"
+function _fmtPriceCents(cents){
+  if(cents == null) return '';
+  return 'R$ ' + (cents/100).toFixed(2).replace('.', ',');
+}
+
 Renderers.simuladoDetail = function(route){
   const sims = window.SIMULADOS || [];
   const sim = sims.find(s => s.id === route.params.simuladoId);
   if(!sim) return `<div class="empty"><div class="empty-title">Simulado não encontrado</div></div>`;
-  if(sim.locked) return `<div class="empty"><div class="empty-title">Simulado bloqueado</div><div class="empty-sub">Adquira este simulado para acessar as questões.</div></div>`;
+  // S5 — bloqueio de acesso (incluído por matéria / pago avulso)
+  const _acc = _simAccessState(sim);
+  if(_acc.locked){
+    const msg = _acc.kind === 'paid'
+      ? 'Este simulado é <strong>pago</strong>' + (sim.priceCents ? ' (' + Util.esc(_fmtPriceCents(sim.priceCents)) + ')' : '') + '. Adquira para acessar as questões.'
+      : 'Este simulado está <strong>incluído</strong> para alunos com acesso à matéria correspondente. Seu plano atual não cobre esta matéria.';
+    const cta = (_acc.kind === 'paid' && sim.checkoutUrl)
+      ? '<a class="btn-ghost" href="' + Util.attr(sim.checkoutUrl) + '" target="_blank" rel="noopener">Comprar simulado</a>'
+      : '';
+    return `<div class="sim-await"><div class="sim-await-card">
+      <span class="s-label" data-a="1">${_acc.kind === 'paid' ? 'Simulado pago' : 'Acesso restrito'}</span>
+      <h1 class="sim-await-title" data-a="2">${Util.esc(sim.name)}</h1>
+      <div class="sim-await-note" data-a="3">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <p>${msg}</p>
+      </div>
+      <div class="sss-actions" data-a="4" style="border:0;padding:0;gap:.8rem">
+        <a class="sss-back" href="#/simulados">${Icons.chevron||'‹'} Voltar aos simulados</a>
+        ${cta}
+      </div>
+    </div></div>`;
+  }
   if(!sim.blocks || !sim.blocks.length) return `<div class="empty"><div class="empty-title">${Util.esc(sim.name)}</div><div class="empty-sub">Este simulado ainda não possui questões cadastradas.</div></div>`;
 
   // S2.2 — estado / tentativa atual
