@@ -2560,8 +2560,10 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
   background:transparent!important;cursor:not-allowed;pointer-events:none;
 }
 
-/* ── Suporte (/suporte) — lista de conversas + chat ── */
-.sup-wrap{margin-top:1.5rem;display:flex;flex-direction:column;gap:1rem;max-width:880px}
+/* ── Suporte (/suporte) — lista de conversas + chat na mesma página ── */
+.sup-wrap{margin:1.5rem auto 0;display:flex;flex-direction:column;gap:1rem;max-width:1180px;width:100%}
+.sup-grid{display:grid;grid-template-columns:340px 1fr;gap:1.1rem;align-items:start}
+@media(max-width:900px){ .sup-grid{grid-template-columns:1fr} }
 .sup-actions-top{margin:0}
 .sup-new-form{
   margin:0 0 1.4rem;padding:1.2rem 1.4rem;
@@ -2570,13 +2572,14 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 }
 .sup-new-actions{display:flex;gap:.6rem;justify-content:flex-end}
 .sup-thread{
-  display:block;padding:.9rem 1.1rem;margin-bottom:.6rem;
+  display:block;padding:.9rem 1.1rem;margin-bottom:.6rem;cursor:pointer;
   border:1px solid var(--border);border-radius:var(--radius);
   background:var(--bg-elevated);text-decoration:none;
-  transition:border-color .25s var(--ease);
+  transition:border-color .25s var(--ease),background .25s var(--ease);
 }
 .sup-thread:hover{border-color:var(--accent-border-soft)}
 .sup-thread.has-unread{border-color:var(--accent-border)}
+.sup-thread.is-active{border-color:var(--accent-border);background:var(--accent-lo)}
 .sup-thread-main{display:flex;align-items:center;gap:.6rem;min-width:0}
 .sup-unread-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0}
 .sup-thread-subject{
@@ -2600,10 +2603,9 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
   letter-spacing:.14em;text-transform:uppercase;color:var(--accent);text-decoration:none;
 }
 .sup-chat{
-  max-width:880px;margin:0 auto;
   border:1px solid var(--accent-border-soft);border-radius:var(--radius-lg,4px);
   background:var(--bg-elevated);overflow:hidden;
-  display:flex;flex-direction:column;
+  display:flex;flex-direction:column;min-height:380px;
 }
 .sup-chat-head{
   display:flex;align-items:center;justify-content:space-between;gap:1rem;
@@ -18396,12 +18398,20 @@ Renderers.support = function(){
         <button class="btn-primary" type="submit" id="supNewSend">Enviar</button>
       </div>
     </form>
-    <div id="supThreadList" data-a="6"><div class="loading">Carregando…</div></div>
+    <div class="sup-grid" data-a="6">
+      <div id="supThreadList"><div class="loading">Carregando…</div></div>
+      <div id="supChatPane"><div class="sup-chat"><div class="sup-empty">Selecione uma conversa ao lado — ou clique em <strong>+ Nova conversa</strong>.</div></div></div>
+    </div>
   </div>`;
 };
-Renderers.support.mount = async function(stageEl){
+Renderers.support.mount = async function(stageEl, route){
   const user = Auth.getUser();
   if(!user) return;
+  const listEl = stageEl.querySelector('#supThreadList');
+  const paneEl = stageEl.querySelector('#supChatPane');
+  let activeThreadId = (route && route.params && route.params.threadId) || null;
+
+  // ── Nova conversa: formulário só aparece ao clicar no botão ──
   const form = stageEl.querySelector('#supNewForm');
   const newBtn = stageEl.querySelector('#supNewBtn');
   if(newBtn) newBtn.addEventListener('click', () => {
@@ -18424,55 +18434,65 @@ Renderers.support.mount = async function(stageEl){
       const { error: mErr } = await window._sb.schema('aluno').from('support_messages')
         .insert({ thread_id: th.id, sender_id: user.id, sender_is_admin: false, text });
       if(mErr) console.warn('[suporte] primeira mensagem:', mErr);
-      location.hash = '#/suporte/' + th.id;
+      form.hidden = true;
+      stageEl.querySelector('#supNewSubject').value = '';
+      stageEl.querySelector('#supNewText').value = '';
+      await loadList();
+      openThread(th.id);
     } finally {
       sendBtn.disabled = false; sendBtn.textContent = 'Enviar';
     }
   });
-  // Lista de conversas (não lidas em destaque)
-  const listEl = stageEl.querySelector('#supThreadList');
-  try{
-    // Sem sessão restaurada NÃO consulta — como anônimo o banco nega acesso
-    // ("permission denied") ou devolve vazio. Avisa o aluno em vez de falhar.
-    if(!(await _supEnsureSession())){
-      listEl.innerHTML = '<div class="sup-empty">Sua sessão ainda não carregou. <a href="javascript:location.reload()" style="color:var(--accent)">Recarregue a página</a> — se persistir, saia e entre novamente.</div>';
-      return;
-    }
-    const [thRes, unRes] = await Promise.all([
-      window._sb.schema('aluno').from('support_threads')
-        .select('*').eq('user_id', user.id).order('last_message_at', { ascending: false }),
-      window._sb.schema('aluno').from('support_messages')
-        .select('thread_id').eq('sender_is_admin', true).is('read_at', null),
-    ]);
-    if(thRes.error){
-      listEl.innerHTML = '<div class="sup-empty">Não foi possível carregar suas conversas (' + Util.esc(thRes.error.message || 'erro') + '). Recarregue a página.</div>';
-      return;
-    }
-    const threads = thRes.data || [];
-    const unread = {};
-    (unRes.data || []).forEach(r => { unread[r.thread_id] = (unread[r.thread_id] || 0) + 1; });
-    if(!threads.length){
-      listEl.innerHTML = '<div class="sup-empty">Nenhuma conversa ainda. Clique em <strong>+ Nova conversa</strong> pra falar com a equipe.</div>';
-      return;
-    }
-    listEl.innerHTML = threads.map(t => `
-      <a class="sup-thread${unread[t.id] ? ' has-unread' : ''}" href="#/suporte/${Util.attr(t.id)}">
-        <div class="sup-thread-main">
-          ${unread[t.id] ? '<span class="sup-unread-dot"></span>' : ''}
-          <span class="sup-thread-subject">${Util.esc(t.subject || '(sem assunto)')}</span>
-          <span class="sup-thread-status${t.status === 'encerrada' ? ' is-closed' : ''}">${t.status === 'encerrada' ? 'encerrada' : 'aberta'}</span>
-        </div>
-        <div class="sup-thread-meta">${Util.esc(_supTimeAgo(t.last_message_at))}${unread[t.id] ? ' · ' + unread[t.id] + ' resposta(s) nova(s)' : ''}</div>
-      </a>`).join('');
-  }catch(e){ console.warn('[suporte] lista:', e); }
-};
 
-Renderers.supportThread = function(){
-  const user = Auth.getUser();
-  if(!user) return '<div class="empty"><div class="empty-title">Acesso restrito</div></div>';
-  return `<div class="sup-chat-page sup-wrap">
-    <a class="sup-back" href="#/suporte">‹ Voltar ao Suporte</a>
-    <div class="sup-chat">
+  // ── Coluna esquerda: lista de conversas (não lidas em destaque) ──
+  async function loadList(){
+    try{
+      if(!(await _supEnsureSession())){
+        listEl.innerHTML = '<div class="sup-empty">Sua sessão ainda não carregou. <a href="javascript:location.reload()" style="color:var(--accent)">Recarregue a página</a> — se persistir, saia e entre novamente.</div>';
+        return;
+      }
+      const [thRes, unRes] = await Promise.all([
+        window._sb.schema('aluno').from('support_threads')
+          .select('*').eq('user_id', user.id).order('last_message_at', { ascending: false }),
+        window._sb.schema('aluno').from('support_messages')
+          .select('thread_id').eq('sender_is_admin', true).is('read_at', null),
+      ]);
+      if(thRes.error){
+        listEl.innerHTML = '<div class="sup-empty">Não foi possível carregar suas conversas (' + Util.esc(thRes.error.message || 'erro') + '). Recarregue a página.</div>';
+        return;
+      }
+      const threads = thRes.data || [];
+      const unread = {};
+      (unRes.data || []).forEach(r => { unread[r.thread_id] = (unread[r.thread_id] || 0) + 1; });
+      if(!threads.length){
+        listEl.innerHTML = '<div class="sup-empty">Nenhuma conversa ainda. Clique em <strong>+ Nova conversa</strong> pra falar com a equipe.</div>';
+        return;
+      }
+      listEl.innerHTML = threads.map(t => `
+        <div class="sup-thread${unread[t.id] ? ' has-unread' : ''}${t.id === activeThreadId ? ' is-active' : ''}" data-sup-thread="${Util.attr(t.id)}">
+          <div class="sup-thread-main">
+            ${unread[t.id] ? '<span class="sup-unread-dot"></span>' : ''}
+            <span class="sup-thread-subject">${Util.esc(t.subject || '(sem assunto)')}</span>
+            <span class="sup-thread-status${t.status === 'encerrada' ? ' is-closed' : ''}">${t.status === 'encerrada' ? 'encerrada' : 'aberta'}</span>
+          </div>
+          <div class="sup-thread-meta">${Util.esc(_supTimeAgo(t.last_message_at))}${unread[t.id] ? ' · ' + unread[t.id] + ' resposta(s) nova(s)' : ''}</div>
+        </div>`).join('');
+    }catch(e){ console.warn('[suporte] lista:', e); }
+  }
+  listEl.addEventListener('click', e => {
+    const th = e.target.closest('[data-sup-thread]');
+    if(th) openThread(th.getAttribute('data-sup-thread'));
+  });
+
+  // ── Coluna direita: conversa aberta NA MESMA página (como no admin) ──
+  function openThread(threadId){
+    activeThreadId = threadId;
+    listEl.querySelectorAll('[data-sup-thread]').forEach(el =>
+      el.classList.toggle('is-active', el.getAttribute('data-sup-thread') === threadId));
+    // URL acompanha sem recarregar (deep-link do sino continua funcionando)
+    try{ history.replaceState(null, '', location.pathname + '#/suporte/' + threadId); }catch(_){}
+
+    paneEl.innerHTML = `<div class="sup-chat">
       <div class="sup-chat-head">
         <div>
           <span class="s-label">Suporte</span>
@@ -18493,157 +18513,159 @@ Renderers.supportThread = function(){
         <textarea id="supReplyText" placeholder="Escreva sua mensagem…" maxlength="4000"></textarea>
         <button class="btn-primary" type="submit" id="supReplySend">Enviar</button>
       </form>
-    </div>
-  </div>`;
-};
-Renderers.supportThread.mount = async function(stageEl, route){
-  const user = Auth.getUser();
-  if(!user) return;
-  const threadId = route.params.threadId;
-  const msgsEl = stageEl.querySelector('#supChatMsgs');
-  const subjEl = stageEl.querySelector('#supChatSubject');
-  const statusEl = stageEl.querySelector('#supChatStatus');
+    </div>`;
 
-  async function load(){
-    try{
-      if(!(await _supEnsureSession())){
-        msgsEl.innerHTML = '<div class="sup-empty">Sua sessão ainda não carregou. <a href="javascript:location.reload()" style="color:var(--accent)">Recarregue a página</a>.</div>';
-        return;
-      }
-      const [thRes, msgRes] = await Promise.all([
-        window._sb.schema('aluno').from('support_threads').select('*').eq('id', threadId).maybeSingle(),
-        window._sb.schema('aluno').from('support_messages')
-          .select('*').eq('thread_id', threadId).order('created_at', { ascending: true }),
-      ]);
-      const t = thRes.data;
-      if(!t){ msgsEl.innerHTML = '<div class="sup-empty">Conversa não encontrada.</div>'; return; }
-      if(subjEl) subjEl.textContent = t.subject || '(sem assunto)';
-      if(statusEl){
-        statusEl.textContent = t.status === 'encerrada' ? 'encerrada' : 'aberta';
-        statusEl.classList.toggle('is-closed', t.status === 'encerrada');
-      }
-      const msgs = msgRes.data || [];
-      // Garante os perfis dos admins que responderam (foto + apelido)
-      const adminSenders = [...new Set(msgs.filter(m => m.sender_is_admin).map(m => m.sender_id).filter(Boolean))];
-      await Promise.all(adminSenders.map(uid =>
-        UserDirectory.getById(uid) ? Promise.resolve() : _ensureProfileLoaded(uid)));
-      const nearBottom = (msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight) < 80;
-      msgsEl.innerHTML = msgs.length ? msgs.map(m => {
-        const own = !m.sender_is_admin;
-        let when = '';
-        if(m.created_at){
-          const d = new Date(m.created_at);
-          when = d.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit' }) + ' · ' +
-                 d.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
-        }
-        const u = own ? null : UserDirectory.getById(m.sender_id);
-        const senderLabel = own ? '' : (u ? (u.nickname || '@' + u.handle) : 'Equipe Ubique');
-        return `<div class="sup-msg-row${own ? ' is-own' : ''}">
-          ${own ? '' : `<div class="sup-msg-av" data-sup-av="${Util.attr(m.sender_id)}"></div>`}
-          <div class="sup-msg">
-            ${own ? '' : `<span class="sup-msg-sender">${Util.esc(senderLabel)}</span>`}
-            ${_supAttachmentHtml(m.attachment)}
-            ${(m.text || '').trim() ? `<p class="sup-msg-text">${Util.esc(m.text)}</p>` : ''}
-            <span class="sup-msg-time">${Util.esc(when)}</span>
-          </div>
-        </div>`;
-      }).join('') : '<div class="sup-empty">Sem mensagens.</div>';
-      // Miniatura de quem respondeu: foto com crop calibrado (ou iniciais)
-      msgsEl.querySelectorAll('[data-sup-av]').forEach(el => {
-        const u2 = UserDirectory.getById(el.getAttribute('data-sup-av'));
-        if(u2 && u2.photoUrl && typeof renderAvatarInto === 'function'){
-          renderAvatarInto(el, u2.photoUrl, u2.photoTransform);
-        } else {
-          el.textContent = u2 ? Util.initials(u2.nickname || u2.handle || '?') : '?';
-        }
-      });
-      if(nearBottom || !msgsEl.dataset.scrolled) msgsEl.scrollTop = msgsEl.scrollHeight;
-      msgsEl.dataset.scrolled = '1';
-      // Marca respostas do admin como lidas
-      window._sb.schema('aluno').from('support_messages')
-        .update({ read_at: new Date().toISOString() })
-        .eq('thread_id', threadId).eq('sender_is_admin', true).is('read_at', null)
-        .then(() => {});
-    }catch(e){ console.warn('[suporte] chat:', e); }
-  }
-  await load();
+    const msgsEl = paneEl.querySelector('#supChatMsgs');
+    const subjEl = paneEl.querySelector('#supChatSubject');
+    const statusEl = paneEl.querySelector('#supChatStatus');
 
-  // Polling leve: enquanto a conversa estiver aberta, busca novidades a cada 30s
-  if(window._supPollTimer) clearInterval(window._supPollTimer);
-  window._supPollTimer = setInterval(() => {
-    if(!location.hash.includes('/suporte/' + threadId)){
-      clearInterval(window._supPollTimer); window._supPollTimer = null; return;
-    }
-    load();
-  }, 30000);
-
-  // Anexo: clipe abre o seletor; chip mostra o arquivo pendente com X
-  let supPendingFile = null;
-  const attachBtn = stageEl.querySelector('#supAttachBtn');
-  const attachInput = stageEl.querySelector('#supAttachInput');
-  const attachChip = stageEl.querySelector('#supAttachChip');
-  const attachName = stageEl.querySelector('#supAttachName');
-  function _setPendingFile(f){
-    supPendingFile = f || null;
-    if(attachChip){
-      attachChip.hidden = !supPendingFile;
-      if(attachName && supPendingFile){
-        const size = (typeof _fmtBytes === 'function') ? ' (' + _fmtBytes(supPendingFile.size) + ')' : '';
-        attachName.textContent = supPendingFile.name + size;
-      }
-    }
-  }
-  if(attachBtn) attachBtn.addEventListener('click', () => attachInput && attachInput.click());
-  if(attachInput) attachInput.addEventListener('change', () => {
-    const f = attachInput.files && attachInput.files[0];
-    if(f && f.size > 25 * 1024 * 1024){
-      attachInput.value = '';
-      _setPendingFile(null);
-      if(window.ueToast) window.ueToast('O arquivo passa de 25 MB.', 'error');
-      return;
-    }
-    _setPendingFile(f);
-  });
-  const attachRemove = stageEl.querySelector('#supAttachRemove');
-  if(attachRemove) attachRemove.addEventListener('click', () => {
-    if(attachInput) attachInput.value = '';
-    _setPendingFile(null);
-  });
-
-  const composer = stageEl.querySelector('#supComposer');
-  if(composer) composer.addEventListener('submit', async e => {
-    e.preventDefault();
-    const ta = stageEl.querySelector('#supReplyText');
-    const text = (ta.value || '').trim();
-    if(!text && !supPendingFile) return;
-    const btn = stageEl.querySelector('#supReplySend');
-    btn.disabled = true;
-    try{
-      // 1) sobe o anexo (se houver)
-      let attachment = null;
-      if(supPendingFile){
-        btn.textContent = 'Enviando anexo…';
-        const up = await _supUploadAttachment(supPendingFile);
-        if(!up || up.error){
-          if(window.ueToast) window.ueToast('Anexo falhou: ' + ((up && up.error) || 'erro'), 'error');
+    async function load(){
+      try{
+        if(!(await _supEnsureSession())){
+          msgsEl.innerHTML = '<div class="sup-empty">Sua sessão ainda não carregou. <a href="javascript:location.reload()" style="color:var(--accent)">Recarregue a página</a>.</div>';
           return;
         }
-        attachment = up;
+        const [thRes, msgRes] = await Promise.all([
+          window._sb.schema('aluno').from('support_threads').select('*').eq('id', threadId).maybeSingle(),
+          window._sb.schema('aluno').from('support_messages')
+            .select('*').eq('thread_id', threadId).order('created_at', { ascending: true }),
+        ]);
+        const t = thRes.data;
+        if(!t){ msgsEl.innerHTML = '<div class="sup-empty">Conversa não encontrada.</div>'; return; }
+        if(subjEl) subjEl.textContent = t.subject || '(sem assunto)';
+        if(statusEl){
+          statusEl.textContent = t.status === 'encerrada' ? 'encerrada' : 'aberta';
+          statusEl.classList.toggle('is-closed', t.status === 'encerrada');
+        }
+        const msgs = msgRes.data || [];
+        // Garante os perfis dos admins que responderam (foto + apelido)
+        const adminSenders = [...new Set(msgs.filter(m => m.sender_is_admin).map(m => m.sender_id).filter(Boolean))];
+        await Promise.all(adminSenders.map(uid =>
+          UserDirectory.getById(uid) ? Promise.resolve() : _ensureProfileLoaded(uid)));
+        const nearBottom = (msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight) < 80;
+        msgsEl.innerHTML = msgs.length ? msgs.map(m => {
+          const own = !m.sender_is_admin;
+          let when = '';
+          if(m.created_at){
+            const d = new Date(m.created_at);
+            when = d.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit' }) + ' · ' +
+                   d.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
+          }
+          const u = own ? null : UserDirectory.getById(m.sender_id);
+          const senderLabel = own ? '' : (u ? (u.nickname || '@' + u.handle) : 'Equipe Ubique');
+          return `<div class="sup-msg-row${own ? ' is-own' : ''}">
+            ${own ? '' : `<div class="sup-msg-av" data-sup-av="${Util.attr(m.sender_id)}"></div>`}
+            <div class="sup-msg">
+              ${own ? '' : `<span class="sup-msg-sender">${Util.esc(senderLabel)}</span>`}
+              ${_supAttachmentHtml(m.attachment)}
+              ${(m.text || '').trim() ? `<p class="sup-msg-text">${Util.esc(m.text)}</p>` : ''}
+              <span class="sup-msg-time">${Util.esc(when)}</span>
+            </div>
+          </div>`;
+        }).join('') : '<div class="sup-empty">Sem mensagens.</div>';
+        // Miniatura de quem respondeu: foto com crop calibrado (ou iniciais)
+        msgsEl.querySelectorAll('[data-sup-av]').forEach(el => {
+          const u2 = UserDirectory.getById(el.getAttribute('data-sup-av'));
+          if(u2 && u2.photoUrl && typeof renderAvatarInto === 'function'){
+            renderAvatarInto(el, u2.photoUrl, u2.photoTransform);
+          } else {
+            el.textContent = u2 ? Util.initials(u2.nickname || u2.handle || '?') : '?';
+          }
+        });
+        if(nearBottom || !msgsEl.dataset.scrolled) msgsEl.scrollTop = msgsEl.scrollHeight;
+        msgsEl.dataset.scrolled = '1';
+        // Marca respostas do admin como lidas e atualiza a bolinha da lista
+        window._sb.schema('aluno').from('support_messages')
+          .update({ read_at: new Date().toISOString() })
+          .eq('thread_id', threadId).eq('sender_is_admin', true).is('read_at', null)
+          .then(({ count }) => { loadList(); });
+      }catch(e){ console.warn('[suporte] chat:', e); }
+    }
+    load();
+
+    // Polling leve: enquanto a conversa estiver aberta, busca novidades a cada 30s
+    if(window._supPollTimer) clearInterval(window._supPollTimer);
+    window._supPollTimer = setInterval(() => {
+      if(!location.hash.includes('/suporte') || activeThreadId !== threadId){
+        clearInterval(window._supPollTimer); window._supPollTimer = null; return;
       }
-      // 2) grava a mensagem
-      btn.textContent = 'Enviando…';
-      const { error } = await window._sb.schema('aluno').from('support_messages')
-        .insert({ thread_id: threadId, sender_id: user.id, sender_is_admin: false, text, attachment });
-      if(error){ console.warn('[suporte] enviar:', error); return; }
-      ta.value = '';
+      load();
+    }, 30000);
+
+    // Anexo: clipe abre o seletor; chip mostra o arquivo pendente com X
+    let supPendingFile = null;
+    const attachBtn = paneEl.querySelector('#supAttachBtn');
+    const attachInput = paneEl.querySelector('#supAttachInput');
+    const attachChip = paneEl.querySelector('#supAttachChip');
+    const attachName = paneEl.querySelector('#supAttachName');
+    function _setPendingFile(f){
+      supPendingFile = f || null;
+      if(attachChip){
+        attachChip.hidden = !supPendingFile;
+        if(attachName && supPendingFile){
+          const size = (typeof _fmtBytes === 'function') ? ' (' + _fmtBytes(supPendingFile.size) + ')' : '';
+          attachName.textContent = supPendingFile.name + size;
+        }
+      }
+    }
+    if(attachBtn) attachBtn.addEventListener('click', () => attachInput && attachInput.click());
+    if(attachInput) attachInput.addEventListener('change', () => {
+      const f = attachInput.files && attachInput.files[0];
+      if(f && f.size > 25 * 1024 * 1024){
+        attachInput.value = '';
+        _setPendingFile(null);
+        if(window.ueToast) window.ueToast('O arquivo passa de 25 MB.', 'error');
+        return;
+      }
+      _setPendingFile(f);
+    });
+    const attachRemove = paneEl.querySelector('#supAttachRemove');
+    if(attachRemove) attachRemove.addEventListener('click', () => {
       if(attachInput) attachInput.value = '';
       _setPendingFile(null);
-      await load();
-    } finally {
-      btn.disabled = false; btn.textContent = 'Enviar';
-    }
-  });
+    });
+
+    const composer = paneEl.querySelector('#supComposer');
+    if(composer) composer.addEventListener('submit', async e => {
+      e.preventDefault();
+      const ta = paneEl.querySelector('#supReplyText');
+      const text = (ta.value || '').trim();
+      if(!text && !supPendingFile) return;
+      const btn = paneEl.querySelector('#supReplySend');
+      btn.disabled = true;
+      try{
+        // 1) sobe o anexo (se houver)
+        let attachment = null;
+        if(supPendingFile){
+          btn.textContent = 'Enviando anexo…';
+          const up = await _supUploadAttachment(supPendingFile);
+          if(!up || up.error){
+            if(window.ueToast) window.ueToast('Anexo falhou: ' + ((up && up.error) || 'erro'), 'error');
+            return;
+          }
+          attachment = up;
+        }
+        // 2) grava a mensagem
+        btn.textContent = 'Enviando…';
+        const { error } = await window._sb.schema('aluno').from('support_messages')
+          .insert({ thread_id: threadId, sender_id: user.id, sender_is_admin: false, text, attachment });
+        if(error){ console.warn('[suporte] enviar:', error); return; }
+        ta.value = '';
+        if(attachInput) attachInput.value = '';
+        _setPendingFile(null);
+        await load();
+        loadList();
+      } finally {
+        btn.disabled = false; btn.textContent = 'Enviar';
+      }
+    });
+  }
+
+  await loadList();
+  if(activeThreadId) openThread(activeThreadId);
 };
+// Deep-link do sino (#/suporte/<id>): mesma página, com a conversa já aberta
+Renderers.supportThread = Renderers.support;
 
 Renderers.notifications = function(route){
   const user = Auth.getUser();
