@@ -37296,8 +37296,11 @@
       });
     }
     renderFalconTotals();
-    renderFalconQuestionsChart();
-    renderFalconAccessChart();
+    // Carrega as respostas reais (uma vez) e então desenha os gráficos
+    ensureFalconResponses().then(() => {
+      renderFalconQuestionsChart();
+      renderFalconAccessChart();
+    });
   }
 
   function initDashboard(){
@@ -37421,6 +37424,24 @@
     }
   }
 
+  // Falcon — fonte REAL dos gráficos: aluno.student_responses (respostas de
+  // unidade). response_sessions só registra "sessões/tentativas" (simulado e
+  // alguns fluxos), então ficava vazio. Aqui cada linha = 1 questão respondida,
+  // com user_id e updated_at (carimbo da atividade). Simulado fica de fora.
+  let falconResponsesLite = null; // null = ainda não carregado
+  async function ensureFalconResponses(){
+    if(falconResponsesLite) return falconResponsesLite;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('student_responses')
+        .select('user_id, updated_at')
+        .order('updated_at', { ascending: false })
+        .limit(20000);
+      falconResponsesLite = (!error && Array.isArray(data)) ? data : [];
+      if(error) console.warn('[falcon responses lite]', error.message);
+    }catch(e){ console.warn('[falcon responses lite ex]', e); falconResponsesLite = []; }
+    return falconResponsesLite;
+  }
+
   // Falcon — esqueleto de buckets compartilhado pelos gráficos de linha.
   // range: 'week' | 'month' | '6m' | 'year' | 'custom'. Retorna os buckets
   // (sem contagem), o modo (dia/mês), a janela [startTs, endTs] e helpers.
@@ -37485,41 +37506,36 @@
     return { buckets, mode, startTs: rangeStart.getTime(), endTs: rangeEnd.getTime() };
   }
 
-  // Questões resolvidas por bucket (soma de questões respondidas nas sessões)
+  // Questões resolvidas por bucket — cada resposta de unidade conta 1.
   function getFalconQuestionsBuckets(range, custom){
     const { buckets, mode, startTs, endTs } = _falconBuckets(range, custom);
     const idx = Object.fromEntries(buckets.map((b,i) => [b.key, i]));
     buckets.forEach(b => b.count = 0);
-    (responseSessionsCache || []).forEach(s => {
-      const ref = s.submitted_at || s.started_at;
-      if(!ref) return;
-      const ts = new Date(ref).getTime();
+    (falconResponsesLite || []).forEach(r => {
+      if(!r.updated_at) return;
+      const ts = new Date(r.updated_at).getTime();
       if(isNaN(ts) || ts < startTs || ts > endTs) return;
-      const key = mode === 'day' ? _falconDayKey(new Date(ref)) : _falconMonthKey(new Date(ref));
+      const key = mode === 'day' ? _falconDayKey(new Date(r.updated_at)) : _falconMonthKey(new Date(r.updated_at));
       const i = idx[key];
       if(i == null) return;
-      const answered = (typeof s.questions_answered === 'number')
-        ? s.questions_answered
-        : (s.status === 'submitted' ? 1 : 0);
-      buckets[i].count += answered;
+      buckets[i].count += 1;
     });
     return buckets;
   }
 
-  // Acessos únicos por bucket (alunos distintos ativos). Guarda o dia/key em
-  // cada bucket pra o Bloco C (clique → quem acessou).
+  // Acessos únicos por bucket — alunos distintos com atividade no dia.
   function getFalconAccessBuckets(range, custom){
     const { buckets, mode, startTs, endTs } = _falconBuckets(range, custom);
     const idx = Object.fromEntries(buckets.map((b,i) => [b.key, i]));
     const sets = buckets.map(() => new Set());
-    (responseSessionsCache || []).forEach(s => {
-      if(!s.started_at || !s.client_id) return;
-      const ts = new Date(s.started_at).getTime();
+    (falconResponsesLite || []).forEach(r => {
+      if(!r.updated_at || !r.user_id) return;
+      const ts = new Date(r.updated_at).getTime();
       if(isNaN(ts) || ts < startTs || ts > endTs) return;
-      const key = mode === 'day' ? _falconDayKey(new Date(s.started_at)) : _falconMonthKey(new Date(s.started_at));
+      const key = mode === 'day' ? _falconDayKey(new Date(r.updated_at)) : _falconMonthKey(new Date(r.updated_at));
       const i = idx[key];
       if(i == null) return;
-      sets[i].add(s.client_id);
+      sets[i].add(r.user_id);
     });
     buckets.forEach((b,i) => { b.count = sets[i].size; b.mode = mode; });
     return buckets;
