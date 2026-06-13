@@ -38084,133 +38084,108 @@
   }
 
   // ─── Modal: perfil do usuário ────────────────────────────────
-  function openFalconUserModal(clientId){
+  // Perfil do aluno (visão admin). Recebe user_id (UUID). Foto/e-mail do perfil
+  // e estatísticas REAIS de aluno.student_responses (só unidade).
+  async function openFalconUserModal(userId){
     const modal = document.getElementById('falconUserModal');
-    if(!modal) return;
+    if(!modal || !userId) return;
+    modal.classList.add('active');
 
-    const client = clientsCache.find(c => c.id === clientId);
-    const name = client?.full_name || `Cliente ${String(clientId).slice(0,6)}…`;
-    const email = client?.email || '';
-    const initial = (name.match(/[A-Za-z\u00C0-\u00FF]/) || ['?'])[0].toUpperCase();
-
-    document.getElementById('falconUserAvatar').textContent = initial;
+    const [profRes, usrRes] = await Promise.all([
+      window._sb.schema('crm').from('user_profiles').select('display_name, nickname, photo_url, photo_transform').eq('user_id', userId).maybeSingle(),
+      window._sb.schema('crm').from('app_users').select('full_name, nickname, email').eq('id', userId).maybeSingle(),
+    ]);
+    const p = profRes.data || {}, u = usrRes.data || {};
+    const name = p.nickname || p.display_name || u.full_name || u.nickname || 'Aluno';
     document.getElementById('falconUserName').textContent = name;
-    document.getElementById('falconUserEmail').textContent = email;
+    document.getElementById('falconUserEmail').textContent = u.email || '';
+    _renderAdminAvatarInto(document.getElementById('falconUserAvatar'), p.photo_url || '', p.photo_transform, name);
 
-    const sessions = (responseSessionsCache || []).filter(s => s.client_id === clientId);
-    const submitted = sessions.filter(s => s.status === 'submitted');
+    const statsEl = document.getElementById('falconUserStats');
+    statsEl.innerHTML = '<p class="dash-ped-empty" style="grid-column:1/-1">Carregando...</p>';
+    const { data: rows, error } = await window._sb.schema('aluno').from('student_responses')
+      .select('is_correct, flagged, updated_at, created_at, metadata').eq('user_id', userId).limit(20000);
+    const resp = (!error && Array.isArray(rows)) ? rows : [];
 
-    // Acerto médio
-    const scored = submitted.filter(s => s.score_percent != null);
-    const avgScore = scored.length
-      ? scored.reduce((sum,s) => sum + parseFloat(s.score_percent), 0) / scored.length
-      : null;
+    let acerto=0, acertoD=0, erro=0, erroD=0;
+    const unitSet = new Set(), daySet = new Set(), bySubj = {};
+    resp.forEach(r => {
+      if(r.is_correct === true){ (r.flagged ? acertoD++ : acerto++); }
+      else if(r.is_correct === false){ (r.flagged ? erroD++ : erro++); }
+      const w = _falconWhen(r); if(w){ daySet.add(_falconDayKey(new Date(w))); }
+      const uid = r.metadata && r.metadata.unit_id;
+      if(uid && String(uid).indexOf('__') !== 0){
+        unitSet.add(String(uid));
+        if(r.is_correct != null){
+          const info = _falconUnitInfo(uid);
+          const sid = info.subjectId;
+          if(sid){
+            if(!bySubj[sid]) bySubj[sid] = { ans:0, corr:0, name:(subjectsCache.find(s=>String(s.id)===String(sid))||{}).subject || info.sig || ('Materia '+sid) };
+            bySubj[sid].ans++; if(r.is_correct === true) bySubj[sid].corr++;
+          }
+        }
+      }
+    });
+    const answered = acerto + acertoD + erro + erroD;
+    const avgScore = answered ? Math.round((acerto + acertoD) / answered * 100) : null;
 
-    // Ofensiva: max sequência de dias com estudo real.
-    // Aqui consideramos dias com questão submetida; quando houver marcação de leitura
-    // persistida na base, ela deve alimentar este mesmo conjunto.
-    const days = [...new Set(submitted.map(s => s.started_at && new Date(s.started_at).toISOString().slice(0,10)).filter(Boolean))].sort();
-    let streak = 0, maxStreak = 0, cur = 0;
+    const days = [...daySet].sort();
+    let maxStreak = 0, cur = 0;
     for(let i = 0; i < days.length; i++){
-      if(i === 0){ cur = 1; continue; }
-      const prev = new Date(days[i-1]), curr2 = new Date(days[i]);
-      cur = (curr2 - prev) === 86400000 ? cur + 1 : 1;
+      cur = (i > 0 && (new Date(days[i]) - new Date(days[i-1])) === 86400000) ? cur + 1 : 1;
       maxStreak = Math.max(maxStreak, cur);
     }
-    if(days.length) maxStreak = Math.max(maxStreak, cur);
 
-    // Stats block
-    document.getElementById('falconUserStats').innerHTML = `
+    statsEl.innerHTML = `
       <div class="card" style="padding:.9rem 1rem;gap:.3rem">
-        <span class="card-label">Sessões concluídas</span>
-        <span class="card-metric" style="font-size:1.6rem">${submitted.length}</span>
+        <span class="card-label">Unidades estudadas</span>
+        <span class="card-metric" style="font-size:1.6rem">${unitSet.size}</span>
       </div>
       <div class="card" style="padding:.9rem 1rem;gap:.3rem">
-        <span class="card-label">Acerto médio</span>
-        <span class="card-metric" style="font-size:1.6rem;color:var(--text)">${avgScore != null ? avgScore.toFixed(0) + '%' : '—'}</span>
+        <span class="card-label">Acerto medio</span>
+        <span class="card-metric" style="font-size:1.6rem;color:var(--text)">${avgScore != null ? avgScore + '%' : '-'}</span>
       </div>
       <div class="card" style="padding:.9rem 1rem;gap:.3rem">
         <span class="card-label">Ofensiva (dias)</span>
-        <span class="card-metric" style="font-size:1.6rem;color:var(--text)">${maxStreak || '0'}</span>
+        <span class="card-metric" style="font-size:1.6rem;color:var(--text)">${maxStreak || 0}</span>
       </div>`;
 
-    // Pie chart — acertos vs erros
+    // Pizza - 4 categorias e cores do donut
     if(falconUserPieChart){ falconUserPieChart.destroy(); falconUserPieChart = null; }
     const pieCanvas = document.getElementById('falconUserPieChart');
-    if(pieCanvas && avgScore != null){
-      const correct = parseFloat(avgScore.toFixed(1));
-      const wrong = parseFloat((100 - correct).toFixed(1));
-      falconUserPieChart = new Chart(pieCanvas.getContext('2d'), {
-        type: 'doughnut',
-        data: {
-          labels: ['Acertos','Erros'],
-          datasets:[{
-            data: [correct, wrong],
-            backgroundColor: ['rgba(93,212,159,.7)','rgba(232,120,120,.6)'],
-            borderColor: ['#5dd49f','#e87878'],
-            borderWidth: 1,
-          }],
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          cutout: '65%',
-          plugins: {
-            legend: { position:'bottom', labels:{ color:'#8a8577', font:{size:11}, boxWidth:12 } },
-            tooltip: { callbacks: { label: ctx => `${ctx.label}: ${ctx.parsed}%` } },
-          },
-        },
-      });
-    } else if(pieCanvas){
-      pieCanvas.getContext('2d').clearRect(0,0,pieCanvas.width,pieCanvas.height);
+    if(pieCanvas){
+      if(answered){
+        falconUserPieChart = new Chart(pieCanvas.getContext('2d'), {
+          type: 'doughnut',
+          data: { labels:['Acertos','Acertos com duvida','Erros','Erros com duvida'],
+            datasets:[{ data:[acerto,acertoD,erro,erroD], backgroundColor:['#4f8a55','#a7d39b','#b3524c','#e0908a'], borderColor:'rgba(11,12,15,.6)', borderWidth:1 }] },
+          options: { responsive:true, maintainAspectRatio:false, cutout:'62%',
+            plugins:{ legend:{ position:'bottom', labels:{ color:'#8a8577', font:{size:10}, boxWidth:10 } },
+              tooltip:{ callbacks:{ label: ctx => `${ctx.label}: ${ctx.parsed} (${Math.round(ctx.parsed/answered*100)}%)` } } } },
+        });
+      } else { pieCanvas.getContext('2d').clearRect(0,0,pieCanvas.width,pieCanvas.height); }
     }
 
-    // Bar chart — desempenho por atividade (top 6)
+    // Barras - desempenho por materia
     if(falconUserBarChart){ falconUserBarChart.destroy(); falconUserBarChart = null; }
     const barCanvas = document.getElementById('falconUserBarChart');
     if(barCanvas){
-      const byCtx = {};
-      submitted.forEach(s => {
-        if(s.score_percent == null) return;
-        const label = s.context === 'mock_exam'
-          ? (mockExamsCache.find(m => m.id === s.context_ref)?.title || 'Simulado') : (s.context || 'Atividade');
-        const short = label.length > 18 ? label.slice(0,18)+'…' : label;
-        if(!byCtx[short]) byCtx[short] = [];
-        byCtx[short].push(parseFloat(s.score_percent));
-      });
-      const entries = Object.entries(byCtx)
-        .map(([k,v]) => [k, v.reduce((a,b)=>a+b,0)/v.length])
-        .sort((a,b) => b[1]-a[1]).slice(0,6);
-
+      const entries = Object.values(bySubj)
+        .map(v => ({ name:v.name, pct: v.ans ? Math.round(v.corr/v.ans*100) : 0 }))
+        .sort((a,b) => b.pct - a.pct).slice(0,8);
       if(entries.length){
-        const barColors = entries.map(([,v]) =>
-          v >= 70 ? 'rgba(93,212,159,.7)' : v >= 50 ? 'rgba(200,169,126,.7)' : 'rgba(232,120,120,.6)');
+        const ps = entries.map(e => e.pct); const mn = Math.min(...ps), mx = Math.max(...ps);
         falconUserBarChart = new Chart(barCanvas.getContext('2d'), {
           type: 'bar',
-          data: {
-            labels: entries.map(([k]) => k),
-            datasets:[{
-              data: entries.map(([,v]) => parseFloat(v.toFixed(1))),
-              backgroundColor: barColors,
-              borderRadius: 3,
-            }],
-          },
-          options: {
-            responsive: true, maintainAspectRatio: false,
-            indexAxis: 'y',
-            plugins: {
-              legend: { display: false },
-              tooltip: { callbacks: { label: ctx => `${ctx.parsed.x.toFixed(0)}% acerto` } },
-            },
-            scales: {
-              x: { min:0, max:100, grid:{color:'rgba(200,169,126,.05)'}, ticks:{color:'#6a6558',font:{size:10}} },
-              y: { grid:{display:false}, ticks:{color:'#8a8577',font:{size:10}} },
-            },
-          },
+          data: { labels: entries.map(e => e.name.length > 20 ? e.name.slice(0,20)+'...' : e.name),
+            datasets:[{ data: entries.map(e => e.pct), backgroundColor: entries.map(e => gradient3(mx===mn?1:(e.pct-mn)/(mx-mn))), borderRadius:3 }] },
+          options: { responsive:true, maintainAspectRatio:false, indexAxis:'y',
+            plugins:{ legend:{ display:false }, tooltip:{ callbacks:{ label: ctx => `${ctx.parsed.x}% acerto` } } },
+            scales:{ x:{ min:0, max:100, grid:{color:'rgba(200,169,126,.05)'}, ticks:{color:'#6a6558',font:{size:10}} },
+                     y:{ grid:{display:false}, ticks:{color:'#8a8577',font:{size:10}} } } },
         });
-      }
+      } else { barCanvas.getContext('2d').clearRect(0,0,barCanvas.width,barCanvas.height); }
     }
-
-    modal.classList.add('active');
   }
 
   function renderDashboardKPIs(){
