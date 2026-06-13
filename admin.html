@@ -37429,24 +37429,30 @@
   // alguns fluxos), então ficava vazio. Aqui cada linha = 1 questão respondida,
   // com user_id e updated_at (carimbo da atividade). Simulado fica de fora.
   let falconResponsesLite = null; // null = ainda não carregado
+  const _falconWhen = (r) => r && (r.updated_at || r.created_at || r.answered_at || null);
   async function ensureFalconResponses(){
     if(falconResponsesLite) return falconResponsesLite;
-    try{
-      const { data, error } = await window._sb.schema('aluno').from('student_responses')
-        .select('user_id, updated_at')
-        .order('updated_at', { ascending: false })
-        .limit(20000);
-      falconResponsesLite = (!error && Array.isArray(data)) ? data : [];
-      if(error) console.warn('[falcon responses lite]', error.message);
-    }catch(e){ console.warn('[falcon responses lite ex]', e); falconResponsesLite = []; }
+    const sr = () => window._sb.schema('aluno').from('student_responses');
+    let res = await sr().select('user_id, updated_at, created_at').order('updated_at', { ascending: false }).limit(20000);
+    if(res.error){
+      // created_at pode não existir nesta tabela — tenta só com updated_at
+      console.warn('[falcon responses] tentativa 1 falhou:', res.error.message);
+      res = await sr().select('user_id, updated_at').order('updated_at', { ascending: false }).limit(20000);
+    }
+    falconResponsesLite = (!res.error && Array.isArray(res.data)) ? res.data : [];
+    if(res.error) console.warn('[falcon responses] erro:', res.error.message);
+    console.log('[falcon responses] carregadas:', falconResponsesLite.length,
+      'exemplo:', falconResponsesLite[0]);
     return falconResponsesLite;
   }
 
   // Falcon — esqueleto de buckets compartilhado pelos gráficos de linha.
   // range: 'week' | 'month' | '6m' | 'year' | 'custom'. Retorna os buckets
   // (sem contagem), o modo (dia/mês), a janela [startTs, endTs] e helpers.
-  const _falconDayKey = (d) => d.toISOString().slice(0,10);
+  // Chaves LOCAIS (não UTC) — evita furo de fuso ao casar resposta × bucket
+  const _falconDayKey = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   const _falconMonthKey = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+  const _falconDayLabel = (d) => `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}`;
   function _falconBuckets(range, custom){
     const now = new Date();
     const buckets = [];
@@ -37499,7 +37505,7 @@
       const last = now.getDate();
       for(let i = 1; i <= last; i++){
         const d = new Date(now.getFullYear(), now.getMonth(), i);
-        buckets.push({ key: _falconDayKey(d), label: String(i).padStart(2,'0') });
+        buckets.push({ key: _falconDayKey(d), label: _falconDayLabel(d) });
       }
     }
 
@@ -37512,10 +37518,11 @@
     const idx = Object.fromEntries(buckets.map((b,i) => [b.key, i]));
     buckets.forEach(b => b.count = 0);
     (falconResponsesLite || []).forEach(r => {
-      if(!r.updated_at) return;
-      const ts = new Date(r.updated_at).getTime();
+      const w = _falconWhen(r);
+      if(!w) return;
+      const d = new Date(w); const ts = d.getTime();
       if(isNaN(ts) || ts < startTs || ts > endTs) return;
-      const key = mode === 'day' ? _falconDayKey(new Date(r.updated_at)) : _falconMonthKey(new Date(r.updated_at));
+      const key = mode === 'day' ? _falconDayKey(d) : _falconMonthKey(d);
       const i = idx[key];
       if(i == null) return;
       buckets[i].count += 1;
@@ -37529,10 +37536,11 @@
     const idx = Object.fromEntries(buckets.map((b,i) => [b.key, i]));
     const sets = buckets.map(() => new Set());
     (falconResponsesLite || []).forEach(r => {
-      if(!r.updated_at || !r.user_id) return;
-      const ts = new Date(r.updated_at).getTime();
+      const w = _falconWhen(r);
+      if(!w || !r.user_id) return;
+      const d = new Date(w); const ts = d.getTime();
       if(isNaN(ts) || ts < startTs || ts > endTs) return;
-      const key = mode === 'day' ? _falconDayKey(new Date(r.updated_at)) : _falconMonthKey(new Date(r.updated_at));
+      const key = mode === 'day' ? _falconDayKey(d) : _falconMonthKey(d);
       const i = idx[key];
       if(i == null) return;
       sets[i].add(r.user_id);
