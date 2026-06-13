@@ -37693,52 +37693,80 @@
   }
 
   // ─── Modal: usuários do dia ──────────────────────────────────
-  function openFalconDayModal(dateKey){
+  async function openFalconDayModal(dateKey){
     const modal = document.getElementById('falconDayModal');
     if(!modal) return;
+    const isMonth = (String(dateKey).length === 7);
 
-    const d = new Date(dateKey + 'T12:00:00');
-    document.getElementById('falconDayModalTitle').textContent =
-      d.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
-
-    // Sessões daquele dia → clientes únicos
-    const seen = new Map(); // client_id → {name, email}
-    (responseSessionsCache || []).forEach(s => {
-      if(!s.started_at || !s.client_id) return;
-      if(new Date(s.started_at).toISOString().slice(0,10) !== dateKey) return;
-      if(!seen.has(s.client_id)){
-        seen.set(s.client_id, {
-          id: s.client_id,
-          name: s.client_name || s.client_email || `Cliente ${String(s.client_id).slice(0,6)}…`,
-          email: s.client_email || '',
-        });
-      }
-    });
-
-    const list = document.getElementById('falconDayModalList');
-    if(seen.size === 0){
-      list.innerHTML = '<div class="card" style="text-align:center;padding:2rem 1rem"><p class="card-body" style="font-style:italic;margin:0">Nenhum acesso registrado neste dia.</p></div>';
+    const titleEl = document.getElementById('falconDayModalTitle');
+    if(isMonth){
+      const d = new Date(dateKey + '-01T12:00:00');
+      titleEl.textContent = d.toLocaleDateString('pt-BR',{month:'long',year:'numeric'});
     } else {
-      list.innerHTML = `<div style="display:flex;flex-direction:column;gap:.5rem">` + [...seen.values()].map(u => {
-        const initial = (u.name.match(/[A-Za-z\u00C0-\u00FF]/) || ['?'])[0].toUpperCase();
-        return `
-          <div class="card" data-day-row data-cid="${u.id}" style="flex-direction:row;align-items:center;gap:.9rem;padding:.7rem .9rem;cursor:pointer">
-            <div style="width:32px;height:32px;border-radius:50%;background:var(--accent-lo);border:1px solid var(--accent-border);display:grid;place-items:center;font-family:var(--mono);font-size:.8rem;color:var(--accent);flex-shrink:0">${initial}</div>
-            <div style="flex:1;min-width:0">
-              <div style="font-family:var(--serif);font-weight:400;font-size:.95rem;color:var(--text)">${esc(u.name)}</div>
-              ${u.email ? `<div style="font-family:var(--mono);font-size:.72rem;color:var(--text-mute)">${esc(u.email)}</div>` : ''}
-            </div>
-          </div>`;
-      }).join('') + `</div>`;
-      list.querySelectorAll('[data-day-row]').forEach(row => {
-        row.addEventListener('click', () => {
-          modal.classList.remove('active');
-          openFalconUserModal(parseInt(row.dataset.cid));
-        });
-      });
+      const d = new Date(dateKey + 'T12:00:00');
+      titleEl.textContent = d.toLocaleDateString('pt-BR',{weekday:'long',day:'2-digit',month:'long',year:'numeric'});
     }
 
+    const listEarly = document.getElementById('falconDayModalList');
+    listEarly.innerHTML = '<div class="card" style="text-align:center;padding:2rem 1rem"><p class="card-body" style="font-style:italic;margin:0">Carregando…</p></div>';
     modal.classList.add('active');
+
+    // Alunos distintos com atividade nesse dia/mês (fonte real: student_responses)
+    await ensureFalconResponses();
+    const userIds = [...new Set((falconResponsesLite || []).filter(r => {
+      const w = _falconWhen(r); if(!w) return false;
+      const dt = new Date(w);
+      const key = isMonth ? _falconMonthKey(dt) : _falconDayKey(dt);
+      return key === dateKey && r.user_id;
+    }).map(r => r.user_id))];
+
+    // Resolve perfil (foto/apelido/nome) + e-mail de cada aluno
+    let people = [];
+    if(userIds.length){
+      const [profRes, usrRes] = await Promise.all([
+        window._sb.schema('crm').from('user_profiles').select('user_id, display_name, nickname, photo_url, photo_transform').in('user_id', userIds),
+        window._sb.schema('crm').from('app_users').select('id, full_name, nickname, email').in('id', userIds),
+      ]);
+      const profById = {}; (profRes.data || []).forEach(p => profById[p.user_id] = p);
+      const usrById = {};  (usrRes.data || []).forEach(u => usrById[u.id] = u);
+      people = userIds.map(uid => {
+        const p = profById[uid] || {}, u = usrById[uid] || {};
+        return {
+          uid,
+          name: p.nickname || p.display_name || u.full_name || u.nickname || 'Aluno',
+          email: u.email || '',
+          photo_url: p.photo_url || '',
+          photo_transform: p.photo_transform || null,
+        };
+      }).sort((a,b) => a.name.localeCompare(b.name, 'pt-BR'));
+    }
+
+    const list = document.getElementById('falconDayModalList');
+    if(people.length === 0){
+      list.innerHTML = '<div class="card" style="text-align:center;padding:2rem 1rem"><p class="card-body" style="font-style:italic;margin:0">Nenhum acesso registrado neste dia.</p></div>';
+      return;
+    }
+    list.innerHTML = `<div style="display:flex;flex-direction:column;gap:.5rem">` + people.map(u => `
+      <div class="card" data-day-row data-uid="${esc(u.uid)}" style="flex-direction:row;align-items:center;gap:.9rem;padding:.7rem .9rem;cursor:pointer">
+        <div class="fday-av" data-fday-av="${esc(u.uid)}" style="width:38px;height:38px;flex-shrink:0"></div>
+        <div style="flex:1;min-width:0">
+          <div style="font-family:var(--serif);font-weight:400;font-size:.98rem;color:var(--text)">${esc(u.name)}</div>
+          ${u.email ? `<div style="font-family:var(--mono);font-size:.72rem;color:var(--text-mute)">${esc(u.email)}</div>` : ''}
+        </div>
+      </div>`).join('') + `</div>`;
+
+    // Avatares com crop calibrado (ou iniciais)
+    list.querySelectorAll('[data-fday-av]').forEach(av => {
+      const u = people.find(x => String(x.uid) === av.getAttribute('data-fday-av'));
+      _renderAdminAvatarInto(av, (u && u.photo_url) || '', u && u.photo_transform, u ? u.name : '?');
+    });
+    // Clique no aluno \u2192 perfil completo (Bloco D)
+    list.querySelectorAll('[data-day-row]').forEach(row => {
+      row.addEventListener('click', () => {
+        modal.classList.remove('active');
+        if(typeof openFalconUserModal === 'function') openFalconUserModal(row.dataset.uid);
+      });
+    });
   }
 
   // ─── Modal: perfil do usuário ────────────────────────────────
