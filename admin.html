@@ -37445,6 +37445,31 @@
     return { total_inline: totalInline, blocos: totalBlocks, detalhe: out };
   };
 
+  // DIAGNÓSTICO (só leitura) — pro estado pós-migração-parcial. Mostra, por
+  // bloco com inline, cada questão inline e se JÁ existe uma questão no banco
+  // com o mesmo texto (= a 1ª migração criou). Chame: await _diagInlineMigration()
+  window._diagInlineMigration = async function(){
+    const { data, error } = await window._sb.schema('conteudo').from('unit_blocks').select('id, unit_id, content');
+    if(error){ console.warn(error.message); return; }
+    const norm = (s) => String(s||'').replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim().toLowerCase();
+    const rows = [];
+    (data || []).forEach(b => {
+      const groups = (b.content && Array.isArray(b.content.groups)) ? b.content.groups : [];
+      groups.forEach((g, gi) => {
+        if(g.bank_question_id || !Array.isArray(g.questions)) return;
+        g.questions.forEach(q => {
+          const txt = norm(q.statement || q.assertion);
+          const matchTf = (tfItemsCache || []).find(t => norm(t.assertiva) === txt && txt);
+          rows.push({ block_id:b.id, grupo:gi, inline_id:q.id, enunciado:(q.statement||'').slice(0,45),
+            no_banco: matchTf ? ('SIM (q ' + matchTf.question_id + ')') : 'não' });
+        });
+      });
+    });
+    console.log('%c[diag] ' + rows.length + ' questões inline. "no_banco=SIM" = a 1ª migração já criou no banco:', 'color:#e9b65a;font-weight:bold');
+    console.table(rows);
+    return rows;
+  };
+
   function initFalconStats(){
     if(!document.getElementById('falcon-questions-chart')) return;
     if(!_falconStatsBound){
@@ -51067,6 +51092,17 @@
     }
 
     _ueSaveStructured(bid);
+    // PERSISTE o novo conteúdo do bloco no Supabase — sem isso a troca da
+    // referência (inline → banco) ficava só na memória do front e se perdia
+    // ao recarregar (bug: a migração não chegava ao banco).
+    try{
+      const { error: upErr } = await conteudo().from('unit_blocks').update({ content: b.content }).eq('id', b.id);
+      if(upErr) throw new Error('unit_blocks update: ' + upErr.message);
+    }catch(e){
+      if(window.ueToast) window.ueToast('Questões criadas, mas falhou ao salvar o bloco: ' + e.message, 'error');
+      console.warn('[migrate persist]', e);
+      return;
+    }
     try{ await Promise.all([loadQuestions(), loadTfItems(), loadTfItemComments(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
     _ueRerenderBlockBody(bid);
 
