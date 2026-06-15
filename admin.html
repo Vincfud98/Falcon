@@ -37702,6 +37702,7 @@
   // Perfil do aluno → "Desempenho por questão"
   let _fuActiveUserId = null;
   let _fuRespByItem = {};   // item_id → resposta do aluno (answer_value, is_correct, flagged)
+  let _fuItems = [];        // questões da unidade atual (banco + inline + avulsas)
   function _falconRankWindow(st){
     if(st.time === 'custom'){
       return [ st.from ? new Date(st.from + 'T00:00:00').toISOString() : null,
@@ -38361,30 +38362,49 @@
       }
       blocks = blocks.slice().sort((a,b) => (a.position||0) - (b.position||0));
 
-      // Sequência de itens (questões) na ordem da unidade
-      const items = []; // { num, itemId, qid, type, statement, subjectName }
+      // Matéria da unidade (vale pra todas as questões da unidade)
+      const _ch = (courseChaptersCache || []).find(c => String(c.id) === String(unit.chapter_id));
+      const _mod = _ch ? (modulesCache || []).find(m => String(m.id) === String(_ch.module_id)) : null;
+      const unitSubjName = _mod ? ((subjectsCache.find(s => String(s.id) === String(_mod.subject_id)) || {}).subject || '') : '';
+
+      // Sequência COMPLETA de itens na ordem da unidade — espelha o
+      // normalizeQuizBlock do aluno: 3 origens por bloco quiz:
+      //  (a) grupo do banco (bank_question_id) → tf_items / question
+      //  (b) grupo inline (g.questions[]) — digitado direto no bloco
+      //  (c) avulsas (content.ungrouped[])
+      const items = []; // { num, itemId, type, statement, source, qid, q }
       let seq = 0;
+      const pushBank = (g) => {
+        const qid = g.bank_question_id;
+        const q = (questionsCache || []).find(x => String(x.id) === String(qid));
+        if(!q) return;
+        if(q.type === 'multiple_choice' || q.type === 'essay'){
+          items.push({ num: ++seq, itemId: String(q.id), type: q.type, statement: q.enunciado || '', source:'bank', qid: String(q.id) });
+        } else { // true_false
+          let tf = (tfItemsCache || []).filter(t => String(t.question_id) === String(qid)).sort((a,b) => (a.numero||0)-(b.numero||0));
+          const subset = Array.isArray(g.bank_item_ids) && g.bank_item_ids.length ? g.bank_item_ids.map(String) : null;
+          if(subset) tf = tf.filter(t => subset.indexOf(String(t.id)) >= 0);
+          tf.forEach(t => items.push({ num: ++seq, itemId: String(t.id), type:'true_false', statement: t.assertiva || '', source:'bank', qid: String(qid) }));
+        }
+      };
+      const pushInline = (q) => {
+        if(!q || q.id == null) return;
+        items.push({ num: ++seq, itemId: String(q.id), type: q.type || 'true_false', statement: q.statement || q.assertion || '', source:'inline', q });
+      };
       blocks.forEach(b => {
-        const groups = (b.content && Array.isArray(b.content.groups)) ? b.content.groups : [];
-        groups.forEach(g => {
-          const qid = g.bank_question_id;
-          if(!qid) return;
-          const q = (questionsCache || []).find(x => String(x.id) === String(qid));
-          if(!q) return;
-          const subjectName = (subjectsCache.find(s => String(s.id) === String(q.subject_id)) || {}).subject || '';
-          if(q.type === 'multiple_choice' || q.type === 'essay'){
-            items.push({ num: ++seq, itemId: String(q.id), qid: String(q.id), type: q.type, statement: q.enunciado || '', subjectName });
-          } else { // true_false
-            let tf = (tfItemsCache || []).filter(t => String(t.question_id) === String(qid)).sort((a,b) => (a.numero||0)-(b.numero||0));
-            const subset = Array.isArray(g.bank_item_ids) && g.bank_item_ids.length ? g.bank_item_ids.map(String) : null;
-            if(subset) tf = tf.filter(t => subset.indexOf(String(t.id)) >= 0);
-            tf.forEach(t => items.push({ num: ++seq, itemId: String(t.id), qid: String(qid), type: 'true_false', statement: t.assertiva || '', subjectName }));
-          }
+        const c = b.content || {};
+        (Array.isArray(c.groups) ? c.groups : []).forEach(g => {
+          if(g.bank_question_id) pushBank(g);
+          else if(Array.isArray(g.questions)) g.questions.forEach(pushInline);
+          else if(Array.isArray(g.items)) g.items.forEach(pushInline);
         });
+        (Array.isArray(c.ungrouped) ? c.ungrouped : []).forEach(pushInline);
       });
+      items.forEach(it => { it.subjectName = unitSubjName; });
+      _fuItems = items;
 
       if(!items.length){
-        body.innerHTML = '<p class="dash-ped-empty" style="margin:.6rem">Esta unidade não tem questões do banco.</p>';
+        body.innerHTML = '<p class="dash-ped-empty" style="margin:.6rem">Esta unidade não tem questões.</p>';
         return;
       }
 
@@ -38397,7 +38417,7 @@
             <th style="width:36px">Nº</th><th>Questão</th><th style="width:120px">Matéria</th>
             <th style="width:130px">Unidade</th><th style="width:90px">Aluno</th><th style="width:80px">Média</th>
           </tr></thead>
-          <tbody>${items.map(it => {
+          <tbody>${items.map((it, idx) => {
             const r = _fuRespByItem[it.itemId];
             let alunoCell = '<span class="fuq-tag fuq-na">não respondeu</span>';
             if(r){
@@ -38405,7 +38425,7 @@
                 : r.is_correct === false ? '<span class="fuq-tag fuq-bad">Incorreta</span>'
                 : '<span class="fuq-tag fuq-na">pendente</span>';
             }
-            return `<tr class="fuq-row" data-fuq-item="${esc(it.itemId)}" data-fuq-qid="${esc(it.qid)}" data-fuq-type="${esc(it.type)}">
+            return `<tr class="fuq-row" data-fuq-idx="${idx}">
               <td class="fuq-num">${it.num}</td>
               <td class="fuq-q">${esc(short(it.statement) || '(sem enunciado)')}</td>
               <td>${esc(it.subjectName)}</td>
@@ -38415,8 +38435,8 @@
             </tr>`;
           }).join('')}</tbody>
         </table>`;
-      body.querySelectorAll('[data-fuq-item]').forEach(row => {
-        row.addEventListener('click', () => _fuOpenQuestionPreview(row.dataset.fuqItem, row.dataset.fuqQid, row.dataset.fuqType));
+      body.querySelectorAll('[data-fuq-idx]').forEach(row => {
+        row.addEventListener('click', () => _fuOpenQuestionPreview(parseInt(row.dataset.fuqIdx, 10)));
       });
 
       // 2) Média dos usuários (RPC) — preenche as células quando chegar, sem
@@ -38439,46 +38459,65 @@
     }
   }
 
-  // Preview completo de uma questão (enunciado + alternativas + gabarito) +
-  // a resposta do aluno destacada. Reusa resolveBankGroupRaw.
-  function _fuOpenQuestionPreview(itemId, qid, type){
+  // Preview completo de uma questão (banco OU inline) + resposta do aluno.
+  // Normaliza tudo pra um shape { reference, statement, type, options:[{label,text,correct}],
+  // correct(bool tf), comment } e renderiza igual pros dois casos.
+  function _fuOpenQuestionPreview(idx){
     const modal = document.getElementById('fuqPreviewModal');
     const bodyEl = document.getElementById('fuqPreviewBody');
     if(!modal || !bodyEl) return;
-    const resolved = (typeof window.resolveBankGroupRaw === 'function')
-      ? window.resolveBankGroupRaw(qid, type === 'true_false' ? [itemId] : null) : null;
-    const r = _fuRespByItem[String(itemId)];
-    const alunoResp = r ? (r.answer_value != null ? String(r.answer_value) : '(em branco)') : '(não respondeu)';
+    const it = _fuItems[idx];
+    if(!it){ return; }
+    const r = _fuRespByItem[String(it.itemId)];
+
+    // Monta o shape do preview
+    let view = null; // { reference, statement, type, options, correct, comment }
+    if(it.source === 'bank'){
+      const resolved = (typeof window.resolveBankGroupRaw === 'function')
+        ? window.resolveBankGroupRaw(it.qid, it.type === 'true_false' ? [it.itemId] : null) : null;
+      const q = resolved && resolved.questions && resolved.questions[0];
+      if(q){
+        view = { reference: resolved.reference_text || '', statement: q.statement || '', type: q.type,
+          options: (q.options||[]).map(o => ({ label:o.label||'', text:o.text||'', correct:!!o.correct })),
+          correct: !!q.correct, comment: q.comment || '' };
+      }
+    } else { // inline
+      const q = it.q || {};
+      const opts = (q.type === 'multiple_choice' && Array.isArray(q.options))
+        ? q.options.map(o => ({ label:o.label||'', text:o.text||o.label||'', correct:!!o.correct })) : [];
+      view = { reference: q.reference_text || '', statement: q.statement || q.assertion || '', type: q.type || 'true_false',
+        options: opts, correct: (q.correct === true || q.correct === 'Certo'), comment: q.comment || q.comments || '' };
+    }
 
     let html = '';
-    if(!resolved || !resolved.questions || !resolved.questions.length){
+    if(!view){
       html = '<p class="dash-ped-empty">Não foi possível carregar a questão.</p>';
     } else {
-      if(resolved.reference_text){ html += `<div class="fuqp-ref">${resolved.reference_text}</div>`; }
-      resolved.questions.forEach(q => {
-        html += `<div class="fuqp-statement">${q.statement || ''}</div>`;
-        if(q.type === 'multiple_choice'){
-          html += '<div class="fuqp-opts">' + (q.options||[]).map(o => {
-            const isKey = !!o.correct;
-            const isAluno = r && String(r.answer_value) === String(o.label);
-            return `<div class="fuqp-opt${isKey?' is-key':''}${isAluno?' is-aluno':''}">
-              <span class="fuqp-opt-mark">${esc(o.label)}</span><span>${o.text||''}</span>
-              ${isKey?'<span class="fuqp-badge fuqp-badge-key">gabarito</span>':''}${isAluno?'<span class="fuqp-badge fuqp-badge-aluno">resposta do aluno</span>':''}
-            </div>`;
-          }).join('') + '</div>';
-        } else { // true_false
-          const keyTxt = q.correct ? 'Certo' : 'Errado';
-          ['Certo','Errado'].forEach(opt => {
-            const isKey = (opt === keyTxt);
-            const isAluno = r && String(r.answer_value) === opt;
-            html += `<div class="fuqp-opt${isKey?' is-key':''}${isAluno?' is-aluno':''}">
-              <span class="fuqp-opt-mark">${opt[0]}</span><span>${opt}</span>
-              ${isKey?'<span class="fuqp-badge fuqp-badge-key">gabarito</span>':''}${isAluno?'<span class="fuqp-badge fuqp-badge-aluno">resposta do aluno</span>':''}
-            </div>`;
-          });
-        }
-        if(q.comment){ html += `<div class="fuqp-gab"><span class="fuqp-gab-label">Gabarito comentado</span>${q.comment}</div>`; }
-      });
+      const av = r && r.answer_value != null ? String(r.answer_value) : null;
+      if(view.reference){ html += `<div class="fuqp-ref">${view.reference}</div>`; }
+      html += `<div class="fuqp-statement">${view.statement || '(sem enunciado)'}</div>`;
+      if(view.type === 'multiple_choice'){
+        html += '<div class="fuqp-opts">' + view.options.map(o => {
+          const isKey = o.correct;
+          const isAluno = av != null && (av === o.label || av === o.text);
+          return `<div class="fuqp-opt${isKey?' is-key':''}${isAluno?' is-aluno':''}">
+            <span class="fuqp-opt-mark">${esc(o.label)}</span><span>${o.text||''}</span>
+            ${isKey?'<span class="fuqp-badge fuqp-badge-key">gabarito</span>':''}${isAluno?'<span class="fuqp-badge fuqp-badge-aluno">resposta do aluno</span>':''}
+          </div>`;
+        }).join('') + '</div>';
+      } else { // true_false
+        const keyTxt = view.correct ? 'Certo' : 'Errado';
+        ['Certo','Errado'].forEach(opt => {
+          const isKey = (opt === keyTxt);
+          const isAluno = av != null && av === opt;
+          html += `<div class="fuqp-opt${isKey?' is-key':''}${isAluno?' is-aluno':''}">
+            <span class="fuqp-opt-mark">${opt[0]}</span><span>${opt}</span>
+            ${isKey?'<span class="fuqp-badge fuqp-badge-key">gabarito</span>':''}${isAluno?'<span class="fuqp-badge fuqp-badge-aluno">resposta do aluno</span>':''}
+          </div>`;
+        });
+      }
+      if(view.comment){ html += `<div class="fuqp-gab"><span class="fuqp-gab-label">Gabarito comentado</span>${view.comment}</div>`; }
+      const alunoResp = r ? (av != null ? av : '(em branco)') : '(não respondeu)';
       const ok = r ? (r.is_correct === true ? 'Correta' : r.is_correct === false ? 'Incorreta' : 'pendente') : 'não respondeu';
       html += `<div class="fuqp-aluno-line"><strong>Resposta do aluno:</strong> ${esc(alunoResp)} <span class="fuq-tag ${r&&r.is_correct?'fuq-ok':(r&&r.is_correct===false?'fuq-bad':'fuq-na')}" style="margin-left:.5rem">${esc(ok)}</span></div>`;
     }
