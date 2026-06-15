@@ -8073,6 +8073,7 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
 <a class="tb-navlink" id="navReading" href="#/reading">Lista de leitura</a>
 <a class="tb-navlink" id="navNotes" href="#/notes">Notas</a>
 <a class="tb-navlink" id="navGlossario" href="#/glossario">Glossário</a>
+<a class="tb-navlink" id="navForum" href="#/forum">Fórum</a>
     <div class="display-prefs" id="displayPrefs">
       <button class="display-prefs-btn" id="displayPrefsBtn" title="Preferências de exibição">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
@@ -11779,6 +11780,7 @@ const Router = (function(){
     if(parts[0] === 'search') return asRoute('student', 'search', {}, query);
     if(parts[0] === 'edital') return asRoute('student', 'edital', {}, query);
     if(parts[0] === 'glossario') return asRoute('student', 'glossario', {}, query);
+    if(parts[0] === 'forum') return asRoute('student', 'forum', {}, query);
     if(parts[0] === 'conta'){
       const tab = parts[1] || 'perfil';
       return asRoute('student', 'account', { tab }, query);
@@ -19890,6 +19892,327 @@ Renderers.glossario.mount = function(stageEl){
       if(bodyEl) bodyEl.innerHTML = _glossEntriesHtml();
     });
   }
+};
+
+/* ═══════════════════ FÓRUM (Comunidade) — Fase 5.1 Parte A ═══════════════════ */
+// Lista de matérias (subjects) e unidades a partir dos cursos já carregados.
+function _forumSubjectsList(){
+  const courses = window.COURSES_ALL || window.COURSES || [];
+  return courses.filter(c => c && c._subjectId != null)
+    .map(c => ({ id:String(c._subjectId), title:c.title || 'Matéria', sigla:c.sigla || '' }))
+    .sort((a,b) => (a.title||'').localeCompare(b.title||'', 'pt-BR'));
+}
+function _forumUnitsForSubject(subjectId){
+  const courses = window.COURSES_ALL || window.COURSES || [];
+  const c = courses.find(x => String(x._subjectId) === String(subjectId));
+  if(!c) return [];
+  const out = [];
+  (c.modules||[]).forEach(m => (m.chapters||[]).forEach(ch => (ch.units||[]).forEach(u => {
+    out.push({ id:String(u.id), label:`${c.sigla?c.sigla+' · ':''}${u.number?u.number+' · ':''}${u.title||''}` });
+  })));
+  return out;
+}
+function _forumSubjectLabel(sid){
+  if(sid == null || sid === '') return '';
+  const s = _forumSubjectsList().find(x => String(x.id) === String(sid));
+  return s ? (s.sigla || s.title) : '';
+}
+function _forumUnitLabelAny(uid){
+  if(!uid) return '';
+  const courses = window.COURSES_ALL || window.COURSES || [];
+  for(const c of courses){
+    for(const m of (c.modules||[])) for(const ch of (m.chapters||[])) for(const u of (ch.units||[])){
+      if(String(u.id) === String(uid)) return `${c.sigla?c.sigla+' · ':''}${u.number?u.number+' · ':''}${u.title||''}`;
+    }
+  }
+  return '';
+}
+function _forumWhen(iso){
+  if(!iso) return '';
+  const d = new Date(iso); const m = Math.floor((Date.now()-d.getTime())/60000);
+  if(m < 1) return 'agora';
+  if(m < 60) return 'há ' + m + ' min';
+  const h = Math.floor(m/60); if(h < 24) return 'há ' + h + 'h';
+  const dd = Math.floor(h/24); if(dd < 7) return 'há ' + dd + 'd';
+  return d.toLocaleDateString('pt-BR');
+}
+let _forumAuthorCache = {};
+async function _forumResolveAuthors(userIds){
+  const need = [...new Set(userIds.map(String))].filter(id => !_forumAuthorCache[id]);
+  if(need.length && window._sb){
+    try{
+      const { data } = await window._sb.schema('crm').from('user_profiles')
+        .select('user_id, display_name, nickname, handle, photo_url, photo_transform').in('user_id', need);
+      (data||[]).forEach(p => { _forumAuthorCache[String(p.user_id)] = p; });
+    }catch(e){ console.warn('[forum authors]', e); }
+    need.forEach(id => { if(!_forumAuthorCache[id]) _forumAuthorCache[id] = {}; });
+  }
+  return _forumAuthorCache;
+}
+async function _forumFetchPosts(){
+  if(!window._sb) return [];
+  try{
+    const { data, error } = await window._sb.schema('aluno').from('forum_posts')
+      .select('id, user_id, subject_id, unit_id, title, subtitle, body, created_at, edited_at, restricted, restricted_reason')
+      .is('deleted_at', null).order('created_at', { ascending:false }).limit(300);
+    if(error){ console.warn('[forum fetch]', error.message); return []; }
+    return data || [];
+  }catch(e){ console.warn('[forum fetch ex]', e); return []; }
+}
+function _forumBodyHTML(text){
+  const escd = Util.esc(text||'');
+  const linked = escd.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+  return linked.replace(/\n/g, '<br>');
+}
+function _forumPostCardHTML(p, authors){
+  const a = authors[String(p.user_id)] || {};
+  const name = a.nickname || a.display_name || 'Aluno';
+  const handle = a.handle ? '@'+a.handle : '';
+  const subjLabel = _forumSubjectLabel(p.subject_id);
+  const unitLabel = _forumUnitLabelAny(p.unit_id);
+  const tags = [];
+  if(subjLabel) tags.push(`<span class="forum-tag">${Util.esc(subjLabel)}</span>`);
+  if(unitLabel) tags.push(`<span class="forum-tag forum-tag-unit">${Util.esc(unitLabel)}</span>`);
+  if(!subjLabel && !unitLabel) tags.push(`<span class="forum-tag forum-tag-geral">Geral</span>`);
+  if(p.restricted){
+    return `<article class="forum-post is-restricted" data-post-id="${Util.attr(p.id)}">
+      <div class="forum-post-head">
+        <div class="forum-avatar" data-avatar="${Util.attr(p.user_id)}"></div>
+        <div class="forum-author"><span class="forum-author-name">${Util.esc(name)}</span>${handle?`<span class="forum-author-handle">${Util.esc(handle)}</span>`:''}<span class="forum-when">${Util.esc(_forumWhen(p.created_at))}</span></div>
+        <div class="forum-tags">${tags.join('')}</div>
+      </div>
+      <div class="forum-restricted-note"><strong>Publicação restrita pela moderação.</strong> ${Util.esc(p.restricted_reason || 'Conteúdo removido por violar as diretrizes da comunidade.')}</div>
+    </article>`;
+  }
+  return `<article class="forum-post" data-post-id="${Util.attr(p.id)}">
+    <div class="forum-post-head">
+      <div class="forum-avatar" data-avatar="${Util.attr(p.user_id)}"></div>
+      <div class="forum-author"><span class="forum-author-name">${Util.esc(name)}</span>${handle?`<span class="forum-author-handle">${Util.esc(handle)}</span>`:''}<span class="forum-when">${Util.esc(_forumWhen(p.created_at))}${p.edited_at?' · editado':''}</span></div>
+      <div class="forum-tags">${tags.join('')}</div>
+    </div>
+    <h3 class="forum-post-title">${Util.esc(p.title)}</h3>
+    ${p.subtitle?`<p class="forum-post-subtitle">${Util.esc(p.subtitle)}</p>`:''}
+    <div class="forum-post-body">${_forumBodyHTML(p.body)}</div>
+  </article>`;
+}
+function _forumInjectStyles(){
+  if(document.getElementById('uq-forum-styles')) return;
+  const st = document.createElement('style');
+  st.id = 'uq-forum-styles';
+  st.textContent = `
+  .forum-wrap{ display:grid; grid-template-columns:230px 1fr; gap:1.5rem; max-width:1080px; margin:0 auto; padding:0 1rem 3rem; align-items:start; }
+  @media(max-width:760px){ .forum-wrap{ grid-template-columns:1fr; } }
+  .forum-side{ position:sticky; top:80px; display:flex; flex-direction:column; gap:.4rem; padding:1.1rem 1.2rem; border:1px solid var(--border,#333); border-radius:var(--radius,4px); background:var(--accent-glow,rgba(200,169,126,.04)); }
+  .forum-side-head{ font-family:var(--sans); font-size:.66rem; letter-spacing:.16em; text-transform:uppercase; color:var(--text-mute); margin-bottom:.3rem; }
+  .forum-flabel{ font-family:var(--sans); font-size:.72rem; color:var(--text-dim); margin-top:.55rem; }
+  .forum-opt{ color:var(--text-mute); }
+  .forum-select,.forum-input,.forum-textarea{ width:100%; padding:.5rem .6rem; background:var(--bg); color:var(--text); border:1px solid var(--border,#333); border-radius:var(--radius,4px); font-family:var(--sans); font-size:.84rem; box-sizing:border-box; }
+  .forum-select:focus,.forum-input:focus,.forum-textarea:focus{ outline:none; border-color:var(--accent); }
+  .forum-select:disabled{ opacity:.5; }
+  .forum-clear{ margin-top:.8rem; background:none; border:1px solid var(--border,#333); color:var(--text-dim); border-radius:var(--radius,4px); padding:.45rem; font-family:var(--sans); font-size:.74rem; cursor:pointer; }
+  .forum-clear:hover{ color:var(--text); border-color:var(--accent); }
+  .forum-toolbar{ display:flex; align-items:center; justify-content:space-between; margin-bottom:1.1rem; gap:1rem; }
+  .forum-count{ font-family:var(--sans); font-size:.78rem; color:var(--text-mute); }
+  .forum-new-btn{ background:var(--accent); color:#1a1a18; border:none; border-radius:var(--radius,4px); padding:.55rem 1rem; font-family:var(--sans); font-weight:500; font-size:.84rem; cursor:pointer; }
+  .forum-new-btn:hover{ filter:brightness(1.07); }
+  .forum-list{ display:flex; flex-direction:column; gap:1rem; }
+  .forum-empty{ color:var(--text-mute); font-family:var(--sans); font-size:.9rem; text-align:center; padding:2.5rem 1rem; }
+  .forum-post{ border:1px solid var(--border,#333); border-radius:8px; padding:1.2rem 1.4rem; background:var(--bg); }
+  .forum-post-head{ display:flex; align-items:center; gap:.7rem; margin-bottom:.8rem; }
+  .forum-avatar{ width:38px; height:38px; border-radius:50%; overflow:hidden; flex-shrink:0; background:var(--accent-lo); position:relative; display:flex; align-items:center; justify-content:center; color:var(--accent); font-family:var(--sans); font-weight:600; font-size:.9rem; }
+  .forum-author{ display:flex; flex-direction:column; line-height:1.25; min-width:0; }
+  .forum-author-name{ font-family:var(--sans); font-weight:500; color:var(--text); font-size:.9rem; }
+  .forum-author-handle{ font-family:var(--sans); font-size:.72rem; color:var(--accent); }
+  .forum-when{ font-family:var(--sans); font-size:.7rem; color:var(--text-mute); }
+  .forum-tags{ margin-left:auto; display:flex; gap:.4rem; flex-wrap:wrap; justify-content:flex-end; }
+  .forum-tag{ font-family:var(--sans); font-size:.66rem; letter-spacing:.04em; padding:.2rem .55rem; border-radius:999px; background:var(--accent-lo); color:var(--accent); border:1px solid var(--accent-strong,rgba(200,169,126,.32)); white-space:nowrap; }
+  .forum-tag-unit{ background:transparent; }
+  .forum-tag-geral{ color:var(--text-mute); border-color:var(--border,#333); background:transparent; }
+  .forum-post-title{ font-family:var(--serif); font-size:1.25rem; font-weight:600; color:var(--text); margin:0 0 .3rem; }
+  .forum-post-subtitle{ font-family:var(--sans); font-size:.86rem; color:var(--text-dim); margin:0 0 .6rem; }
+  .forum-post-body{ font-family:var(--sans); font-size:.92rem; line-height:1.6; color:var(--text-dim); word-break:break-word; }
+  .forum-post-body a{ color:var(--accent); }
+  .forum-restricted-note{ font-family:var(--sans); font-size:.85rem; color:var(--text-dim); background:rgba(179,82,76,.08); border:1px solid rgba(179,82,76,.3); border-radius:var(--radius,4px); padding:.7rem .9rem; }
+  .forum-modal{ display:none; position:fixed; inset:0; z-index:1200; }
+  .forum-modal.open{ display:flex; align-items:center; justify-content:center; }
+  .forum-modal-backdrop{ position:absolute; inset:0; background:rgba(0,0,0,.55); }
+  .forum-modal-panel{ position:relative; width:min(560px,92vw); max-height:90vh; overflow:auto; background:var(--bg); border:1px solid var(--border,#333); border-radius:10px; padding:1.5rem 1.7rem; display:flex; flex-direction:column; gap:.15rem; }
+  .forum-modal-head{ display:flex; align-items:center; justify-content:space-between; }
+  .forum-modal-title{ font-family:var(--serif); font-size:1.3rem; font-weight:600; color:var(--text); }
+  .forum-modal-x{ background:none; border:none; color:var(--text-mute); font-size:1.6rem; line-height:1; cursor:pointer; }
+  .forum-modal-x:hover{ color:var(--text); }
+  .forum-modal-sub{ font-family:var(--sans); font-size:.82rem; color:var(--text-mute); margin:.1rem 0 .5rem; }
+  .forum-textarea{ min-height:120px; resize:vertical; }
+  .forum-modal-actions{ display:flex; justify-content:flex-end; gap:.7rem; margin-top:1.1rem; }
+  .forum-btn-ghost{ background:none; border:1px solid var(--border,#333); color:var(--text-dim); border-radius:var(--radius,4px); padding:.5rem 1rem; font-family:var(--sans); cursor:pointer; }
+  .forum-btn-primary{ background:var(--accent); color:#1a1a18; border:none; border-radius:var(--radius,4px); padding:.5rem 1.3rem; font-family:var(--sans); font-weight:500; cursor:pointer; }
+  .forum-btn-primary:disabled{ opacity:.6; cursor:default; }
+  .forum-modal-err{ color:#e0908a; font-family:var(--sans); font-size:.8rem; margin-top:.5rem; }
+  `;
+  document.head.appendChild(st);
+}
+// Modal "Nova publicação"
+const ForumCompose = (function(){
+  let _el = null, _onDone = null;
+  function ensureEl(){
+    if(_el) return _el;
+    _el = document.createElement('div');
+    _el.className = 'forum-modal';
+    _el.innerHTML = `
+      <div class="forum-modal-backdrop"></div>
+      <div class="forum-modal-panel">
+        <div class="forum-modal-head">
+          <span class="forum-modal-title">Nova publicação</span>
+          <button class="forum-modal-x" type="button" aria-label="Fechar">&times;</button>
+        </div>
+        <p class="forum-modal-sub">Escolha a matéria (opcional) e escreva sua mensagem.</p>
+        <label class="forum-flabel">Matéria <span class="forum-opt">(opcional)</span></label>
+        <select class="forum-select" id="fcSubject"></select>
+        <label class="forum-flabel">Unidade <span class="forum-opt">(opcional)</span></label>
+        <select class="forum-select" id="fcUnit"><option value="">—</option></select>
+        <label class="forum-flabel">Título</label>
+        <input type="text" class="forum-input" id="fcTitle" maxlength="160" placeholder="Escreva um título curto…">
+        <label class="forum-flabel">Subtítulo <span class="forum-opt">(opcional)</span></label>
+        <input type="text" class="forum-input" id="fcSubtitle" maxlength="200" placeholder="Um complemento curto…">
+        <label class="forum-flabel">Mensagem</label>
+        <textarea class="forum-textarea" id="fcBody" maxlength="5000" placeholder="Escreva aqui…"></textarea>
+        <div class="forum-modal-err" id="fcErr" hidden></div>
+        <div class="forum-modal-actions">
+          <button class="forum-btn-ghost" id="fcCancel" type="button">Cancelar</button>
+          <button class="forum-btn-primary" id="fcPublish" type="button">Publicar</button>
+        </div>
+      </div>`;
+    document.body.appendChild(_el);
+    const unit = _el.querySelector('#fcUnit');
+    const subj = _el.querySelector('#fcSubject');
+    function fillUnits(){
+      const sid = subj.value;
+      const units = sid ? _forumUnitsForSubject(sid) : [];
+      unit.innerHTML = ['<option value="">— (dúvida ampla da matéria)</option>'].concat(units.map(u=>`<option value="${Util.attr(u.id)}">${Util.esc(u.label)}</option>`)).join('');
+      unit.disabled = !sid;
+    }
+    _el._fillUnits = fillUnits;
+    subj.addEventListener('change', fillUnits);
+    _el.querySelector('.forum-modal-backdrop').addEventListener('click', close);
+    _el.querySelector('.forum-modal-x').addEventListener('click', close);
+    _el.querySelector('#fcCancel').addEventListener('click', close);
+    _el.querySelector('#fcPublish').addEventListener('click', publish);
+    return _el;
+  }
+  function open(onDone){
+    _onDone = onDone || null;
+    const el = ensureEl();
+    const subj = el.querySelector('#fcSubject');
+    subj.innerHTML = ['<option value="">— (dúvida geral, sem matéria)</option>']
+      .concat(_forumSubjectsList().map(s=>`<option value="${Util.attr(s.id)}">${Util.esc(s.title)}</option>`)).join('');
+    subj.value = ''; el._fillUnits();
+    ['#fcTitle','#fcSubtitle','#fcBody'].forEach(id => { el.querySelector(id).value = ''; });
+    const err = el.querySelector('#fcErr'); err.hidden = true; err.textContent = '';
+    el.classList.add('open');
+    setTimeout(() => { try{ el.querySelector('#fcTitle').focus(); }catch(_){} }, 30);
+  }
+  function close(){ if(_el) _el.classList.remove('open'); }
+  async function publish(){
+    const el = _el; if(!el) return;
+    const title = el.querySelector('#fcTitle').value.trim();
+    const body = el.querySelector('#fcBody').value.trim();
+    const subtitle = el.querySelector('#fcSubtitle').value.trim();
+    const subject_id = el.querySelector('#fcSubject').value || null;
+    const unit_id = el.querySelector('#fcUnit').value || null;
+    const err = el.querySelector('#fcErr');
+    if(!title || !body){ err.textContent = 'Título e mensagem são obrigatórios.'; err.hidden = false; return; }
+    const uid = (typeof _currentSupaUserId === 'function') ? _currentSupaUserId() : null;
+    if(!uid || !window._sb){ err.textContent = 'Você precisa estar logado.'; err.hidden = false; return; }
+    const btn = el.querySelector('#fcPublish'); btn.disabled = true; btn.textContent = 'Publicando…';
+    try{
+      const { error } = await window._sb.schema('aluno').from('forum_posts')
+        .insert({ user_id: uid, subject_id, unit_id, title, subtitle: subtitle || null, body });
+      if(error){ err.textContent = 'Erro ao publicar: ' + error.message; err.hidden = false; btn.disabled = false; btn.textContent = 'Publicar'; return; }
+      close();
+      if(_onDone) _onDone();
+    }catch(e){ err.textContent = 'Erro inesperado ao publicar.'; err.hidden = false; }
+    btn.disabled = false; btn.textContent = 'Publicar';
+  }
+  return { open, close };
+})();
+window.ForumCompose = ForumCompose;
+
+Renderers.forum = function(route){
+  _forumInjectStyles();
+  const q = (route && route.query) || {};
+  const subjOpts = ['<option value="">Todas as matérias</option>']
+    .concat(_forumSubjectsList().map(s => `<option value="${Util.attr(s.id)}"${String(q.subject||'')===String(s.id)?' selected':''}>${Util.esc(s.title)}</option>`)).join('');
+  return `<div class="hero unit-hero forum-hero">
+      <span class="s-label">Comunidade</span>
+      <h1 class="s-title">Fórum Ubique</h1>
+      <p class="s-subtitle">Um quadro público para dúvidas, insights e avisos — por matéria e unidade.</p>
+    </div>
+    <div class="forum-wrap">
+      <aside class="forum-side">
+        <div class="forum-side-head">Filtros</div>
+        <label class="forum-flabel">Matéria</label>
+        <select class="forum-select" id="forumFilterSubject">${subjOpts}</select>
+        <label class="forum-flabel">Unidade</label>
+        <select class="forum-select" id="forumFilterUnit"><option value="">Todas as unidades</option></select>
+        <button class="forum-clear" id="forumClear" type="button">Limpar filtros</button>
+      </aside>
+      <main class="forum-main">
+        <div class="forum-toolbar">
+          <span class="forum-count" id="forumCount"></span>
+          <button class="forum-new-btn" id="forumNewBtn" type="button">+ Nova publicação</button>
+        </div>
+        <div class="forum-list" id="forumList"><p class="forum-empty">Carregando…</p></div>
+      </main>
+    </div>`;
+};
+Renderers.forum.mount = function(stageEl, route){
+  const listEl = stageEl.querySelector('#forumList');
+  const countEl = stageEl.querySelector('#forumCount');
+  const subjSel = stageEl.querySelector('#forumFilterSubject');
+  const unitSel = stageEl.querySelector('#forumFilterUnit');
+  const clearBtn = stageEl.querySelector('#forumClear');
+  const newBtn = stageEl.querySelector('#forumNewBtn');
+  let _all = [];
+  function _fillUnitFilter(){
+    const sid = subjSel.value;
+    const units = sid ? _forumUnitsForSubject(sid) : [];
+    unitSel.innerHTML = ['<option value="">Todas as unidades</option>'].concat(units.map(u=>`<option value="${Util.attr(u.id)}">${Util.esc(u.label)}</option>`)).join('');
+    unitSel.disabled = !sid;
+  }
+  async function _renderList(posts){
+    if(!posts.length){
+      const filtered = subjSel.value || unitSel.value;
+      listEl.innerHTML = `<p class="forum-empty">${filtered ? 'Nenhuma publicação com esse filtro.' : 'Nenhuma publicação ainda. Seja o primeiro a publicar!'}</p>`;
+      countEl.textContent = ''; return;
+    }
+    countEl.textContent = posts.length + (posts.length===1 ? ' publicação' : ' publicações');
+    const authors = await _forumResolveAuthors(posts.map(p => p.user_id));
+    listEl.innerHTML = posts.map(p => _forumPostCardHTML(p, authors)).join('');
+    listEl.querySelectorAll('.forum-avatar[data-avatar]').forEach(el => {
+      const a = authors[String(el.dataset.avatar)] || {};
+      renderAvatarInto(el, a.photo_url || '', a.photo_transform);
+      if(!a.photo_url){ el.textContent = ((a.nickname||a.display_name||'?')[0]||'?').toUpperCase(); }
+    });
+  }
+  function _apply(){
+    const sid = subjSel.value, uid = unitSel.value;
+    let view = _all;
+    if(sid) view = view.filter(p => String(p.subject_id||'') === String(sid));
+    if(uid) view = view.filter(p => String(p.unit_id||'') === String(uid));
+    _renderList(view);
+  }
+  async function _reload(){
+    listEl.innerHTML = `<p class="forum-empty">Carregando…</p>`;
+    _all = await _forumFetchPosts();
+    _apply();
+  }
+  _fillUnitFilter();
+  subjSel.addEventListener('change', () => { _fillUnitFilter(); _apply(); });
+  unitSel.addEventListener('change', _apply);
+  clearBtn.addEventListener('click', () => { subjSel.value=''; _fillUnitFilter(); unitSel.value=''; _apply(); });
+  newBtn.addEventListener('click', () => ForumCompose.open(() => _reload()));
+  if(route && route.query && route.query.subject){ subjSel.value = String(route.query.subject); _fillUnitFilter(); if(route.query.unit) unitSel.value = String(route.query.unit); }
+  _reload();
 };
 
 /* ═══════════ EDITAL — visualização hierárquica do edital + progresso ═══════════ */
@@ -29719,6 +30042,8 @@ const App = {
     if(navEdital) navEdital.classList.toggle('active', route.view === 'edital');
     const navGloss = document.getElementById('navGlossario');
     if(navGloss) navGloss.classList.toggle('active', route.view === 'glossario');
+    const navForum = document.getElementById('navForum');
+    if(navForum) navForum.classList.toggle('active', route.view === 'forum');
     // Labels da topbar refletem a matéria ativa: "Portal • HB" quando
     // dentro de uma matéria; só "Portal" no modo global (catálogo).
     try{
