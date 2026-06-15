@@ -37672,8 +37672,10 @@
     // Carrega as respostas reais (uma vez) e então desenha os gráficos
     ensureFalconResponses().then(() => {
       renderFalconQuestionsChart();
-      renderFalconAccessChart();
+      renderFalconAccessChart(); // desenha já com o que houver
     });
+    // Presença real (entrou/abriu unidade) — quando chegar, redesenha os acessos
+    ensureFalconAccessDaily().then(() => renderFalconAccessChart());
   }
 
   function initDashboard(){
@@ -38175,6 +38177,53 @@
     return falconResponsesLite;
   }
 
+  // Presença REAL: entrou na plataforma (aluno.platform_access) ou abriu unidade
+  // (aluno.unit_progress.last_seen_at). Isso captura quem só LÊ, sem responder.
+  let falconAccessLite = null; // null = ainda não carregado
+  async function ensureFalconAccessDaily(){
+    if(falconAccessLite) return falconAccessLite;
+    falconAccessLite = [];
+    try{
+      const pa = await window._sb.schema('aluno').from('platform_access')
+        .select('user_id, access_date, last_at').limit(50000);
+      if(!pa.error && Array.isArray(pa.data)){
+        pa.data.forEach(r => {
+          if(!r.user_id) return;
+          let d = null;
+          if(r.access_date){ const p = String(r.access_date).split('-').map(Number); if(p[0]) d = new Date(p[0], (p[1]||1)-1, p[2]||1, 12); }
+          else if(r.last_at){ d = new Date(r.last_at); }
+          if(d && !isNaN(d.getTime())) falconAccessLite.push({ user_id: r.user_id, d });
+        });
+      } else if(pa.error){ console.warn('[platform_access read]', pa.error.message); }
+    }catch(e){ console.warn('[platform_access ex]', e); }
+    try{
+      const up = await window._sb.schema('aluno').from('unit_progress')
+        .select('user_id, last_seen_at').limit(50000);
+      if(!up.error && Array.isArray(up.data)){
+        up.data.forEach(r => {
+          if(!r.user_id || !r.last_seen_at) return;
+          const d = new Date(r.last_seen_at);
+          if(!isNaN(d.getTime())) falconAccessLite.push({ user_id: r.user_id, d });
+        });
+      }
+    }catch(e){ console.warn('[unit_progress read ex]', e); }
+    console.log('[falcon access] eventos de presença:', falconAccessLite.length);
+    return falconAccessLite;
+  }
+
+  // União de TODOS os sinais de "esteve ativo no dia": entrou (platform_access),
+  // abriu unidade (unit_progress) OU respondeu questão (student_responses).
+  // Cada item já vem com a data (d) pronta pra bucketizar.
+  function _falconActivityEvents(){
+    const out = [];
+    (falconResponsesLite || []).forEach(r => {
+      const w = _falconWhen(r);
+      if(w && r.user_id){ const d = new Date(w); if(!isNaN(d.getTime())) out.push({ user_id: r.user_id, d }); }
+    });
+    (falconAccessLite || []).forEach(e => out.push(e));
+    return out;
+  }
+
   // Falcon — esqueleto de buckets compartilhado pelos gráficos de linha.
   // range: 'week' | 'month' | '6m' | 'year' | 'custom'. Retorna os buckets
   // (sem contagem), o modo (dia/mês), a janela [startTs, endTs] e helpers.
@@ -38264,15 +38313,13 @@
     const { buckets, mode, startTs, endTs } = _falconBuckets(range, custom);
     const idx = Object.fromEntries(buckets.map((b,i) => [b.key, i]));
     const sets = buckets.map(() => new Set());
-    (falconResponsesLite || []).forEach(r => {
-      const w = _falconWhen(r);
-      if(!w || !r.user_id) return;
-      const d = new Date(w); const ts = d.getTime();
+    _falconActivityEvents().forEach(e => {
+      const ts = e.d.getTime();
       if(isNaN(ts) || ts < startTs || ts > endTs) return;
-      const key = mode === 'day' ? _falconDayKey(d) : _falconMonthKey(d);
+      const key = mode === 'day' ? _falconDayKey(e.d) : _falconMonthKey(e.d);
       const i = idx[key];
       if(i == null) return;
-      sets[i].add(r.user_id);
+      sets[i].add(e.user_id);
     });
     buckets.forEach((b,i) => { b.count = sets[i].size; b.mode = mode; });
     return buckets;
@@ -38440,14 +38487,13 @@
     listEarly.innerHTML = '<div class="card" style="text-align:center;padding:2rem 1rem"><p class="card-body" style="font-style:italic;margin:0">Carregando…</p></div>';
     modal.classList.add('active');
 
-    // Alunos distintos com atividade nesse dia/mês (fonte real: student_responses)
-    await ensureFalconResponses();
-    const userIds = [...new Set((falconResponsesLite || []).filter(r => {
-      const w = _falconWhen(r); if(!w) return false;
-      const dt = new Date(w);
-      const key = isMonth ? _falconMonthKey(dt) : _falconDayKey(dt);
-      return key === dateKey && r.user_id;
-    }).map(r => r.user_id))];
+    // Alunos distintos que estiveram ATIVOS nesse dia/mês — entrou, abriu unidade
+    // ou respondeu questão (mesma união do gráfico).
+    await Promise.all([ensureFalconResponses(), ensureFalconAccessDaily()]);
+    const userIds = [...new Set(_falconActivityEvents().filter(e => {
+      const key = isMonth ? _falconMonthKey(e.d) : _falconDayKey(e.d);
+      return key === dateKey && e.user_id;
+    }).map(e => e.user_id))];
 
     // Resolve perfil (foto/apelido/nome) + e-mail de cada aluno
     let people = [];

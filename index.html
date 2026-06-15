@@ -17077,6 +17077,34 @@ window._refreshNotifsUI = function(){
   }catch(_){}
 };
 
+// Registro de ACESSO real à plataforma: marca "o aluno entrou hoje" mesmo que
+// ele só leia um texto (não depende de responder questão). 1 linha por dia
+// (upsert em aluno.platform_access). Trava de 5 min pra não floodar a rede.
+let _lastAccessPingTs = 0;
+async function _recordPlatformAccess(userId){
+  if(!userId || !window._sb) return;
+  const now = Date.now();
+  if(now - _lastAccessPingTs < 5 * 60 * 1000) return;
+  _lastAccessPingTs = now;
+  try{
+    // dia LOCAL (mesma convenção do resto do app), não UTC
+    const d = new Date();
+    const access_date = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    const { error } = await window._sb.schema('aluno').from('platform_access')
+      .upsert({ user_id: userId, access_date, last_at: new Date().toISOString() }, { onConflict: 'user_id,access_date' });
+    if(error) console.warn('[platform_access]', error.message);
+  }catch(e){ console.warn('[platform_access ex]', e); }
+}
+// Quando o aluno volta pra aba depois de um tempo, re-registra a presença.
+if(typeof document !== 'undefined' && !window._accessVisBound){
+  window._accessVisBound = true;
+  document.addEventListener('visibilitychange', () => {
+    if(document.visibilityState !== 'visible') return;
+    const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    if(u && u.id) _recordPlatformAccess(u.id);
+  });
+}
+
 async function initUserSession(user){
   if(!user || !user.id) return;
   // 1) Entrega o "crachá" (token de login) à antena do realtime — necessário
@@ -17112,6 +17140,8 @@ async function initUserSession(user){
   }
   // 4) Follows
   if(window.Follows && typeof Follows.hydrate === 'function') Follows.hydrate(user.id).catch(()=>{});
+  // 5) Acesso do dia (entrou na plataforma — conta mesmo que só leia um texto)
+  try{ _recordPlatformAccess(user.id); }catch(_){}
 }
 window.initUserSession = initUserSession;
 
