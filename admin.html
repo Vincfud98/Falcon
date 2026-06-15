@@ -37470,6 +37470,48 @@
     return rows;
   };
 
+  // RECUPERAÇÃO — completa a migração parcial: aponta cada grupo inline pra
+  // questão do banco que JÁ existe (mesma assertiva), sem criar duplicata, e
+  // persiste no Supabase. Por padrão é DRY-RUN (não grava). Para aplicar:
+  // await _completeInlineMigration(false)
+  window._completeInlineMigration = async function(apply){
+    const dry = (apply !== false);
+    const { data, error } = await window._sb.schema('conteudo').from('unit_blocks').select('id, unit_id, content');
+    if(error){ console.warn(error.message); return; }
+    const norm = (s) => String(s||'').replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim().toLowerCase();
+    const changes = [];
+    for(const b of (data || [])){
+      const groups = (b.content && Array.isArray(b.content.groups)) ? b.content.groups : [];
+      let changed = false;
+      const newGroups = groups.map(g => {
+        if(g.bank_question_id || !Array.isArray(g.questions) || !g.questions.length) return g;
+        const qids = new Set(); let allMatched = true;
+        g.questions.forEach(q => {
+          const txt = norm(q.statement || q.assertion);
+          const t = (tfItemsCache || []).find(x => norm(x.assertiva) === txt && txt);
+          if(t) qids.add(String(t.question_id)); else allMatched = false;
+        });
+        if(allMatched && qids.size === 1){
+          const bankQid = [...qids][0];
+          changes.push({ block_id:b.id, grupo:g.id, questoes:g.questions.length, aponta_para_banco:bankQid, status:'OK' });
+          changed = true;
+          return { id: g.id, bank_question_id: bankQid };
+        }
+        changes.push({ block_id:b.id, grupo:g.id, questoes:g.questions.length, aponta_para_banco:'—', status:'SEM MATCH (pulado)' });
+        return g;
+      });
+      if(changed && !dry){
+        const newContent = Object.assign({}, b.content, { groups: newGroups });
+        const { error: upErr } = await window._sb.schema('conteudo').from('unit_blocks').update({ content: newContent }).eq('id', b.id);
+        if(upErr){ console.warn('[recuperação] update', b.id, upErr.message); }
+        else console.log('[recuperação] bloco', b.id, 'atualizado ✅');
+      }
+    }
+    console.table(changes);
+    console.log(dry ? '%cDRY-RUN — nada foi gravado. Para aplicar: await _completeInlineMigration(false)' : '%cAplicado. Recarregue e rode await _scanInlineQuestions() pra confirmar 0.', 'color:#e9b65a;font-weight:bold');
+    return changes;
+  };
+
   function initFalconStats(){
     if(!document.getElementById('falcon-questions-chart')) return;
     if(!_falconStatsBound){
