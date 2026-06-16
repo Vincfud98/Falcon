@@ -13768,9 +13768,10 @@ Blocks.quiz = {
               const prior = (ctx.store && ctx.store.getQuizAnswer) ? ctx.store.getQuizAnswer(ctx.unitId, block.id, item.id) : null;
               if(!prior || prior.selected == null){ if(window.ueToast) window.ueToast('Responda a questão antes de enviar ao colega.', 'warn'); return; }
               if(window.CoopPicker) window.CoopPicker.open({
+                allowReasoning: true,
                 onSend: (sel) => {
-                  (sel.partners || []).forEach(p => { if(window._coopSendQuiz) window._coopSendQuiz(p, item, prior, ctx, block.id, item.id); });
-                  (sel.rooms || []).forEach(r => { if(window._coopSendGroupQuiz) window._coopSendGroupQuiz(r, item, prior, ctx, block.id, item.id); });
+                  (sel.partners || []).forEach(p => { if(window._coopSendQuiz) window._coopSendQuiz(p, item, prior, ctx, block.id, item.id, sel.reasoning); });
+                  (sel.rooms || []).forEach(r => { if(window._coopSendGroupQuiz) window._coopSendGroupQuiz(r, item, prior, ctx, block.id, item.id, sel.reasoning); });
                 }
               });
             });
@@ -21122,6 +21123,10 @@ const CoopPicker = (function(){
         </div>
         <p class="coop-modal-sub" id="coopPickSub">Marque um ou mais e clique em Enviar.</p>
         <div class="coop-pick-list" id="coopPickList"></div>
+        <div class="coop-pick-reason" id="coopPickReason" hidden>
+          <label class="coop-reason-check"><input type="checkbox" id="coopReasonChk"> Explicar meu raciocínio para o corretor <span class="forum-opt">(opcional)</span></label>
+          <textarea id="coopReasonText" class="coop-textarea" placeholder="Ex.: marquei Certo porque achei que as expansões começaram por X…" hidden></textarea>
+        </div>
         <div class="coop-modal-actions" style="margin-top:1rem"><button class="coop-btn-ghost" id="coopPickCancel" type="button">Cancelar</button><button class="coop-btn-primary" id="coopPickSend" type="button" disabled>Enviar</button></div>
       </div>`;
     document.body.appendChild(_el);
@@ -21142,11 +21147,17 @@ const CoopPicker = (function(){
       row.classList.toggle('selected', set.has(id));
       _updateSendBtn();
     });
+    _el.querySelector('#coopReasonChk').addEventListener('change', e => {
+      _el.querySelector('#coopReasonText').hidden = !e.target.checked;
+      if(e.target.checked) _el.querySelector('#coopReasonText').focus();
+    });
     _el.querySelector('#coopPickSend').addEventListener('click', () => {
       const partners = _coopPartners().filter(u => _sel.partners.has(String(u.id)));
       const rooms = _rooms.filter(r => _sel.rooms.has(String(r.id)));
+      const chk = _el.querySelector('#coopReasonChk');
+      const reasoning = (chk && chk.checked) ? (_el.querySelector('#coopReasonText').value || '').trim() : '';
       close();
-      if(_onSend) _onSend({ partners, rooms });
+      if(_onSend) _onSend({ partners, rooms, reasoning });
     });
     return _el;
   }
@@ -21201,6 +21212,10 @@ const CoopPicker = (function(){
     el.querySelector('#coopPickSub').textContent = opts.subtitle || (_partnersOnly ? 'Marque um ou mais colegas e clique em Enviar.' : 'Marque um ou mais colegas/salas e clique em Enviar.');
     el.querySelector('#coopPickFilters').style.display = _partnersOnly ? 'none' : '';
     el.querySelectorAll('.coop-pick-chip').forEach((x,i) => x.classList.toggle('on', i === 0));
+    // Raciocínio (opcional) — só na objetiva, onde só há a alternativa marcada.
+    el.querySelector('#coopPickReason').hidden = !opts.allowReasoning;
+    el.querySelector('#coopReasonChk').checked = false;
+    const _rt = el.querySelector('#coopReasonText'); _rt.value = ''; _rt.hidden = true;
     _rooms = (!_partnersOnly && typeof _salasFetchRooms === 'function') ? await _salasFetchRooms() : [];
     _renderList(); _updateSendBtn();
     el.classList.add('open');
@@ -21298,10 +21313,11 @@ function _coopPackageQuiz(item){
     origin: item.origin || ''
   };
 }
-async function _coopSendQuiz(partner, item, prior, ctx, blockId, itemId){
+async function _coopSendQuiz(partner, item, prior, ctx, blockId, itemId, reasoning){
   const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
   if(!me || !me.id || !window._sb || !partner || !partner.id) return;
   const author_answer = { value: (prior && prior.selected != null) ? prior.selected : '', is_correct: !!(prior && prior.correct) };
+  if(reasoning) author_answer.reasoning = reasoning;
   try{
     const { data, error } = await window._sb.schema('aluno').from('coop_sessions').insert({
       from_user: me.id, to_user: partner.id, question_type: 'quiz',
@@ -21391,6 +21407,10 @@ const CoopSessionModal = (function(){
       const answer = (s.author_answer && s.author_answer.text) || '';
       html += `<div class="coop-ans"><div class="coop-ans-lbl">Resposta de ${Util.esc(_coopName(s.from_user))}</div><div class="coop-ans-body">${_rich(answer)}</div></div>`;
     }
+    // Raciocínio que o autor escreveu (opcional) — ajuda o corretor a justificar.
+    if(s.author_answer && s.author_answer.reasoning){
+      html += `<div class="coop-ans"><div class="coop-ans-lbl">Raciocínio de ${Util.esc(_coopName(s.from_user))}</div><div class="coop-ans-body">${_rich(s.author_answer.reasoning)}</div></div>`;
+    }
     // Formulário de correção (se sou membro corretor e ainda não corrigi)
     if(canCorrect && !myCorr){
       if(isQuiz){
@@ -21437,9 +21457,17 @@ const CoopSessionModal = (function(){
         }).join('');
       }
       html += `</div>`;
-      // Objetiva: gabarito só agora (depois do julgamento)
+      // Objetiva: gabarito só agora (depois do julgamento) + feedback do acerto
       if(isQuiz){
         html += `<div class="coop-model"><div class="coop-ans-lbl">Gabarito</div><div class="coop-corr-grade">Resposta correta: <strong>${Util.esc(q.key || '—')}</strong></div>${q.comments?`<div class="coop-model-body">${q.comments}</div>`:''}</div>`;
+        const authorCorrect = !!(s.author_answer && s.author_answer.is_correct);
+        if(myCorr){
+          // Acertou o julgamento se o veredito bate com o acerto real do autor
+          const judgedOk = (myCorr.verdict === 'correct') === authorCorrect;
+          html += `<div class="coop-result ${judgedOk?'is-ok':'is-no'}">${judgedOk ? 'Você avaliou corretamente!' : 'Você avaliou de forma incorreta.'}</div>`;
+        } else if(isAuthor){
+          html += `<div class="coop-result ${authorCorrect?'is-ok':'is-no'}">${authorCorrect ? 'Você acertou a questão.' : 'Você errou a questão.'}</div>`;
+        }
       }
     }
     body.innerHTML = html;
@@ -21468,6 +21496,9 @@ const CoopSessionModal = (function(){
     if(isQuiz){
       const ans = (s.author_answer && s.author_answer.value) || '—';
       html += `<div class="coop-ans"><div class="coop-ans-lbl">Resposta ${isReviewer ? 'do colega' : 'sua'}</div><div class="coop-ans-pick">${Util.esc(ans)}</div></div>`;
+      if(s.author_answer && s.author_answer.reasoning){
+        html += `<div class="coop-ans"><div class="coop-ans-lbl">Raciocínio ${isReviewer ? 'do colega' : 'seu'}</div><div class="coop-ans-body">${_rich(s.author_answer.reasoning)}</div></div>`;
+      }
       if(isReviewer && s.status === 'pending'){
         html += `<div class="coop-grade"><div class="coop-ans-lbl">Sua avaliação</div>
           <p class="coop-verdict-q">A resposta do colega está correta ou incorreta?</p>
@@ -21655,10 +21686,11 @@ async function _coopSendGroupEssay(room, item, answerText, ctx, blockId, itemId)
     if(window.ueToast) ueToast('Questão enviada para a sala ' + (room.name || '') + '!', 'success');
   }catch(e){ console.warn('[coop group essay]', e); if(window.ueToast) ueToast('Erro inesperado ao enviar.', 'error'); }
 }
-async function _coopSendGroupQuiz(room, item, prior, ctx, blockId, itemId){
+async function _coopSendGroupQuiz(room, item, prior, ctx, blockId, itemId, reasoning){
   const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
   if(!me || !me.id || !window._sb || !room || !room.id) return;
   const author_answer = { value:(prior && prior.selected != null) ? prior.selected : '', is_correct: !!(prior && prior.correct) };
+  if(reasoning) author_answer.reasoning = reasoning;
   try{
     const sid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
     const ins = { from_user: me.id, to_user: null, room_id: room.id, question_type:'quiz', unit_id:(ctx&&ctx.unitId)||null, item_id:itemId, question:_coopPackageQuiz(item), author_answer, status:'open' };
@@ -21687,6 +21719,10 @@ function _coopGroupInjectStyles(){
   .coop-pick-row.selected .coop-pick-check{ background:var(--accent); border-color:var(--accent); }
   .coop-pick-row.selected .coop-pick-check::after{ content:''; width:5px; height:9px; border:solid var(--bg); border-width:0 2px 2px 0; transform:rotate(45deg); margin-top:-2px; }
   .coop-pick-room-av{ background:var(--accent-lo); color:var(--accent); font-family:var(--mono); }
+  .coop-pick-reason{ margin-top:.9rem; padding-top:.9rem; border-top:1px solid var(--accent-border-soft); }
+  .coop-reason-check{ display:flex; align-items:center; gap:.5rem; font-family:var(--sans); font-size:.84rem; color:var(--text-dim); cursor:pointer; }
+  .coop-reason-check input{ accent-color:var(--accent); width:16px; height:16px; cursor:pointer; }
+  .coop-pick-reason .coop-textarea{ margin-top:.6rem; }
   .coop-group-corrs{ margin-top:1.1rem; }
   .coop-group-corr{ border:1px solid var(--accent-border-soft); border-radius:var(--radius); padding:.7rem .85rem; margin-top:.5rem; background:var(--accent-glow); }
   .coop-group-corr.is-pending{ display:flex; align-items:center; justify-content:space-between; background:none; border-style:dashed; color:var(--text-mute); }
