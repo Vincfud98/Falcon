@@ -21320,14 +21320,24 @@ async function _salasFetchMembers(roomId){
 async function _salasCreate(payload){
   const uid = _salasMyUid(); if(!uid || !window._sb) return null;
   try{
-    const { data, error } = await window._sb.schema('aluno').from('study_rooms').insert({
+    // id gerado no cliente: evita depender de ler a sala de volta (a RLS de SELECT
+    // só libera quem já é membro, e a linha de membro só entra no passo seguinte).
+    const roomId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
+    const ins = {
       name: payload.name, description: payload.description || null, creator_id: uid,
-      ranking_mode: payload.ranking_mode || 'endless', end_date: payload.end_date || null, daily_goal: payload.daily_goal || 0
-    }).select('id').single();
+      ranking_mode: payload.ranking_mode || 'endless', end_date: payload.end_date || null,
+      daily_goal: payload.daily_goal || 0, goal_type: payload.goal_type || 'questions_per_day'
+    };
+    if(roomId) ins.id = roomId;
+    const q = window._sb.schema('aluno').from('study_rooms').insert(ins);
+    const { data, error } = roomId ? await q : await q.select('id');
     if(error){ if(window.ueToast) ueToast('Erro ao criar: ' + error.message, 'error'); return null; }
-    await window._sb.schema('aluno').from('room_members').insert({ room_id: data.id, user_id: uid, role:'owner', status:'member' });
-    return data.id;
-  }catch(e){ console.warn('[salas create]', e); return null; }
+    const newId = roomId || (data && data[0] && data[0].id);
+    if(!newId){ if(window.ueToast) ueToast('Erro ao criar a sala.', 'error'); return null; }
+    const { error: merr } = await window._sb.schema('aluno').from('room_members').insert({ room_id: newId, user_id: uid, role:'owner', status:'member' });
+    if(merr){ if(window.ueToast) ueToast('Falha ao entrar na sala: ' + merr.message, 'error'); return null; }
+    return newId;
+  }catch(e){ console.warn('[salas create]', e); if(window.ueToast) ueToast('Erro inesperado ao criar a sala.', 'error'); return null; }
 }
 async function _salasInvite(roomId, roomName, partner){
   const uid = _salasMyUid(); if(!uid || !window._sb || !partner || !partner.id) return;
@@ -21372,11 +21382,12 @@ function _salasOpenCreateModal(onDone){
   if(!el){
     el = document.createElement('div'); el.id = 'salasCreateModal'; el.className = 'coop-modal';
     el.innerHTML = `<div class="coop-modal-backdrop"></div><div class="coop-modal-panel"><div class="coop-modal-head"><span class="coop-modal-title">Nova sala de estudos</span><button class="coop-modal-x" type="button" aria-label="Fechar">&times;</button></div>
-      <label class="sr-label">Nome da sala</label><input class="sr-input" id="srName" maxlength="80" placeholder="Ex.: Maratona CACD">
-      <label class="sr-label">Descrição <span class="forum-opt">(opcional)</span></label><input class="sr-input" id="srDesc" maxlength="160" placeholder="Sobre o que é a sala…">
-      <label class="sr-label">Meta diária de questões <span class="forum-opt">(opcional)</span></label><input type="number" class="sr-input" id="srGoal" min="0" step="5" placeholder="Ex.: 30">
-      <label class="sr-label">Tipo de ranking</label><select class="sr-select" id="srMode"><option value="endless">Sem data de término (dia / semana / mês / ano)</option><option value="dated">Com data final (define um vencedor)</option></select>
-      <div id="srDateWrap" hidden><label class="sr-label">Data final</label><input type="date" class="sr-input" id="srDate"></div>
+      <div class="sr-field"><label class="sr-label" for="srName">Nome da sala</label><input class="sr-input" id="srName" maxlength="80" placeholder="Ex.: Maratona CACD"></div>
+      <div class="sr-field"><label class="sr-label" for="srDesc">Descrição <span class="forum-opt">(opcional)</span></label><input class="sr-input" id="srDesc" maxlength="160" placeholder="Sobre o que é a sala…"></div>
+      <div class="sr-field"><label class="sr-label" for="srGoalType">Tipo de meta</label><select class="sr-select" id="srGoalType"><option value="questions_per_day">Questões por dia (por integrante)</option></select></div>
+      <div class="sr-field"><label class="sr-label" for="srGoal">Meta diária <span class="forum-opt">(opcional)</span></label><input type="number" class="sr-input" id="srGoal" min="0" step="5" placeholder="Ex.: 30"><div class="sr-help">Cada integrante busca essa meta por dia. A sala mostra um medidor coletivo somando as questões de todos.</div></div>
+      <div class="sr-field"><label class="sr-label" for="srMode">Tipo de ranking</label><select class="sr-select" id="srMode"><option value="endless">Sem data de término (dia / semana / mês / ano)</option><option value="dated">Com data final (define um vencedor)</option></select></div>
+      <div class="sr-field" id="srDateWrap" hidden><label class="sr-label" for="srDate">Data final</label><input type="date" class="sr-input" id="srDate"></div>
       <div class="coop-modal-err" id="srErr" hidden></div>
       <div class="coop-modal-actions"><button class="coop-btn-ghost" id="srCancel" type="button">Cancelar</button><button class="coop-btn-primary" id="srCreate" type="button">Criar sala</button></div></div>`;
     document.body.appendChild(el);
@@ -21388,7 +21399,7 @@ function _salasOpenCreateModal(onDone){
       const name = (el.querySelector('#srName').value || '').trim(); const err = el.querySelector('#srErr');
       if(!name){ err.textContent = 'Dê um nome à sala.'; err.hidden = false; return; }
       const mode = el.querySelector('#srMode').value;
-      const payload = { name, description:(el.querySelector('#srDesc').value||'').trim(), daily_goal: parseInt(el.querySelector('#srGoal').value,10)||0, ranking_mode: mode, end_date: mode==='dated' ? (el.querySelector('#srDate').value||null) : null };
+      const payload = { name, description:(el.querySelector('#srDesc').value||'').trim(), goal_type: el.querySelector('#srGoalType').value||'questions_per_day', daily_goal: parseInt(el.querySelector('#srGoal').value,10)||0, ranking_mode: mode, end_date: mode==='dated' ? (el.querySelector('#srDate').value||null) : null };
       const btn = el.querySelector('#srCreate'); btn.disabled = true; btn.textContent = 'Criando…';
       const id = await _salasCreate(payload); btn.disabled = false; btn.textContent = 'Criar sala';
       if(id){ el.classList.remove('open'); _salasCurrentId = id; if(onDone) onDone(); }
@@ -21396,6 +21407,7 @@ function _salasOpenCreateModal(onDone){
     });
   }
   ['#srName','#srDesc','#srGoal'].forEach(s => { el.querySelector(s).value = ''; });
+  el.querySelector('#srGoalType').value = 'questions_per_day';
   el.querySelector('#srMode').value = 'endless'; el.querySelector('#srDateWrap').hidden = true;
   const er = el.querySelector('#srErr'); er.hidden = true; er.textContent = '';
   el.classList.add('open');
@@ -21444,9 +21456,13 @@ function _salasInjectStyles(){
   .salas-drawer-body{ flex:1; overflow-y:auto; }
   .salas-pane{ display:none; }
   .salas-pane.on{ display:block; }
-  .sr-label{ display:block; font-family:var(--sans); font-size:.72rem; color:var(--text-dim); margin:.6rem 0 .2rem; }
-  .sr-input, .sr-select{ width:100%; box-sizing:border-box; padding:.5rem .6rem; background:var(--bg); color:var(--text); border:1px solid var(--accent-border); border-radius:var(--radius); font-family:var(--sans); font-size:.84rem; }
-  .sr-input:focus, .sr-select:focus{ outline:none; border-color:var(--accent); }
+  .sr-field{ margin:0 0 1.05rem; }
+  .sr-label{ display:block; font-family:var(--sans); font-weight:300; font-size:.62rem; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); margin:0 0 .5rem; }
+  .sr-label .forum-opt{ letter-spacing:0; text-transform:none; color:var(--text-dim); font-size:.72rem; }
+  .sr-input, .sr-select{ width:100%; box-sizing:border-box; padding:.8rem 1rem; background:var(--bg); color:var(--text); border:1px solid var(--accent-border-soft); border-radius:var(--radius); font-family:var(--sans); font-weight:300; font-size:.92rem; transition:border-color .25s ease, background .25s ease; }
+  .sr-input::placeholder{ color:var(--text-dim); opacity:.7; }
+  .sr-input:focus, .sr-select:focus{ outline:none; border-color:var(--accent); background:var(--accent-xlo); }
+  .sr-help{ font-family:var(--sans); font-size:.72rem; color:var(--text-dim); margin-top:.45rem; line-height:1.5; }
   `;
   document.head.appendChild(st);
 }
