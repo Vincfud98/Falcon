@@ -20955,11 +20955,24 @@ const CoopPicker = (function(){
 window.CoopPicker = CoopPicker;
 
 // Módulo CoopStudy — base. Partes B/C preenchem o fluxo de correção/resultado.
+// Cria a notificação DIRETO no Supabase (aguardando + com erro visível). Não usa
+// Notifications.create (que faz store local + guardas e engole o erro). RLS já
+// permite criar notificação para qualquer usuário (notif_insert_authenticated).
+async function _coopCreateNotif(toUser, type, payload){
+  if(!window._sb || !toUser) return false;
+  try{
+    const row = { user_id: toUser, type, payload: payload || {}, read: false, created_at: new Date().toISOString() };
+    if(typeof crypto !== 'undefined' && crypto.randomUUID) row.id = crypto.randomUUID();
+    const { error } = await window._sb.schema('aluno').from('notifications').insert(row);
+    if(error){ console.warn('[coop notif insert]', error.message); return false; }
+    return true;
+  }catch(e){ console.warn('[coop notif ex]', e); return false; }
+}
 const Coop = (function(){
   function partners(){ return _coopPartners(); }
   function _me(){ const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null; return (u && u.id) ? u.id : null; }
-  function notifyRequest(toUserId, coopId){ if(window.Notifications && Notifications.create) Notifications.create(toUserId, 'coop_request', { from_user_id: _me(), coop_id: coopId }); }
-  function notifyDone(toUserId, coopId){ if(window.Notifications && Notifications.create) Notifications.create(toUserId, 'coop_done', { from_user_id: _me(), coop_id: coopId }); }
+  async function notifyRequest(toUserId, coopId){ return _coopCreateNotif(toUserId, 'coop_request', { from_user_id: _me(), coop_id: coopId }); }
+  async function notifyDone(toUserId, coopId){ return _coopCreateNotif(toUserId, 'coop_done', { from_user_id: _me(), coop_id: coopId }); }
   async function fetchSession(id){
     if(!window._sb || !id) return null;
     try{ const { data, error } = await window._sb.schema('aluno').from('coop_sessions').select('*').eq('id', id).maybeSingle(); if(error){ console.warn('[coop fetch]', error.message); return null; } return data || null; }
@@ -21003,8 +21016,11 @@ async function _coopSendEssay(partner, item, answerText, ctx, blockId, itemId){
     }).select('id').single();
     if(error){ if(window.ueToast) window.ueToast('Erro ao enviar: ' + error.message, 'error'); return; }
     if(data && data.id){
-      Coop.notifyRequest(partner.id, data.id);
-      if(window.ueToast) window.ueToast('Questão enviada para ' + (partner.nickname || 'seu colega') + ' corrigir!', 'success');
+      const okN = await Coop.notifyRequest(partner.id, data.id);
+      if(window.ueToast) window.ueToast(
+        okN ? ('Questão enviada para ' + (partner.nickname || 'seu colega') + ' corrigir!')
+            : 'Sessão criada, mas a notificação falhou. Avise o suporte.',
+        okN ? 'success' : 'warn');
     }
   }catch(e){ console.warn('[coop send essay]', e); if(window.ueToast) window.ueToast('Erro inesperado ao enviar.', 'error'); }
 }
@@ -21071,7 +21087,7 @@ const CoopSessionModal = (function(){
         .update({ status:'graded', grade, reviewer_comment: comment || null, graded_at: new Date().toISOString() }).eq('id', _session.id);
       if(error){ if(window.ueToast) window.ueToast('Erro: ' + error.message, 'error'); send.disabled = false; send.textContent = 'Enviar correção'; return; }
       _session.status = 'graded'; _session.grade = grade; _session.reviewer_comment = comment;
-      if(window.Coop) Coop.notifyDone(_session.from_user, _session.id);
+      if(window.Coop) await Coop.notifyDone(_session.from_user, _session.id);
       render();
       if(window.ueToast) window.ueToast('Correção enviada! Veja o gabarito abaixo pra comparar.', 'success');
     }catch(err){ console.warn('[coop grade]', err); send.disabled = false; send.textContent = 'Enviar correção'; }
