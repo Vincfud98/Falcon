@@ -17017,6 +17017,26 @@ window.UserDirectory = UserDirectory;
    - 'follow_request'  { from_user_id, follow_id }
    - 'follow_accepted' { from_user_id, follow_id }
    - 'essay_corrected' { unit_id?, block_id?, score? } */
+// Denormaliza a identidade do remetente DENTRO do payload da notificação, no
+// momento da criação. Quem cria a notificação é sempre o usuário que age, e o
+// perfil dele está disponível aqui — então gravamos nome/@/foto junto. Assim o
+// texto da notificação NUNCA mais depende de um perfil que possa estar ausente
+// ou chegar atrasado (padrão de feed de atividades). Usado por todos os caminhos
+// de criação (Notifications.create + _coopCreateNotif).
+function _enrichNotifFrom(payload){
+  const p = Object.assign({}, payload || {});
+  const fid = p.from_user_id;
+  if(!fid) return p;
+  let u = null;
+  try{ u = (window.UserDirectory && UserDirectory.getById) ? UserDirectory.getById(fid) : null; }catch(_){}
+  if(u){
+    if(u.nickname) p.from_name = u.nickname;
+    if(u.handle) p.from_handle = u.handle;
+    if(u.photoUrl) p.from_photo_url = u.photoUrl;
+    if(u.photoTransform) p.from_photo_transform = u.photoTransform;
+  }
+  return p;
+}
 const Notifications = (function(){
   const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   function _t(){ return window.UbiqueStore && UbiqueStore.notifications; }
@@ -17056,7 +17076,7 @@ const Notifications = (function(){
   function create(userId, type, payload){
     if(!_t() || !userId) return null;
     const id = _genId();
-    const row = { id, user_id: userId, type, payload: payload || {}, read: false, created_at: Date.now() };
+    const row = { id, user_id: userId, type, payload: _enrichNotifFrom(payload), read: false, created_at: Date.now() };
     UbiqueStore.notifications.add(row);
     _syncCreate(row).catch(()=>{});
     return row;
@@ -18371,14 +18391,21 @@ function _notifSkeletonHTML(){
 function _notifRenderItem(n){
   const p = n.payload || {};
   const from = p.from_user_id ? UserDirectory.getById(p.from_user_id) : null;
+  // Identidade do remetente: perfil ao vivo (mais atual) → identidade GRAVADA na
+  // notificação na criação (from_name/from_handle/from_photo_*) → "Usuário". A
+  // denormalização garante o nome mesmo se o perfil sumir ou chegar atrasado.
+  const fName = (from && from.nickname) || p.from_name || '';
+  const fHandle = (from && from.handle) || p.from_handle || '';
+  const fPhotoUrl = (from && from.photoUrl) || p.from_photo_url || '';
+  const fPhotoT = (from && from.photoTransform) || p.from_photo_transform || null;
   // Privacidade: notificação mostra APELIDO (ou @) — nome completo só no modal
-  const fromInitials = from ? Util.initials(from.nickname || from.handle || '?') : '?';
-  const fromName = from ? (from.nickname || ('@' + from.handle)) : 'Usuário';
-  const photoAttrs = from && from.photoUrl
-    ? `data-photo-url="${Util.attr(from.photoUrl)}" data-photo-x="${(from.photoTransform&&from.photoTransform.x)||0}" data-photo-y="${(from.photoTransform&&from.photoTransform.y)||0}" data-photo-s="${(from.photoTransform&&from.photoTransform.scale)||1}"`
+  const fromInitials = (fName || fHandle) ? Util.initials(fName || fHandle) : '?';
+  const fromName = fName || (fHandle ? '@' + fHandle : '') || 'Usuário';
+  const photoAttrs = fPhotoUrl
+    ? `data-photo-url="${Util.attr(fPhotoUrl)}" data-photo-x="${(fPhotoT&&fPhotoT.x)||0}" data-photo-y="${(fPhotoT&&fPhotoT.y)||0}" data-photo-s="${(fPhotoT&&fPhotoT.scale)||1}"`
     : '';
-  const fromUidAttr = from ? `data-open-profile="${Util.attr(from.id)}"` : '';
-  const avatarHtml = `<div class="notif-avatar ${from ? 'is-clickable' : ''}" ${photoAttrs} ${fromUidAttr}><span class="notif-initials">${Util.esc(fromInitials)}</span></div>`;
+  const fromUidAttr = p.from_user_id ? `data-open-profile="${Util.attr(p.from_user_id)}"` : '';
+  const avatarHtml = `<div class="notif-avatar ${p.from_user_id ? 'is-clickable' : ''}" ${photoAttrs} ${fromUidAttr}><span class="notif-initials">${Util.esc(fromInitials)}</span></div>`;
 
   let line = '';
   let actions = '';
@@ -21071,7 +21098,7 @@ window.CoopPicker = CoopPicker;
 async function _coopCreateNotif(toUser, type, payload){
   if(!window._sb || !toUser) return false;
   try{
-    const row = { user_id: toUser, type, payload: payload || {}, read: false, created_at: new Date().toISOString() };
+    const row = { user_id: toUser, type, payload: _enrichNotifFrom(payload), read: false, created_at: new Date().toISOString() };
     if(typeof crypto !== 'undefined' && crypto.randomUUID) row.id = crypto.randomUUID();
     const { error } = await window._sb.schema('aluno').from('notifications').insert(row);
     if(error){ console.warn('[coop notif insert]', error.message); return false; }
