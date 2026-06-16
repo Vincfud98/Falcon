@@ -1228,6 +1228,11 @@ html[data-theme="light"] .sim-exam-topbar{
 .notif-avatar.is-clickable{cursor:pointer;transition:border-color .2s ease}
 .notif-avatar.is-clickable:hover{border-color:var(--accent)}
 .notif-initials{position:relative;z-index:1}
+.notif-skel{cursor:default;pointer-events:none}
+.notif-skel-av{animation:notifSkelPulse 1.2s ease-in-out infinite}
+.notif-skel-line{height:.78rem;width:62%;border-radius:3px;background:var(--accent-lo);animation:notifSkelPulse 1.2s ease-in-out infinite}
+.notif-skel-line.short{width:34%;height:.62rem}
+@keyframes notifSkelPulse{0%,100%{opacity:.35}50%{opacity:.7}}
 .notif-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:.3rem}
 .notif-line{
   font-family:var(--serif);font-size:.92rem;line-height:1.45;color:var(--text);
@@ -17104,6 +17109,29 @@ const Notifications = (function(){
         }
       });
       if(added) console.log('[Notifications] hydrated:', added);
+      // Pré-carrega os perfis dos remetentes ANTES de devolver, num batch único —
+      // mesmo padrão do Fórum (_forumResolveAuthors). Sem isto, a página pintava
+      // "Usuário" e só depois repintava com o nome real (o flick).
+      try{
+        const fromIds = [...new Set((data || [])
+          .map(r => r && r.payload && r.payload.from_user_id)
+          .filter(Boolean).map(String))]
+          .filter(id => !(window.UserDirectory && UserDirectory.getById(id)));
+        if(fromIds.length && window.UbiqueStore && UbiqueStore.user_profiles && window._sb){
+          const { data: profs } = await window._sb.schema('crm').from('user_profiles')
+            .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform')
+            .in('user_id', fromIds);
+          const list = UbiqueStore.user_profiles.list() || [];
+          (profs || []).forEach(p => {
+            const merged = { user_id:p.user_id, displayName:p.display_name||'', nickname:p.nickname||'',
+              namePublic:p.full_name_public!==false, handle:p.handle||'', bio:p.bio||'',
+              photoUrl:p.photo_url||'', photoTransform:p.photo_transform||{ x:0, y:0, scale:1 }, updated_at:Date.now() };
+            const ex = list.find(x => x && x.user_id === p.user_id);
+            if(ex) UbiqueStore.user_profiles.update(ex.id, merged);
+            else UbiqueStore.user_profiles.add(Object.assign({ created_at:Date.now() }, merged));
+          });
+        }
+      }catch(e){ console.warn('[notif hydrate profiles]', e); }
       return added;
     }catch(e){ console.warn('[notif hydrate ex]', e); return 0; }
   }
@@ -17207,7 +17235,7 @@ async function initUserSession(user){
   // 3) Notificações: hidrata + (re)liga a antena realtime do usuário ATUAL
   if(window.Notifications){
     window._lastNotifTotal = undefined; // força re-render na 1ª hidratação
-    Notifications.hydrate(user.id).then(window._refreshNotifsUI).catch(()=>{});
+    Notifications.hydrate(user.id).then(() => { window._notifHydrateDone = true; if(window._refreshNotifsUI) window._refreshNotifsUI(); }).catch(() => { window._notifHydrateDone = true; if(window._refreshNotifsUI) window._refreshNotifsUI(); });
     if(typeof Notifications.subscribeRealtime === 'function'){
       // Cancela qualquer antena anterior (de outro usuário) e religa pro atual.
       if(typeof Notifications.unsubscribeRealtime === 'function') Notifications.unsubscribeRealtime();
@@ -18334,6 +18362,12 @@ window._scrollToPendingComment = function(){
   tick();
 };
 
+// Skeleton de carregamento: mostrado enquanto as notificações + perfis dos
+// remetentes ainda estão chegando do servidor. Evita o flash de "Usuário".
+function _notifSkeletonHTML(){
+  const row = `<div class="notif-item notif-skel" aria-hidden="true"><div class="notif-avatar notif-skel-av"></div><div class="notif-body"><div class="notif-skel-line"></div><div class="notif-skel-line short"></div></div></div>`;
+  return `<div class="notif-list">${row.repeat(4)}</div>`;
+}
 function _notifRenderItem(n){
   const p = n.payload || {};
   const from = p.from_user_id ? UserDirectory.getById(p.from_user_id) : null;
@@ -18841,9 +18875,11 @@ Renderers.notifications = function(route){
         ${Util.esc(lbl)} <span class="notif-tab-count">${count}</span>
       </button>`).join('')}
   </div>`;
-  const listHtml = filtered.length
-    ? `<div class="notif-list">${filtered.map(_notifRenderItem).join('')}</div>`
-    : `<div class="empty" style="text-align:left;padding:2rem"><div class="empty-title">${filter==='all'?'Nenhuma notificação ainda':'Nada por aqui'}</div><div class="empty-body">${filter==='all'?'Quando alguém te mencionar, te seguir ou suas redações forem corrigidas, você verá aqui.':'Mude o filtro pra ver outros tipos de notificação.'}</div></div>`;
+  const listHtml = !window._notifHydrateDone
+    ? _notifSkeletonHTML()
+    : (filtered.length
+        ? `<div class="notif-list">${filtered.map(_notifRenderItem).join('')}</div>`
+        : `<div class="empty" style="text-align:left;padding:2rem"><div class="empty-title">${filter==='all'?'Nenhuma notificação ainda':'Nada por aqui'}</div><div class="empty-body">${filter==='all'?'Quando alguém te mencionar, te seguir ou suas redações forem corrigidas, você verá aqui.':'Mude o filtro pra ver outros tipos de notificação.'}</div></div>`);
   return `<div class="hero unit-hero">
     <span class="s-label" data-a="1">Central</span>
     <h1 class="s-title" data-a="2">Notificações</h1>
