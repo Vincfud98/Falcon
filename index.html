@@ -18353,6 +18353,18 @@ function _notifRenderItem(n){
     if(p.thread_id){
       actions = `<div class="notif-actions"><a class="btn-ghost" href="#/suporte/${encodeURIComponent(p.thread_id)}" data-notif-id="${Util.attr(n.id)}">Abrir conversa →</a></div>`;
     }
+  } else if(n.type === 'coop_request'){
+    // Estudo em dupla — um colega te enviou uma questão pra corrigir
+    line = `<strong>${Util.esc(fromName)}</strong> te enviou uma questão para corrigir (estudo em dupla).`;
+    if(p.coop_id){
+      actions = `<div class="notif-actions"><button class="btn-ghost" data-notif-coop="${Util.attr(p.coop_id)}" data-notif-id="${Util.attr(n.id)}">Corrigir →</button></div>`;
+    }
+  } else if(n.type === 'coop_done'){
+    // Estudo em dupla — o colega corrigiu a sua questão
+    line = `<strong>${Util.esc(fromName)}</strong> corrigiu sua questão (estudo em dupla).`;
+    if(p.coop_id){
+      actions = `<div class="notif-actions"><button class="btn-ghost" data-notif-coop="${Util.attr(p.coop_id)}" data-notif-id="${Util.attr(n.id)}">Ver correção →</button></div>`;
+    }
   } else {
     line = Util.esc(n.type) + ' (tipo desconhecido)';
   }
@@ -18867,6 +18879,13 @@ Renderers.notifications.mount = function(stageEl){
       Follows.decline(dec.getAttribute('data-notif-decline'));
       Notifications.markRead(dec.getAttribute('data-notif-id'));
       App.render();
+      return;
+    }
+    const coop = e.target.closest('[data-notif-coop]');
+    if(coop){
+      const nid = coop.getAttribute('data-notif-id');
+      if(nid) Notifications.markRead(nid);
+      if(window.Coop && typeof Coop.openSession === 'function') Coop.openSession(coop.getAttribute('data-notif-coop'));
       return;
     }
     });
@@ -20777,6 +20796,133 @@ Renderers.forum.mount = function(stageEl, route){
   if(route && route.query && route.query.subject){ subjSel.value = String(route.query.subject); _fillUnitFilter(); if(route.query.unit) unitSel.value = String(route.query.unit); }
   _reload();
 };
+
+/* ═══════════════════ CoopStudy (Fase 5.2) — base/Parte A ═══════════════════ */
+// Colegas de estudo = follow mútuo, resolvidos com nome público + foto.
+function _coopPartners(){
+  try{
+    const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    if(!me || !me.id || !window.Follows || !Follows.mutual) return [];
+    return Follows.mutual(me.id)
+      .map(edge => (window.UserDirectory ? UserDirectory.getById(edge.following_id) : null))
+      .filter(Boolean);
+  }catch(e){ console.warn('[coop partners]', e); return []; }
+}
+function _coopInjectStyles(){
+  if(document.getElementById('uq-coop-styles')) return;
+  const st = document.createElement('style'); st.id = 'uq-coop-styles';
+  st.textContent = `
+  .coop-modal{ display:none; position:fixed; inset:0; z-index:1250; }
+  .coop-modal.open{ display:flex; align-items:center; justify-content:center; }
+  .coop-modal-backdrop{ position:absolute; inset:0; background:rgba(0,0,0,.55); }
+  .coop-modal-panel{ position:relative; width:min(460px,92vw); max-height:85vh; overflow:auto; background:var(--bg); border:1px solid var(--accent-border-soft); border-radius:10px; padding:1.4rem 1.6rem; }
+  .coop-modal-head{ display:flex; align-items:center; justify-content:space-between; }
+  .coop-modal-title{ font-family:var(--serif); font-size:1.2rem; font-weight:600; color:var(--text); }
+  .coop-modal-x{ background:none; border:none; color:var(--text-mute); font-size:1.5rem; line-height:1; cursor:pointer; }
+  .coop-modal-x:hover{ color:var(--text); }
+  .coop-modal-sub{ font-family:var(--sans); font-size:.8rem; color:var(--text-mute); margin:.2rem 0 1rem; }
+  .coop-pick-list{ display:flex; flex-direction:column; gap:.4rem; }
+  .coop-pick-row{ display:flex; align-items:center; gap:.7rem; width:100%; text-align:left; padding:.55rem .7rem; background:var(--accent-xlo); border:1px solid var(--accent-border-soft); border-radius:var(--radius); cursor:pointer; transition:border-color .2s ease,background .2s ease; }
+  .coop-pick-row:hover{ border-color:var(--accent); background:var(--accent-lo); }
+  .coop-pick-av{ width:34px; height:34px; border-radius:50%; flex-shrink:0; position:relative; overflow:hidden; background:var(--accent-lo); display:flex; align-items:center; justify-content:center; color:var(--accent); font-family:var(--sans); font-weight:600; font-size:.72rem; }
+  .coop-pick-info{ display:flex; flex-direction:column; min-width:0; }
+  .coop-pick-name{ font-family:var(--sans); font-size:.86rem; color:var(--text); }
+  .coop-pick-handle{ font-family:var(--mono); font-size:.66rem; color:var(--text-mute); }
+  .coop-empty{ font-family:var(--sans); font-size:.86rem; color:var(--text-mute); line-height:1.6; padding:.5rem 0; }
+  .coop-pick-confirm p{ font-family:var(--sans); font-size:.92rem; color:var(--text-dim); line-height:1.6; }
+  .coop-modal-actions{ display:flex; justify-content:flex-end; gap:.7rem; margin-top:1.2rem; }
+  .coop-btn-ghost{ background:none; border:1px solid var(--accent-border-soft); color:var(--text-dim); border-radius:var(--radius); padding:.5rem 1rem; font-family:var(--sans); font-size:.78rem; cursor:pointer; }
+  .coop-btn-primary{ background:var(--accent); color:var(--bg); border:none; border-radius:var(--radius); padding:.5rem 1.2rem; font-family:var(--sans); font-weight:500; font-size:.78rem; cursor:pointer; }
+  /* Avatar img dentro do picker segue o crop (desfaz max-width global) */
+  .coop-pick-av img.avatar-img{ display:block; max-width:none !important; max-height:none !important; }
+  `;
+  document.head.appendChild(st);
+}
+// Seletor reutilizável de colega de estudo: open({ title, subtitle, onPick })
+const CoopPicker = (function(){
+  let _el = null, _onPick = null, _selected = null;
+  function ensureEl(){
+    if(_el) return _el;
+    _coopInjectStyles();
+    _el = document.createElement('div'); _el.className = 'coop-modal';
+    _el.innerHTML = `
+      <div class="coop-modal-backdrop"></div>
+      <div class="coop-modal-panel">
+        <div class="coop-modal-head"><span class="coop-modal-title" id="coopPickTitle">Enviar para Colega de Estudo</span><button class="coop-modal-x" type="button" aria-label="Fechar">&times;</button></div>
+        <p class="coop-modal-sub" id="coopPickSub">Escolha um colega (vocês se seguem mutuamente).</p>
+        <div class="coop-pick-list" id="coopPickList"></div>
+        <div class="coop-pick-confirm" id="coopPickConfirm" hidden>
+          <p id="coopPickConfirmText"></p>
+          <div class="coop-modal-actions"><button class="coop-btn-ghost" id="coopPickBack" type="button">Voltar</button><button class="coop-btn-primary" id="coopPickSend" type="button">Confirmar envio</button></div>
+        </div>
+      </div>`;
+    document.body.appendChild(_el);
+    _el.querySelector('.coop-modal-backdrop').addEventListener('click', close);
+    _el.querySelector('.coop-modal-x').addEventListener('click', close);
+    _el.querySelector('#coopPickBack').addEventListener('click', _showList);
+    _el.querySelector('#coopPickSend').addEventListener('click', () => { const sel = _selected; close(); if(_onPick && sel) _onPick(sel); });
+    _el.querySelector('#coopPickList').addEventListener('click', e => {
+      const row = e.target.closest('[data-coop-uid]'); if(!row) return;
+      const uid = row.dataset.coopUid;
+      _selected = _coopPartners().find(u => String(u.id) === String(uid)) || { id: uid };
+      _showConfirm(_selected);
+    });
+    return _el;
+  }
+  function _showList(){ if(!_el) return; _el.querySelector('#coopPickList').hidden = false; _el.querySelector('#coopPickConfirm').hidden = true; }
+  function _showConfirm(u){
+    _el.querySelector('#coopPickList').hidden = true;
+    const c = _el.querySelector('#coopPickConfirm'); c.hidden = false;
+    _el.querySelector('#coopPickConfirmText').innerHTML = `Enviar esta questão para <strong>${Util.esc(u.nickname || ('@'+(u.handle||'colega')))}</strong> corrigir?`;
+  }
+  function open(opts){
+    opts = opts || {}; _onPick = opts.onPick || null; _selected = null;
+    const el = ensureEl();
+    el.querySelector('#coopPickTitle').textContent = opts.title || 'Enviar para Colega de Estudo';
+    el.querySelector('#coopPickSub').textContent = opts.subtitle || 'Escolha um colega (vocês se seguem mutuamente).';
+    const partners = _coopPartners();
+    const listEl = el.querySelector('#coopPickList');
+    if(!partners.length){
+      listEl.innerHTML = `<p class="coop-empty">Você ainda não tem colegas de estudo. Em <strong>Conta → Colegas</strong>, siga alguém e seja seguido de volta para estudar em dupla.</p>`;
+    } else {
+      listEl.innerHTML = partners.map(u => `<button type="button" class="coop-pick-row" data-coop-uid="${Util.attr(u.id)}">
+        <div class="coop-pick-av" data-photo-url="${Util.attr(u.photoUrl||'')}" data-photo-x="${(u.photoTransform&&u.photoTransform.x)||0}" data-photo-y="${(u.photoTransform&&u.photoTransform.y)||0}" data-photo-s="${(u.photoTransform&&u.photoTransform.scale)||1}"><span>${Util.esc(Util.initials(u.nickname||u.handle||'?'))}</span></div>
+        <div class="coop-pick-info"><span class="coop-pick-name">${Util.esc(u.nickname || ('@'+(u.handle||'colega')))}</span><span class="coop-pick-handle">@${Util.esc(u.handle||'')}</span></div>
+      </button>`).join('');
+      listEl.querySelectorAll('.coop-pick-av[data-photo-url]').forEach(av => {
+        const url = av.getAttribute('data-photo-url'); if(!url) return;
+        renderAvatarInto(av, url, { x:parseFloat(av.dataset.photoX)||0, y:parseFloat(av.dataset.photoY)||0, scale:parseFloat(av.dataset.photoS)||1 });
+      });
+    }
+    _showList();
+    el.classList.add('open');
+  }
+  function close(){ if(_el) _el.classList.remove('open'); }
+  return { open, close };
+})();
+window.CoopPicker = CoopPicker;
+
+// Módulo CoopStudy — base. Partes B/C preenchem o fluxo de correção/resultado.
+const Coop = (function(){
+  function partners(){ return _coopPartners(); }
+  function _me(){ const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null; return (u && u.id) ? u.id : null; }
+  function notifyRequest(toUserId, coopId){ if(window.Notifications && Notifications.create) Notifications.create(toUserId, 'coop_request', { from_user_id: _me(), coop_id: coopId }); }
+  function notifyDone(toUserId, coopId){ if(window.Notifications && Notifications.create) Notifications.create(toUserId, 'coop_done', { from_user_id: _me(), coop_id: coopId }); }
+  async function fetchSession(id){
+    if(!window._sb || !id) return null;
+    try{ const { data, error } = await window._sb.schema('aluno').from('coop_sessions').select('*').eq('id', id).maybeSingle(); if(error){ console.warn('[coop fetch]', error.message); return null; } return data || null; }
+    catch(e){ console.warn('[coop fetch ex]', e); return null; }
+  }
+  async function openSession(id){
+    const s = await fetchSession(id);
+    if(!s) return;
+    // Partes B/C definem window._coopOpenModal(session) (correção / resultado).
+    if(typeof window._coopOpenModal === 'function'){ window._coopOpenModal(s); return; }
+    console.log('[coop] sessão carregada (modal vem nas Partes B/C):', s);
+  }
+  return { partners, notifyRequest, notifyDone, fetchSession, openSession };
+})();
+window.Coop = Coop;
 
 /* ═══════════ EDITAL — visualização hierárquica do edital + progresso ═══════════ */
 Renderers.edital = function(){
