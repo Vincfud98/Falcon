@@ -8400,6 +8400,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     <button class="tab-group" data-group="contato">
       Contato <span class="tab-group-count" id="count-group-contato">—</span>
     </button>
+    <button class="tab-group" data-group="forum">
+      Fórum <span class="tab-group-count" id="count-group-forum">—</span>
+    </button>
   </nav>
 
   <!-- ═══════════════════════════════════════════════════════════
@@ -9328,6 +9331,28 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           <div id="ctThreadList"><div class="loading">Carregando</div></div>
           <div id="ctChatPane"><div class="ct-chat"><div class="ct-empty">Selecione uma conversa ao lado.</div></div></div>
         </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="tab-group-panel" id="group-forum">
+    <nav class="tabs">
+      <button class="tab active" data-tab="forum-posts">Posts <span class="tab-count" id="count-forum-posts"></span></button>
+    </nav>
+    <main class="content">
+      <div id="globalMessageForum"></div>
+      <section class="tab-panel active" id="panel-forum-posts">
+        <div class="section-head">
+          <h2>Moderação do Fórum</h2>
+          <span class="count" id="forum-posts-count">—</span>
+          <select id="forumModFilter" class="fmod-filter">
+            <option value="all">Todos</option>
+            <option value="active">Ativos</option>
+            <option value="restricted">Restritos</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" id="forumPostsRefresh">Atualizar</button>
+        </div>
+        <div id="forumPostsList"><div class="loading">Carregando</div></div>
       </section>
     </main>
   </div>
@@ -16602,6 +16627,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(group.dataset.group === 'estatisticas' && typeof initFalconStats === 'function'){
         requestAnimationFrame(() => initFalconStats());
       }
+      if(group.dataset.group === 'forum' && typeof initForumModeration === 'function'){
+        requestAnimationFrame(() => initForumModeration());
+      }
     });
   });
 
@@ -17469,7 +17497,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       loadKnowledgeRecent(), loadKnowledgeIngestions(), loadIngestionAggregates(),
       loadMockExams(), loadMockExamQuestions(), loadMockExamSections(), loadProductMockExams(),
       loadResponseSessions(),
-      loadContatoMencoes(), loadContatoThreads(),
+      loadContatoMencoes(), loadContatoThreads(), loadForumPosts(),
       // Comercial
       loadBrands(), loadBrandLogos(), loadImagesLibrary(),
       loadCurrentUserPermissions(),
@@ -42042,6 +42070,173 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(t1) t1.addEventListener('click', loadContatoMencoes);
     if(t2) t2.addEventListener('click', loadContatoThreads);
   })();
+
+  // ═══════════════ MODERAÇÃO DO FÓRUM (Fase 5.1 — Parte C) ═══════════════
+  let forumModPosts = [];
+  let _forumModProfiles = {};
+  let _forumModBound = false;
+  let _forumModAdminUid = null;
+
+  function _forumModInjectStyles(){
+    if(document.getElementById('fmod-styles')) return;
+    const st = document.createElement('style'); st.id = 'fmod-styles';
+    st.textContent = `
+    .fmod-filter{ padding:.4rem .6rem; background:var(--bg); border:1px solid var(--border-soft); border-radius:var(--radius); color:var(--text-dim); font-family:var(--sans); font-size:.78rem; margin-left:.6rem; }
+    #forumPostsList{ display:flex; flex-direction:column; gap:1rem; }
+    .fmod-card{ background:var(--bg-card); border:1px solid var(--border-soft); border-radius:6px; padding:1.1rem 1.3rem; }
+    .fmod-card.is-restricted{ border-color:rgba(179,82,76,.4); background:rgba(179,82,76,.05); }
+    .fmod-head{ display:flex; align-items:center; gap:.7rem; margin-bottom:.7rem; }
+    .fmod-av{ width:36px; height:36px; border-radius:50%; flex-shrink:0; }
+    .fmod-who{ display:flex; flex-direction:column; line-height:1.3; min-width:0; }
+    .fmod-name{ font-family:var(--sans); font-weight:500; color:var(--text); font-size:.9rem; }
+    .fmod-sub{ font-family:var(--mono); font-size:.64rem; color:var(--text-mute); }
+    .fmod-flag{ margin-left:auto; font-family:var(--mono); font-size:.6rem; letter-spacing:.1em; text-transform:uppercase; color:#e0908a; border:1px solid rgba(179,82,76,.45); border-radius:999px; padding:.2rem .65rem; }
+    .fmod-tags{ display:flex; gap:.4rem; flex-wrap:wrap; margin-bottom:.5rem; }
+    .fmod-tag{ font-family:var(--mono); font-size:.6rem; letter-spacing:.06em; text-transform:uppercase; color:var(--accent); border:1px solid var(--border-soft); border-radius:3px; padding:.15rem .5rem; }
+    .fmod-title{ font-family:var(--serif); font-size:1.1rem; color:var(--text); margin-bottom:.15rem; }
+    .fmod-subtitle{ font-family:var(--sans); font-size:.82rem; color:var(--text-dim); margin-bottom:.4rem; }
+    .fmod-body{ font-family:var(--sans); font-size:.86rem; line-height:1.55; color:var(--text-dim); word-break:break-word; }
+    .fmod-reason{ margin-top:.7rem; font-family:var(--sans); font-size:.82rem; color:var(--text-dim); background:rgba(179,82,76,.08); border:1px solid rgba(179,82,76,.3); border-radius:var(--radius); padding:.6rem .8rem; }
+    .fmod-actions{ display:flex; align-items:center; gap:.6rem; margin-top:1rem; flex-wrap:wrap; }
+    .fmod-reason-input{ flex:1; min-width:240px; padding:.45rem .6rem; background:var(--bg); border:1px solid var(--border-soft); border-radius:var(--radius); color:var(--text); font-family:var(--sans); font-size:.82rem; }
+    .fmod-reason-input:focus{ outline:none; border-color:var(--accent); }
+    `;
+    document.head.appendChild(st);
+  }
+  async function _forumModEnsureAdminUid(){
+    if(_forumModAdminUid) return _forumModAdminUid;
+    try{ const { data } = await window._sb.auth.getUser(); _forumModAdminUid = data && data.user ? data.user.id : null; }catch(_){}
+    return _forumModAdminUid;
+  }
+  function _forumModMsg(text, isError){
+    const el = document.getElementById('globalMessageForum');
+    if(!el) return;
+    el.innerHTML = `<div class="message ${isError?'error':'success'}">${esc(text)}</div>`;
+    setTimeout(() => { el.innerHTML = ''; }, 4000);
+  }
+  function _forumModUpdateBadge(){
+    const restrictedN = forumModPosts.filter(p => p.restricted).length;
+    const g = document.getElementById('count-group-forum');
+    if(g) g.textContent = restrictedN > 0 ? String(restrictedN) : '';
+    const t = document.getElementById('count-forum-posts');
+    if(t) t.textContent = forumModPosts.length ? String(forumModPosts.length) : '';
+  }
+  async function _forumModLoadProfiles(ids){
+    const uniq = [...new Set((ids||[]).map(String).filter(Boolean))].filter(id => !_forumModProfiles[id]);
+    if(!uniq.length) return;
+    try{
+      const [pr, au] = await Promise.all([
+        crm().from('user_profiles').select('user_id, nickname, handle, display_name, photo_url, photo_transform').in('user_id', uniq),
+        crm().from('app_users').select('id, full_name, nickname, email').in('id', uniq),
+      ]);
+      const auById = {}; (au.data||[]).forEach(u => { auById[String(u.id)] = u; });
+      (pr.data||[]).forEach(p => { _forumModProfiles[String(p.user_id)] = Object.assign({}, p, { _au: auById[String(p.user_id)] || {} }); });
+      uniq.forEach(id => { if(!_forumModProfiles[id]) _forumModProfiles[id] = { _au: auById[id] || {} }; });
+    }catch(e){ console.warn('[forum mod profiles]', e); }
+  }
+  async function loadForumPosts(){
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('forum_posts')
+        .select('*').is('deleted_at', null).order('created_at', { ascending:false }).limit(500);
+      forumModPosts = (!error && Array.isArray(data)) ? data : [];
+      if(error) console.warn('[forum mod load]', error.message);
+      await _forumModLoadProfiles(forumModPosts.map(p => p.user_id));
+      renderForumPosts();
+      _forumModUpdateBadge();
+    }catch(e){ console.warn('[forum mod load ex]', e); }
+  }
+  function _forumModCardHTML(p){
+    const pr = _forumModProfiles[String(p.user_id)] || {};
+    const realName = (pr._au && pr._au.full_name) || pr.display_name || pr.nickname || 'Aluno';
+    const nick = pr.nickname || (pr._au && pr._au.nickname) || '';
+    const handle = pr.handle ? '@'+pr.handle : '';
+    const when = p.created_at ? new Date(p.created_at).toLocaleString('pt-BR') : '';
+    const sub = [nick, handle].filter(Boolean).join(' · ');
+    const restricted = !!p.restricted;
+    return `<div class="fmod-card${restricted?' is-restricted':''}">
+      <div class="fmod-head">
+        <div class="fmod-av" data-fmod-av="${esc(p.user_id)}"></div>
+        <div class="fmod-who"><span class="fmod-name">${esc(realName)}</span><span class="fmod-sub">${esc(sub ? sub+' · ' : '')}${esc(when)}</span></div>
+        ${restricted ? '<span class="fmod-flag">Restrito</span>' : ''}
+      </div>
+      <div class="fmod-title">${esc(p.title||'(sem título)')}</div>
+      ${p.subtitle ? `<div class="fmod-subtitle">${esc(p.subtitle)}</div>` : ''}
+      <div class="fmod-body">${esc(p.body||'').replace(/\n/g,'<br>')}</div>
+      ${restricted ? `<div class="fmod-reason"><strong>Motivo (visível ao aluno):</strong> ${esc(p.restricted_reason||'—')}</div>` : ''}
+      <div class="fmod-actions">
+        ${restricted
+          ? `<button class="btn btn-ghost btn-sm" data-fmod-release="${esc(p.id)}">Liberar</button>`
+          : `<input type="text" class="fmod-reason-input" data-fmod-reason-for="${esc(p.id)}" placeholder="Motivo da restrição (o aluno verá isto)…">
+             <button class="btn btn-danger btn-sm" data-fmod-restrict="${esc(p.id)}">Restringir</button>`}
+        <button class="btn btn-ghost btn-sm" data-fmod-delete="${esc(p.id)}">Excluir</button>
+      </div>
+    </div>`;
+  }
+  function renderForumPosts(){
+    const listEl = document.getElementById('forumPostsList');
+    if(!listEl) return;
+    const flt = (document.getElementById('forumModFilter') || {}).value || 'all';
+    let list = forumModPosts.slice();
+    if(flt === 'active') list = list.filter(p => !p.restricted);
+    else if(flt === 'restricted') list = list.filter(p => p.restricted);
+    const cnt = document.getElementById('forum-posts-count');
+    if(cnt) cnt.textContent = list.length + ' post(s)';
+    if(!list.length){ listEl.innerHTML = '<p class="client-panel-hint">Nenhum post neste filtro.</p>'; return; }
+    listEl.innerHTML = list.map(p => _forumModCardHTML(p)).join('');
+    listEl.querySelectorAll('[data-fmod-av]').forEach(el => {
+      const pr = _forumModProfiles[String(el.dataset.fmodAv)] || {};
+      const name = (pr._au && pr._au.full_name) || pr.display_name || pr.nickname || 'Aluno';
+      _renderAdminAvatarInto(el, pr.photo_url || '', pr.photo_transform, name);
+    });
+  }
+  async function _forumModRestrict(postId, reason){
+    if(!reason || !reason.trim()){ _forumModMsg('Escreva o motivo da restrição.', true); return; }
+    const adminUid = await _forumModEnsureAdminUid();
+    try{
+      const { error } = await window._sb.schema('aluno').from('forum_posts')
+        .update({ restricted:true, restricted_reason:reason.trim(), restricted_by:adminUid, restricted_at:new Date().toISOString() }).eq('id', postId);
+      if(error){ _forumModMsg('Erro ao restringir: '+error.message, true); return; }
+      await loadForumPosts(); _forumModMsg('Post restrito — o aluno verá o motivo.', false);
+    }catch(e){ _forumModMsg('Erro inesperado.', true); }
+  }
+  async function _forumModRelease(postId){
+    try{
+      const { error } = await window._sb.schema('aluno').from('forum_posts')
+        .update({ restricted:false, restricted_reason:null, restricted_by:null, restricted_at:null }).eq('id', postId);
+      if(error){ _forumModMsg('Erro ao liberar: '+error.message, true); return; }
+      await loadForumPosts(); _forumModMsg('Post liberado.', false);
+    }catch(e){ _forumModMsg('Erro inesperado.', true); }
+  }
+  async function _forumModDelete(postId){
+    if(!window.confirm('Excluir este post de vez? O aluno não verá mais (apagado).')) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('forum_posts')
+        .update({ deleted_at:new Date().toISOString() }).eq('id', postId);
+      if(error){ _forumModMsg('Erro ao excluir: '+error.message, true); return; }
+      await loadForumPosts(); _forumModMsg('Post excluído.', false);
+    }catch(e){ _forumModMsg('Erro inesperado.', true); }
+  }
+  function initForumModeration(){
+    if(!document.getElementById('forumPostsList')) return;
+    _forumModInjectStyles();
+    if(!_forumModBound){
+      _forumModBound = true;
+      const refresh = document.getElementById('forumPostsRefresh');
+      if(refresh) refresh.addEventListener('click', loadForumPosts);
+      const flt = document.getElementById('forumModFilter');
+      if(flt) flt.addEventListener('change', renderForumPosts);
+      const list = document.getElementById('forumPostsList');
+      if(list) list.addEventListener('click', e => {
+        const rb = e.target.closest('[data-fmod-restrict]');
+        if(rb){ const input = list.querySelector(`[data-fmod-reason-for="${rb.dataset.fmodRestrict}"]`); _forumModRestrict(rb.dataset.fmodRestrict, input ? input.value : ''); return; }
+        const lb = e.target.closest('[data-fmod-release]');
+        if(lb){ _forumModRelease(lb.dataset.fmodRelease); return; }
+        const db = e.target.closest('[data-fmod-delete]');
+        if(db){ _forumModDelete(db.dataset.fmodDelete); return; }
+      });
+    }
+    loadForumPosts();
+  }
 
   async function loadMockExams(){
     const { data, error } = await conteudo()
