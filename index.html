@@ -13291,6 +13291,7 @@ function quizPanelHTML(item){
    Botões revelados só após responder (.q-item.answered via CSS). */
 function quizDataBarHTML(){
   return `<div class="q-actions-bar">
+    <button type="button" class="q-pill-btn q-coop-btn" data-action="q-coop" data-tip="Enviar para Colega de Estudo" aria-label="Enviar para Colega de Estudo"><svg viewBox="0 0 24 24" aria-hidden="true" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 19a5.4 5.4 0 0 1 10.8 0"/><circle cx="17.2" cy="8.6" r="2.5"/><path d="M16.6 13.3a4.7 4.7 0 0 1 4 5.7"/></svg></button>
     <button type="button" class="q-pill-btn q-data-btn" data-action="q-data" data-tip="Estatísticas e dificuldade" aria-label="Estatísticas" aria-expanded="false">${Icons.statistics||''}</button>
     <button type="button" class="q-pill-btn q-comments-btn" data-action="q-comments" data-tip="Comentários" aria-label="Comentários" aria-expanded="false">${Icons.comments||''}<span class="q-pill-count" hidden>0</span></button>
   </div>
@@ -13719,6 +13720,15 @@ Blocks.quiz = {
         const item = allItems.find(x => String(x.id) === String(itemId));
         if(item){
           bindQuizDataPanel(itemEl, item);
+          // CoopStudy — enviar a objetiva pra um colega avaliar
+          const coopBtn = itemEl.querySelector('[data-action="q-coop"]');
+          if(coopBtn){
+            coopBtn.addEventListener('click', () => {
+              const prior = (ctx.store && ctx.store.getQuizAnswer) ? ctx.store.getQuizAnswer(ctx.unitId, block.id, item.id) : null;
+              if(!prior || prior.selected == null){ if(window.ueToast) window.ueToast('Responda a questão antes de enviar ao colega.', 'warn'); return; }
+              if(window.CoopPicker) window.CoopPicker.open({ onPick: (partner) => { if(window._coopSendQuiz) window._coopSendQuiz(partner, item, prior, ctx, block.id, item.id); } });
+            });
+          }
         } else {
           console.warn('[Blocks.quiz.mount] não bindou painel — item não encontrado em allItems', {
             domItemId: itemId,
@@ -20895,6 +20905,17 @@ function _coopInjectStyles(){
   .coop-model-block{ margin-bottom:.7rem; }
   .coop-model-lbl{ font-family:var(--sans); font-weight:500; font-size:.8rem; color:var(--text); margin-bottom:.25rem; }
   .coop-model-body{ font-family:var(--sans); font-weight:300; font-size:.86rem; line-height:1.75; color:var(--text-dim); }
+  .coop-opts{ display:flex; flex-direction:column; gap:.4rem; margin-top:.7rem; }
+  .coop-opt{ font-family:var(--sans); font-size:.86rem; color:var(--text-dim); padding:.5rem .8rem; border:1px solid var(--accent-border-soft); border-radius:var(--radius); }
+  .coop-ans-pick{ font-family:var(--sans); font-weight:500; font-size:.95rem; color:var(--text); padding:.5rem .85rem; border:1px solid var(--accent-border); border-radius:var(--radius); background:var(--accent-xlo); display:inline-block; }
+  .coop-verdict-q{ font-family:var(--sans); font-size:.86rem; color:var(--text-dim); margin:.2rem 0 .6rem; }
+  .coop-verdict{ display:flex; gap:.6rem; margin-bottom:.7rem; }
+  .coop-verdict-btn{ flex:1; padding:.6rem; background:var(--bg-elevated); border:1px solid var(--accent-border); border-radius:var(--radius); color:var(--text); font-family:var(--sans); font-size:.86rem; cursor:pointer; transition:all .2s ease; }
+  .coop-verdict-btn:hover{ border-color:var(--accent); }
+  .coop-verdict-btn.on{ background:var(--accent-lo); border-color:var(--accent); color:var(--accent); font-weight:500; }
+  .coop-result{ font-family:var(--sans); font-weight:500; font-size:.92rem; padding:.7rem .9rem; border-radius:var(--radius); text-align:center; }
+  .coop-result.is-ok{ color:var(--green,#5dd49f); background:rgba(93,212,159,.08); border:1px solid rgba(93,212,159,.3); }
+  .coop-result.is-no{ color:var(--red,#e87878); background:var(--red-lo,rgba(232,120,120,.1)); border:1px solid var(--red-border,rgba(232,120,120,.35)); }
   `;
   document.head.appendChild(st);
 }
@@ -21036,6 +21057,44 @@ async function _coopSendEssay(partner, item, answerText, ctx, blockId, itemId){
 }
 window._coopSendEssay = _coopSendEssay;
 
+// ── CoopStudy Objetiva (Parte C) ──
+function _coopPackageQuiz(item){
+  if(!item) return {};
+  return {
+    kind: 'quiz',
+    assertion: item.assertion || '',
+    options: Array.isArray(item.options) ? item.options.slice() : [],
+    key: item.key || '',
+    comments: item.comments || '',
+    reference_text: item.reference_text || '',
+    reference_image: item.reference_image || '',
+    origin: item.origin || ''
+  };
+}
+async function _coopSendQuiz(partner, item, prior, ctx, blockId, itemId){
+  const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(!me || !me.id || !window._sb || !partner || !partner.id) return;
+  const author_answer = { value: (prior && prior.selected != null) ? prior.selected : '', is_correct: !!(prior && prior.correct) };
+  try{
+    const { data, error } = await window._sb.schema('aluno').from('coop_sessions').insert({
+      from_user: me.id, to_user: partner.id, question_type: 'quiz',
+      unit_id: (ctx && ctx.unitId) || null, item_id: itemId,
+      question: _coopPackageQuiz(item), author_answer, status: 'pending'
+    }).select('id').single();
+    if(error){ if(window.ueToast) window.ueToast('Erro ao enviar: ' + error.message, 'error'); return; }
+    if(data && data.id){
+      const _sid = _forumSubjectOfUnit(ctx && ctx.unitId);
+      const _sig = _sid ? _forumSubjectLabel(_sid) : '';
+      const okN = await Coop.notifyRequest(partner.id, data.id, { qtype: 'quiz', subject: _sig });
+      if(window.ueToast) window.ueToast(
+        okN ? ('Questão enviada para ' + (partner.nickname || 'seu colega') + ' avaliar!')
+            : 'Sessão criada, mas a notificação falhou. Avise o suporte.',
+        okN ? 'success' : 'warn');
+    }
+  }catch(e){ console.warn('[coop send quiz]', e); if(window.ueToast) window.ueToast('Erro inesperado ao enviar.', 'error'); }
+}
+window._coopSendQuiz = _coopSendQuiz;
+
 // Modal de correção (revisor) / resultado (autor) — base discursiva (Parte B)
 const CoopSessionModal = (function(){
   let _el = null, _session = null;
@@ -21063,48 +21122,105 @@ const CoopSessionModal = (function(){
     (q.criteria || []).forEach(c => { h += `<div class="coop-model-block"><div class="coop-model-lbl">Critério: ${Util.esc(c.label||'')}${c.maxScore?(' ('+c.maxScore+' pts)'):''}</div>${c.description?`<div class="coop-model-body">${Util.esc(c.description)}</div>`:''}${c.modelAnswer?`<div class="coop-model-body">${c.modelAnswer}</div>`:''}</div>`; });
     return h || '<p class="coop-empty">Sem gabarito cadastrado para esta questão.</p>';
   }
+  function _qHTMLQuiz(q){
+    const ref = q.reference_text ? `<div class="coop-q-ref">${q.reference_text}</div>` : '';
+    const img = q.reference_image ? `<img class="coop-q-ref-img" src="${Util.attr(q.reference_image)}" alt="" loading="lazy">` : '';
+    const opts = (q.options || []).map(o => `<div class="coop-opt">${Util.esc(o)}</div>`).join('');
+    return `<div class="coop-q">${q.origin?`<div class="coop-q-origin">${Util.esc(q.origin)}</div>`:''}${ref}${img}<div class="coop-q-cmd">${q.assertion || ''}</div>${opts?`<div class="coop-opts">${opts}</div>`:''}</div>`;
+  }
   function render(){
     const s = _session, q = s.question || {}, body = _el.querySelector('#coopSessBody');
     const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null, meId = me && me.id;
     const isReviewer = meId && String(meId) === String(s.to_user);
-    const answer = (s.author_answer && s.author_answer.text) || '';
-    const maxScore = q.maxScore || 10;
-    let html = _qHTML(q);
-    html += `<div class="coop-ans"><div class="coop-ans-lbl">Resposta ${isReviewer ? 'do colega' : 'sua'}</div><div class="coop-ans-body">${_rich(answer)}</div></div>`;
-    if(isReviewer && s.status === 'pending'){
-      html += `<div class="coop-grade"><div class="coop-ans-lbl">Sua correção</div>
-        <label class="coop-grade-row">Nota (0 a ${maxScore}) <input type="number" id="coopGrade" min="0" max="${maxScore}" step="0.5" class="coop-input-num"></label>
-        <textarea id="coopComment" class="coop-textarea" placeholder="Comentário sobre a resposta do colega…"></textarea>
-        <div class="coop-modal-actions"><button class="coop-btn-primary" id="coopSendCorrection" type="button">Enviar correção</button></div></div>`;
-    } else if(s.status === 'graded'){
-      html += `<div class="coop-corr"><div class="coop-ans-lbl">Correção ${isReviewer ? 'que você deu' : 'do colega'}</div><div class="coop-corr-grade">Nota: <strong>${s.grade != null ? s.grade : '—'} / ${maxScore}</strong></div>${s.reviewer_comment?`<div class="coop-corr-comment">${_rich(s.reviewer_comment)}</div>`:''}</div>`;
-      html += `<div class="coop-model"><div class="coop-ans-lbl">Modelo de resposta / gabarito</div>${_modelHTML(q)}</div>`;
+    const isQuiz = s.question_type === 'quiz' || q.kind === 'quiz';
+    let html = isQuiz ? _qHTMLQuiz(q) : _qHTML(q);
+    if(isQuiz){
+      const ans = (s.author_answer && s.author_answer.value) || '—';
+      html += `<div class="coop-ans"><div class="coop-ans-lbl">Resposta ${isReviewer ? 'do colega' : 'sua'}</div><div class="coop-ans-pick">${Util.esc(ans)}</div></div>`;
+      if(isReviewer && s.status === 'pending'){
+        html += `<div class="coop-grade"><div class="coop-ans-lbl">Sua avaliação</div>
+          <p class="coop-verdict-q">A resposta do colega está correta ou incorreta?</p>
+          <div class="coop-verdict" id="coopVerdict">
+            <button type="button" class="coop-verdict-btn" data-verdict="correct">Correta</button>
+            <button type="button" class="coop-verdict-btn" data-verdict="incorrect">Incorreta</button>
+          </div>
+          <textarea id="coopComment" class="coop-textarea" placeholder="Justifique sua avaliação…"></textarea>
+          <div class="coop-modal-actions"><button class="coop-btn-primary" id="coopSendVerdict" type="button">Enviar avaliação</button></div></div>`;
+      } else if(s.status === 'graded'){
+        const authorCorrect = !!(s.author_answer && s.author_answer.is_correct);
+        const reviewerCorrect = (s.verdict === 'correct') === authorCorrect;
+        const verdictLabel = s.verdict === 'correct' ? 'Correta' : (s.verdict === 'incorrect' ? 'Incorreta' : '—');
+        html += `<div class="coop-corr"><div class="coop-ans-lbl">Avaliação ${isReviewer ? 'que você deu' : 'do colega'}</div>
+          <div class="coop-corr-grade">Veredito: <strong>${verdictLabel}</strong></div>
+          ${s.reviewer_comment?`<div class="coop-corr-comment">${_rich(s.reviewer_comment)}</div>`:''}</div>`;
+        html += `<div class="coop-model"><div class="coop-ans-lbl">Gabarito</div>
+          <div class="coop-corr-grade">Resposta correta: <strong>${Util.esc(q.key || '—')}</strong></div>
+          ${q.comments?`<div class="coop-model-body">${q.comments}</div>`:''}</div>`;
+        html += isReviewer
+          ? `<div class="coop-result ${reviewerCorrect?'is-ok':'is-no'}">${reviewerCorrect ? 'Você avaliou corretamente!' : 'Você avaliou de forma incorreta.'}</div>`
+          : `<div class="coop-result ${authorCorrect?'is-ok':'is-no'}">${authorCorrect ? 'Você acertou a questão.' : 'Você errou a questão.'}</div>`;
+      } else {
+        html += `<p class="coop-empty">Aguardando a avaliação do colega…</p>`;
+      }
     } else {
-      html += `<p class="coop-empty">Aguardando a correção do colega…</p>`;
+      const answer = (s.author_answer && s.author_answer.text) || '';
+      const maxScore = q.maxScore || 10;
+      html += `<div class="coop-ans"><div class="coop-ans-lbl">Resposta ${isReviewer ? 'do colega' : 'sua'}</div><div class="coop-ans-body">${_rich(answer)}</div></div>`;
+      if(isReviewer && s.status === 'pending'){
+        html += `<div class="coop-grade"><div class="coop-ans-lbl">Sua correção</div>
+          <label class="coop-grade-row">Nota (0 a ${maxScore}) <input type="number" id="coopGrade" min="0" max="${maxScore}" step="0.5" class="coop-input-num"></label>
+          <textarea id="coopComment" class="coop-textarea" placeholder="Comentário sobre a resposta do colega…"></textarea>
+          <div class="coop-modal-actions"><button class="coop-btn-primary" id="coopSendCorrection" type="button">Enviar correção</button></div></div>`;
+      } else if(s.status === 'graded'){
+        html += `<div class="coop-corr"><div class="coop-ans-lbl">Correção ${isReviewer ? 'que você deu' : 'do colega'}</div><div class="coop-corr-grade">Nota: <strong>${s.grade != null ? s.grade : '—'} / ${maxScore}</strong></div>${s.reviewer_comment?`<div class="coop-corr-comment">${_rich(s.reviewer_comment)}</div>`:''}</div>`;
+        html += `<div class="coop-model"><div class="coop-ans-lbl">Modelo de resposta / gabarito</div>${_modelHTML(q)}</div>`;
+      } else {
+        html += `<p class="coop-empty">Aguardando a correção do colega…</p>`;
+      }
     }
     body.innerHTML = html;
   }
   async function _onClick(e){
+    const vb = e.target.closest('.coop-verdict-btn');
+    if(vb){ const wrap = vb.closest('#coopVerdict'); if(wrap){ wrap.querySelectorAll('.coop-verdict-btn').forEach(b => b.classList.toggle('on', b === vb)); } return; }
+    // Discursiva — enviar nota
     const send = e.target.closest('#coopSendCorrection');
-    if(!send) return;
-    const gv = _el.querySelector('#coopGrade').value;
-    const grade = parseFloat(gv);
-    const comment = (_el.querySelector('#coopComment').value || '').trim();
-    if(gv === '' || isNaN(grade)){ if(window.ueToast) window.ueToast('Dê uma nota antes de enviar.', 'warn'); return; }
-    send.disabled = true; send.textContent = 'Enviando…';
-    try{
-      const { error } = await window._sb.schema('aluno').from('coop_sessions')
-        .update({ status:'graded', grade, reviewer_comment: comment || null, graded_at: new Date().toISOString() }).eq('id', _session.id);
-      if(error){ if(window.ueToast) window.ueToast('Erro: ' + error.message, 'error'); send.disabled = false; send.textContent = 'Enviar correção'; return; }
-      _session.status = 'graded'; _session.grade = grade; _session.reviewer_comment = comment;
-      if(window.Coop){
-        const _sid = _forumSubjectOfUnit(_session.unit_id);
-        const _sig = _sid ? _forumSubjectLabel(_sid) : '';
-        await Coop.notifyDone(_session.from_user, _session.id, { qtype: _session.question_type, subject: _sig });
-      }
-      render();
-      if(window.ueToast) window.ueToast('Correção enviada! Veja o gabarito abaixo pra comparar.', 'success');
-    }catch(err){ console.warn('[coop grade]', err); send.disabled = false; send.textContent = 'Enviar correção'; }
+    if(send){
+      const gv = _el.querySelector('#coopGrade').value;
+      const grade = parseFloat(gv);
+      const comment = (_el.querySelector('#coopComment').value || '').trim();
+      if(gv === '' || isNaN(grade)){ if(window.ueToast) window.ueToast('Dê uma nota antes de enviar.', 'warn'); return; }
+      send.disabled = true; send.textContent = 'Enviando…';
+      try{
+        const { error } = await window._sb.schema('aluno').from('coop_sessions')
+          .update({ status:'graded', grade, reviewer_comment: comment || null, graded_at: new Date().toISOString() }).eq('id', _session.id);
+        if(error){ if(window.ueToast) window.ueToast('Erro: ' + error.message, 'error'); send.disabled = false; send.textContent = 'Enviar correção'; return; }
+        _session.status = 'graded'; _session.grade = grade; _session.reviewer_comment = comment;
+        if(window.Coop){ const _sid = _forumSubjectOfUnit(_session.unit_id); const _sig = _sid ? _forumSubjectLabel(_sid) : ''; await Coop.notifyDone(_session.from_user, _session.id, { qtype: _session.question_type, subject: _sig }); }
+        render();
+        if(window.ueToast) window.ueToast('Correção enviada! Veja o gabarito abaixo pra comparar.', 'success');
+      }catch(err){ console.warn('[coop grade]', err); send.disabled = false; send.textContent = 'Enviar correção'; }
+      return;
+    }
+    // Objetiva — enviar veredito
+    const sendQ = e.target.closest('#coopSendVerdict');
+    if(sendQ){
+      const sel = _el.querySelector('#coopVerdict .coop-verdict-btn.on');
+      if(!sel){ if(window.ueToast) window.ueToast('Escolha Correta ou Incorreta.', 'warn'); return; }
+      const verdict = sel.dataset.verdict;
+      const comment = (_el.querySelector('#coopComment').value || '').trim();
+      sendQ.disabled = true; sendQ.textContent = 'Enviando…';
+      try{
+        const { error } = await window._sb.schema('aluno').from('coop_sessions')
+          .update({ status:'graded', verdict, reviewer_comment: comment || null, graded_at: new Date().toISOString() }).eq('id', _session.id);
+        if(error){ if(window.ueToast) window.ueToast('Erro: ' + error.message, 'error'); sendQ.disabled = false; sendQ.textContent = 'Enviar avaliação'; return; }
+        _session.status = 'graded'; _session.verdict = verdict; _session.reviewer_comment = comment;
+        if(window.Coop){ const _sid = _forumSubjectOfUnit(_session.unit_id); const _sig = _sid ? _forumSubjectLabel(_sid) : ''; await Coop.notifyDone(_session.from_user, _session.id, { qtype: _session.question_type, subject: _sig }); }
+        render();
+        if(window.ueToast) window.ueToast('Avaliação enviada! Veja o gabarito abaixo.', 'success');
+      }catch(err){ console.warn('[coop verdict]', err); sendQ.disabled = false; sendQ.textContent = 'Enviar avaliação'; }
+      return;
+    }
   }
   function open(session){ _session = session; const el = ensureEl(); render(); el.classList.add('open'); }
   function close(){ if(_el) _el.classList.remove('open'); }
