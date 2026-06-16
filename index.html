@@ -19966,7 +19966,7 @@ function _forumBodyHTML(text){
   const linked = escd.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
   return linked.replace(/\n/g, '<br>');
 }
-function _forumPostCardHTML(p, authors, eng){
+function _forumPostCardHTML(p, authors, eng, polls){
   const a = authors[String(p.user_id)] || {};
   const name = a.nickname || a.display_name || 'Aluno';
   const handle = a.handle ? '@'+a.handle : '';
@@ -19988,6 +19988,7 @@ function _forumPostCardHTML(p, authors, eng){
   }
   const lk = (eng && eng.likes && eng.likes[String(p.id)]) || { count:0, mine:false };
   const cmN = (eng && eng.comments && eng.comments[String(p.id)]) || 0;
+  const poll = polls && polls[String(p.id)];
   return `<article class="forum-post" data-post-id="${Util.attr(p.id)}">
     <div class="forum-post-head">
       <div class="forum-avatar" data-avatar="${Util.attr(p.user_id)}"></div>
@@ -19997,6 +19998,7 @@ function _forumPostCardHTML(p, authors, eng){
     <h3 class="forum-post-title">${Util.esc(p.title)}</h3>
     ${p.subtitle?`<p class="forum-post-subtitle">${Util.esc(p.subtitle)}</p>`:''}
     <div class="forum-post-body">${_forumBodyHTML(p.body)}</div>
+    ${poll ? `<div class="forum-poll" data-poll="${Util.attr(poll.pollId)}" data-post="${Util.attr(p.id)}">${_forumPollInnerHTML(poll)}</div>` : ''}
     <div class="forum-post-foot">
       <button class="forum-act forum-like${lk.mine?' on':''}" data-like="${Util.attr(p.id)}" title="Aplaudir">
         <svg viewBox="0 0 24 24" aria-hidden="true" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 14 5.4 11.9a1.6 1.6 0 0 1 2.3-2.3l1 1"/><path d="M9.3 11.9 6.5 9.1A1.6 1.6 0 0 1 8.8 6.8l3 3"/><path d="M11.8 10.4 9.4 8a1.6 1.6 0 0 1 2.3-2.3l2.8 2.8"/><path d="M14.1 8.8 12.7 7.4a1.6 1.6 0 0 1 2.3-2.3l3.2 3.2a6 6 0 0 1-1.1 8.4l-1.2.9a5 5 0 0 1-6.7-.9l-2.6-3"/><path d="M16.8 4.6 17.7 3M13.6 3.6 14 1.9M19.9 7.9 21.6 7.5"/></svg>
@@ -20102,6 +20104,57 @@ async function _forumInsertComment(postId, parentId, text){
     return true;
   }catch(e){ console.warn('[forum comment insert ex]', e); return false; }
 }
+// ── Enquetes (Parte D) ──
+async function _forumLoadPolls(postIds, myUid){
+  const byPost = {};
+  if(!window._sb || !postIds.length) return byPost;
+  try{
+    const { data: polls } = await window._sb.schema('aluno').from('forum_polls').select('id, post_id, question').in('post_id', postIds);
+    if(!polls || !polls.length) return byPost;
+    const pollIds = polls.map(p => p.id);
+    const [optsRes, votesRes] = await Promise.all([
+      window._sb.schema('aluno').from('forum_poll_options').select('id, poll_id, position, label').in('poll_id', pollIds),
+      window._sb.schema('aluno').from('forum_poll_votes').select('poll_id, option_id, user_id').in('poll_id', pollIds),
+    ]);
+    const optsByPoll = {}; (optsRes.data||[]).forEach(o => { (optsByPoll[o.poll_id] = optsByPoll[o.poll_id]||[]).push(o); });
+    const votesByPoll = {}, myByPoll = {};
+    (votesRes.data||[]).forEach(v => { (votesByPoll[v.poll_id] = votesByPoll[v.poll_id]||[]).push(v); if(myUid && String(v.user_id)===String(myUid)) myByPoll[v.poll_id] = v.option_id; });
+    polls.forEach(pl => {
+      const opts = (optsByPoll[pl.id]||[]).slice().sort((a,b)=>(a.position||0)-(b.position||0));
+      const votes = votesByPoll[pl.id]||[];
+      const counts = {}; opts.forEach(o => counts[o.id]=0); votes.forEach(v => { counts[v.option_id] = (counts[v.option_id]||0)+1; });
+      byPost[String(pl.post_id)] = { pollId: pl.id, question: pl.question || '', total: votes.length, myVote: myByPoll[pl.id] || null,
+        options: opts.map(o => ({ id:o.id, label:o.label, count: counts[o.id]||0 })) };
+    });
+  }catch(e){ console.warn('[forum polls]', e); }
+  return byPost;
+}
+function _forumPollInnerHTML(poll){
+  const voted = !!poll.myVote;
+  const total = poll.total || 0;
+  const head = poll.question ? `<div class="forum-poll-q">${Util.esc(poll.question)}</div>` : '';
+  const opts = poll.options.map(o => {
+    if(voted){
+      const pct = total ? Math.round(o.count/total*100) : 0;
+      const mine = String(poll.myVote) === String(o.id);
+      return `<div class="forum-poll-result${mine?' mine':''}"><div class="forum-poll-fill" style="width:${pct}%"></div><span class="forum-poll-rlabel">${Util.esc(o.label)}</span><span class="forum-poll-rpct">${pct}%</span></div>`;
+    }
+    return `<button type="button" class="forum-poll-opt-btn" data-vote-option="${Util.attr(o.id)}">${Util.esc(o.label)}</button>`;
+  }).join('');
+  const foot = `<div class="forum-poll-foot">${total} voto${total===1?'':'s'}${voted?'':' · vote para ver os resultados'}</div>`;
+  return head + `<div class="forum-poll-opts">${opts}</div>` + foot;
+}
+async function _forumVote(pollId, optionId){
+  const uid = _forumMyUid(); if(!uid || !window._sb) return;
+  try{
+    await window._sb.schema('aluno').from('forum_poll_votes')
+      .upsert({ poll_id: pollId, user_id: uid, option_id: optionId, voted_at: new Date().toISOString() }, { onConflict:'poll_id,user_id' });
+  }catch(e){ console.warn('[forum vote]', e); }
+}
+async function _forumReloadPoll(postId){
+  const map = await _forumLoadPolls([postId], _forumMyUid());
+  return map[String(postId)] || null;
+}
 function _forumInjectStyles(){
   if(document.getElementById('uq-forum-styles')) return;
   const st = document.createElement('style');
@@ -20181,6 +20234,26 @@ function _forumInjectStyles(){
   .forum-cm-replies{ margin-top:.8rem; display:flex; flex-direction:column; gap:.8rem; padding-left:.5rem; border-left:1px solid var(--border,#333); }
   .forum-cm-replybox{ margin-top:.6rem; display:flex; flex-direction:column; gap:.4rem; }
   .forum-cm-replybox-actions{ display:flex; gap:.5rem; justify-content:flex-end; }
+  .forum-poll-toggle{ display:flex; align-items:center; gap:.5rem; font-family:var(--sans); font-size:.82rem; color:var(--text-dim); margin-top:.7rem; cursor:pointer; }
+  .forum-poll-build{ margin-top:.6rem; display:flex; flex-direction:column; gap:.5rem; padding:.85rem; border:1px dashed var(--accent-border-soft); border-radius:var(--radius,4px); }
+  .forum-poll-build[hidden]{ display:none; }
+  .forum-poll-opt-row{ display:flex; gap:.5rem; align-items:center; }
+  .forum-poll-opt-row .forum-input{ flex:1; }
+  .forum-poll-rmopt{ background:none; border:none; color:var(--text-mute); font-size:1.2rem; line-height:1; cursor:pointer; padding:0 .2rem; }
+  .forum-poll-rmopt:hover{ color:var(--red,#e87878); }
+  .forum-poll-addopt{ align-self:flex-start; background:none; border:1px solid var(--accent-border-soft); color:var(--text-dim); border-radius:var(--radius,4px); padding:.35rem .7rem; font-family:var(--sans); font-size:.74rem; cursor:pointer; }
+  .forum-poll-addopt:hover{ color:var(--accent); border-color:var(--accent); }
+  .forum-poll{ margin-top:.2rem; }
+  .forum-poll-q{ font-family:var(--sans); font-weight:500; font-size:.9rem; color:var(--text); margin-bottom:.55rem; }
+  .forum-poll-opts{ display:flex; flex-direction:column; gap:.5rem; }
+  .forum-poll-opt-btn{ text-align:left; background:var(--accent-xlo); border:1px solid var(--accent-border-soft); color:var(--text); border-radius:var(--radius,4px); padding:.6rem .85rem; font-family:var(--sans); font-size:.86rem; cursor:pointer; transition:border-color .2s ease; }
+  .forum-poll-opt-btn:hover{ border-color:var(--accent); }
+  .forum-poll-result{ position:relative; overflow:hidden; border:1px solid var(--accent-border-soft); border-radius:var(--radius,4px); padding:.6rem .85rem; display:flex; align-items:center; gap:.6rem; }
+  .forum-poll-result.mine{ border-color:var(--accent); }
+  .forum-poll-fill{ position:absolute; left:0; top:0; bottom:0; background:var(--accent-xlo); z-index:0; transition:width .4s ease; }
+  .forum-poll-rlabel{ position:relative; z-index:1; flex:1; font-family:var(--sans); font-size:.86rem; color:var(--text); }
+  .forum-poll-rpct{ position:relative; z-index:1; font-family:var(--mono); font-size:.8rem; color:var(--accent); }
+  .forum-poll-foot{ font-family:var(--sans); font-size:.72rem; color:var(--text-mute); margin-top:.5rem; }
   `;
   document.head.appendChild(st);
 }
@@ -20209,6 +20282,12 @@ const ForumCompose = (function(){
         <input type="text" class="forum-input" id="fcSubtitle" maxlength="200" placeholder="Um complemento curto…">
         <label class="forum-flabel">Mensagem</label>
         <textarea class="forum-textarea" id="fcBody" maxlength="5000" placeholder="Escreva aqui…"></textarea>
+        <label class="forum-poll-toggle"><input type="checkbox" id="fcPollOn"> Adicionar enquete</label>
+        <div class="forum-poll-build" id="fcPollBuild" hidden>
+          <input type="text" class="forum-input" id="fcPollQ" maxlength="160" placeholder="Pergunta da enquete (opcional)…">
+          <div id="fcPollOpts"></div>
+          <button type="button" class="forum-poll-addopt" id="fcPollAdd">+ Adicionar opção</button>
+        </div>
         <div class="forum-modal-err" id="fcErr" hidden></div>
         <div class="forum-modal-actions">
           <button class="forum-btn-ghost" id="fcCancel" type="button">Cancelar</button>
@@ -20229,6 +20308,21 @@ const ForumCompose = (function(){
     _el.querySelector('.forum-modal-backdrop').addEventListener('click', close);
     _el.querySelector('.forum-modal-x').addEventListener('click', close);
     _el.querySelector('#fcCancel').addEventListener('click', close);
+    // Construtor de enquete (opcional)
+    const pollOn = _el.querySelector('#fcPollOn');
+    const pollBuild = _el.querySelector('#fcPollBuild');
+    const pollOpts = _el.querySelector('#fcPollOpts');
+    function addOpt(val){
+      if(pollOpts.querySelectorAll('.forum-poll-opt-row').length >= 6) return;
+      const row = document.createElement('div'); row.className = 'forum-poll-opt-row';
+      row.innerHTML = `<input type="text" class="forum-input forum-poll-opt" maxlength="80" placeholder="Opção…"><button type="button" class="forum-poll-rmopt" title="Remover">&times;</button>`;
+      if(val) row.querySelector('input').value = val;
+      pollOpts.appendChild(row);
+    }
+    _el._resetPoll = function(){ pollOn.checked = false; pollBuild.hidden = true; _el.querySelector('#fcPollQ').value = ''; pollOpts.innerHTML = ''; addOpt(); addOpt(); };
+    pollOn.addEventListener('change', () => { pollBuild.hidden = !pollOn.checked; if(pollOn.checked && !pollOpts.children.length){ addOpt(); addOpt(); } });
+    _el.querySelector('#fcPollAdd').addEventListener('click', () => addOpt());
+    pollOpts.addEventListener('click', e => { const rm = e.target.closest('.forum-poll-rmopt'); if(rm && pollOpts.querySelectorAll('.forum-poll-opt-row').length > 2) rm.closest('.forum-poll-opt-row').remove(); });
     _el.querySelector('#fcPublish').addEventListener('click', publish);
     return _el;
   }
@@ -20240,6 +20334,7 @@ const ForumCompose = (function(){
       .concat(_forumSubjectsList().map(s=>`<option value="${Util.attr(s.id)}">${Util.esc(s.title)}</option>`)).join('');
     subj.value = ''; el._fillUnits();
     ['#fcTitle','#fcSubtitle','#fcBody'].forEach(id => { el.querySelector(id).value = ''; });
+    if(el._resetPoll) el._resetPoll();
     const err = el.querySelector('#fcErr'); err.hidden = true; err.textContent = '';
     el.classList.add('open');
     setTimeout(() => { try{ el.querySelector('#fcTitle').focus(); }catch(_){} }, 30);
@@ -20259,9 +20354,26 @@ const ForumCompose = (function(){
     if(!uid || !window._sb){ err.textContent = 'Você precisa estar logado.'; err.hidden = false; return; }
     const btn = el.querySelector('#fcPublish'); btn.disabled = true; btn.textContent = 'Publicando…';
     try{
-      const { error } = await window._sb.schema('aluno').from('forum_posts')
-        .insert({ user_id: uid, subject_id, unit_id, title, subtitle: subtitle || null, body });
+      const { data: ins, error } = await window._sb.schema('aluno').from('forum_posts')
+        .insert({ user_id: uid, subject_id, unit_id, title, subtitle: subtitle || null, body })
+        .select('id').single();
       if(error){ err.textContent = 'Erro ao publicar: ' + error.message; err.hidden = false; btn.disabled = false; btn.textContent = 'Publicar'; return; }
+      // Enquete (opcional)
+      const pollOn = el.querySelector('#fcPollOn');
+      if(pollOn && pollOn.checked && ins && ins.id){
+        const opts = [...el.querySelectorAll('.forum-poll-opt')].map(i => i.value.trim()).filter(Boolean);
+        if(opts.length >= 2){
+          try{
+            const pq = el.querySelector('#fcPollQ').value.trim() || null;
+            const { data: poll, error: pErr } = await window._sb.schema('aluno').from('forum_polls')
+              .insert({ post_id: ins.id, question: pq }).select('id').single();
+            if(!pErr && poll && poll.id){
+              await window._sb.schema('aluno').from('forum_poll_options')
+                .insert(opts.map((label, i) => ({ poll_id: poll.id, position: i, label })));
+            } else if(pErr){ console.warn('[forum poll create]', pErr.message); }
+          }catch(pe){ console.warn('[forum poll create ex]', pe); }
+        }
+      }
       close();
       if(_onDone) _onDone();
     }catch(e){ err.textContent = 'Erro inesperado ao publicar.'; err.hidden = false; }
@@ -20314,8 +20426,10 @@ Renderers.forum.mount = function(stageEl, route){
     }
     countEl.textContent = posts.length + (posts.length===1 ? ' publicação' : ' publicações');
     const authors = await _forumResolveAuthors(posts.map(p => p.user_id));
-    const eng = await _forumLoadEngagement(posts.map(p => p.id), _forumMyUid());
-    listEl.innerHTML = posts.map(p => _forumPostCardHTML(p, authors, eng)).join('');
+    const myUid = _forumMyUid();
+    const eng = await _forumLoadEngagement(posts.map(p => p.id), myUid);
+    const polls = await _forumLoadPolls(posts.map(p => p.id), myUid);
+    listEl.innerHTML = posts.map(p => _forumPostCardHTML(p, authors, eng, polls)).join('');
     listEl.querySelectorAll('.forum-avatar[data-avatar]').forEach(el => {
       const a = authors[String(el.dataset.avatar)] || {};
       renderAvatarInto(el, a.photo_url || '', a.photo_transform);
@@ -20341,6 +20455,15 @@ Renderers.forum.mount = function(stageEl, route){
   newBtn.addEventListener('click', () => ForumCompose.open(() => _reload()));
   // Delegação: curtir, abrir/fechar comentários, comentar e responder
   listEl.addEventListener('click', async (e) => {
+    const voteBtn = e.target.closest('[data-vote-option]');
+    if(voteBtn){
+      const pollEl = voteBtn.closest('.forum-poll'); if(!pollEl) return;
+      voteBtn.disabled = true;
+      await _forumVote(pollEl.dataset.poll, voteBtn.dataset.voteOption);
+      const fresh = await _forumReloadPoll(pollEl.dataset.post);
+      if(fresh) pollEl.innerHTML = _forumPollInnerHTML(fresh);
+      return;
+    }
     const likeBtn = e.target.closest('[data-like]');
     if(likeBtn){ _forumToggleLike(likeBtn.dataset.like, likeBtn); return; }
     const cmToggle = e.target.closest('[data-cmtoggle]');
