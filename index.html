@@ -16002,6 +16002,7 @@ Blocks.comments = {
         <div class="cmt-input-wrap">
           <textarea class="cmt-textarea" id="cmtInput-${Util.attr(block.id)}" placeholder="Escreva seu comentário..."></textarea>
           <button class="cmt-submit" data-action="post-comment">Publicar</button>
+          ${(ctx && ctx.question) ? `<label class="cmt-forum-row" style="display:flex;align-items:center;gap:.45rem;margin-top:.55rem;font-family:var(--sans);font-size:.75rem;color:var(--text-dim);cursor:pointer"><input type="checkbox" class="cmt-forum-cb" style="cursor:pointer;width:15px;height:15px">Publicar também no Fórum (com a questão anexada)</label>` : ''}
         </div>
       </div>
       <div class="cmt-count">${thread.count} comentário${thread.count===1?'':'s'}</div>
@@ -16094,6 +16095,11 @@ Blocks.comments = {
       const text = textarea.value.trim();
       if(!text) return;
       Store.addComment(block.id, text, null, ctx && ctx.unitId);
+      const fcb = wrap.querySelector('.cmt-forum-cb');
+      if(fcb && fcb.checked && ctx && ctx.question && typeof window._forumPublishQuestionComment === 'function'){
+        window._forumPublishQuestionComment(ctx, text);
+        fcb.checked = false;
+      }
       textarea.value = '';
       refreshThread();
     });
@@ -19955,7 +19961,7 @@ async function _forumFetchPosts(){
   if(!window._sb) return [];
   try{
     const { data, error } = await window._sb.schema('aluno').from('forum_posts')
-      .select('id, user_id, subject_id, unit_id, title, subtitle, body, created_at, edited_at, restricted, restricted_reason')
+      .select('id, user_id, subject_id, unit_id, title, subtitle, body, kind, question, created_at, edited_at, restricted, restricted_reason')
       .is('deleted_at', null).order('created_at', { ascending:false }).limit(300);
     if(error){ console.warn('[forum fetch]', error.message); return []; }
     return data || [];
@@ -19997,7 +20003,7 @@ function _forumPostCardHTML(p, authors, eng, polls){
     </div>
     <h3 class="forum-post-title">${Util.esc(p.title)}</h3>
     ${p.subtitle?`<p class="forum-post-subtitle">${Util.esc(p.subtitle)}</p>`:''}
-    <div class="forum-post-body">${_forumBodyHTML(p.body)}</div>
+    ${(p.kind === 'question' && p.question) ? _forumQuestionHTML(p.question, p.body) : `<div class="forum-post-body">${_forumBodyHTML(p.body)}</div>`}
     ${poll ? `<div class="forum-poll" data-poll="${Util.attr(poll.pollId)}" data-post="${Util.attr(p.id)}">${_forumPollInnerHTML(poll)}</div>` : ''}
     <div class="forum-post-foot">
       <button class="forum-act forum-like${lk.mine?' on':''}" data-like="${Util.attr(p.id)}" title="Aplaudir">
@@ -20155,6 +20161,70 @@ async function _forumReloadPoll(postId){
   const map = await _forumLoadPolls([postId], _forumMyUid());
   return map[String(postId)] || null;
 }
+// ── Comentário de questão → post (Parte E) ──
+// Empacota uma questão (do bloco) num objeto leve pra anexar ao post do fórum.
+function _forumPackageQuestion(item){
+  if(!item) return null;
+  return {
+    item_id: item.id || null,
+    statement: item.assertion || item.enunciado || '',
+    options: Array.isArray(item.options) ? item.options.slice() : [],
+    key: item.key || '',
+    explain: item.comments || '',
+    reference_text: item.reference_text || '',
+    origin: item.origin || ''
+  };
+}
+function _forumSubjectOfUnit(unitId){
+  if(!unitId) return null;
+  const courses = window.COURSES_ALL || window.COURSES || [];
+  for(const c of courses){
+    for(const m of (c.modules||[])) for(const ch of (m.chapters||[])) for(const u of (ch.units||[])){
+      if(String(u.id) === String(unitId)) return (c._subjectId != null) ? String(c._subjectId) : null;
+    }
+  }
+  return null;
+}
+async function _forumPublishQuestionComment(ctx, text){
+  const uid = _forumMyUid(); if(!uid || !window._sb) return;
+  const q = (ctx && ctx.question) || {};
+  const title = 'Dúvida em questão' + (q.origin ? ' (' + q.origin + ')' : '');
+  try{
+    const { error } = await window._sb.schema('aluno').from('forum_posts').insert({
+      user_id: uid,
+      subject_id: (ctx && ctx.forumSubjectId) || null,
+      unit_id: (ctx && ctx.forumUnitId) || null,
+      title, subtitle: null, body: text,
+      kind: 'question', question: q
+    });
+    if(error) console.warn('[forum publish question]', error.message);
+  }catch(e){ console.warn('[forum publish question ex]', e); }
+}
+// Render da questão anexada no post: enunciado em cima; gabarito + comentário do
+// autor ficam BORRADOS (spoiler), revelados ao clicar.
+function _forumQuestionHTML(q, comment){
+  if(!q) return '';
+  const opts = (Array.isArray(q.options) && q.options.length)
+    ? `<ul class="forum-q-opts">${q.options.map(o => `<li>${Util.esc(o)}</li>`).join('')}</ul>` : '';
+  const ref = q.reference_text ? `<div class="forum-q-ref">${_forumBodyHTML(q.reference_text)}</div>` : '';
+  const spoiler = `
+    <div class="forum-q-gab"><strong>Gabarito:</strong> ${Util.esc(q.key || '—')}</div>
+    ${q.explain ? `<div class="forum-q-explain">${_forumBodyHTML(q.explain)}</div>` : ''}
+    ${comment ? `<div class="forum-q-comment"><span class="forum-q-comment-lbl">Comentário do autor</span>${_forumBodyHTML(comment)}</div>` : ''}`;
+  return `<div class="forum-q">
+    ${q.origin ? `<div class="forum-q-origin">${Util.esc(q.origin)}</div>` : ''}
+    ${ref}
+    <div class="forum-q-statement">${_forumBodyHTML(q.statement || '')}</div>
+    ${opts}
+    <div class="forum-spoiler" data-spoiler>
+      <div class="forum-spoiler-content">${spoiler}</div>
+      <div class="forum-spoiler-hint">Toque para revelar a resposta</div>
+    </div>
+  </div>`;
+}
+window._forumPackageQuestion = _forumPackageQuestion;
+window._forumSubjectOfUnit = _forumSubjectOfUnit;
+window._forumPublishQuestionComment = _forumPublishQuestionComment;
 function _forumInjectStyles(){
   if(document.getElementById('uq-forum-styles')) return;
   const st = document.createElement('style');
@@ -20258,6 +20328,22 @@ function _forumInjectStyles(){
   .forum-poll-result.mine .forum-poll-rlabel{ color:var(--accent); font-weight:500; }
   .forum-poll-rpct{ position:relative; z-index:1; font-family:var(--mono); font-size:.82rem; color:var(--accent); }
   .forum-poll-foot{ font-family:var(--sans); font-size:.72rem; color:var(--text-mute); margin-top:.6rem; }
+  .forum-q{ border:1px solid var(--accent-border-soft); border-radius:var(--radius,4px); padding:1rem 1.1rem; background:var(--accent-glow,rgba(200,169,126,.04)); }
+  .forum-q-origin{ font-family:var(--mono); font-size:.6rem; letter-spacing:.1em; text-transform:uppercase; color:var(--text-mute); margin-bottom:.45rem; }
+  .forum-q-ref{ font-family:var(--sans); font-size:.84rem; color:var(--text-dim); border-left:2px solid var(--accent-border); padding:.4rem .8rem; margin-bottom:.6rem; }
+  .forum-q-statement{ font-family:var(--sans); font-size:.92rem; line-height:1.6; color:var(--text); }
+  .forum-q-opts{ list-style:none; padding:0; margin:.7rem 0 0; display:flex; flex-direction:column; gap:.4rem; }
+  .forum-q-opts li{ font-family:var(--sans); font-size:.86rem; color:var(--text-dim); padding:.45rem .75rem; border:1px solid var(--accent-border-soft); border-radius:var(--radius,4px); }
+  .forum-q-gab{ font-family:var(--sans); font-size:.88rem; color:var(--text); margin-bottom:.4rem; }
+  .forum-q-explain{ font-family:var(--sans); font-size:.86rem; line-height:1.55; color:var(--text-dim); }
+  .forum-q-comment{ margin-top:.6rem; padding-top:.6rem; border-top:1px solid var(--accent-border-soft); }
+  .forum-q-comment-lbl{ display:block; font-family:var(--mono); font-size:.58rem; letter-spacing:.1em; text-transform:uppercase; color:var(--accent); margin-bottom:.3rem; }
+  .forum-spoiler{ position:relative; cursor:pointer; border-radius:var(--radius,4px); overflow:hidden; margin-top:.8rem; min-height:48px; }
+  .forum-spoiler-content{ filter:blur(8px); transition:filter .45s ease; pointer-events:none; user-select:none; padding:.3rem; }
+  .forum-spoiler.revealed{ cursor:default; }
+  .forum-spoiler.revealed .forum-spoiler-content{ filter:none; user-select:auto; }
+  .forum-spoiler-hint{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-family:var(--sans); font-size:.78rem; letter-spacing:.04em; color:var(--accent); background:rgba(0,0,0,.12); text-transform:uppercase; }
+  .forum-spoiler.revealed .forum-spoiler-hint{ display:none; }
   `;
   document.head.appendChild(st);
 }
@@ -20459,6 +20545,8 @@ Renderers.forum.mount = function(stageEl, route){
   newBtn.addEventListener('click', () => ForumCompose.open(() => _reload()));
   // Delegação: curtir, abrir/fechar comentários, comentar e responder
   listEl.addEventListener('click', async (e) => {
+    const sp = e.target.closest('[data-spoiler]');
+    if(sp){ sp.classList.add('revealed'); return; }
     const voteBtn = e.target.closest('[data-vote-option]');
     if(voteBtn){
       const pollEl = voteBtn.closest('.forum-poll'); if(!pollEl) return;
@@ -29916,6 +30004,11 @@ function bindQuizDataPanel(itemEl, item){
     const pseudo = { id: item.id, type:'comments', title:'' };
     const ap = (item.appears_in && item.appears_in[0]) || {};
     const ctx = { unitId: item.__unitId || ap.unit_id || ('q:'+item.id), store: Store, bare: true };
+    if(typeof window._forumPackageQuestion === 'function'){
+      ctx.question = window._forumPackageQuestion(item);
+      ctx.forumUnitId = ap.unit_id || item.__unitId || null;
+      ctx.forumSubjectId = (typeof window._forumSubjectOfUnit === 'function') ? window._forumSubjectOfUnit(ctx.forumUnitId) : null;
+    }
     pane.innerHTML = Blocks.comments.render(pseudo, ctx);
     if(Blocks.comments.mount) Blocks.comments.mount(pane, pseudo, ctx);
     // Badge: atualiza após hidratar e a cada interação na thread.
