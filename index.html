@@ -13756,7 +13756,10 @@ Blocks.quiz = {
             coopBtn.addEventListener('click', () => {
               const prior = (ctx.store && ctx.store.getQuizAnswer) ? ctx.store.getQuizAnswer(ctx.unitId, block.id, item.id) : null;
               if(!prior || prior.selected == null){ if(window.ueToast) window.ueToast('Responda a questão antes de enviar ao colega.', 'warn'); return; }
-              if(window.CoopPicker) window.CoopPicker.open({ onPick: (partner) => { if(window._coopSendQuiz) window._coopSendQuiz(partner, item, prior, ctx, block.id, item.id); } });
+              if(window.CoopPicker) window.CoopPicker.open({
+                onPickPartner: (partner) => { if(window._coopSendQuiz) window._coopSendQuiz(partner, item, prior, ctx, block.id, item.id); },
+                onPickRoom: (room) => { if(window._coopSendGroupQuiz) window._coopSendGroupQuiz(room, item, prior, ctx, block.id, item.id); }
+              });
             });
           }
         } else {
@@ -14945,7 +14948,10 @@ Blocks.essay = {
           const prior = (ctx.store && ctx.store.getEssayAnswer) ? ctx.store.getEssayAnswer(ctx.unitId, block.id, itemId) : null;
           const answer = txt || (prior && prior.text) || '';
           if(!answer){ if(window.ueToast) window.ueToast('Escreva sua resposta antes de enviar ao colega.', 'warn'); else if(ta) ta.focus(); return; }
-          if(window.CoopPicker) window.CoopPicker.open({ onPick: (partner) => { if(window._coopSendEssay) window._coopSendEssay(partner, item, answer, ctx, block.id, itemId); } });
+          if(window.CoopPicker) window.CoopPicker.open({
+            onPickPartner: (partner) => { if(window._coopSendEssay) window._coopSendEssay(partner, item, answer, ctx, block.id, itemId); },
+            onPickRoom: (room) => { if(window._coopSendGroupEssay) window._coopSendGroupEssay(room, item, answer, ctx, block.id, itemId); }
+          });
         });
       }
       if(submitBtn && ta){
@@ -18510,7 +18516,8 @@ function _notifRenderItem(n){
     // Estudo em dupla — um colega te enviou uma questão pra corrigir
     const _ql = p.qtype === 'quiz' ? 'objetiva' : (p.qtype === 'essay' ? 'discursiva' : '');
     const _desc = 'questão' + (_ql ? ' ' + _ql : '') + (p.subject ? ' de ' + Util.esc(p.subject) : '');
-    line = `<strong>${Util.esc(fromName)}</strong> te enviou uma ${_desc} para corrigir (estudo em dupla).`;
+    const _ctx = p.room_id ? (' na sala' + (p.room_name ? ' <strong>' + Util.esc(p.room_name) + '</strong>' : '')) : ' (estudo em dupla)';
+    line = `<strong>${Util.esc(fromName)}</strong> enviou uma ${_desc} para corrigir${_ctx}.`;
     if(p.coop_id){
       actions = `<div class="notif-actions"><button class="btn-ghost" data-notif-coop="${Util.attr(p.coop_id)}" data-notif-id="${Util.attr(n.id)}">Corrigir →</button></div>`;
     }
@@ -18518,7 +18525,8 @@ function _notifRenderItem(n){
     // Estudo em dupla — o colega corrigiu a sua questão
     const _ql = p.qtype === 'quiz' ? 'objetiva' : (p.qtype === 'essay' ? 'discursiva' : '');
     const _desc = 'questão' + (_ql ? ' ' + _ql : '') + (p.subject ? ' de ' + Util.esc(p.subject) : '');
-    line = `<strong>${Util.esc(fromName)}</strong> corrigiu sua ${_desc} (estudo em dupla).`;
+    const _ctx = p.room_id ? ' na sala' : ' (estudo em dupla)';
+    line = `<strong>${Util.esc(fromName)}</strong> corrigiu sua ${_desc}${_ctx}.`;
     if(p.coop_id){
       actions = `<div class="notif-actions"><button class="btn-ghost" data-notif-coop="${Util.attr(p.coop_id)}" data-notif-id="${Util.attr(n.id)}">Ver correção →</button></div>`;
     }
@@ -21072,17 +21080,22 @@ function _coopInjectStyles(){
 }
 // Seletor reutilizável de colega de estudo: open({ title, subtitle, onPick })
 const CoopPicker = (function(){
-  let _el = null, _onPick = null, _selected = null;
+  let _el = null, _onPickPartner = null, _onPickRoom = null, _selected = null, _rooms = [];
   function ensureEl(){
     if(_el) return _el;
-    _coopInjectStyles();
+    _coopInjectStyles(); _coopGroupInjectStyles();
     _el = document.createElement('div'); _el.className = 'coop-modal';
     _el.innerHTML = `
       <div class="coop-modal-backdrop"></div>
       <div class="coop-modal-panel">
-        <div class="coop-modal-head"><span class="coop-modal-title" id="coopPickTitle">Enviar para Colega de Estudo</span><button class="coop-modal-x" type="button" aria-label="Fechar">&times;</button></div>
+        <div class="coop-modal-head"><span class="coop-modal-title" id="coopPickTitle">Enviar questão</span><button class="coop-modal-x" type="button" aria-label="Fechar">&times;</button></div>
+        <div class="coop-pick-tabs" id="coopPickTabs">
+          <button type="button" class="coop-pick-tab on" data-cptab="partner">Um colega</button>
+          <button type="button" class="coop-pick-tab" data-cptab="room">Uma sala</button>
+        </div>
         <p class="coop-modal-sub" id="coopPickSub">Escolha um colega (vocês se seguem mutuamente).</p>
-        <div class="coop-pick-list" id="coopPickList"></div>
+        <div class="coop-pick-list" id="coopPickListPartner"></div>
+        <div class="coop-pick-list" id="coopPickListRoom" hidden></div>
         <div class="coop-pick-confirm" id="coopPickConfirm" hidden>
           <p id="coopPickConfirmText"></p>
           <div class="coop-modal-actions"><button class="coop-btn-ghost" id="coopPickBack" type="button">Voltar</button><button class="coop-btn-primary" id="coopPickSend" type="button">Confirmar envio</button></div>
@@ -21092,40 +21105,85 @@ const CoopPicker = (function(){
     _el.querySelector('.coop-modal-backdrop').addEventListener('click', close);
     _el.querySelector('.coop-modal-x').addEventListener('click', close);
     _el.querySelector('#coopPickBack').addEventListener('click', _showList);
-    _el.querySelector('#coopPickSend').addEventListener('click', () => { const sel = _selected; close(); if(_onPick && sel) _onPick(sel); });
-    _el.querySelector('#coopPickList').addEventListener('click', e => {
+    _el.querySelector('#coopPickSend').addEventListener('click', () => {
+      const sel = _selected; close();
+      if(sel && sel.type === 'partner' && _onPickPartner) _onPickPartner(sel.user);
+      else if(sel && sel.type === 'room' && _onPickRoom) _onPickRoom(sel.room);
+    });
+    _el.querySelector('#coopPickTabs').addEventListener('click', e => {
+      const b = e.target.closest('[data-cptab]'); if(!b) return;
+      _el.querySelectorAll('.coop-pick-tab').forEach(x => x.classList.toggle('on', x === b));
+      _setTab(b.dataset.cptab);
+    });
+    _el.querySelector('#coopPickListPartner').addEventListener('click', e => {
       const row = e.target.closest('[data-coop-uid]'); if(!row) return;
-      const uid = row.dataset.coopUid;
-      _selected = _coopPartners().find(u => String(u.id) === String(uid)) || { id: uid };
-      _showConfirm(_selected);
+      const u = _coopPartners().find(x => String(x.id) === String(row.dataset.coopUid)) || { id: row.dataset.coopUid };
+      _selected = { type:'partner', user: u };
+      _showConfirm(`Enviar esta questão para <strong>${Util.esc(u.nickname || ('@'+(u.handle||'colega')))}</strong> corrigir?`);
+    });
+    _el.querySelector('#coopPickListRoom').addEventListener('click', e => {
+      const row = e.target.closest('[data-coop-room]'); if(!row) return;
+      const r = _rooms.find(x => String(x.id) === String(row.dataset.coopRoom)); if(!r) return;
+      _selected = { type:'room', room: r };
+      _showConfirm(`Enviar esta questão para a sala <strong>${Util.esc(r.name||'')}</strong>? Todos os membros poderão corrigir.`);
     });
     return _el;
   }
-  function _showList(){ if(!_el) return; _el.querySelector('#coopPickList').hidden = false; _el.querySelector('#coopPickConfirm').hidden = true; }
-  function _showConfirm(u){
-    _el.querySelector('#coopPickList').hidden = true;
+  function _setTab(tab){
+    if(!_el) return;
+    _el.querySelector('#coopPickListPartner').hidden = tab !== 'partner';
+    _el.querySelector('#coopPickListRoom').hidden = tab !== 'room';
+    _el.querySelector('#coopPickSub').textContent = tab === 'room'
+      ? 'Escolha uma sala — todos os membros vão corrigir.'
+      : 'Escolha um colega (vocês se seguem mutuamente).';
+  }
+  function _showList(){
+    if(!_el) return;
+    const on = _el.querySelector('.coop-pick-tab.on');
+    _el.querySelector('#coopPickConfirm').hidden = true;
+    _el.querySelector('#coopPickTabs').hidden = false;
+    _setTab(on ? on.dataset.cptab : 'partner');
+  }
+  function _showConfirm(text){
+    _el.querySelector('#coopPickListPartner').hidden = true;
+    _el.querySelector('#coopPickListRoom').hidden = true;
+    _el.querySelector('#coopPickTabs').hidden = true;
+    _el.querySelector('#coopPickSub').textContent = '';
     const c = _el.querySelector('#coopPickConfirm'); c.hidden = false;
-    _el.querySelector('#coopPickConfirmText').innerHTML = `Enviar esta questão para <strong>${Util.esc(u.nickname || ('@'+(u.handle||'colega')))}</strong> corrigir?`;
+    _el.querySelector('#coopPickConfirmText').innerHTML = text;
+  }
+  function _renderPartners(){
+    const partners = _coopPartners();
+    const listEl = _el.querySelector('#coopPickListPartner');
+    if(!partners.length){ listEl.innerHTML = `<p class="coop-empty">Você ainda não tem colegas de estudo. Em <strong>Conta → Colegas</strong>, siga alguém e seja seguido de volta para estudar em dupla.</p>`; return; }
+    listEl.innerHTML = partners.map(u => `<button type="button" class="coop-pick-row" data-coop-uid="${Util.attr(u.id)}">
+      <div class="coop-pick-av" data-photo-url="${Util.attr(u.photoUrl||'')}" data-photo-x="${(u.photoTransform&&u.photoTransform.x)||0}" data-photo-y="${(u.photoTransform&&u.photoTransform.y)||0}" data-photo-s="${(u.photoTransform&&u.photoTransform.scale)||1}"><span>${Util.esc(Util.initials(u.nickname||u.handle||'?'))}</span></div>
+      <div class="coop-pick-info"><span class="coop-pick-name">${Util.esc(u.nickname || ('@'+(u.handle||'colega')))}</span><span class="coop-pick-handle">@${Util.esc(u.handle||'')}</span></div>
+    </button>`).join('');
+    listEl.querySelectorAll('.coop-pick-av[data-photo-url]').forEach(av => {
+      const url = av.getAttribute('data-photo-url'); if(!url) return;
+      renderAvatarInto(av, url, { x:parseFloat(av.dataset.photoX)||0, y:parseFloat(av.dataset.photoY)||0, scale:parseFloat(av.dataset.photoS)||1 });
+    });
+  }
+  async function _renderRooms(){
+    const listEl = _el.querySelector('#coopPickListRoom');
+    listEl.innerHTML = `<p class="coop-empty">Carregando suas salas…</p>`;
+    _rooms = (typeof _salasFetchRooms === 'function') ? await _salasFetchRooms() : [];
+    if(!_rooms.length){ listEl.innerHTML = `<p class="coop-empty">Você não está em nenhuma sala. Crie ou entre em uma em <strong>Salas de Estudos</strong>.</p>`; return; }
+    listEl.innerHTML = _rooms.map(r => `<button type="button" class="coop-pick-row" data-coop-room="${Util.attr(r.id)}">
+      <div class="coop-pick-av coop-pick-room-av"><span>${Util.esc(Util.initials(r.name||'?'))}</span></div>
+      <div class="coop-pick-info"><span class="coop-pick-name">${Util.esc(r.name||'Sala')}</span><span class="coop-pick-handle">${r._role==='owner'?'você é dono':'membro'}</span></div>
+    </button>`).join('');
   }
   function open(opts){
-    opts = opts || {}; _onPick = opts.onPick || null; _selected = null;
+    opts = opts || {}; _onPickPartner = opts.onPickPartner || opts.onPick || null; _onPickRoom = opts.onPickRoom || null; _selected = null;
     const el = ensureEl();
-    el.querySelector('#coopPickTitle').textContent = opts.title || 'Enviar para Colega de Estudo';
-    el.querySelector('#coopPickSub').textContent = opts.subtitle || 'Escolha um colega (vocês se seguem mutuamente).';
-    const partners = _coopPartners();
-    const listEl = el.querySelector('#coopPickList');
-    if(!partners.length){
-      listEl.innerHTML = `<p class="coop-empty">Você ainda não tem colegas de estudo. Em <strong>Conta → Colegas</strong>, siga alguém e seja seguido de volta para estudar em dupla.</p>`;
-    } else {
-      listEl.innerHTML = partners.map(u => `<button type="button" class="coop-pick-row" data-coop-uid="${Util.attr(u.id)}">
-        <div class="coop-pick-av" data-photo-url="${Util.attr(u.photoUrl||'')}" data-photo-x="${(u.photoTransform&&u.photoTransform.x)||0}" data-photo-y="${(u.photoTransform&&u.photoTransform.y)||0}" data-photo-s="${(u.photoTransform&&u.photoTransform.scale)||1}"><span>${Util.esc(Util.initials(u.nickname||u.handle||'?'))}</span></div>
-        <div class="coop-pick-info"><span class="coop-pick-name">${Util.esc(u.nickname || ('@'+(u.handle||'colega')))}</span><span class="coop-pick-handle">@${Util.esc(u.handle||'')}</span></div>
-      </button>`).join('');
-      listEl.querySelectorAll('.coop-pick-av[data-photo-url]').forEach(av => {
-        const url = av.getAttribute('data-photo-url'); if(!url) return;
-        renderAvatarInto(av, url, { x:parseFloat(av.dataset.photoX)||0, y:parseFloat(av.dataset.photoY)||0, scale:parseFloat(av.dataset.photoS)||1 });
-      });
-    }
+    el.querySelector('#coopPickTitle').textContent = opts.title || 'Enviar questão';
+    el.querySelectorAll('.coop-pick-tab').forEach((x,i) => x.classList.toggle('on', i === 0));
+    // partnersOnly: só colega (ex.: convidar pra sala) — esconde a aba "Uma sala".
+    const tabs = el.querySelector('#coopPickTabs'); if(tabs) tabs.style.display = opts.partnersOnly ? 'none' : '';
+    _renderPartners();
+    if(!opts.partnersOnly) _renderRooms();
     _showList();
     el.classList.add('open');
   }
@@ -21296,7 +21354,84 @@ const CoopSessionModal = (function(){
     const img = q.reference_image ? `<img class="coop-q-ref-img" src="${Util.attr(q.reference_image)}" alt="" loading="lazy">` : '';
     return `<div class="coop-q">${q.origin?`<div class="coop-q-origin">${Util.esc(q.origin)}</div>`:''}${ref}${img}<div class="coop-q-cmd">${q.assertion || ''}</div></div>`;
   }
+  function _renderGroup(){
+    const s = _session, q = s.question || {}, body = _el.querySelector('#coopSessBody');
+    const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null, meId = me && me.id;
+    const isAuthor = meId && String(meId) === String(s.from_user);
+    const isQuiz = s.question_type === 'quiz' || q.kind === 'quiz';
+    const corrections = s._corrections || [];
+    const members = (s._members || []).filter(m => m.status === 'member');
+    const correctors = members.filter(m => String(m.user_id) !== String(s.from_user));
+    const myCorr = corrections.find(c => String(c.corrector_id) === String(meId));
+    const canCorrect = meId && !isAuthor && correctors.some(m => String(m.user_id) === String(meId));
+    let html = isQuiz ? _qHTMLQuiz(q) : _qHTML(q);
+    // Resposta do autor
+    if(isQuiz){
+      const ans = (s.author_answer && s.author_answer.value) || '—';
+      html += `<div class="coop-ans"><div class="coop-ans-lbl">Resposta de ${Util.esc(_coopName(s.from_user))}</div><div class="coop-ans-pick">${Util.esc(ans)}</div></div>`;
+    } else {
+      const answer = (s.author_answer && s.author_answer.text) || '';
+      html += `<div class="coop-ans"><div class="coop-ans-lbl">Resposta de ${Util.esc(_coopName(s.from_user))}</div><div class="coop-ans-body">${_rich(answer)}</div></div>`;
+    }
+    // Formulário de correção (se sou membro corretor e ainda não corrigi)
+    if(canCorrect && !myCorr){
+      if(isQuiz){
+        html += `<div class="coop-grade"><div class="coop-ans-lbl">Sua avaliação</div>
+          <p class="coop-verdict-q">A resposta está correta ou incorreta?</p>
+          <div class="coop-verdict" id="coopVerdict"><button type="button" class="coop-verdict-btn" data-verdict="correct">Correta</button><button type="button" class="coop-verdict-btn" data-verdict="incorrect">Incorreta</button></div>
+          <textarea id="coopComment" class="coop-textarea" placeholder="Justifique sua avaliação…"></textarea>
+          <div class="coop-modal-actions"><button class="coop-btn-primary" id="coopGroupVerdict" type="button">Enviar avaliação</button></div></div>`;
+      } else {
+        const maxScore = q.maxScore || 10;
+        html += `<div class="coop-grade"><div class="coop-ans-lbl">Sua correção</div>
+          <label class="coop-grade-row">Nota (0 a ${maxScore}) <input type="number" id="coopGrade" min="0" max="${maxScore}" step="0.5" class="coop-input-num"></label>
+          <textarea id="coopComment" class="coop-textarea" placeholder="Comentário sobre a resposta…"></textarea>
+          <div class="coop-modal-actions"><button class="coop-btn-primary" id="coopGroupGrade" type="button">Enviar correção</button></div></div>`;
+      }
+    } else if(canCorrect && myCorr){
+      html += `<p class="coop-empty">Você já corrigiu esta questão. Veja abaixo as correções do grupo.</p>`;
+    }
+    // Agregado: correções do grupo + pendentes
+    const maxScore = q.maxScore || 10;
+    html += `<div class="coop-group-corrs"><div class="coop-ans-lbl">Correções do grupo (${corrections.length}/${correctors.length})</div>`;
+    if(!correctors.length){
+      html += `<p class="coop-empty">A sala ainda não tem outros membros pra corrigir.</p>`;
+    } else {
+      html += correctors.map(m => {
+        const c = corrections.find(x => String(x.corrector_id) === String(m.user_id));
+        const name = _coopName(m.user_id);
+        if(!c) return `<div class="coop-group-corr is-pending"><span class="coop-gc-name">${Util.esc(name)}</span><span class="coop-gc-status">pendente</span></div>`;
+        const verdictLabel = isQuiz
+          ? (c.verdict === 'correct' ? 'Correta' : (c.verdict === 'incorrect' ? 'Incorreta' : '—'))
+          : ('Nota ' + (c.grade != null ? c.grade : '—') + ' / ' + maxScore);
+        return `<div class="coop-group-corr"><div class="coop-gc-top"><span class="coop-gc-name">${Util.esc(name)}</span><span class="coop-gc-verdict">${Util.esc(verdictLabel)}</span></div>${c.comment?`<div class="coop-corr-comment">${_rich(c.comment)}</div>`:''}</div>`;
+      }).join('');
+    }
+    html += `</div>`;
+    // Gabarito
+    if(isQuiz){
+      html += `<div class="coop-model"><div class="coop-ans-lbl">Gabarito</div><div class="coop-corr-grade">Resposta correta: <strong>${Util.esc(q.key || '—')}</strong></div>${q.comments?`<div class="coop-model-body">${q.comments}</div>`:''}</div>`;
+    } else {
+      html += `<div class="coop-col-gab"><div class="coop-gab-lbl">Gabarito / critérios</div>${_gabTabsHTML(q)}</div>`;
+    }
+    body.innerHTML = html;
+  }
+  async function _coopSubmitGroupCorrection(fields){
+    const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    if(!me || !me.id || !window._sb) return false;
+    try{
+      const row = Object.assign({ session_id: _session.id, corrector_id: me.id, updated_at: new Date().toISOString() }, fields);
+      const { error } = await window._sb.schema('aluno').from('coop_corrections').upsert(row, { onConflict:'session_id,corrector_id' });
+      if(error){ if(window.ueToast) ueToast('Erro: ' + error.message, 'error'); return false; }
+      if(window.Coop){ const _sid = _forumSubjectOfUnit(_session.unit_id); const _sig = _sid ? _forumSubjectLabel(_sid) : ''; await Coop.notifyDone(_session.from_user, _session.id, { qtype:_session.question_type, subject:_sig, room_id:_session.room_id }); }
+      _session._corrections = await _coopFetchCorrections(_session.id);
+      render();
+      if(window.ueToast) ueToast('Correção enviada!', 'success');
+      return true;
+    }catch(e){ console.warn('[coop group submit]', e); if(window.ueToast) ueToast('Erro inesperado ao enviar.', 'error'); return false; }
+  }
   function render(){
+    if(_session && _session.room_id){ _renderGroup(); return; }
     const s = _session, q = s.question || {}, body = _el.querySelector('#coopSessBody');
     const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null, meId = me && me.id;
     const isReviewer = meId && String(meId) === String(s.to_user);
@@ -21359,6 +21494,28 @@ const CoopSessionModal = (function(){
     }
     const vb = e.target.closest('.coop-verdict-btn');
     if(vb){ const wrap = vb.closest('#coopVerdict'); if(wrap){ wrap.querySelectorAll('.coop-verdict-btn').forEach(b => b.classList.toggle('on', b === vb)); } return; }
+    // GRUPO — enviar nota (discursiva)
+    const gGrade = e.target.closest('#coopGroupGrade');
+    if(gGrade){
+      const gv = _el.querySelector('#coopGrade').value; const grade = parseFloat(gv);
+      const comment = (_el.querySelector('#coopComment').value || '').trim();
+      if(gv === '' || isNaN(grade)){ if(window.ueToast) window.ueToast('Dê uma nota antes de enviar.', 'warn'); return; }
+      gGrade.disabled = true; gGrade.textContent = 'Enviando…';
+      const ok = await _coopSubmitGroupCorrection({ grade, comment: comment || null });
+      if(!ok){ gGrade.disabled = false; gGrade.textContent = 'Enviar correção'; }
+      return;
+    }
+    // GRUPO — enviar veredito (objetiva)
+    const gVerdict = e.target.closest('#coopGroupVerdict');
+    if(gVerdict){
+      const sel = _el.querySelector('#coopVerdict .coop-verdict-btn.on');
+      if(!sel){ if(window.ueToast) window.ueToast('Escolha Correta ou Incorreta.', 'warn'); return; }
+      const comment = (_el.querySelector('#coopComment').value || '').trim();
+      gVerdict.disabled = true; gVerdict.textContent = 'Enviando…';
+      const ok = await _coopSubmitGroupCorrection({ verdict: sel.dataset.verdict, comment: comment || null });
+      if(!ok){ gVerdict.disabled = false; gVerdict.textContent = 'Enviar avaliação'; }
+      return;
+    }
     // Discursiva — enviar nota
     const send = e.target.closest('#coopSendCorrection');
     if(send){
@@ -21398,11 +21555,124 @@ const CoopSessionModal = (function(){
       return;
     }
   }
-  function open(session){ _session = session; const el = ensureEl(); render(); el.classList.add('open'); }
+  async function open(session){
+    _session = session; const el = ensureEl();
+    _coopGroupInjectStyles();
+    if(session && session.room_id){
+      // Modo grupo: carrega correções + membros antes de renderizar.
+      el.querySelector('#coopSessBody').innerHTML = '<p class="coop-empty">Carregando…</p>';
+      el.classList.add('open');
+      _session._corrections = await _coopFetchCorrections(session.id);
+      _session._members = (typeof _salasFetchMembers === 'function') ? await _salasFetchMembers(session.room_id) : [];
+    }
+    render(); el.classList.add('open');
+  }
   function close(){ if(_el) _el.classList.remove('open'); }
   return { open, close };
 })();
 window._coopOpenModal = function(s){ CoopSessionModal.open(s); };
+
+/* ═══════════ CoopStudy em GRUPO (Fase 5.3 — Parte B) ═══════════
+   Envia uma questão pra uma SALA (room_id na coop_sessions). Cada membro corrige
+   numa linha própria em coop_corrections (sem conflito de escrita). O autor e os
+   membros veem o agregado: quem corrigiu como X e quem está pendente. */
+function _coopName(uid){
+  const u = (window.UserDirectory && UserDirectory.getById) ? UserDirectory.getById(uid) : null;
+  return u ? (u.nickname || ('@' + (u.handle || 'colega'))) : 'Aluno';
+}
+async function _coopFetchCorrections(sessionId){
+  if(!window._sb || !sessionId) return [];
+  try{ const { data, error } = await window._sb.schema('aluno').from('coop_corrections').select('*').eq('session_id', sessionId);
+    if(error){ console.warn('[coop corr fetch]', error.message); return []; } return data || []; }
+  catch(e){ console.warn('[coop corr fetch ex]', e); return []; }
+}
+async function _coopFetchRoomActivities(roomId){
+  if(!window._sb || !roomId) return [];
+  try{ const { data, error } = await window._sb.schema('aluno').from('coop_sessions').select('*')
+      .eq('room_id', roomId).order('created_at', { ascending:false });
+    if(error){ console.warn('[coop room acts]', error.message); return []; } return data || []; }
+  catch(e){ console.warn('[coop room acts ex]', e); return []; }
+}
+async function _coopCorrectionCounts(sessionIds){
+  const out = {};
+  if(!window._sb || !sessionIds || !sessionIds.length) return out;
+  try{ const { data } = await window._sb.schema('aluno').from('coop_corrections').select('session_id').in('session_id', sessionIds);
+    (data || []).forEach(r => { out[r.session_id] = (out[r.session_id] || 0) + 1; }); }
+  catch(e){ console.warn('[coop corr counts]', e); }
+  return out;
+}
+async function _coopNotifyRoom(room, coopId, qtype, ctx){
+  if(!coopId || !room || !room.id) return;
+  const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null, meId = me && me.id;
+  const _sid = (typeof _forumSubjectOfUnit === 'function') ? _forumSubjectOfUnit(ctx && ctx.unitId) : null;
+  const _sig = (_sid && typeof _forumSubjectLabel === 'function') ? _forumSubjectLabel(_sid) : '';
+  const members = (typeof _salasFetchMembers === 'function') ? await _salasFetchMembers(room.id) : [];
+  for(const m of members){
+    if(!m || m.status !== 'member' || String(m.user_id) === String(meId)) continue;
+    await _coopCreateNotif(m.user_id, 'coop_request', { from_user_id: meId, coop_id: coopId, room_id: room.id, room_name: room.name || '', qtype, subject: _sig });
+  }
+}
+async function _coopSendGroupEssay(room, item, answerText, ctx, blockId, itemId){
+  const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(!me || !me.id || !window._sb || !room || !room.id) return;
+  try{
+    const sid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
+    const ins = { from_user: me.id, to_user: null, room_id: room.id, question_type:'essay', unit_id:(ctx&&ctx.unitId)||null, item_id:itemId, question:_coopPackageEssay(item), author_answer:{ text:answerText }, status:'open' };
+    if(sid) ins.id = sid;
+    const q = window._sb.schema('aluno').from('coop_sessions').insert(ins);
+    const { data, error } = sid ? await q : await q.select('id').single();
+    if(error){ if(window.ueToast) ueToast('Erro ao enviar: ' + error.message, 'error'); return; }
+    const newId = sid || (data && data.id);
+    await _coopNotifyRoom(room, newId, 'essay', ctx);
+    if(window.ueToast) ueToast('Questão enviada para a sala ' + (room.name || '') + '!', 'success');
+  }catch(e){ console.warn('[coop group essay]', e); if(window.ueToast) ueToast('Erro inesperado ao enviar.', 'error'); }
+}
+async function _coopSendGroupQuiz(room, item, prior, ctx, blockId, itemId){
+  const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(!me || !me.id || !window._sb || !room || !room.id) return;
+  const author_answer = { value:(prior && prior.selected != null) ? prior.selected : '', is_correct: !!(prior && prior.correct) };
+  try{
+    const sid = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
+    const ins = { from_user: me.id, to_user: null, room_id: room.id, question_type:'quiz', unit_id:(ctx&&ctx.unitId)||null, item_id:itemId, question:_coopPackageQuiz(item), author_answer, status:'open' };
+    if(sid) ins.id = sid;
+    const q = window._sb.schema('aluno').from('coop_sessions').insert(ins);
+    const { data, error } = sid ? await q : await q.select('id').single();
+    if(error){ if(window.ueToast) ueToast('Erro ao enviar: ' + error.message, 'error'); return; }
+    const newId = sid || (data && data.id);
+    await _coopNotifyRoom(room, newId, 'quiz', ctx);
+    if(window.ueToast) ueToast('Questão enviada para a sala ' + (room.name || '') + '!', 'success');
+  }catch(e){ console.warn('[coop group quiz]', e); if(window.ueToast) ueToast('Erro inesperado ao enviar.', 'error'); }
+}
+window._coopSendGroupEssay = _coopSendGroupEssay;
+window._coopSendGroupQuiz = _coopSendGroupQuiz;
+function _coopGroupInjectStyles(){
+  if(document.getElementById('uq-coopgroup-styles')) return;
+  const st = document.createElement('style'); st.id = 'uq-coopgroup-styles';
+  st.textContent = `
+  .coop-pick-tabs{ display:flex; gap:.4rem; margin-bottom:.9rem; }
+  .coop-pick-tab{ flex:1; background:none; border:1px solid var(--accent-border-soft); border-radius:var(--radius); color:var(--text-dim); font-family:var(--sans); font-size:.8rem; padding:.5rem .6rem; cursor:pointer; }
+  .coop-pick-tab:hover{ color:var(--text); }
+  .coop-pick-tab.on{ background:var(--accent-lo); border-color:var(--accent); color:var(--accent); }
+  .coop-pick-room-av{ background:var(--accent-lo); color:var(--accent); font-family:var(--mono); }
+  .coop-group-corrs{ margin-top:1.1rem; }
+  .coop-group-corr{ border:1px solid var(--accent-border-soft); border-radius:var(--radius); padding:.7rem .85rem; margin-top:.5rem; background:var(--accent-glow); }
+  .coop-group-corr.is-pending{ display:flex; align-items:center; justify-content:space-between; background:none; border-style:dashed; color:var(--text-mute); }
+  .coop-gc-top{ display:flex; align-items:center; justify-content:space-between; gap:.6rem; }
+  .coop-gc-name{ font-family:var(--sans); font-weight:600; font-size:.86rem; color:var(--text); }
+  .coop-gc-verdict{ font-family:var(--mono); font-size:.66rem; letter-spacing:.04em; color:var(--accent); white-space:nowrap; }
+  .coop-gc-status{ font-family:var(--mono); font-size:.62rem; letter-spacing:.08em; text-transform:uppercase; color:var(--text-mute); }
+  .salas-acts{ margin-top:1.2rem; }
+  .salas-acts-head{ font-family:var(--mono); font-size:.62rem; letter-spacing:.14em; text-transform:uppercase; color:var(--text-mute); margin-bottom:.7rem; }
+  .salas-act{ width:100%; text-align:left; display:flex; align-items:center; gap:.9rem; border:1px solid var(--accent-border-soft); border-radius:var(--radius); background:var(--bg-card); padding:.8rem 1rem; cursor:pointer; margin-bottom:.5rem; color:var(--text); font-family:var(--sans); }
+  .salas-act:hover{ border-color:var(--accent); background:var(--accent-glow); }
+  .salas-act-main{ flex:1; min-width:0; }
+  .salas-act-t{ font-size:.9rem; color:var(--text); margin-bottom:.15rem; }
+  .salas-act-sub{ font-size:.72rem; color:var(--text-dim); }
+  .salas-act-kind{ font-family:var(--mono); font-size:.56rem; letter-spacing:.1em; text-transform:uppercase; color:var(--accent); background:var(--accent-lo); border-radius:3px; padding:.2rem .45rem; flex-shrink:0; }
+  .salas-act-count{ font-family:var(--mono); font-size:.64rem; color:var(--text-mute); flex-shrink:0; white-space:nowrap; }
+  `;
+  document.head.appendChild(st);
+}
 
 /* ═══════════════════ SALAS DE ESTUDOS (Fase 5.3) — Parte A ═══════════════════ */
 function _salasMyUid(){ const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null; return (u && u.id) ? u.id : null; }
@@ -21632,9 +21902,24 @@ Renderers.salas.mount = function(stageEl){
   async function renderMain(){
     const room = _salasRooms.find(r => String(r.id) === String(_salasCurrentId));
     if(!room){ mainEl.innerHTML = '<div class="salas-main-empty"><p>Selecione uma sala ao lado, ou crie uma nova pra começar.</p></div>'; return; }
+    _coopGroupInjectStyles();
     const isOwner = String(room.creator_id) === String(_salasMyUid());
     const members = (await _salasFetchMembers(room.id)).filter(m => m.status === 'member');
     const avs = members.map(m => { const u = _salasResolveUser(m.user_id); return `<div class="salas-mesa-av" data-url="${Util.attr(u.photoUrl||'')}" data-x="${(u.photoTransform&&u.photoTransform.x)||0}" data-y="${(u.photoTransform&&u.photoTransform.y)||0}" data-s="${(u.photoTransform&&u.photoTransform.scale)||1}" title="${Util.esc(u.nickname || u.handle || 'Aluno')}"><span>${Util.esc(Util.initials(u.nickname || u.handle || '?'))}</span></div>`; }).join('');
+    // Mural de atividades do grupo (CoopStudy em grupo — Parte B)
+    const acts = await _coopFetchRoomActivities(room.id);
+    const counts = await _coopCorrectionCounts(acts.map(a => a.id));
+    const corrTotal = Math.max(0, members.length - 1);
+    const _strip = (s) => String(s || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    const actsHtml = acts.length ? `<div class="salas-acts"><div class="salas-acts-head">Atividades do grupo</div>${acts.map(a => {
+        const q = a.question || {}; const isQuiz = a.question_type === 'quiz' || q.kind === 'quiz';
+        const title = _strip(isQuiz ? (q.assertion || 'Questão objetiva') : (q.command || q.statement || 'Questão discursiva')).slice(0, 100) || (isQuiz ? 'Questão objetiva' : 'Questão discursiva');
+        return `<button class="salas-act" type="button" data-act="${Util.attr(a.id)}">
+          <span class="salas-act-kind">${isQuiz ? 'Objetiva' : 'Discursiva'}</span>
+          <div class="salas-act-main"><div class="salas-act-t">${Util.esc(title)}</div><div class="salas-act-sub">enviada por ${Util.esc(_coopName(a.from_user))}</div></div>
+          <span class="salas-act-count">${counts[a.id] || 0}/${corrTotal} corrigiram</span>
+        </button>`;
+      }).join('')}</div>` : '';
     mainEl.innerHTML = `<section class="salas-group">
       <div class="salas-room-head">
         <div><span class="salas-group-eyebrow">Sala de estudos</span><h2 class="salas-room-title">${Util.esc(room.name)}</h2>${room.description?`<p class="salas-room-desc">${Util.esc(room.description)}</p>`:''}</div>
@@ -21649,6 +21934,7 @@ Renderers.salas.mount = function(stageEl){
         <div class="salas-mesa">${avs || '<p class="salas-empty">Sem membros ainda — convide colegas.</p>'}</div>
         <p class="salas-mesa-note">A Mesa ao vivo (online + o que cada um está estudando, com chamas no streak) chega na próxima parte.</p>
       </div>
+      ${actsHtml || '<div class="salas-acts"><div class="salas-acts-head">Atividades do grupo</div><p class="salas-empty">Nenhuma atividade ainda. Resolva uma questão e use o botão CoopStudy → "Uma sala" pra enviar pro grupo corrigir.</p></div>'}
     </section>`;
     mainEl.querySelectorAll('.salas-mesa-av[data-url]').forEach(el => { const url = el.dataset.url; if(url) renderAvatarInto(el, url, { x:parseFloat(el.dataset.x)||0, y:parseFloat(el.dataset.y)||0, scale:parseFloat(el.dataset.s)||1 }); });
   }
@@ -21665,7 +21951,8 @@ Renderers.salas.mount = function(stageEl){
   stageEl.querySelector('#salasNewBtn').addEventListener('click', () => _salasOpenCreateModal(() => renderList()));
   mainEl.addEventListener('click', async e => {
     const inv = e.target.closest('[data-invite]');
-    if(inv){ const room = _salasRooms.find(r => String(r.id) === String(inv.dataset.invite)); if(window.CoopPicker) CoopPicker.open({ title:'Convidar para a sala', subtitle:'Escolha um colega (vocês se seguem mutuamente).', onPick:(p) => _salasInvite(inv.dataset.invite, room ? room.name : '', p) }); return; }
+    if(inv){ const room = _salasRooms.find(r => String(r.id) === String(inv.dataset.invite)); if(window.CoopPicker) CoopPicker.open({ title:'Convidar para a sala', partnersOnly:true, onPickPartner:(p) => _salasInvite(inv.dataset.invite, room ? room.name : '', p) }); return; }
+    const act = e.target.closest('[data-act]'); if(act){ if(window.Coop && Coop.openSession) Coop.openSession(act.dataset.act); return; }
     const del = e.target.closest('[data-del]'); if(del){ if(await _salasDelete(del.dataset.del)) renderList(); return; }
     const lv = e.target.closest('[data-leave]'); if(lv){ if(await _salasLeave(lv.dataset.leave)) renderList(); return; }
     const dt = e.target.closest('[data-drawer-toggle]'); if(dt){ drawer.hidden = !drawer.hidden; return; }
