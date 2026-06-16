@@ -17264,7 +17264,116 @@ async function _recordPlatformAccess(userId){
     const { error } = await window._sb.schema('aluno').from('platform_access')
       .upsert({ user_id: userId, access_date, last_at: new Date().toISOString() }, { onConflict: 'user_id,access_date' });
     if(error) console.warn('[platform_access]', error.message);
+    _computeStoreStreak(userId).catch(()=>{});
   }catch(e){ console.warn('[platform_access ex]', e); }
+}
+
+/* ═══════════ Presença / atividade / streak (Fase 5.3 — Parte C) ═══════════ */
+function _dayFmt(x){ return x.getFullYear() + '-' + String(x.getMonth()+1).padStart(2,'0') + '-' + String(x.getDate()).padStart(2,'0'); }
+// Conta dias CONSECUTIVOS até hoje no platform_access e grava em user_profiles.
+async function _computeStoreStreak(userId){
+  if(!userId || !window._sb) return;
+  try{
+    const { data } = await window._sb.schema('aluno').from('platform_access')
+      .select('access_date').eq('user_id', userId).order('access_date', { ascending:false }).limit(200);
+    const set = new Set((data || []).map(r => r.access_date));
+    let streak = 0; const d = new Date();
+    while(set.has(_dayFmt(d))){ streak++; d.setDate(d.getDate() - 1); }
+    const today = _dayFmt(new Date());
+    await window._sb.schema('crm').from('user_profiles').update({ streak, streak_day: today }).eq('user_id', userId);
+    window._myStreak = streak;
+  }catch(e){ console.warn('[streak]', e); }
+}
+// Streak válido = não quebrou (último dia computado é hoje ou ontem).
+function _streakValid(streak, streakDay){
+  if(!streak || !streakDay) return false;
+  const t = new Date(); const y = new Date(); y.setDate(y.getDate() - 1);
+  return streakDay === _dayFmt(t) || streakDay === _dayFmt(y);
+}
+// Grava "o que estou estudando agora" (matéria + unidade) — só quando a unidade muda.
+let _lastActivityUnit = null;
+async function _recordCurrentActivity(unitId){
+  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
+  if(!uid || !window._sb || !unitId) return;
+  if(String(_lastActivityUnit) === String(unitId)) return;
+  _lastActivityUnit = unitId;
+  const sid = (typeof _forumSubjectOfUnit === 'function') ? _forumSubjectOfUnit(unitId) : null;
+  const label = (sid && typeof _forumSubjectLabel === 'function') ? _forumSubjectLabel(sid) : '';
+  try{
+    await window._sb.schema('crm').from('user_profiles')
+      .update({ current_activity: { subject: label, subject_id: sid, unit_id: unitId, at: new Date().toISOString() } })
+      .eq('user_id', uid);
+  }catch(e){ console.warn('[activity]', e); }
+}
+// Busca presença (online / última vez / atividade / streak) de uma lista de ids.
+async function _presenceFetch(userIds){
+  const out = {};
+  const ids = [...new Set((userIds || []).map(String))].filter(Boolean);
+  if(!ids.length || !window._sb) return out;
+  try{
+    const { data } = await window._sb.schema('crm').from('user_profiles')
+      .select('user_id, last_seen_at, current_activity, streak, streak_day').in('user_id', ids);
+    const now = Date.now();
+    (data || []).forEach(r => {
+      const seen = r.last_seen_at ? new Date(r.last_seen_at).getTime() : 0;
+      out[String(r.user_id)] = {
+        online: !!seen && (now - seen) < 3 * 60 * 1000,
+        lastSeen: seen,
+        activity: r.current_activity || null,
+        streak: _streakValid(r.streak, r.streak_day) ? r.streak : 0
+      };
+    });
+  }catch(e){ console.warn('[presence]', e); }
+  return out;
+}
+function _relTime(ts){
+  if(!ts) return '';
+  const diff = Date.now() - ts;
+  if(diff < 60 * 1000) return 'agora';
+  const m = Math.floor(diff / 60000); if(m < 60) return 'há ' + m + 'min';
+  const h = Math.floor(m / 60); if(h < 24) return 'há ' + h + 'h';
+  const dd = Math.floor(h / 24); return 'há ' + dd + (dd === 1 ? ' dia' : ' dias');
+}
+// Ícone de chama (sem emoji — SVG no padrão da plataforma).
+const _FLAME_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M13.5 0.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z"/></svg>';
+// Linha de status estilo Steam: online → "estudando MATÉRIA" / "online"; offline → "visto há X".
+function _presenceStatusHTML(p){
+  if(!p) return '';
+  if(p.online){
+    const subj = p.activity && p.activity.subject;
+    return subj
+      ? `<span class="pres-status is-online">estudando ${Util.esc(subj)}</span>`
+      : `<span class="pres-status is-online">online</span>`;
+  }
+  return p.lastSeen ? `<span class="pres-status">visto ${Util.esc(_relTime(p.lastSeen))}</span>` : '';
+}
+function _streakChipHTML(streak){
+  return streak > 0 ? `<span class="pres-streak" title="${streak} dias seguidos">${_FLAME_SVG}${streak}</span>` : '';
+}
+function _presenceInjectStyles(){
+  if(document.getElementById('uq-presence-styles')) return;
+  const st = document.createElement('style'); st.id = 'uq-presence-styles';
+  st.textContent = `
+  .pres-dot{ position:absolute; right:-1px; bottom:-1px; width:13px; height:13px; border-radius:50%; background:var(--text-mute); border:2px solid var(--bg); box-sizing:border-box; }
+  .pres-dot.is-online{ background:#57c785; }
+  .pres-dot.is-online::after{ content:''; position:absolute; inset:-3px; border-radius:50%; border:2px solid #57c785; opacity:.6; animation:presPulse 1.8s ease-out infinite; }
+  @keyframes presPulse{ 0%{ transform:scale(.7); opacity:.6; } 100%{ transform:scale(1.5); opacity:0; } }
+  .pres-status{ font-family:var(--sans); font-size:.72rem; color:var(--text-mute); }
+  .pres-status.is-online{ color:#57c785; }
+  .pres-streak{ display:inline-flex; align-items:center; gap:.15rem; font-family:var(--mono); font-size:.66rem; color:#e08a3c; font-weight:600; vertical-align:middle; }
+  .pres-streak svg{ width:12px; height:12px; }
+  .peer-card-avwrap{ position:relative; flex-shrink:0; }
+  .peer-card-avwrap .pres-dot{ right:1px; bottom:1px; }
+  .peer-card-status{ margin-top:.15rem; }
+  .salas-mesa-wrap{ display:inline-flex; flex-direction:column; align-items:center; gap:.35rem; width:64px; }
+  .salas-mesa-avbox{ position:relative; width:48px; height:48px; flex-shrink:0; }
+  .salas-mesa-avbox .pres-dot{ right:1px; bottom:1px; }
+  .salas-mesa-sub{ font-family:var(--sans); font-size:.6rem; line-height:1.25; text-align:center; color:var(--text-mute); max-width:64px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .salas-mesa-sub.is-online{ color:#57c785; }
+  .salas-mesa-streak{ display:inline-flex; align-items:center; gap:.1rem; font-family:var(--mono); font-size:.58rem; color:#e08a3c; font-weight:600; }
+  .salas-mesa-streak svg{ width:10px; height:10px; }
+  `;
+  document.head.appendChild(st);
 }
 // Quando o aluno volta pra aba depois de um tempo, re-registra a presença.
 if(typeof document !== 'undefined' && !window._accessVisBound){
@@ -17861,60 +17970,64 @@ Renderers.account.mount = function(stageEl){
   });
 
   // ── Tab "Colegas de estudo" — render dinâmico ──
-  function renderUserCard(u, actionsHtml){
+  function renderUserCard(u, actionsHtml, presence){
     // Privacidade: card mostra APELIDO (ou @) — nome completo só no modal
     const initials = Util.esc(Util.initials(u.nickname || u.handle || '?'));
     const t = u.photoTransform || { x:0, y:0, scale:1 };
     const photoAttrs = u.photoUrl
       ? `data-photo-url="${Util.attr(u.photoUrl)}" data-photo-x="${t.x||0}" data-photo-y="${t.y||0}" data-photo-s="${t.scale||1}"`
       : '';
+    const p = presence || null;
+    const dot = `<span class="pres-dot${p && p.online ? ' is-online' : ''}"></span>`;
+    const streak = (typeof _streakChipHTML === 'function') ? _streakChipHTML(p ? p.streak : 0) : '';
+    const status = (typeof _presenceStatusHTML === 'function') ? _presenceStatusHTML(p) : '';
     return `<div class="peer-card">
-      <div class="peer-card-avatar" ${photoAttrs} data-open-profile="${Util.attr(u.id)}">
-        <span class="peer-card-initials">${initials}</span>
+      <div class="peer-card-avwrap" data-open-profile="${Util.attr(u.id)}">
+        <div class="peer-card-avatar" ${photoAttrs}>
+          <span class="peer-card-initials">${initials}</span>
+        </div>${dot}
       </div>
       <div class="peer-card-body" data-open-profile="${Util.attr(u.id)}" style="cursor:pointer">
-        <div class="peer-card-name">${Util.esc(u.nickname || '@' + (u.handle || 'sem-id'))}</div>
+        <div class="peer-card-name">${Util.esc(u.nickname || '@' + (u.handle || 'sem-id'))}${streak ? (' ' + streak) : ''}</div>
         <div class="peer-card-handle">@${Util.esc(u.handle || 'sem-id')}</div>
+        ${status ? `<div class="peer-card-status">${status}</div>` : ''}
       </div>
       <div class="peer-card-actions">${actionsHtml || ''}</div>
     </div>`;
   }
-  function renderPeersAllSubpanes(){
+  async function renderPeersAllSubpanes(){
     const fresh = Auth.getUser();
     if(!fresh) return;
     const meId = fresh.id;
-    // Pedidos (incoming pending)
-    const incoming = Follows.pendingIncoming(meId).map(f => {
-      const u = UserDirectory.getById(f.follower_id);
-      if(!u) return '';
-      const actions =
+    if(typeof _presenceInjectStyles === 'function') _presenceInjectStyles();
+    // Monta as 4 listas como {u, actions} (presença é resolvida depois, num lote)
+    const incomingRaw = Follows.pendingIncoming(meId).map(f => {
+      const u = UserDirectory.getById(f.follower_id); if(!u) return null;
+      return { u, actions:
         `<button class="btn btn-ghost btn-sm" data-peers-accept="${Util.attr(f.id)}">Aceitar</button>
-         <button class="btn btn-ghost btn-sm" data-peers-decline="${Util.attr(f.id)}" style="color:var(--red)">Recusar</button>`;
-      return renderUserCard(u, actions);
+         <button class="btn btn-ghost btn-sm" data-peers-decline="${Util.attr(f.id)}" style="color:var(--red)">Recusar</button>` };
     }).filter(Boolean);
-    // Colegas mutuais
-    const mutual = Follows.mutual(meId).map(f => {
-      const u = UserDirectory.getById(f.following_id);
-      if(!u) return '';
-      return renderUserCard(u, '<span class="peer-tag is-mutual">colega mutual</span>');
+    const mutualRaw = Follows.mutual(meId).map(f => {
+      const u = UserDirectory.getById(f.following_id); if(!u) return null;
+      return { u, actions: '<span class="peer-tag is-mutual">colega mutual</span>' };
     }).filter(Boolean);
-    // Seguindo
-    const following = Follows.following(meId).map(f => {
-      const u = UserDirectory.getById(f.following_id);
-      if(!u) return '';
-      const actions = `<button class="btn btn-ghost btn-sm" data-peers-unfollow="${Util.attr(u.id)}">Deixar de seguir</button>`;
-      return renderUserCard(u, actions);
+    const followingRaw = Follows.following(meId).map(f => {
+      const u = UserDirectory.getById(f.following_id); if(!u) return null;
+      return { u, actions: `<button class="btn btn-ghost btn-sm" data-peers-unfollow="${Util.attr(u.id)}">Deixar de seguir</button>` };
     }).filter(Boolean);
-    // Seguidores
-    const followers = Follows.followers(meId).map(f => {
-      const u = UserDirectory.getById(f.follower_id);
-      if(!u) return '';
+    const followersRaw = Follows.followers(meId).map(f => {
+      const u = UserDirectory.getById(f.follower_id); if(!u) return null;
       const rel = Follows.relationshipWith(meId, u.id);
       const actions = rel.iFollow
         ? '<span class="peer-tag is-mutual">colega mutual</span>'
         : `<button class="btn btn-ghost btn-sm" data-peers-followback="${Util.attr(u.id)}">Seguir de volta</button>`;
-      return renderUserCard(u, actions);
+      return { u, actions };
     }).filter(Boolean);
+    // Presença (online / atividade / streak) de todos os exibidos — 1 só consulta
+    const allIds = [...incomingRaw, ...mutualRaw, ...followingRaw, ...followersRaw].map(x => x.u.id);
+    const pres = (typeof _presenceFetch === 'function') ? await _presenceFetch(allIds) : {};
+    const renderList = arr => arr.map(x => renderUserCard(x.u, x.actions, pres[String(x.u.id)]));
+    const incoming = renderList(incomingRaw), mutual = renderList(mutualRaw), following = renderList(followingRaw), followers = renderList(followersRaw);
 
     function fillPane(key, hits, emptyMsg){
       const pane = stageEl.querySelector('[data-peers-pane="' + key + '"]');
@@ -21987,8 +22100,27 @@ Renderers.salas.mount = function(stageEl){
     if(!room){ mainEl.innerHTML = '<div class="salas-main-empty"><p>Selecione uma sala ao lado, ou crie uma nova pra começar.</p></div>'; return; }
     _coopGroupInjectStyles();
     const isOwner = String(room.creator_id) === String(_salasMyUid());
+    if(typeof _presenceInjectStyles === 'function') _presenceInjectStyles();
     const members = (await _salasFetchMembers(room.id)).filter(m => m.status === 'member');
-    const avs = members.map(m => { const u = _salasResolveUser(m.user_id); return `<div class="salas-mesa-av" data-url="${Util.attr(u.photoUrl||'')}" data-x="${(u.photoTransform&&u.photoTransform.x)||0}" data-y="${(u.photoTransform&&u.photoTransform.y)||0}" data-s="${(u.photoTransform&&u.photoTransform.scale)||1}" title="${Util.esc(u.nickname || u.handle || 'Aluno')}"><span>${Util.esc(Util.initials(u.nickname || u.handle || '?'))}</span></div>`; }).join('');
+    // Mesa ao vivo (Parte C): presença + matéria atual + streak de cada membro
+    const mesaPres = (typeof _presenceFetch === 'function') ? await _presenceFetch(members.map(m => m.user_id)) : {};
+    const avs = members.map(m => {
+      const u = _salasResolveUser(m.user_id);
+      const p = mesaPres[String(m.user_id)];
+      const name = u.nickname || u.handle || 'Aluno';
+      let sub = '';
+      if(p && p.online){ sub = `<span class="salas-mesa-sub is-online">${p.activity && p.activity.subject ? Util.esc('estudando ' + p.activity.subject) : 'online'}</span>`; }
+      else if(p && p.lastSeen){ sub = `<span class="salas-mesa-sub">${Util.esc(_relTime(p.lastSeen))}</span>`; }
+      else { sub = `<span class="salas-mesa-sub">${Util.esc(name)}</span>`; }
+      const streak = (p && p.streak > 0) ? `<span class="salas-mesa-streak" title="${p.streak} dias seguidos">${_FLAME_SVG}${p.streak}</span>` : '';
+      return `<div class="salas-mesa-wrap" title="${Util.esc(name)}">
+        <div class="salas-mesa-avbox">
+          <div class="salas-mesa-av" data-url="${Util.attr(u.photoUrl||'')}" data-x="${(u.photoTransform&&u.photoTransform.x)||0}" data-y="${(u.photoTransform&&u.photoTransform.y)||0}" data-s="${(u.photoTransform&&u.photoTransform.scale)||1}"><span>${Util.esc(Util.initials(name))}</span></div>
+          <span class="pres-dot${p && p.online ? ' is-online' : ''}"></span>
+        </div>
+        ${sub}${streak}
+      </div>`;
+    }).join('');
     // Mural de atividades do grupo (CoopStudy em grupo — Parte B)
     const acts = await _coopFetchRoomActivities(room.id);
     const counts = await _coopCorrectionCounts(acts.map(a => a.id));
@@ -22015,7 +22147,7 @@ Renderers.salas.mount = function(stageEl){
       <div class="salas-mesa-card">
         <div class="salas-card-h">A Mesa <span class="salas-card-sub">${members.length} ${members.length===1?'membro':'membros'}</span></div>
         <div class="salas-mesa">${avs || '<p class="salas-empty">Sem membros ainda — convide colegas.</p>'}</div>
-        <p class="salas-mesa-note">A Mesa ao vivo (online + o que cada um está estudando, com chamas no streak) chega na próxima parte.</p>
+        <p class="salas-mesa-note">Bolinha verde = online agora · o que cada um está estudando · chama = dias seguidos de estudo.</p>
       </div>
       ${actsHtml || '<div class="salas-acts"><div class="salas-acts-head">Atividades do grupo</div><p class="salas-empty">Nenhuma atividade ainda. Resolva uma questão e use o botão CoopStudy → "Uma sala" pra enviar pro grupo corrigir.</p></div>'}
     </section>`;
@@ -31766,6 +31898,12 @@ const App = {
     let route = Router.parse();
     const user = Auth.getUser();
     const isAdminUser = !!user && (user.role === 'admin' || user.role === 'superadmin');
+
+    // Parte C — rastreia "o que estou estudando agora" ao abrir uma unidade
+    // (a própria função só grava quando a unidade muda).
+    if(user && route && route.view === 'unit' && route.params && route.params.unitId && typeof _recordCurrentActivity === 'function'){
+      _recordCurrentActivity(route.params.unitId);
+    }
 
     // Garante que o Store do usuário esteja inicializado ANTES de desenhar.
     // Sem isto, ao relogar sem reload o _state ficava nulo e a busca de
