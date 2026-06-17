@@ -22367,6 +22367,133 @@ async function _salasRenderRanking(drawer){
   });
 }
 
+/* ═══════════ Chat público da sala (Fase 5.3 — Parte H) ═══════════
+   Reusa o CSS do chat de suporte (.sup-msg-*/.sup-composer). Sem anexos, sem
+   auto-delete; carrega 10 por vez ("carregar mais") + realtime ao vivo. */
+function _salasChatInjectStyles(){
+  if(document.getElementById('uq-schat-styles')) return;
+  const st = document.createElement('style'); st.id = 'uq-schat-styles';
+  st.textContent = `
+  .salas-chat{ display:flex; flex-direction:column; gap:.5rem; }
+  .salas-chat-msgs{ display:flex; flex-direction:column; gap:.5rem; max-height:58vh; overflow-y:auto; padding:.2rem; min-height:120px; }
+  .salas-chat-more{ align-self:center; background:none; border:1px solid var(--accent-border-soft); border-radius:999px; color:var(--text-dim); font-family:var(--sans); font-size:.7rem; padding:.3rem .8rem; cursor:pointer; }
+  .salas-chat-more:hover{ color:var(--accent); border-color:var(--accent-border); }
+  .salas-chat-composer{ padding:.7rem 0 0 !important; border-top:1px solid var(--accent-border-soft) !important; background:transparent !important; }
+  .salas-chat-composer textarea{ min-height:38px; }
+  `;
+  document.head.appendChild(st);
+}
+function _salasChatBubbleHTML(m, meId){
+  const own = String(m.sender_id) === String(meId);
+  const u = _salasResolveUser(m.sender_id);
+  const name = u.nickname || u.handle || 'Aluno';
+  let when = '';
+  if(m.created_at){ const d = new Date(m.created_at); when = d.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit' }) + ' · ' + d.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' }); }
+  return `<div class="sup-msg-row${own ? ' is-own' : ''}" data-msg-id="${Util.attr(m.id)}">
+    ${own ? '' : `<div class="sup-msg-av" data-sup-av="${Util.attr(m.sender_id)}" data-open-profile="${Util.attr(m.sender_id)}"></div>`}
+    <div class="sup-msg">
+      ${own ? '' : `<span class="sup-msg-sender">${Util.esc(name)}</span>`}
+      <p class="sup-msg-text">${Util.esc(m.text || '')}</p>
+      <span class="sup-msg-time">${Util.esc(when)}</span>
+    </div>
+  </div>`;
+}
+function _salasChatHydrateAvatars(msgsEl){
+  msgsEl.querySelectorAll('[data-sup-av]').forEach(el => {
+    if(el.__avDone) return; el.__avDone = true;
+    const u = _salasResolveUser(el.getAttribute('data-sup-av'));
+    if(u && u.photoUrl && typeof renderAvatarInto === 'function') renderAvatarInto(el, u.photoUrl, u.photoTransform);
+    else el.textContent = Util.initials(u.nickname || u.handle || '?');
+  });
+}
+function _salasChatUnsubscribe(){ if(window._salasChatCh && window._sb){ try{ window._sb.removeChannel(window._salasChatCh); }catch(_){} window._salasChatCh = null; } }
+function _salasChatSubscribe(pane, roomId){
+  _salasChatUnsubscribe();
+  if(!window._sb || !window._sb.channel) return;
+  try{
+    window._salasChatCh = window._sb.channel('room-chat-' + roomId)
+      .on('postgres_changes', { event:'INSERT', schema:'aluno', table:'room_messages', filter:'room_id=eq.' + roomId }, (payload) => {
+        const m = payload && payload.new; if(!m) return;
+        const msgsEl = pane.querySelector('#salasChatMsgs'); if(!msgsEl) return;
+        if(msgsEl.querySelector('[data-msg-id="' + m.id + '"]')) return; // já está
+        _salasChatAppend(pane, m);
+      })
+      .subscribe();
+  }catch(e){ console.warn('[room chat rt]', e); }
+}
+async function _salasChatAppend(pane, m){
+  const msgsEl = pane.querySelector('#salasChatMsgs'); if(!msgsEl) return;
+  const ph = msgsEl.querySelector('.salas-soon'); if(ph) ph.remove();
+  if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded([m.sender_id]);
+  const atBottom = (msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight) < 60;
+  msgsEl.insertAdjacentHTML('beforeend', _salasChatBubbleHTML(m, _salasMyUid()));
+  _salasChatHydrateAvatars(msgsEl);
+  if(atBottom) msgsEl.scrollTop = msgsEl.scrollHeight;
+}
+async function _salasChatSend(pane){
+  const ta = pane.querySelector('#salasChatText'); if(!ta) return;
+  const text = (ta.value || '').trim();
+  if(!text || !window._sb || !_salasCurrentId) return;
+  const meId = _salasMyUid(); if(!meId) return;
+  ta.value = ''; ta.disabled = true;
+  try{
+    const { data, error } = await window._sb.schema('aluno').from('room_messages')
+      .insert({ room_id: _salasCurrentId, sender_id: meId, text }).select('*').single();
+    if(error){ if(window.ueToast) ueToast('Erro ao enviar: ' + error.message, 'error'); ta.value = text; }
+    else if(data){ await _salasChatAppend(pane, data); } // mostra na hora (realtime deduplica)
+  }catch(e){ console.warn('[chat send]', e); }
+  ta.disabled = false; ta.focus();
+}
+async function _salasChatLoadMore(pane){
+  const roomId = window._salasChatRoom; if(!roomId || !window._salasChatOldest || !window._sb) return;
+  try{
+    const { data } = await window._sb.schema('aluno').from('room_messages').select('*')
+      .eq('room_id', roomId).lt('created_at', window._salasChatOldest).order('created_at', { ascending:false }).limit(10);
+    const older = (data || []).slice().reverse();
+    const moreBtn = pane.querySelector('#salasChatMore');
+    if(!older.length){ if(moreBtn) moreBtn.hidden = true; return; }
+    if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(older.map(m => m.sender_id));
+    const msgsEl = pane.querySelector('#salasChatMsgs');
+    const prevH = msgsEl.scrollHeight;
+    msgsEl.insertAdjacentHTML('afterbegin', older.map(m => _salasChatBubbleHTML(m, _salasMyUid())).join(''));
+    _salasChatHydrateAvatars(msgsEl);
+    window._salasChatOldest = older[0].created_at;
+    msgsEl.scrollTop = msgsEl.scrollHeight - prevH; // mantém a posição visual
+    if(older.length < 10 && moreBtn) moreBtn.hidden = true;
+  }catch(e){ console.warn('[chat more]', e); }
+}
+async function _salasRenderChat(drawer){
+  const pane = drawer.querySelector('[data-spane="chat"]'); if(!pane) return;
+  const roomId = _salasCurrentId;
+  if(!roomId){ pane.innerHTML = '<p class="salas-soon">Selecione uma sala.</p>'; _salasChatUnsubscribe(); return; }
+  _salasChatInjectStyles();
+  const meId = _salasMyUid();
+  pane.innerHTML = `<div class="salas-chat">
+    <button class="salas-chat-more" id="salasChatMore" type="button" hidden>Carregar mais</button>
+    <div class="salas-chat-msgs" id="salasChatMsgs"><p class="salas-soon">Carregando…</p></div>
+    <form class="sup-composer salas-chat-composer" id="salasChatForm">
+      <textarea id="salasChatText" placeholder="Mensagem pro grupo…" maxlength="2000"></textarea>
+      <button class="btn-primary" type="submit">Enviar</button>
+    </form>
+  </div>`;
+  window._salasChatRoom = roomId; window._salasChatOldest = null;
+  const msgsEl = pane.querySelector('#salasChatMsgs');
+  try{
+    const { data } = await window._sb.schema('aluno').from('room_messages').select('*')
+      .eq('room_id', roomId).order('created_at', { ascending:false }).limit(10);
+    const msgs = (data || []).slice().reverse(); // mais antigas primeiro
+    if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(msgs.map(m => m.sender_id));
+    msgsEl.innerHTML = msgs.length ? msgs.map(m => _salasChatBubbleHTML(m, meId)).join('') : '<p class="salas-soon">Nenhuma mensagem ainda. Diga oi pro grupo!</p>';
+    _salasChatHydrateAvatars(msgsEl);
+    if(msgs.length){ window._salasChatOldest = msgs[0].created_at; }
+    const moreBtn = pane.querySelector('#salasChatMore'); if(moreBtn && msgs.length >= 10) moreBtn.hidden = false;
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+  }catch(e){ console.warn('[chat load]', e); msgsEl.innerHTML = '<p class="salas-soon">Erro ao carregar o chat.</p>'; }
+  pane.querySelector('#salasChatForm').addEventListener('submit', (e) => { e.preventDefault(); _salasChatSend(pane); });
+  const moreBtn2 = pane.querySelector('#salasChatMore'); if(moreBtn2) moreBtn2.addEventListener('click', () => _salasChatLoadMore(pane));
+  _salasChatSubscribe(pane, roomId);
+}
+
 /* ═══════════════════ SALAS DE ESTUDOS (Fase 5.3) — Parte A ═══════════════════ */
 function _salasMyUid(){ const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null; return (u && u.id) ? u.id : null; }
 let _salasRooms = [];
@@ -22551,9 +22678,11 @@ function _salasWireDrawer(drawer){
     drawer.querySelectorAll('.salas-stab').forEach(x => x.classList.toggle('on', x === b));
     drawer.querySelectorAll('.salas-pane').forEach(p => p.classList.toggle('on', p.dataset.spane === k));
     window._salasMetaEditing = false;
+    if(k !== 'chat') _salasChatUnsubscribe(); // sai do chat → cancela a antena
     if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
     else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
     else if(k === 'ranking'){ _salasRenderRanking(drawer); _salasDrawerStartPoll(drawer); }
+    else if(k === 'chat'){ _salasDrawerStopPoll(); _salasRenderChat(drawer); } // chat é realtime, sem poll
     else { _salasDrawerStopPoll(); }
   });
   // Clicar no apelido/avatar do feed abre o perfil; editar meta (dono)
@@ -22567,7 +22696,7 @@ function _salasWireDrawer(drawer){
       const rp = e.target.closest('[data-rankp]'); if(rp){ window._salasRankPeriod = rp.getAttribute('data-rankp'); _salasRenderRanking(drawer); return; }
     });
   }
-  const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; _salasDrawerStopPoll(); });
+  const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; _salasDrawerStopPoll(); _salasChatUnsubscribe(); });
   const rz = drawer.querySelector('.salas-drawer-resize');
   if(rz) rz.addEventListener('mousedown', e => {
     e.preventDefault(); document.body.style.userSelect = 'none';
@@ -22719,7 +22848,8 @@ Renderers.salas.mount = function(stageEl){
         if(k === 'ranking'){ _salasRenderRanking(drawer); _salasDrawerStartPoll(drawer); }
         else if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
         else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
-      } else { _salasDrawerStopPoll(); }
+        else if(k === 'chat'){ _salasRenderChat(drawer); }
+      } else { _salasDrawerStopPoll(); _salasChatUnsubscribe(); }
       return;
     }
   });
