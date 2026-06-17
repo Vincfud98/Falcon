@@ -11325,6 +11325,9 @@ const Store = (function(){
         _state.quizAnswers[unitId][blockId][itemId] = Object.assign({ answeredAt: Date.now() }, payload);
       }
       _persist(); _emit();
+      // Meta Coletiva: recontar as questões do dia (debounced) — vale também no
+      // modo adiado/marcado (que não sincroniza), pois conta do store local.
+      if(typeof window._scheduleDailyCount === 'function') window._scheduleDailyCount();
       // Modo adiado: seleção solta é salva SÓ localmente (opts.sync === false).
       // Ela não conta nas estatísticas globais nem sincroniza — isso só
       // acontece quando o aluno clica em "Verificar respostas".
@@ -11506,6 +11509,29 @@ const Store = (function(){
     },
     isBookmarked(unitId, blockId){
       return !!(_state.bookmarks[unitId] && _state.bookmarks[unitId][blockId]);
+    },
+    // Conta as questões objetivas respondidas HOJE (modo instantâneo OU adiado/
+    // marcado), DISTINTAS, a partir do store local — a fonte que tem as marcadas
+    // na hora (no modo adiado a resposta só vai pro banco ao "Verificar"). Grava
+    // em window._questionsToday; o heartbeat propaga pro perfil (Meta Coletiva).
+    recountQuestionsToday(){
+      if(!_state){ return 0; }
+      const n = new Date();
+      const isToday = (ts) => { if(!ts) return false; const d = new Date(ts); return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate(); };
+      const isBank = (id) => typeof id === 'string' && (id.startsWith('ubique-') || /^[a-z]+-\d/.test(id));
+      const set = new Set();
+      const byBank = _state.quizAnswersByBankId || {};
+      for(const bid in byBank){ const a = byBank[bid]; if(a && a.selected != null && isToday(a.answeredAt)) set.add('b:' + bid); }
+      const byUnit = _state.quizAnswers || {};
+      for(const u in byUnit){
+        if(String(u).indexOf('__sim_') === 0) continue; // simulado não conta na meta
+        const bb = byUnit[u] || {};
+        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || !isToday(a.answeredAt)) continue; set.add(isBank(it) ? ('b:' + it) : ('q:' + u + ':' + b + ':' + it)); } }
+      }
+      window._questionsDay = (typeof _dayFmt === 'function') ? _dayFmt(new Date()) : '';
+      window._questionsToday = set.size;
+      if(typeof window._presenceBeat === 'function') window._presenceBeat();
+      return set.size;
     },
     getQuizAnswer(unitId, blockId, itemId){
       // Defensive: _state pode ser null se Store.init ainda não rodou
@@ -17361,24 +17387,22 @@ function _myQuestionsToday(){
   if(window._questionsDay !== today){ window._questionsDay = today; window._questionsToday = 0; }
   return window._questionsToday || 0;
 }
-async function _loadMyDailyCount(){
-  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
-  if(!uid || !window._sb) return;
-  try{
-    const { data } = await window._sb.schema('crm').from('user_profiles')
-      .select('questions_today, questions_day').eq('user_id', uid).maybeSingle();
-    const today = _dayFmt(new Date());
-    window._questionsDay = today;
-    window._questionsToday = (data && data.questions_day === today) ? (data.questions_today || 0) : 0;
-  }catch(e){ window._questionsToday = window._questionsToday || 0; }
+// Reconta as questões do dia a partir do STORE LOCAL (fonte que tem as marcadas
+// na hora). Debounced — no "Verificar respostas" vários itens entram em laço.
+let _dailyRecountTimer = null;
+function _scheduleDailyCount(){
+  if(_dailyRecountTimer) return;
+  _dailyRecountTimer = setTimeout(() => {
+    _dailyRecountTimer = null;
+    if(window.Store && typeof Store.recountQuestionsToday === 'function') Store.recountQuestionsToday();
+  }, 1200);
 }
-window._loadMyDailyCount = _loadMyDailyCount;
+window._scheduleDailyCount = _scheduleDailyCount;
 let _hotStreak = 0, _practiceUnit = null, _practiceEmittedUnit = null;
 function _recordPractice(unitId, correct){
   if(!(window.Auth && Auth.getUser && (Auth.getUser() || {}).id) || !window._sb) return;
   _hotStreak = correct ? (_hotStreak + 1) : 0;
   window._myHotStreak = _hotStreak;
-  window._questionsToday = _myQuestionsToday() + 1; // conta a questão objetiva do dia
   window._lastPracticeAt = Date.now();
   if(unitId){ _practiceUnit = unitId; window._practiceUnit = unitId; }
   // Feed: "está praticando questões em HB · 01 · …" (1× por unidade)
@@ -17545,8 +17569,8 @@ if(typeof document !== 'undefined' && !window._accessVisBound){
 
 async function initUserSession(user){
   if(!user || !user.id) return;
-  // Contador diário de questões (Meta Coletiva) — carrega o acumulado de hoje.
-  if(typeof _loadMyDailyCount === 'function') _loadMyDailyCount().catch(()=>{});
+  // Contador diário de questões (Meta Coletiva) — reconta do store local.
+  if(typeof _scheduleDailyCount === 'function') _scheduleDailyCount();
   // 1) Entrega o "crachá" (token de login) à antena do realtime — necessário
   //    pra entregar linhas de tabelas com RLS ao vivo. Sem isto, o realtime
   //    conecta mas não recebe nada das tabelas protegidas.
