@@ -11519,29 +11519,38 @@ const Store = (function(){
       const n = new Date();
       const isToday = (ts) => { if(!ts) return false; const d = new Date(ts); return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate(); };
       const isBank = (id) => typeof id === 'string' && (id.startsWith('ubique-') || /^[a-z]+-\d/.test(id));
-      const set = new Set();
+      const map = new Map();           // chave distinta → objeto da resposta
+      const add = (k, a) => { if(!map.has(k)) map.set(k, a); };
       const byBank = _state.quizAnswersByBankId || {};
-      for(const bid in byBank){ const a = byBank[bid]; if(a && a.selected != null && isToday(a.answeredAt)) set.add('b:' + bid); }
+      for(const bid in byBank){ const a = byBank[bid]; if(a && a.selected != null && isToday(a.answeredAt)) add('b:' + bid, a); }
       const byUnit = _state.quizAnswers || {};
       for(const u in byUnit){
-        if(String(u).indexOf('__sim_') === 0) continue; // simulado não conta na meta
+        if(String(u).indexOf('__sim_') === 0) continue; // simulado não conta
         const bb = byUnit[u] || {};
-        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || !isToday(a.answeredAt)) continue; set.add(isBank(it) ? ('b:' + it) : ('q:' + u + ':' + b + ':' + it)); } }
+        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || !isToday(a.answeredAt)) continue; add(isBank(it) ? ('b:' + it) : ('q:' + u + ':' + b + ':' + it), a); } }
       }
-      window._questionsDay = (typeof _dayFmt === 'function') ? _dayFmt(new Date()) : '';
-      window._questionsToday = set.size;
-      // Grava DIRETO no perfil (não depende do heartbeat) — fonte da Meta Coletiva.
+      // XP do dia (Gamificação — Parte G): acerto=50, erro=10; só conta as que já
+      // têm correção conhecida (a.correct === true/false).
+      let xp = 0, correct = 0, total = 0;
+      map.forEach(a => { if(a.correct === true){ correct++; total++; xp += 50; } else if(a.correct === false){ total++; xp += 10; } });
+      const today = (typeof _dayFmt === 'function') ? _dayFmt(new Date()) : '';
+      window._questionsDay = today;
+      window._questionsToday = map.size;
+      // Grava DIRETO (não depende do heartbeat): questions_today (Meta) + daily_xp (Ranking).
       try{
         const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
         if(uid && window._sb){
           window._sb.schema('crm').from('user_profiles')
-            .update({ questions_today: set.size, questions_day: window._questionsDay })
+            .update({ questions_today: map.size, questions_day: today })
             .eq('user_id', uid)
             .then(({ error }) => { if(error) console.warn('[meta recount] erro ao gravar:', error.message); });
+          window._sb.schema('aluno').from('daily_xp')
+            .upsert({ user_id: uid, day: today, xp, correct_count: correct, total_count: total, updated_at: new Date().toISOString() }, { onConflict: 'user_id,day' })
+            .then(({ error }) => { if(error) console.warn('[daily_xp] erro ao gravar:', error.message); });
         }
-      }catch(e){ console.warn('[meta recount] ex:', e); }
+      }catch(e){ console.warn('[recount] ex:', e); }
       if(typeof window._presenceBeat === 'function') window._presenceBeat();
-      return set.size;
+      return map.size;
     },
     getQuizAnswer(unitId, blockId, itemId){
       // Defensive: _state pode ser null se Store.init ainda não rodou
@@ -22160,6 +22169,7 @@ function _salasDrawerStartPoll(drawer){
     const active = drawer.querySelector('.salas-stab.on'); const k = active && active.dataset.stab;
     if(k === 'feed') _salasRenderFeed(drawer);
     else if(k === 'meta'){ if(!window._salasMetaEditing) _salasRenderMeta(drawer); }
+    else if(k === 'ranking') _salasRenderRanking(drawer);
     else _salasDrawerStopPoll();
   }, 30000);
 }
@@ -22241,6 +22251,117 @@ async function _salasSaveMeta(drawer){
     _salasRenderMeta(drawer);
     if(window.ueToast) ueToast('Meta atualizada!', 'success');
   }catch(e){ console.warn('[meta save]', e); }
+}
+
+/* ═══════════ Ranking / Gamificação (Fase 5.3 — Parte G) ═══════════
+   XP = acerto×50 + erro×10, somado por período a partir de aluno.daily_xp.
+   Sem data: abas Hoje/Semana/Mês/Ano/Total + vitórias (vencedor do dia). */
+async function _fetchRoomDailyXp(memberIds){
+  const ids = [...new Set((memberIds || []).map(String))].filter(Boolean);
+  if(!ids.length || !window._sb) return [];
+  const since = new Date(); since.setDate(since.getDate() - 366);
+  const sinceStr = (typeof _dayFmt === 'function') ? _dayFmt(since) : null;
+  try{
+    let q = window._sb.schema('aluno').from('daily_xp').select('user_id, day, xp, correct_count, total_count').in('user_id', ids);
+    if(sinceStr) q = q.gte('day', sinceStr);
+    const { data, error } = await q;
+    if(error){ console.warn('[daily_xp fetch]', error.message); return []; }
+    return data || [];
+  }catch(e){ console.warn('[daily_xp fetch ex]', e); return []; }
+}
+function _rankPeriodStart(period){
+  const n = new Date(); n.setHours(0,0,0,0);
+  if(period === 'week'){ const d = new Date(n); const dow = (d.getDay() + 6) % 7; d.setDate(d.getDate() - dow); return d; } // segunda
+  if(period === 'month') return new Date(n.getFullYear(), n.getMonth(), 1);
+  if(period === 'year') return new Date(n.getFullYear(), 0, 1);
+  if(period === 'total') return new Date(0);
+  return n; // hoje
+}
+function _salasRankInjectStyles(){
+  if(document.getElementById('uq-srank-styles')) return;
+  const st = document.createElement('style'); st.id = 'uq-srank-styles';
+  st.textContent = `
+  .srank-tabs{ display:flex; gap:.3rem; margin-bottom:.9rem; flex-wrap:wrap; }
+  .srank-tab{ background:none; border:1px solid var(--accent-border-soft); border-radius:999px; color:var(--text-dim); font-family:var(--sans); font-size:.7rem; padding:.3rem .7rem; cursor:pointer; }
+  .srank-tab:hover{ color:var(--text); }
+  .srank-tab.on{ background:var(--accent-lo); border-color:var(--accent); color:var(--accent); }
+  .srank-head{ font-family:var(--sans); font-size:.78rem; color:var(--text-dim); margin-bottom:.7rem; }
+  .srank-head strong{ color:var(--accent); }
+  .srank-list{ display:flex; flex-direction:column; gap:.4rem; }
+  .srank-row{ display:flex; align-items:center; gap:.7rem; padding:.55rem .6rem; border:1px solid var(--accent-border-soft); border-radius:var(--radius); background:var(--bg-card); }
+  .srank-row.is-me{ border-color:var(--accent-border); background:var(--accent-glow); }
+  .srank-pos{ width:22px; text-align:center; font-family:var(--mono); font-size:.78rem; color:var(--text-mute); flex-shrink:0; }
+  .srank-row.p1 .srank-pos{ color:#e8c46a; } .srank-row.p2 .srank-pos{ color:#cfd3d8; } .srank-row.p3 .srank-pos{ color:#d9a06a; }
+  .srank-av{ width:32px; height:32px; border-radius:50%; overflow:hidden; position:relative; flex-shrink:0; background:var(--accent-lo); color:var(--accent); display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-size:.62rem; cursor:pointer; }
+  .srank-av img.avatar-img{ display:block; max-width:none !important; max-height:none !important; }
+  .srank-info{ flex:1; min-width:0; }
+  .srank-name{ font-family:var(--sans); font-size:.86rem; color:var(--text); cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .srank-name:hover{ color:var(--accent); }
+  .srank-sub{ font-family:var(--mono); font-size:.6rem; color:var(--text-mute); letter-spacing:.03em; }
+  .srank-xp{ font-family:var(--mono); font-size:.92rem; font-weight:600; color:var(--accent); flex-shrink:0; }
+  .srank-xp small{ font-size:.6rem; color:var(--text-mute); font-weight:400; }
+  .srank-wins{ display:inline-flex; align-items:center; gap:.15rem; font-family:var(--mono); font-size:.62rem; color:#e8c46a; flex-shrink:0; }
+  .srank-winner{ font-family:var(--serif); font-size:1rem; color:#e8c46a; margin-bottom:.6rem; }
+  `;
+  document.head.appendChild(st);
+}
+async function _salasRenderRanking(drawer){
+  const pane = drawer.querySelector('[data-spane="ranking"]'); if(!pane) return;
+  const roomId = _salasCurrentId;
+  if(!roomId){ pane.innerHTML = '<p class="salas-soon">Selecione uma sala.</p>'; return; }
+  _salasRankInjectStyles();
+  const room = _salasRooms.find(r => String(r.id) === String(roomId)) || {};
+  const dated = room.ranking_mode === 'dated' && room.end_date;
+  const meId = _salasMyUid();
+  const members = (await _salasFetchMembers(roomId)).filter(m => m.status === 'member');
+  if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(members.map(m => m.user_id));
+  const rows = await _fetchRoomDailyXp(members.map(m => m.user_id));
+  // vitórias (todos os tempos): vencedor de cada dia ganha 1
+  const byDay = {}; rows.forEach(r => { (byDay[r.day] = byDay[r.day] || []).push(r); });
+  const wins = {};
+  Object.keys(byDay).forEach(day => {
+    const list = byDay[day].filter(r => (r.xp || 0) > 0); if(!list.length) return;
+    const mx = Math.max.apply(null, list.map(r => r.xp || 0));
+    list.filter(r => (r.xp || 0) === mx).forEach(r => { wins[r.user_id] = (wins[r.user_id] || 0) + 1; });
+  });
+  // período
+  const period = dated ? 'total' : (window._salasRankPeriod || 'today');
+  const startStr = _dayFmt(_rankPeriodStart(period));
+  const endStr = dated ? room.end_date : null;
+  const xpBy = {}, corBy = {};
+  rows.forEach(r => { if(r.day >= startStr && (!endStr || r.day <= endStr)){ xpBy[r.user_id] = (xpBy[r.user_id] || 0) + (r.xp || 0); corBy[r.user_id] = (corBy[r.user_id] || 0) + (r.correct_count || 0); } });
+  const ranking = members.map(m => ({ uid: m.user_id, xp: xpBy[m.user_id] || 0, correct: corBy[m.user_id] || 0, wins: wins[m.user_id] || 0 }))
+    .sort((a, b) => b.xp - a.xp || b.correct - a.correct || b.wins - a.wins);
+  // cabeçalho / abas
+  let html = '';
+  if(dated){
+    const ended = endStr && _dayFmt(new Date()) > endStr;
+    const fmtBR = (s) => { const p = String(s).split('-'); return p.length === 3 ? (p[2] + '/' + p[1] + '/' + p[0]) : s; };
+    if(ended && ranking.length && ranking[0].xp > 0){ html += `<div class="srank-winner">Vencedor: ${Util.esc(_coopName(ranking[0].uid))}</div>`; }
+    html += `<div class="srank-head">Ranking ${ended ? 'final' : 'até'} <strong>${Util.esc(fmtBR(endStr))}</strong></div>`;
+  } else {
+    const periods = [['today','Hoje'],['week','Semana'],['month','Mês'],['year','Ano'],['total','Total']];
+    html += `<div class="srank-tabs">${periods.map(([k, lbl]) => `<button type="button" class="srank-tab${period === k ? ' on' : ''}" data-rankp="${k}">${lbl}</button>`).join('')}</div>`;
+  }
+  if(!ranking.length){ pane.innerHTML = html + '<p class="salas-soon">Sem ninguém no ranking ainda.</p>'; return; }
+  html += `<div class="srank-list">${ranking.map((r, i) => {
+    const u = _salasResolveUser(r.uid); const name = u.nickname || u.handle || 'Aluno';
+    const t = u.photoTransform || { x:0, y:0, scale:1 };
+    const winsHtml = r.wins > 0 ? `<span class="srank-wins" title="${r.wins} ${r.wins === 1 ? 'vitória' : 'vitórias'} (vencedor do dia)">${_FLAME_SVG}${r.wins}</span>` : '';
+    return `<div class="srank-row p${i + 1}${String(r.uid) === String(meId) ? ' is-me' : ''}">
+      <span class="srank-pos">${i + 1}º</span>
+      <div class="srank-av" data-photo-url="${Util.attr(u.photoUrl||'')}" data-photo-x="${t.x||0}" data-photo-y="${t.y||0}" data-photo-s="${t.scale||1}" data-open-profile="${Util.attr(r.uid)}"><span>${Util.esc(Util.initials(name))}</span></div>
+      <div class="srank-info"><div class="srank-name" data-open-profile="${Util.attr(r.uid)}">${Util.esc(name)}</div><div class="srank-sub">${r.correct} ${r.correct === 1 ? 'acerto' : 'acertos'}</div></div>
+      ${winsHtml}
+      <span class="srank-xp">${r.xp}<small> XP</small></span>
+    </div>`;
+  }).join('')}</div>`;
+  pane.innerHTML = html;
+  pane.querySelectorAll('.srank-av[data-photo-url]').forEach(av => {
+    const url = av.getAttribute('data-photo-url'); if(!url) return;
+    renderAvatarInto(av, url, { x:parseFloat(av.dataset.photoX)||0, y:parseFloat(av.dataset.photoY)||0, scale:parseFloat(av.dataset.photoS)||1 });
+    const ini = av.querySelector('span'); if(ini) ini.style.display = 'none';
+  });
 }
 
 /* ═══════════════════ SALAS DE ESTUDOS (Fase 5.3) — Parte A ═══════════════════ */
@@ -22429,6 +22550,7 @@ function _salasWireDrawer(drawer){
     window._salasMetaEditing = false;
     if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
     else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
+    else if(k === 'ranking'){ _salasRenderRanking(drawer); _salasDrawerStartPoll(drawer); }
     else { _salasDrawerStopPoll(); }
   });
   // Clicar no apelido/avatar do feed abre o perfil; editar meta (dono)
@@ -22439,6 +22561,7 @@ function _salasWireDrawer(drawer){
       if(e.target.closest('[data-meta-edit]')){ window._salasMetaEditing = true; _salasRenderMeta(drawer); return; }
       if(e.target.closest('[data-meta-cancel]')){ window._salasMetaEditing = false; _salasRenderMeta(drawer); return; }
       if(e.target.closest('[data-meta-save]')){ _salasSaveMeta(drawer); return; }
+      const rp = e.target.closest('[data-rankp]'); if(rp){ window._salasRankPeriod = rp.getAttribute('data-rankp'); _salasRenderRanking(drawer); return; }
     });
   }
   const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; _salasDrawerStopPoll(); });
@@ -22586,7 +22709,16 @@ Renderers.salas.mount = function(stageEl){
     const act = e.target.closest('[data-act]'); if(act){ if(window.Coop && Coop.openSession) Coop.openSession(act.dataset.act); return; }
     const del = e.target.closest('[data-del]'); if(del){ if(await _salasDelete(del.dataset.del)) renderList(); return; }
     const lv = e.target.closest('[data-leave]'); if(lv){ if(await _salasLeave(lv.dataset.leave)) renderList(); return; }
-    const dt = e.target.closest('[data-drawer-toggle]'); if(dt){ drawer.hidden = !drawer.hidden; return; }
+    const dt = e.target.closest('[data-drawer-toggle]'); if(dt){
+      drawer.hidden = !drawer.hidden;
+      if(!drawer.hidden){ // ao abrir, renderiza a aba ativa (padrão = Ranking)
+        const act = drawer.querySelector('.salas-stab.on'); const k = act && act.dataset.stab;
+        if(k === 'ranking'){ _salasRenderRanking(drawer); _salasDrawerStartPoll(drawer); }
+        else if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
+        else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
+      } else { _salasDrawerStopPoll(); }
+      return;
+    }
   });
   renderList();
   // Presença AO VIVO (Parte F): heartbeat imediato ao entrar + realtime (push de
