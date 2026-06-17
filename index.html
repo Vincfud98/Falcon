@@ -17334,20 +17334,34 @@ async function _recordCurrentActivity(unitId){
   if(!uid || !window._sb || !unitId) return;
   if(String(_lastActivityUnit) === String(unitId)) return;
   _lastActivityUnit = unitId;
+  _practiceEmittedUnit = null; // reabre a possibilidade de emitir "praticando" nesta unidade
+  const act = _buildActivity(unitId, 'reading');
   try{
     await window._sb.schema('crm').from('user_profiles')
-      .update({ current_activity: _buildActivity(unitId, 'reading') }).eq('user_id', uid);
+      .update({ current_activity: act }).eq('user_id', uid);
   }catch(e){ console.warn('[activity]', e); }
+  // Feed: "está estudando HB · 01 · unidade"
+  if(typeof _roomEmit === 'function') _roomEmit('studying', { sigla: act.sigla, unit_number: act.unit_number, unit_title: act.unit_title, unit_id: unitId }).catch(()=>{});
 }
 // Praticando questões: atualiza tipo='practicing' + hot_streak (acertos seguidos).
 // Chamado a cada resposta objetiva; debounce de 1.5s evita escrita por item no
 // modo "verificar tudo" (que processa vários itens num laço).
-let _hotStreak = 0, _practiceTimer = null, _practiceUnit = null;
+let _hotStreak = 0, _practiceTimer = null, _practiceUnit = null, _practiceEmittedUnit = null;
 function _recordPractice(unitId, correct){
   if(!(window.Auth && Auth.getUser && (Auth.getUser() || {}).id) || !window._sb) return;
   _hotStreak = correct ? (_hotStreak + 1) : 0;
   window._myHotStreak = _hotStreak;
   if(unitId) _practiceUnit = unitId;
+  // Feed: "está praticando questões em HB · 01 · …" (1× por unidade)
+  if(typeof _roomEmit === 'function' && unitId && String(_practiceEmittedUnit) !== String(unitId)){
+    _practiceEmittedUnit = unitId;
+    const m = (typeof _unitMetaById === 'function') ? (_unitMetaById(unitId) || {}) : {};
+    _roomEmit('practicing', { sigla: m.sigla, unit_number: m.number, unit_title: m.title, unit_id: unitId }).catch(()=>{});
+  }
+  // Feed: "acertou N seguidas!" nos marcos 5/10/15…
+  if(typeof _roomEmit === 'function' && correct && _hotStreak >= 5 && _hotStreak % 5 === 0){
+    _roomEmit('streak', { count: _hotStreak }).catch(()=>{});
+  }
   if(_practiceTimer) return;
   _practiceTimer = setTimeout(() => { _practiceTimer = null; _flushPractice(); }, 1500);
 }
@@ -21717,6 +21731,7 @@ const CoopSessionModal = (function(){
       const { error } = await window._sb.schema('aluno').from('coop_corrections').upsert(row, { onConflict:'session_id,corrector_id' });
       if(error){ if(window.ueToast) ueToast('Erro: ' + error.message, 'error'); return false; }
       if(window.Coop){ const _sid = _forumSubjectOfUnit(_session.unit_id); const _sig = _sid ? _forumSubjectLabel(_sid) : ''; await Coop.notifyDone(_session.from_user, _session.id, { qtype:_session.question_type, subject:_sig, room_id:_session.room_id }); }
+      if(_session.room_id && typeof _roomEmitTo === 'function') _roomEmitTo(_session.room_id, 'coop_done', {}).catch(()=>{});
       _session._corrections = await _coopFetchCorrections(_session.id);
       render();
       if(window.ueToast) ueToast('Correção enviada!', 'success');
@@ -21922,6 +21937,7 @@ async function _coopSendGroupEssay(room, item, answerText, ctx, blockId, itemId)
     if(error){ if(window.ueToast) ueToast('Erro ao enviar: ' + error.message, 'error'); return; }
     const newId = sid || (data && data.id);
     await _coopNotifyRoom(room, newId, 'essay', ctx);
+    if(typeof _roomEmitTo === 'function') _roomEmitTo(room.id, 'coop_sent', { qtype:'essay' }).catch(()=>{});
     if(window.ueToast) ueToast('Questão enviada para a sala ' + (room.name || '') + '!', 'success');
   }catch(e){ console.warn('[coop group essay]', e); if(window.ueToast) ueToast('Erro inesperado ao enviar.', 'error'); }
 }
@@ -21939,6 +21955,7 @@ async function _coopSendGroupQuiz(room, item, prior, ctx, blockId, itemId, reaso
     if(error){ if(window.ueToast) ueToast('Erro ao enviar: ' + error.message, 'error'); return; }
     const newId = sid || (data && data.id);
     await _coopNotifyRoom(room, newId, 'quiz', ctx);
+    if(typeof _roomEmitTo === 'function') _roomEmitTo(room.id, 'coop_sent', { qtype:'quiz' }).catch(()=>{});
     if(window.ueToast) ueToast('Questão enviada para a sala ' + (room.name || '') + '!', 'success');
   }catch(e){ console.warn('[coop group quiz]', e); if(window.ueToast) ueToast('Erro inesperado ao enviar.', 'error'); }
 }
@@ -21983,6 +22000,97 @@ function _coopGroupInjectStyles(){
   .salas-act-count{ font-family:var(--mono); font-size:.64rem; color:var(--text-mute); flex-shrink:0; white-space:nowrap; }
   `;
   document.head.appendChild(st);
+}
+
+/* ═══════════ Feed de ações da sala (Fase 5.3 — Parte E) ═══════════
+   Log automático: o sistema insere eventos (estudando/praticando/on fire/coop)
+   nas salas do membro; a aba Feed lê os recentes. Ninguém digita. */
+// Emite um evento pra TODAS as salas das quais sou membro.
+async function _roomEmit(type, payload){
+  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
+  if(!uid || !window._sb) return;
+  const mem = window._salasMyMemberships || {};
+  const rooms = Object.keys(mem).filter(rid => mem[rid] === 'member');
+  if(!rooms.length) return;
+  const at = new Date().toISOString();
+  const rows = rooms.map(rid => ({ room_id: rid, user_id: uid, type, payload: payload || {}, created_at: at }));
+  try{ await window._sb.schema('aluno').from('room_events').insert(rows); }catch(e){ console.warn('[room emit]', e); }
+}
+// Emite pra UMA sala específica (eventos de coop, que já são por sala).
+async function _roomEmitTo(roomId, type, payload){
+  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
+  if(!uid || !window._sb || !roomId) return;
+  try{ await window._sb.schema('aluno').from('room_events').insert({ room_id: roomId, user_id: uid, type, payload: payload || {}, created_at: new Date().toISOString() }); }
+  catch(e){ console.warn('[room emit to]', e); }
+}
+async function _roomFetchEvents(roomId, limit){
+  if(!window._sb || !roomId) return [];
+  try{ const { data, error } = await window._sb.schema('aluno').from('room_events').select('*').eq('room_id', roomId).order('created_at', { ascending:false }).limit(limit || 50);
+    if(error){ console.warn('[room events]', error.message); return []; } return data || []; }
+  catch(e){ console.warn('[room events ex]', e); return []; }
+}
+function _roomEventText(ev){
+  const p = ev.payload || {};
+  const unit = [p.sigla, p.unit_number, p.unit_title].filter(Boolean).join(' · ');
+  switch(ev.type){
+    case 'studying':   return unit ? `está estudando <strong>${Util.esc(unit)}</strong>` : 'começou a estudar';
+    case 'practicing': return unit ? `está praticando questões em <strong>${Util.esc(unit)}</strong>` : 'está praticando questões';
+    case 'streak':     return `acertou <strong>${Util.esc(String(p.count || ''))} seguidas</strong>!`;
+    case 'coop_sent':  return 'enviou uma questão pro grupo corrigir';
+    case 'coop_done':  return 'corrigiu uma questão da sala';
+    default:           return Util.esc(ev.type);
+  }
+}
+function _salasFeedInjectStyles(){
+  if(document.getElementById('uq-rfeed-styles')) return;
+  const st = document.createElement('style'); st.id = 'uq-rfeed-styles';
+  st.textContent = `
+  .rfeed{ display:flex; flex-direction:column; }
+  .rfeed-item{ display:flex; gap:.6rem; align-items:flex-start; padding:.65rem .1rem; border-bottom:1px solid var(--accent-border-soft); }
+  .rfeed-item:last-child{ border-bottom:none; }
+  .rfeed-av{ width:30px; height:30px; border-radius:50%; overflow:hidden; position:relative; flex-shrink:0; background:var(--accent-lo); color:var(--accent); display:flex; align-items:center; justify-content:center; font-family:var(--mono); font-size:.6rem; cursor:pointer; }
+  .rfeed-av img.avatar-img{ display:block; max-width:none !important; max-height:none !important; }
+  .rfeed-body{ flex:1; min-width:0; display:flex; flex-direction:column; gap:.15rem; }
+  .rfeed-line{ font-family:var(--sans); font-size:.82rem; color:var(--text-dim); line-height:1.4; }
+  .rfeed-line strong{ color:var(--text); font-weight:600; }
+  .rfeed-name{ cursor:pointer; }
+  .rfeed-name:hover{ color:var(--accent); }
+  .rfeed-time{ font-family:var(--mono); font-size:.58rem; color:var(--text-mute); letter-spacing:.06em; }
+  `;
+  document.head.appendChild(st);
+}
+async function _salasRenderFeed(drawer){
+  const pane = drawer.querySelector('[data-spane="feed"]'); if(!pane) return;
+  const roomId = _salasCurrentId;
+  if(!roomId){ pane.innerHTML = '<p class="salas-soon">Selecione uma sala.</p>'; return; }
+  _salasFeedInjectStyles();
+  const events = await _roomFetchEvents(roomId, 50);
+  if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(events.map(e => e.user_id));
+  if(!events.length){ pane.innerHTML = '<p class="salas-soon">Nenhuma ação ainda. Quando alguém estudar ou praticar questões, aparece aqui.</p>'; return; }
+  pane.innerHTML = `<div class="rfeed">${events.map(ev => {
+    const u = _salasResolveUser(ev.user_id);
+    const name = u.nickname || u.handle || 'Aluno';
+    const t = u.photoTransform || { x:0, y:0, scale:1 };
+    return `<div class="rfeed-item">
+      <div class="rfeed-av" data-photo-url="${Util.attr(u.photoUrl||'')}" data-photo-x="${t.x||0}" data-photo-y="${t.y||0}" data-photo-s="${t.scale||1}" data-open-profile="${Util.attr(ev.user_id)}"><span>${Util.esc(Util.initials(name))}</span></div>
+      <div class="rfeed-body"><span class="rfeed-line"><strong class="rfeed-name" data-open-profile="${Util.attr(ev.user_id)}">${Util.esc(name)}</strong> ${_roomEventText(ev)}</span><span class="rfeed-time">${Util.esc(_relTime(new Date(ev.created_at).getTime()))}</span></div>
+    </div>`;
+  }).join('')}</div>`;
+  pane.querySelectorAll('.rfeed-av[data-photo-url]').forEach(av => {
+    const url = av.getAttribute('data-photo-url'); if(!url) return;
+    renderAvatarInto(av, url, { x:parseFloat(av.dataset.photoX)||0, y:parseFloat(av.dataset.photoY)||0, scale:parseFloat(av.dataset.photoS)||1 });
+    const ini = av.querySelector('span'); if(ini) ini.style.display = 'none';
+  });
+}
+function _salasFeedStopPoll(){ if(window._salasFeedTimer){ clearInterval(window._salasFeedTimer); window._salasFeedTimer = null; } }
+function _salasFeedStartPoll(drawer){
+  _salasFeedStopPoll();
+  window._salasFeedTimer = setInterval(() => {
+    if(document.visibilityState !== 'visible') return;
+    const active = drawer.querySelector('.salas-stab.on');
+    if(active && active.dataset.stab === 'feed' && !drawer.hidden) _salasRenderFeed(drawer);
+    else _salasFeedStopPoll();
+  }, 30000);
 }
 
 /* ═══════════════════ SALAS DE ESTUDOS (Fase 5.3) — Parte A ═══════════════════ */
@@ -22164,8 +22272,15 @@ function _salasInjectStyles(){
 }
 function _salasWireDrawer(drawer){
   const tabs = drawer.querySelector('.salas-drawer-tabs');
-  if(tabs) tabs.addEventListener('click', e => { const b = e.target.closest('[data-stab]'); if(!b) return; const k = b.dataset.stab; drawer.querySelectorAll('.salas-stab').forEach(x => x.classList.toggle('on', x === b)); drawer.querySelectorAll('.salas-pane').forEach(p => p.classList.toggle('on', p.dataset.spane === k)); });
-  const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; });
+  if(tabs) tabs.addEventListener('click', e => {
+    const b = e.target.closest('[data-stab]'); if(!b) return; const k = b.dataset.stab;
+    drawer.querySelectorAll('.salas-stab').forEach(x => x.classList.toggle('on', x === b));
+    drawer.querySelectorAll('.salas-pane').forEach(p => p.classList.toggle('on', p.dataset.spane === k));
+    if(k === 'feed'){ _salasRenderFeed(drawer); _salasFeedStartPoll(drawer); } else { _salasFeedStopPoll(); }
+  });
+  // Clicar no apelido/avatar do feed abre o perfil
+  if(!drawer.__profBound){ drawer.__profBound = true; drawer.addEventListener('click', e => { const op = e.target.closest('[data-open-profile]'); if(op && typeof window.openUserProfile === 'function') openUserProfile(op.getAttribute('data-open-profile')); }); }
+  const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; _salasFeedStopPoll(); });
   const rz = drawer.querySelector('.salas-drawer-resize');
   if(rz) rz.addEventListener('mousedown', e => {
     e.preventDefault(); document.body.style.userSelect = 'none';
