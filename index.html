@@ -13652,6 +13652,7 @@ Blocks.quiz = {
             return;
           }
           ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { selected:value, correct, doubt:existingDoubt });
+          if(window._recordPractice) window._recordPractice(ctx.unitId, correct);
           itemEl.querySelectorAll('.q-option').forEach((b,j) => {
             b.classList.remove('selected','correct','wrong');
             if(j === idx) b.classList.add(correct ? 'correct' : 'wrong', 'selected');
@@ -13895,6 +13896,7 @@ Blocks.quiz = {
                   // Verifica + SINCRONIZA (só agora conta na estatística global).
                   ctx.store.updateQuizAnswer(ctx.unitId, block.id, it.id,
                     { selected:p.selected, correct, verified:true, doubt:!!p.doubt });
+                  if(window._recordPractice) window._recordPractice(ctx.unitId, correct);
                   const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
                   if(itemEl) revealItem(itemEl, selIdx, correct);
                 }
@@ -17294,43 +17296,88 @@ function _streakValid(streak, streakDay){
   const t = new Date(); const y = new Date(); y.setDate(y.getDate() - 1);
   return streakDay === _dayFmt(t) || streakDay === _dayFmt(y);
 }
-// Grava "o que estou estudando agora" (matéria + unidade) — só quando a unidade muda.
+// Metadata completa de uma unidade pelo id (sigla, número, título, matéria) —
+// fonte única pro "HB · 01 · Configuração do Brasil" e pra atividade.
+function _unitMetaById(unitId){
+  if(!unitId) return null;
+  const courses = window.COURSES_ALL || window.COURSES || [];
+  for(const c of courses){
+    for(const m of (c.modules || [])) for(const ch of (m.chapters || [])) for(const u of (ch.units || [])){
+      if(String(u.id) === String(unitId)){
+        return { sigla: c.sigla || '', number: u.number || '', title: u.title || '', subjectId: (c._subjectId != null) ? String(c._subjectId) : null, subjectFull: c.title || '' };
+      }
+    }
+  }
+  return null;
+}
+function _buildActivity(unitId, type){
+  const meta = _unitMetaById(unitId) || {};
+  return { type: type, subject: meta.subjectFull || '', subject_short: meta.sigla || '', subject_id: meta.subjectId || null,
+    sigla: meta.sigla || '', unit_number: meta.number || '', unit_title: meta.title || '', unit_id: unitId || null, at: new Date().toISOString() };
+}
+// Rótulo "HB · 01 · Configuração do Brasil" a partir da atividade gravada.
+function _activityUnitLabel(a){
+  if(!a) return '';
+  const parts = [];
+  if(a.sigla || a.subject_short) parts.push(a.sigla || a.subject_short);
+  if(a.unit_number) parts.push(a.unit_number);
+  if(a.unit_title) parts.push(a.unit_title);
+  return parts.join(' · ');
+}
+// Grava "estou LENDO esta unidade" — só quando a unidade muda (evita flood).
 let _lastActivityUnit = null;
 async function _recordCurrentActivity(unitId){
   const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
   if(!uid || !window._sb || !unitId) return;
   if(String(_lastActivityUnit) === String(unitId)) return;
   _lastActivityUnit = unitId;
-  const sid = (typeof _forumSubjectOfUnit === 'function') ? _forumSubjectOfUnit(unitId) : null;
-  // Nome COMPLETO da matéria (ex.: "História do Brasil"), não a sigla.
-  let label = '', short = '';
-  if(sid){
-    const _sl = (typeof _forumSubjectsList === 'function') ? _forumSubjectsList() : [];
-    const _so = _sl.find(x => String(x.id) === String(sid));
-    if(_so){ label = _so.title || _so.sigla || ''; short = _so.sigla || _so.title || ''; }
-    else if(typeof _forumSubjectLabel === 'function'){ label = _forumSubjectLabel(sid); short = label; }
-  }
   try{
     await window._sb.schema('crm').from('user_profiles')
-      .update({ current_activity: { subject: label, subject_short: short, subject_id: sid, unit_id: unitId, at: new Date().toISOString() } })
-      .eq('user_id', uid);
+      .update({ current_activity: _buildActivity(unitId, 'reading') }).eq('user_id', uid);
   }catch(e){ console.warn('[activity]', e); }
 }
-// Busca presença (online / última vez / atividade / streak) de uma lista de ids.
+// Praticando questões: atualiza tipo='practicing' + hot_streak (acertos seguidos).
+// Chamado a cada resposta objetiva; debounce de 1.5s evita escrita por item no
+// modo "verificar tudo" (que processa vários itens num laço).
+let _hotStreak = 0, _practiceTimer = null, _practiceUnit = null;
+function _recordPractice(unitId, correct){
+  if(!(window.Auth && Auth.getUser && (Auth.getUser() || {}).id) || !window._sb) return;
+  _hotStreak = correct ? (_hotStreak + 1) : 0;
+  window._myHotStreak = _hotStreak;
+  if(unitId) _practiceUnit = unitId;
+  if(_practiceTimer) return;
+  _practiceTimer = setTimeout(() => { _practiceTimer = null; _flushPractice(); }, 1500);
+}
+async function _flushPractice(){
+  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
+  if(!uid || !window._sb) return;
+  try{
+    await window._sb.schema('crm').from('user_profiles')
+      .update({ current_activity: _buildActivity(_practiceUnit, 'practicing'), hot_streak: _hotStreak }).eq('user_id', uid);
+  }catch(e){ console.warn('[practice]', e); }
+}
+window._recordPractice = _recordPractice;
+// Busca presença (online / atividade / streak / on-fire) de uma lista de ids.
 async function _presenceFetch(userIds){
   const out = {};
   const ids = [...new Set((userIds || []).map(String))].filter(Boolean);
   if(!ids.length || !window._sb) return out;
   try{
     const { data } = await window._sb.schema('crm').from('user_profiles')
-      .select('user_id, last_seen_at, current_activity, streak, streak_day').in('user_id', ids);
+      .select('user_id, last_seen_at, current_activity, streak, streak_day, hot_streak').in('user_id', ids);
     const now = Date.now();
     (data || []).forEach(r => {
       const seen = r.last_seen_at ? new Date(r.last_seen_at).getTime() : 0;
+      const online = !!seen && (now - seen) < 3 * 60 * 1000;
+      const a = r.current_activity || null;
+      const actAt = (a && a.at) ? new Date(a.at).getTime() : 0;
+      const practicing = online && a && a.type === 'practicing' && actAt && (now - actAt) < 2 * 60 * 1000;
+      const hot = r.hot_streak || 0;
       out[String(r.user_id)] = {
-        online: !!seen && (now - seen) < 3 * 60 * 1000,
-        lastSeen: seen,
-        activity: r.current_activity || null,
+        online, lastSeen: seen, activity: a,
+        practicing: !!practicing,
+        onFire: online && hot >= 5,
+        hotStreak: hot,
         streak: _streakValid(r.streak, r.streak_day) ? r.streak : 0
       };
     });
@@ -17396,13 +17443,28 @@ function _presenceInjectStyles(){
   .peer-card-avwrap .pres-dot{ right:1px; bottom:1px; }
   .peer-card-status{ margin-top:.15rem; }
   .salas-mesa-wrap{ display:inline-flex; flex-direction:column; align-items:center; gap:.35rem; width:78px; }
-  .salas-mesa-avbox{ position:relative; width:48px; height:48px; flex-shrink:0; }
-  .salas-mesa-avbox .pres-dot{ right:1px; bottom:1px; }
+  .salas-mesa-avbox{ position:relative; width:48px; height:48px; flex-shrink:0; border-radius:50%; }
+  /* Anel de status ao redor do avatar */
+  .salas-mesa-avbox.is-reading{ box-shadow:0 0 0 2px #57c785; }
+  .salas-mesa-avbox.is-practicing{ box-shadow:0 0 0 2px #5b9bd5; }
+  .salas-mesa-avbox.is-offline{ box-shadow:0 0 0 2px var(--accent-border-soft); }
+  .salas-mesa-avbox.is-reading::after, .salas-mesa-avbox.is-practicing::after{ content:''; position:absolute; inset:0; border-radius:50%; border:2px solid currentColor; opacity:.55; animation:mesaPulse 1.9s ease-out infinite; pointer-events:none; }
+  .salas-mesa-avbox.is-reading::after{ color:#57c785; }
+  .salas-mesa-avbox.is-practicing::after{ color:#5b9bd5; }
+  @keyframes mesaPulse{ 0%{ transform:scale(1); opacity:.55; } 100%{ transform:scale(1.32); opacity:0; } }
+  /* On fire (5+ acertos seguidos): glow alaranjado tremeluzente + chama no topo */
+  .salas-mesa-avbox.on-fire{ box-shadow:0 0 0 2px #ff8a3d, 0 0 14px 3px rgba(255,138,61,.6); animation:mesaFire 1s ease-in-out infinite alternate; }
+  .salas-mesa-avbox.on-fire::after{ display:none; }
+  @keyframes mesaFire{ from{ box-shadow:0 0 0 2px #e8662c, 0 0 8px 1px rgba(232,102,44,.45); } to{ box-shadow:0 0 0 2px #ff9a4d, 0 0 18px 5px rgba(255,138,61,.8); } }
+  .salas-mesa-fire{ position:absolute; top:-9px; left:50%; transform:translateX(-50%); width:14px; height:14px; color:#ff8a3d; filter:drop-shadow(0 0 3px rgba(255,138,61,.8)); }
+  .salas-mesa-fire svg{ width:100%; height:100%; display:block; fill:currentColor; }
+  .salas-mesa-wrap.is-off .salas-mesa-av{ opacity:.5; filter:grayscale(.65); }
+  .salas-mesa-wrap.is-off .salas-mesa-name{ color:var(--text-mute); font-weight:400; }
   .salas-mesa-name{ font-family:var(--sans); font-weight:600; font-size:.66rem; line-height:1.2; text-align:center; color:var(--text); max-width:78px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .salas-mesa-sub{ font-family:var(--sans); font-size:.6rem; line-height:1.25; text-align:center; color:var(--text-mute); max-width:78px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
   .salas-mesa-sub.is-online{ color:#57c785; }
-  .salas-mesa-streak{ display:inline-flex; align-items:center; gap:.1rem; font-family:var(--mono); font-size:.58rem; color:#e08a3c; font-weight:600; }
-  .salas-mesa-streak svg{ width:10px; height:10px; }
+  .salas-mesa-offh{ font-family:var(--mono); font-size:.56rem; letter-spacing:.14em; text-transform:uppercase; color:var(--text-mute); margin:1.1rem 0 .6rem; padding-top:.9rem; border-top:1px solid var(--accent-border-soft); }
+  .salas-mesa-offrow{ opacity:.92; }
   `;
   document.head.appendChild(st);
 }
@@ -22137,29 +22199,35 @@ Renderers.salas.mount = function(stageEl){
     const members = (await _salasFetchMembers(room.id)).filter(m => m.status === 'member');
     // Mesa ao vivo (Parte C): presença + matéria atual + streak de cada membro
     const mesaPres = (typeof _presenceFetch === 'function') ? await _presenceFetch(members.map(m => m.user_id)) : {};
-    const avs = members.map(m => {
+    // Anel de status: verde=lendo · azul=praticando · cinza=offline; glow=on fire.
+    // Hover mostra "HB · 01 · Configuração do Brasil". Online na mesa, offline fora.
+    const _mesaMember = (m) => {
       const u = _salasResolveUser(m.user_id);
       const p = mesaPres[String(m.user_id)];
       const name = u.nickname || u.handle || 'Aluno';
-      // Status: online COM matéria → "estudando X"; online SEM matéria → nada
-      // (a bolinha verde já é o sinal de "online", não repetir); offline → "visto há X".
+      const online = !!(p && p.online);
+      const ring = online ? (p.practicing ? 'is-practicing' : 'is-reading') : 'is-offline';
+      const fire = (p && p.onFire) ? ' on-fire' : '';
+      const hover = (online && p && p.activity) ? _activityUnitLabel(p.activity) : '';
       let sub = '';
-      if(p && p.online){
-        const full = _activitySubjectFull(p.activity);
-        const subj = _activitySubjectShort(p.activity);
-        if(subj) sub = `<span class="salas-mesa-sub is-online" title="estudando ${Util.attr(full || subj)}">estudando ${Util.esc(subj)}</span>`;
-      }
-      else if(p && p.lastSeen){ sub = `<span class="salas-mesa-sub" title="último acesso">${Util.esc(_relTime(p.lastSeen))}</span>`; }
-      const streak = (p && p.streak > 0) ? `<span class="salas-mesa-streak" title="${p.streak} ${p.streak === 1 ? 'dia' : 'dias'} seguidos de estudo">${_FLAME_SVG}${p.streak}</span>` : '';
-      return `<div class="salas-mesa-wrap">
-        <div class="salas-mesa-avbox">
+      if(online){
+        const subj = p.activity && (p.activity.subject_short || p.activity.sigla);
+        if(subj) sub = `<span class="salas-mesa-sub is-online">estudando ${Util.esc(subj)}</span>`;
+      } else if(p && p.lastSeen){ sub = `<span class="salas-mesa-sub">${Util.esc(_relTime(p.lastSeen))}</span>`; }
+      return `<div class="salas-mesa-wrap${online ? '' : ' is-off'}" title="${Util.attr(hover || name)}">
+        <div class="salas-mesa-avbox ${ring}${fire}">
           <div class="salas-mesa-av" data-url="${Util.attr(u.photoUrl||'')}" data-x="${(u.photoTransform&&u.photoTransform.x)||0}" data-y="${(u.photoTransform&&u.photoTransform.y)||0}" data-s="${(u.photoTransform&&u.photoTransform.scale)||1}"><span>${Util.esc(Util.initials(name))}</span></div>
-          <span class="pres-dot${p && p.online ? ' is-online' : ''}"></span>
+          ${fire ? `<span class="salas-mesa-fire">${_FLAME_SVG}</span>` : ''}
         </div>
         <span class="salas-mesa-name">${Util.esc(name)}</span>
-        ${sub}${streak}
+        ${sub}
       </div>`;
-    }).join('');
+    };
+    const _isOn = m => { const p = mesaPres[String(m.user_id)]; return !!(p && p.online); };
+    const onlineMembers = members.filter(_isOn);
+    const offlineMembers = members.filter(m => !_isOn(m));
+    const onlineAvs = onlineMembers.map(_mesaMember).join('');
+    const offlineAvs = offlineMembers.map(_mesaMember).join('');
     // Mural de atividades do grupo (CoopStudy em grupo — Parte B)
     const acts = await _coopFetchRoomActivities(room.id);
     const counts = await _coopCorrectionCounts(acts.map(a => a.id));
@@ -22184,8 +22252,9 @@ Renderers.salas.mount = function(stageEl){
         </div>
       </div>
       <div class="salas-mesa-card">
-        <div class="salas-card-h">A Mesa <span class="salas-card-sub">${members.length} ${members.length===1?'membro':'membros'}</span></div>
-        <div class="salas-mesa">${avs || '<p class="salas-empty">Sem membros ainda — convide colegas.</p>'}</div>
+        <div class="salas-card-h">A Mesa <span class="salas-card-sub">${onlineMembers.length} na mesa${offlineMembers.length ? (' · ' + offlineMembers.length + ' fora') : ''}</span></div>
+        <div class="salas-mesa">${onlineAvs || '<p class="salas-empty">Ninguém na mesa agora — quando um colega entrar e estudar, ele aparece aqui ao vivo.</p>'}</div>
+        ${offlineAvs ? `<div class="salas-mesa-offh">Fora da mesa</div><div class="salas-mesa salas-mesa-offrow">${offlineAvs}</div>` : ''}
       </div>
       ${actsHtml || '<div class="salas-acts"><div class="salas-acts-head">Atividades do grupo</div><p class="salas-empty">Nenhuma atividade ainda. Resolva uma questão e use o botão CoopStudy → "Uma sala" pra enviar pro grupo corrigir.</p></div>'}
     </section>`;
@@ -22211,6 +22280,15 @@ Renderers.salas.mount = function(stageEl){
     const dt = e.target.closest('[data-drawer-toggle]'); if(dt){ drawer.hidden = !drawer.hidden; return; }
   });
   renderList();
+  // Auto-refresh ao vivo (Parte D): re-busca a presença a cada 30s enquanto a
+  // aba está visível e você está na página de Salas. Não empilha timers.
+  if(window._salasPollTimer){ clearInterval(window._salasPollTimer); window._salasPollTimer = null; }
+  window._salasPollTimer = setInterval(() => {
+    if(document.visibilityState !== 'visible') return;
+    const r = (window.Router && Router.parse) ? Router.parse() : null;
+    if(!r || r.view !== 'salas'){ clearInterval(window._salasPollTimer); window._salasPollTimer = null; return; }
+    if(_salasCurrentId) renderMain();
+  }, 30000);
 };
 
 /* ═══════════ EDITAL — visualização hierárquica do edital + progresso ═══════════ */
