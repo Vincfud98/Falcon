@@ -8124,7 +8124,7 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
 <a class="tb-navlink" id="navNotes" href="#/notes">Notas</a>
 <a class="tb-navlink" id="navGlossario" href="#/glossario">Glossário</a>
 <a class="tb-navlink" id="navForum" href="#/forum">Fórum</a>
-<a class="tb-navlink" id="navSalas" href="#/salas">Salas de Estudos</a>
+<a class="tb-navlink" id="navSalas" href="#/salas">Salas de Estudos <span class="salas-badge" id="navSalasBadge" hidden></span></a>
     <div class="display-prefs" id="displayPrefs">
       <button class="display-prefs-btn" id="displayPrefsBtn" title="Preferências de exibição">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
@@ -9165,6 +9165,13 @@ window.TAG_REGISTRY = {
           (mems || []).forEach(m => { window._salasMyMemberships[m.room_id] = m.status; });
         }
       } catch(e){ console.warn('[hydrate memberships] exception:', e); }
+
+      // Salas: antena ao vivo do chat + cálculo das não-lidas (badges/notificação).
+      // Espera as notificações hidratarem pra não duplicar a notificação por sala.
+      (function _kickSalasUnread(){
+        if(typeof _salasAntennaStart === 'function' && window._notifHydrateDone){ _salasAntennaStart(); _salasComputeUnread(); }
+        else { setTimeout(_kickSalasUnread, 400); }
+      })();
 
       // Contato — lista de admins (RPC segura; aluno não lê papéis direto).
       // Usada pelo autocomplete do "@admin" e pelo registro de menções.
@@ -18885,6 +18892,15 @@ function _notifRenderItem(n){
         </div>`;
       }
     }
+  } else if(n.type === 'room_chat'){
+    const cnt = (window._salasUnread && window._salasUnread[p.room_id]) || p.count || 1;
+    const sala = p.room_name ? ' <strong>' + Util.esc(p.room_name) + '</strong>' : ' de estudos';
+    line = cnt > 1
+      ? `<strong>${cnt} mensagens novas</strong> na sala${sala}.`
+      : `<strong>Nova mensagem</strong> na sala${sala}.`;
+    if(p.room_id){
+      actions = `<div class="notif-actions"><button class="btn-ghost" data-notif-roomchat="${Util.attr(p.room_id)}" data-notif-id="${Util.attr(n.id)}">Abrir chat →</button></div>`;
+    }
   } else {
     line = Util.esc(n.type) + ' (tipo desconhecido)';
   }
@@ -19424,6 +19440,12 @@ Renderers.notifications.mount = function(stageEl){
       window._salasDeclined = window._salasDeclined || new Set(); window._salasDeclined.add(String(_rid));
       if(window._salasMyMemberships) delete window._salasMyMemberships[_rid];
       App.render();
+      return;
+    }
+    const rChat = e.target.closest('[data-notif-roomchat]');
+    if(rChat){
+      Notifications.markRead(rChat.getAttribute('data-notif-id'));
+      if(window._salasOpenRoomChat) window._salasOpenRoomChat(rChat.getAttribute('data-notif-roomchat'));
       return;
     }
     });
@@ -22426,6 +22448,9 @@ function _salasChatSubscribe(pane, roomId){
         const msgsEl = pane.querySelector('#salasChatMsgs'); if(!msgsEl) return;
         if(msgsEl.querySelector('[data-msg-id="' + m.id + '"]')) return; // já está
         _salasChatAppend(pane, m);
+        // Estou vendo o chat → mantém como lido (avança a última leitura) e
+        // garante que a antena não acumule não-lidas desta sala.
+        if(String(m.sender_id) !== String(_salasMyUid()) && typeof _salasMarkRoomRead === 'function') _salasMarkRoomRead(roomId);
       })
       .subscribe();
   }catch(e){ console.warn('[room chat rt]', e); }
@@ -22503,7 +22528,103 @@ async function _salasRenderChat(drawer){
   if(_ta) _ta.addEventListener('keydown', (e) => { if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); _salasChatSend(pane); } });
   const moreBtn2 = pane.querySelector('#salasChatMore'); if(moreBtn2) moreBtn2.addEventListener('click', () => _salasChatLoadMore(pane));
   _salasChatSubscribe(pane, roomId);
+  window._salasViewingChat = true; window._salasViewingChatRoom = roomId;
+  if(typeof _salasMarkRoomRead === 'function') _salasMarkRoomRead(roomId);
 }
+
+/* ═══════════ Não-lidas do chat + notificação (Fase 5.3) ═══════════
+   Badge (Chat/Painéis/Suas salas/topbar) = mensagens de outros após sua última
+   leitura. UMA notificação por sala (anti-flood). Não notifica quem está vendo
+   o chat. Antena ao vivo cobre quando você está fora da sala. */
+window._salasUnread = window._salasUnread || {};
+window._salasRoomNames = window._salasRoomNames || {};
+function _salasBadgeInjectStyles(){
+  if(document.getElementById('uq-salasbadge-styles')) return;
+  const st = document.createElement('style'); st.id = 'uq-salasbadge-styles';
+  st.textContent = `.salas-badge{ display:inline-flex; align-items:center; justify-content:center; min-width:16px; height:16px; padding:0 4px; border-radius:99px; background:var(--accent); color:var(--bg); font-family:var(--mono); font-size:.55rem; font-weight:700; line-height:1; vertical-align:middle; margin-left:.2rem; } .salas-badge[hidden]{ display:none; }`;
+  document.head.appendChild(st);
+}
+function _salasTotalUnread(){ let t = 0; const u = window._salasUnread || {}; for(const k in u) t += (u[k] || 0); return t; }
+function _salasUpdateBadges(){
+  _salasBadgeInjectStyles();
+  const setB = (el, n) => { if(!el) return; if(n > 0){ el.hidden = false; el.textContent = n > 99 ? '99+' : String(n); } else { el.hidden = true; el.textContent = ''; } };
+  setB(document.getElementById('navSalasBadge'), _salasTotalUnread());
+  const cur = (window._salasUnread || {})[_salasCurrentId] || 0;
+  setB(document.getElementById('salasPanelBadge'), cur);
+  setB(document.getElementById('salasChatTabBadge'), cur);
+}
+async function _salasFetchReads(uid){
+  const out = {};
+  try{ const { data } = await window._sb.schema('aluno').from('room_reads').select('room_id, last_read_at').eq('user_id', uid); (data || []).forEach(r => { out[r.room_id] = r.last_read_at; }); }catch(_){}
+  return out;
+}
+async function _salasComputeUnread(){
+  const uid = _salasMyUid(); if(!uid || !window._sb) return;
+  const rooms = Object.keys(window._salasMyMemberships || {}).filter(r => window._salasMyMemberships[r] === 'member');
+  if(!rooms.length){ window._salasUnread = {}; _salasUpdateBadges(); return; }
+  try{ const { data } = await window._sb.schema('aluno').from('study_rooms').select('id, name').in('id', rooms); (data || []).forEach(r => { window._salasRoomNames[r.id] = r.name; }); }catch(_){}
+  const reads = await _salasFetchReads(uid);
+  const since = new Date(); since.setDate(since.getDate() - 30);
+  const unread = {};
+  try{
+    const { data } = await window._sb.schema('aluno').from('room_messages').select('room_id, sender_id, created_at').in('room_id', rooms).gte('created_at', since.toISOString());
+    (data || []).forEach(m => { if(String(m.sender_id) === String(uid)) return; const lr = reads[m.room_id]; if(!lr || m.created_at > lr) unread[m.room_id] = (unread[m.room_id] || 0) + 1; });
+  }catch(_){}
+  window._salasUnread = unread;
+  _salasUpdateBadges();
+  Object.keys(unread).forEach(rid => { if(unread[rid] > 0) _salasEnsureChatNotif(rid, window._salasRoomNames[rid] || '', unread[rid]); });
+}
+function _salasEnsureChatNotif(roomId, roomName, count){
+  const uid = _salasMyUid(); if(!uid || !window.UbiqueStore || !UbiqueStore.notifications || !window.Notifications) return;
+  const list = UbiqueStore.notifications.list() || [];
+  const ex = list.find(n => n && String(n.user_id) === String(uid) && n.type === 'room_chat' && n.payload && String(n.payload.room_id) === String(roomId) && !n.read);
+  if(ex){
+    const pay = Object.assign({}, ex.payload, { room_name: roomName, count });
+    try{ UbiqueStore.notifications.update(ex.id, { payload: pay, created_at: Date.now(), read:false }); }catch(_){}
+    try{ if(window._sb) window._sb.schema('aluno').from('notifications').update({ payload: pay, read:false, created_at: new Date().toISOString() }).eq('id', ex.id).then(()=>{}); }catch(_){}
+  } else if(typeof Notifications.create === 'function'){
+    Notifications.create(uid, 'room_chat', { room_id: roomId, room_name: roomName, count });
+  }
+  if(window._refreshNotifsUI) window._refreshNotifsUI();
+}
+function _salasClearChatNotif(roomId){
+  const uid = _salasMyUid(); if(!uid || !window.UbiqueStore || !UbiqueStore.notifications || !window.Notifications) return;
+  (UbiqueStore.notifications.list() || []).filter(n => n && String(n.user_id) === String(uid) && n.type === 'room_chat' && n.payload && String(n.payload.room_id) === String(roomId) && !n.read).forEach(n => { try{ Notifications.markRead(n.id); }catch(_){} });
+  if(window._refreshNotifsUI) window._refreshNotifsUI();
+}
+async function _salasMarkRoomRead(roomId){
+  const uid = _salasMyUid(); if(!uid || !window._sb || !roomId) return;
+  window._salasUnread = window._salasUnread || {}; window._salasUnread[roomId] = 0;
+  _salasUpdateBadges();
+  _salasClearChatNotif(roomId);
+  try{ await window._sb.schema('aluno').from('room_reads').upsert({ user_id: uid, room_id: roomId, last_read_at: new Date().toISOString() }, { onConflict:'user_id,room_id' }); }catch(e){ console.warn('[room read]', e); }
+}
+function _salasChatLeave(){
+  if(window._salasViewingChat){ const r = window._salasViewingChatRoom; window._salasViewingChat = false; window._salasViewingChatRoom = null; if(r) _salasMarkRoomRead(r); }
+  if(typeof _salasChatUnsubscribe === 'function') _salasChatUnsubscribe();
+}
+function _salasAntennaStart(){
+  if(window._salasAntennaCh && window._sb){ try{ window._sb.removeChannel(window._salasAntennaCh); }catch(_){} window._salasAntennaCh = null; }
+  if(!window._sb || !window._sb.channel) return;
+  const uid = _salasMyUid(); if(!uid) return;
+  try{
+    window._salasAntennaCh = window._sb.channel('salas-antenna-' + uid)
+      .on('postgres_changes', { event:'INSERT', schema:'aluno', table:'room_messages' }, (payload) => {
+        const m = payload && payload.new; if(!m) return;
+        if(String(m.sender_id) === String(uid)) return;
+        const mem = window._salasMyMemberships || {};
+        if(mem[m.room_id] !== 'member') return;
+        if(window._salasViewingChat && String(window._salasViewingChatRoom) === String(m.room_id)) return; // está vendo
+        window._salasUnread = window._salasUnread || {};
+        window._salasUnread[m.room_id] = (window._salasUnread[m.room_id] || 0) + 1;
+        _salasUpdateBadges();
+        _salasEnsureChatNotif(m.room_id, window._salasRoomNames[m.room_id] || '', window._salasUnread[m.room_id]);
+      })
+      .subscribe();
+  }catch(e){ console.warn('[salas antenna]', e); }
+}
+window._salasComputeUnread = _salasComputeUnread;
+window._salasAntennaStart = _salasAntennaStart;
 
 /* ═══════════════════ SALAS DE ESTUDOS (Fase 5.3) — Parte A ═══════════════════ */
 function _salasMyUid(){ const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null; return (u && u.id) ? u.id : null; }
@@ -22579,6 +22700,7 @@ async function _salasAcceptInvite(roomId){
     (window._salasMyMemberships = window._salasMyMemberships || {})[roomId] = 'member';
     if(window._salasDeclined) window._salasDeclined.delete(String(roomId));
     if(window.ueToast) ueToast('Você entrou na sala!', 'success');
+    if(typeof _salasComputeUnread === 'function') _salasComputeUnread();
   }catch(e){ console.warn('[salas accept]', e); }
 }
 async function _salasDeclineInvite(roomId){
@@ -22589,6 +22711,21 @@ async function _salasDeclineInvite(roomId){
 window._salasAcceptInvite = _salasAcceptInvite;
 window._salasDeclineInvite = _salasDeclineInvite;
 window._salasOpenRoom = function(roomId){ _salasCurrentId = roomId; if(window.Router) Router.go('/salas'); };
+// Abre direto o CHAT de uma sala (usado pela notificação "mensagens novas").
+window._salasOpenRoomChat = function(roomId){
+  _salasCurrentId = roomId;
+  if(window.Router) Router.go('/salas');
+  let tries = 0;
+  (function _try(){
+    const drawer = document.querySelector('.salas-drawer');
+    if(drawer){
+      const roomBtn = document.querySelector('[data-room="' + roomId + '"]');
+      if(roomBtn && !roomBtn.classList.contains('on')) roomBtn.click();
+      if(drawer.hidden){ const tg = document.querySelector('[data-drawer-toggle]'); if(tg) tg.click(); }
+      const chatTab = drawer.querySelector('[data-stab="chat"]'); if(chatTab) chatTab.click();
+    } else if(tries++ < 25){ setTimeout(_try, 120); }
+  })();
+};
 
 function _salasOpenCreateModal(onDone){
   if(typeof _coopInjectStyles === 'function') _coopInjectStyles();
@@ -22689,7 +22826,7 @@ function _salasWireDrawer(drawer){
     drawer.querySelectorAll('.salas-stab').forEach(x => x.classList.toggle('on', x === b));
     drawer.querySelectorAll('.salas-pane').forEach(p => p.classList.toggle('on', p.dataset.spane === k));
     window._salasMetaEditing = false;
-    if(k !== 'chat') _salasChatUnsubscribe(); // sai do chat → cancela a antena
+    if(k !== 'chat') _salasChatLeave(); // sai do chat → cancela antena + marca lido
     if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
     else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
     else if(k === 'ranking'){ _salasRenderRanking(drawer); _salasDrawerStartPoll(drawer); }
@@ -22707,7 +22844,7 @@ function _salasWireDrawer(drawer){
       const rp = e.target.closest('[data-rankp]'); if(rp){ window._salasRankPeriod = rp.getAttribute('data-rankp'); _salasRenderRanking(drawer); return; }
     });
   }
-  const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; _salasDrawerStopPoll(); _salasChatUnsubscribe(); });
+  const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; _salasDrawerStopPoll(); _salasChatLeave(); });
   const rz = drawer.querySelector('.salas-drawer-resize');
   if(rz) rz.addEventListener('mousedown', e => {
     e.preventDefault(); document.body.style.userSelect = 'none';
@@ -22739,8 +22876,7 @@ Renderers.salas = function(route){
             <button class="salas-stab on" data-stab="ranking" type="button">Ranking</button>
             <button class="salas-stab" data-stab="meta" type="button">Meta</button>
             <button class="salas-stab" data-stab="feed" type="button">Feed</button>
-            <button class="salas-stab" data-stab="chat" type="button">Chat</button>
-            <button class="salas-stab" data-stab="avisos" type="button">Avisos</button>
+            <button class="salas-stab" data-stab="chat" type="button">Chat <span class="salas-badge" id="salasChatTabBadge" hidden></span></button>
           </div>
           <button class="salas-drawer-x" type="button" aria-label="Fechar">&times;</button>
         </div>
@@ -22749,7 +22885,6 @@ Renderers.salas = function(route){
           <div class="salas-pane" data-spane="meta"><p class="salas-soon">Meta coletiva — chega na Parte F.</p></div>
           <div class="salas-pane" data-spane="feed"><p class="salas-soon">Feed de ações — chega na Parte E.</p></div>
           <div class="salas-pane" data-spane="chat"><p class="salas-soon">Chat da sala — chega na Parte H.</p></div>
-          <div class="salas-pane" data-spane="avisos"><p class="salas-soon">Avisos do grupo — chega na Parte I.</p></div>
         </div>
       </div>
     </div>`;
@@ -22823,7 +22958,7 @@ Renderers.salas.mount = function(stageEl){
         <div class="salas-room-actions">
           <button class="btn-ghost" data-invite="${Util.attr(room.id)}" type="button">Convidar colega</button>
           ${isOwner ? `<button class="btn-ghost" data-del="${Util.attr(room.id)}" type="button">Excluir</button>` : `<button class="btn-ghost" data-leave="${Util.attr(room.id)}" type="button">Sair</button>`}
-          <button class="btn-primary" data-drawer-toggle="1" type="button">Painéis</button>
+          <button class="btn-primary" data-drawer-toggle="1" type="button">Painéis <span class="salas-badge" id="salasPanelBadge" hidden></span></button>
         </div>
       </div>
       <div class="salas-mesa-card">
@@ -22840,9 +22975,10 @@ Renderers.salas.mount = function(stageEl){
     if(_salasCurrentId && !_salasRooms.find(r => String(r.id) === String(_salasCurrentId))) _salasCurrentId = null;
     if(!_salasCurrentId && _salasRooms.length) _salasCurrentId = _salasRooms[0].id;
     listEl.innerHTML = _salasRooms.length
-      ? _salasRooms.map(r => `<button class="salas-room-item${String(r.id)===String(_salasCurrentId)?' on':''}" data-room="${Util.attr(r.id)}" type="button"><span class="salas-room-name">${Util.esc(r.name)}</span>${String(r.creator_id)===String(_salasMyUid())?'<span class="salas-room-owner">dono</span>':''}</button>`).join('')
+      ? _salasRooms.map(r => { const _ur = (window._salasUnread && window._salasUnread[r.id]) || 0; return `<button class="salas-room-item${String(r.id)===String(_salasCurrentId)?' on':''}" data-room="${Util.attr(r.id)}" type="button"><span class="salas-room-name">${Util.esc(r.name)}</span>${_ur>0?`<span class="salas-badge">${_ur>99?'99+':_ur}</span>`:(String(r.creator_id)===String(_salasMyUid())?'<span class="salas-room-owner">dono</span>':'')}</button>`; }).join('')
       : '<p class="salas-empty">Você ainda não está em nenhuma sala. Crie uma!</p>';
     renderMain();
+    if(typeof _salasUpdateBadges === 'function') _salasUpdateBadges();
   }
   listEl.addEventListener('click', e => { const b = e.target.closest('[data-room]'); if(b){ _salasCurrentId = b.dataset.room; renderList(); } });
   stageEl.querySelector('#salasNewBtn').addEventListener('click', () => _salasOpenCreateModal(() => renderList()));
@@ -22860,7 +22996,7 @@ Renderers.salas.mount = function(stageEl){
         else if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
         else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
         else if(k === 'chat'){ _salasRenderChat(drawer); }
-      } else { _salasDrawerStopPoll(); _salasChatUnsubscribe(); }
+      } else { _salasDrawerStopPoll(); _salasChatLeave(); }
       return;
     }
   });
