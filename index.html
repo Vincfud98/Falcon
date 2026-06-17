@@ -9178,6 +9178,9 @@ window.TAG_REGISTRY = {
       // ao voltar pra aba. O admin lê last_seen_at na topbar do chat e no ranking.
       try {
         const _beat = () => {
+          // Só pulsa com a aba VISÍVEL — senão um aba em 2º plano manteria
+          // last_seen sempre fresco e o aluno nunca apareceria "offline".
+          if(typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return;
           const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
           if(!u || !u.id || !window._sb) return;
           window._sb.schema('crm').from('user_profiles')
@@ -17384,6 +17387,24 @@ async function _presenceFetch(userIds){
   }catch(e){ console.warn('[presence]', e); }
   return out;
 }
+// Garante que os perfis (nome/@/foto) de uma lista de ids estejam no
+// UserDirectory ANTES de renderizar — senão getById devolve null e o card some.
+async function _ensureProfilesLoaded(ids){
+  const need = [...new Set((ids || []).map(String))].filter(id => id && !(window.UserDirectory && UserDirectory.getById(id)));
+  if(!need.length || !window._sb || !window.UbiqueStore || !UbiqueStore.user_profiles) return;
+  try{
+    const { data } = await window._sb.schema('crm').from('user_profiles')
+      .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform').in('user_id', need);
+    const list = UbiqueStore.user_profiles.list() || [];
+    (data || []).forEach(p => {
+      const merged = { user_id:p.user_id, displayName:p.display_name||'', nickname:p.nickname||'', namePublic:p.full_name_public!==false, handle:p.handle||'', bio:p.bio||'', photoUrl:p.photo_url||'', photoTransform:p.photo_transform||{ x:0, y:0, scale:1 }, updated_at:Date.now() };
+      const ex = list.find(x => x && x.user_id === p.user_id);
+      if(ex) UbiqueStore.user_profiles.update(ex.id, merged);
+      else UbiqueStore.user_profiles.add(Object.assign({ created_at:Date.now() }, merged));
+    });
+  }catch(e){ console.warn('[ensureProfiles]', e); }
+}
+window._ensureProfilesLoaded = _ensureProfilesLoaded;
 function _relTime(ts){
   if(!ts) return '';
   const diff = Date.now() - ts;
@@ -18093,22 +18114,28 @@ Renderers.account.mount = function(stageEl){
     if(!fresh) return;
     const meId = fresh.id;
     if(typeof _presenceInjectStyles === 'function') _presenceInjectStyles();
+    // Pega os edges de follow e GARANTE os perfis carregados ANTES de montar os
+    // cards — senão getById devolve null e o colega some da lista (bug visto).
+    const inc = Follows.pendingIncoming(meId), mut = Follows.mutual(meId), fol = Follows.following(meId), fos = Follows.followers(meId);
+    if(typeof _ensureProfilesLoaded === 'function'){
+      await _ensureProfilesLoaded([...inc.map(f=>f.follower_id), ...mut.map(f=>f.following_id), ...fol.map(f=>f.following_id), ...fos.map(f=>f.follower_id)]);
+    }
     // Monta as 4 listas como {u, actions} (presença é resolvida depois, num lote)
-    const incomingRaw = Follows.pendingIncoming(meId).map(f => {
+    const incomingRaw = inc.map(f => {
       const u = UserDirectory.getById(f.follower_id); if(!u) return null;
       return { u, actions:
         `<button class="btn btn-ghost btn-sm" data-peers-accept="${Util.attr(f.id)}">Aceitar</button>
          <button class="btn btn-ghost btn-sm" data-peers-decline="${Util.attr(f.id)}" style="color:var(--red)">Recusar</button>` };
     }).filter(Boolean);
-    const mutualRaw = Follows.mutual(meId).map(f => {
+    const mutualRaw = mut.map(f => {
       const u = UserDirectory.getById(f.following_id); if(!u) return null;
       return { u, actions: '<span class="peer-tag is-mutual">colega mutual</span>' };
     }).filter(Boolean);
-    const followingRaw = Follows.following(meId).map(f => {
+    const followingRaw = fol.map(f => {
       const u = UserDirectory.getById(f.following_id); if(!u) return null;
       return { u, actions: `<button class="btn btn-ghost btn-sm" data-peers-unfollow="${Util.attr(u.id)}">Deixar de seguir</button>` };
     }).filter(Boolean);
-    const followersRaw = Follows.followers(meId).map(f => {
+    const followersRaw = fos.map(f => {
       const u = UserDirectory.getById(f.follower_id); if(!u) return null;
       const rel = Follows.relationshipWith(meId, u.id);
       const actions = rel.iFollow
@@ -22197,7 +22224,8 @@ Renderers.salas.mount = function(stageEl){
     const isOwner = String(room.creator_id) === String(_salasMyUid());
     if(typeof _presenceInjectStyles === 'function') _presenceInjectStyles();
     const members = (await _salasFetchMembers(room.id)).filter(m => m.status === 'member');
-    // Mesa ao vivo (Parte C): presença + matéria atual + streak de cada membro
+    if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(members.map(m => m.user_id));
+    // Mesa ao vivo (Parte C/D): presença + matéria atual + status de cada membro
     const mesaPres = (typeof _presenceFetch === 'function') ? await _presenceFetch(members.map(m => m.user_id)) : {};
     // Anel de status: verde=lendo · azul=praticando · cinza=offline; glow=on fire.
     // Hover mostra "HB · 01 · Configuração do Brasil". Online na mesa, offline fora.
@@ -22208,13 +22236,12 @@ Renderers.salas.mount = function(stageEl){
       const online = !!(p && p.online);
       const ring = online ? (p.practicing ? 'is-practicing' : 'is-reading') : 'is-offline';
       const fire = (p && p.onFire) ? ' on-fire' : '';
-      const hover = (online && p && p.activity) ? _activityUnitLabel(p.activity) : '';
       let sub = '';
       if(online){
         const subj = p.activity && (p.activity.subject_short || p.activity.sigla);
         if(subj) sub = `<span class="salas-mesa-sub is-online">estudando ${Util.esc(subj)}</span>`;
       } else if(p && p.lastSeen){ sub = `<span class="salas-mesa-sub">${Util.esc(_relTime(p.lastSeen))}</span>`; }
-      return `<div class="salas-mesa-wrap${online ? '' : ' is-off'}" title="${Util.attr(hover || name)}">
+      return `<div class="salas-mesa-wrap${online ? '' : ' is-off'}" title="${Util.attr(name)}">
         <div class="salas-mesa-avbox ${ring}${fire}">
           <div class="salas-mesa-av" data-url="${Util.attr(u.photoUrl||'')}" data-x="${(u.photoTransform&&u.photoTransform.x)||0}" data-y="${(u.photoTransform&&u.photoTransform.y)||0}" data-s="${(u.photoTransform&&u.photoTransform.scale)||1}"><span>${Util.esc(Util.initials(name))}</span></div>
           ${fire ? `<span class="salas-mesa-fire">${_FLAME_SVG}</span>` : ''}
