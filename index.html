@@ -8124,7 +8124,7 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
 <a class="tb-navlink" id="navNotes" href="#/notes">Notas</a>
 <a class="tb-navlink" id="navGlossario" href="#/glossario">Glossário</a>
 <a class="tb-navlink" id="navForum" href="#/forum">Fórum</a>
-<a class="tb-navlink" id="navSalas" href="#/salas">Salas de Estudos <span class="salas-badge" id="navSalasBadge" hidden></span></a>
+<a class="tb-navlink" id="navSalas" href="#/salas">Salas</a>
     <div class="display-prefs" id="displayPrefs">
       <button class="display-prefs-btn" id="displayPrefsBtn" title="Preferências de exibição">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
@@ -22548,7 +22548,6 @@ function _salasTotalUnread(){ let t = 0; const u = window._salasUnread || {}; fo
 function _salasUpdateBadges(){
   _salasBadgeInjectStyles();
   const setB = (el, n) => { if(!el) return; if(n > 0){ el.hidden = false; el.textContent = n > 99 ? '99+' : String(n); } else { el.hidden = true; el.textContent = ''; } };
-  setB(document.getElementById('navSalasBadge'), _salasTotalUnread());
   const cur = (window._salasUnread || {})[_salasCurrentId] || 0;
   setB(document.getElementById('salasPanelBadge'), cur);
   setB(document.getElementById('salasChatTabBadge'), cur);
@@ -22575,17 +22574,21 @@ async function _salasComputeUnread(){
   Object.keys(unread).forEach(rid => { if(unread[rid] > 0) _salasEnsureChatNotif(rid, window._salasRoomNames[rid] || '', unread[rid]); });
 }
 function _salasEnsureChatNotif(roomId, roomName, count){
-  const uid = _salasMyUid(); if(!uid || !window.UbiqueStore || !UbiqueStore.notifications || !window.Notifications) return;
+  const uid = _salasMyUid();
+  if(!uid || !window.UbiqueStore || !UbiqueStore.notifications || !window.Notifications){ console.log('[salas DIAG] ensureChatNotif abortou: faltou', { uid:!!uid, store:!!(window.UbiqueStore&&UbiqueStore.notifications), notif:!!window.Notifications }); return; }
   const list = UbiqueStore.notifications.list() || [];
   const ex = list.find(n => n && String(n.user_id) === String(uid) && n.type === 'room_chat' && n.payload && String(n.payload.room_id) === String(roomId) && !n.read);
   if(ex){
+    console.log('[salas DIAG] ATUALIZANDO notificação existente da sala', roomId, '→ count', count);
     const pay = Object.assign({}, ex.payload, { room_name: roomName, count });
     try{ UbiqueStore.notifications.update(ex.id, { payload: pay, created_at: Date.now(), read:false }); }catch(_){}
     try{ if(window._sb) window._sb.schema('aluno').from('notifications').update({ payload: pay, read:false, created_at: new Date().toISOString() }).eq('id', ex.id).then(()=>{}); }catch(_){}
   } else if(typeof Notifications.create === 'function'){
-    Notifications.create(uid, 'room_chat', { room_id: roomId, room_name: roomName, count });
+    const row = Notifications.create(uid, 'room_chat', { room_id: roomId, room_name: roomName, count });
+    console.log('[salas DIAG] CRIANDO notificação nova da sala', roomId, '→', row ? 'ok id '+row.id : 'create() devolveu null');
   }
   if(window._refreshNotifsUI) window._refreshNotifsUI();
+  try{ console.log('[salas DIAG] sino agora conta', Notifications.unreadCount(uid), 'não-lidas'); }catch(_){}
 }
 function _salasClearChatNotif(roomId){
   const uid = _salasMyUid(); if(!uid || !window.UbiqueStore || !UbiqueStore.notifications || !window.Notifications) return;
@@ -22608,19 +22611,21 @@ function _salasAntennaStart(){
   if(!window._sb || !window._sb.channel) return;
   const uid = _salasMyUid(); if(!uid) return;
   try{
+    console.log('%c[salas DIAG] antena iniciando para', 'color:#c8a97e', uid, '· salas que sou membro:', window._salasMyMemberships);
     window._salasAntennaCh = window._sb.channel('salas-antenna-' + uid)
       .on('postgres_changes', { event:'INSERT', schema:'aluno', table:'room_messages' }, (payload) => {
-        const m = payload && payload.new; if(!m) return;
-        if(String(m.sender_id) === String(uid)) return;
+        const m = payload && payload.new; if(!m){ console.log('[salas DIAG] evento sem payload'); return; }
+        console.log('%c[salas DIAG] mensagem recebida pela antena', 'color:#57c785', { room:m.room_id, sender:m.sender_id, eu:uid });
+        if(String(m.sender_id) === String(uid)){ console.log('[salas DIAG] ignorada: sou eu o remetente'); return; }
         const mem = window._salasMyMemberships || {};
-        if(mem[m.room_id] !== 'member') return;
-        if(window._salasViewingChat && String(window._salasViewingChatRoom) === String(m.room_id)) return; // está vendo
+        if(mem[m.room_id] !== 'member'){ console.log('[salas DIAG] ignorada: não sou membro dessa sala', mem[m.room_id]); return; }
+        if(window._salasViewingChat && String(window._salasViewingChatRoom) === String(m.room_id)){ console.log('[salas DIAG] ignorada: estou vendo o chat dessa sala'); return; }
         window._salasUnread = window._salasUnread || {};
         window._salasUnread[m.room_id] = (window._salasUnread[m.room_id] || 0) + 1;
         _salasUpdateBadges();
         _salasEnsureChatNotif(m.room_id, window._salasRoomNames[m.room_id] || '', window._salasUnread[m.room_id]);
       })
-      .subscribe();
+      .subscribe((status) => { console.log('%c[salas DIAG] status da antena:', 'color:#c8a97e', status); });
   }catch(e){ console.warn('[salas antenna]', e); }
 }
 window._salasComputeUnread = _salasComputeUnread;
@@ -22969,6 +22974,7 @@ Renderers.salas.mount = function(stageEl){
       ${actsHtml || '<div class="salas-acts"><div class="salas-acts-head">Atividades do grupo</div><p class="salas-empty">Nenhuma atividade ainda. Resolva uma questão e use o botão CoopStudy → "Uma sala" pra enviar pro grupo corrigir.</p></div>'}
     </section>`;
     mainEl.querySelectorAll('.salas-mesa-av[data-url]').forEach(el => { const url = el.dataset.url; if(url) renderAvatarInto(el, url, { x:parseFloat(el.dataset.x)||0, y:parseFloat(el.dataset.y)||0, scale:parseFloat(el.dataset.s)||1 }); });
+    if(typeof _salasUpdateBadges === 'function') _salasUpdateBadges(); // badge "Painéis"/aba Chat sempre em dia
   }
   async function renderList(){
     _salasRooms = await _salasFetchRooms();
@@ -22977,8 +22983,7 @@ Renderers.salas.mount = function(stageEl){
     listEl.innerHTML = _salasRooms.length
       ? _salasRooms.map(r => { const _ur = (window._salasUnread && window._salasUnread[r.id]) || 0; return `<button class="salas-room-item${String(r.id)===String(_salasCurrentId)?' on':''}" data-room="${Util.attr(r.id)}" type="button"><span class="salas-room-name">${Util.esc(r.name)}</span>${_ur>0?`<span class="salas-badge">${_ur>99?'99+':_ur}</span>`:(String(r.creator_id)===String(_salasMyUid())?'<span class="salas-room-owner">dono</span>':'')}</button>`; }).join('')
       : '<p class="salas-empty">Você ainda não está em nenhuma sala. Crie uma!</p>';
-    renderMain();
-    if(typeof _salasUpdateBadges === 'function') _salasUpdateBadges();
+    renderMain(); // renderMain já atualiza os badges (Painéis/aba Chat) ao terminar
   }
   listEl.addEventListener('click', e => { const b = e.target.closest('[data-room]'); if(b){ _salasCurrentId = b.dataset.room; renderList(); } });
   stageEl.querySelector('#salasNewBtn').addEventListener('click', () => _salasOpenCreateModal(() => renderList()));
