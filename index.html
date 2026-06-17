@@ -9188,8 +9188,9 @@ window.TAG_REGISTRY = {
             .eq('user_id', u.id)
             .then(({ error }) => { if(error) console.warn('[presença]', error.message); });
         };
+        window._presenceBeat = _beat;
         _beat();
-        if(!window._hbTimer) window._hbTimer = setInterval(_beat, 60 * 1000);
+        if(!window._hbTimer) window._hbTimer = setInterval(_beat, 25 * 1000);
         if(!window._hbVisBound){
           window._hbVisBound = true;
           document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible') _beat(); });
@@ -17383,9 +17384,12 @@ async function _presenceFetch(userIds){
     const { data } = await window._sb.schema('crm').from('user_profiles')
       .select('user_id, last_seen_at, current_activity, streak, streak_day, hot_streak').in('user_id', ids);
     const now = Date.now();
+    const meId = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
     (data || []).forEach(r => {
       const seen = r.last_seen_at ? new Date(r.last_seen_at).getTime() : 0;
-      const online = !!seen && (now - seen) < 3 * 60 * 1000;
+      // online = visto nos últimos 75s; o próprio usuário é sempre online (ele
+      // está claramente usando o app — nunca deve se ver "offline").
+      const online = (meId && String(r.user_id) === String(meId)) || (!!seen && (now - seen) < 75 * 1000);
       const a = r.current_activity || null;
       const actAt = (a && a.at) ? new Date(a.at).getTime() : 0;
       const practicing = online && a && a.type === 'practicing' && actAt && (now - actAt) < 2 * 60 * 1000;
@@ -22332,6 +22336,9 @@ Renderers.salas.mount = function(stageEl){
   const mainEl = stageEl.querySelector('#salasMain');
   const drawer = stageEl.querySelector('#salasDrawer');
   _salasWireDrawer(drawer);
+  let _mesaMemberIds = [];              // ids dos membros da sala atual (pra filtrar o realtime)
+  let _mesaRefreshT = null;
+  const _mesaRefreshSoon = () => { if(_mesaRefreshT) return; _mesaRefreshT = setTimeout(() => { _mesaRefreshT = null; if(_salasCurrentId) renderMain(); }, 1200); };
   async function renderMain(){
     const room = _salasRooms.find(r => String(r.id) === String(_salasCurrentId));
     if(!room){ mainEl.innerHTML = '<div class="salas-main-empty"><p>Selecione uma sala ao lado, ou crie uma nova pra começar.</p></div>'; return; }
@@ -22339,6 +22346,7 @@ Renderers.salas.mount = function(stageEl){
     const isOwner = String(room.creator_id) === String(_salasMyUid());
     if(typeof _presenceInjectStyles === 'function') _presenceInjectStyles();
     const members = (await _salasFetchMembers(room.id)).filter(m => m.status === 'member');
+    _mesaMemberIds = members.map(m => String(m.user_id));
     if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(members.map(m => m.user_id));
     // Mesa ao vivo (Parte C/D): presença + matéria atual + status de cada membro
     const mesaPres = (typeof _presenceFetch === 'function') ? await _presenceFetch(members.map(m => m.user_id)) : {};
@@ -22424,15 +22432,33 @@ Renderers.salas.mount = function(stageEl){
     const dt = e.target.closest('[data-drawer-toggle]'); if(dt){ drawer.hidden = !drawer.hidden; return; }
   });
   renderList();
-  // Auto-refresh ao vivo (Parte D): re-busca a presença a cada 30s enquanto a
-  // aba está visível e você está na página de Salas. Não empilha timers.
-  if(window._salasPollTimer){ clearInterval(window._salasPollTimer); window._salasPollTimer = null; }
+  // Presença AO VIVO (Parte F): heartbeat imediato ao entrar + realtime (push de
+  // quem fica online/muda de atividade) + poll curto de segurança (detecta quem
+  // ficou OFFLINE, já que "saiu" não gera evento). Limpa tudo ao sair da página.
+  if(typeof window._presenceBeat === 'function') try{ window._presenceBeat(); }catch(_){}
+  function _salasStopLive(){
+    if(window._salasPollTimer){ clearInterval(window._salasPollTimer); window._salasPollTimer = null; }
+    if(window._salasPresenceCh && window._sb){ try{ window._sb.removeChannel(window._salasPresenceCh); }catch(_){} window._salasPresenceCh = null; }
+  }
+  _salasStopLive();
+  // Realtime: qualquer UPDATE em crm.user_profiles de um membro da sala → refresh
+  if(window._sb && window._sb.channel){
+    try{
+      window._salasPresenceCh = window._sb.channel('salas-presence-' + (_salasMyUid() || 'x'))
+        .on('postgres_changes', { event:'UPDATE', schema:'crm', table:'user_profiles' }, (payload) => {
+          const uid = payload && payload.new && payload.new.user_id;
+          if(uid && _mesaMemberIds.some(id => String(id) === String(uid))) _mesaRefreshSoon();
+        })
+        .subscribe();
+    }catch(e){ console.warn('[salas presence rt]', e); }
+  }
+  // Poll de segurança a cada 15s (offline + fallback se o realtime cair).
   window._salasPollTimer = setInterval(() => {
     if(document.visibilityState !== 'visible') return;
     const r = (window.Router && Router.parse) ? Router.parse() : null;
-    if(!r || r.view !== 'salas'){ clearInterval(window._salasPollTimer); window._salasPollTimer = null; return; }
+    if(!r || r.view !== 'salas'){ _salasStopLive(); return; }
     if(_salasCurrentId) renderMain();
-  }, 30000);
+  }, 15000);
 };
 
 /* ═══════════ EDITAL — visualização hierárquica do edital + progresso ═══════════ */
