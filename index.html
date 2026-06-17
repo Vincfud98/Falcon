@@ -9192,8 +9192,10 @@ window.TAG_REGISTRY = {
             const practicing = window._lastPracticeAt && (Date.now() - window._lastPracticeAt < 2 * 60 * 1000) && String(window._practiceUnit || '') === String(unitId);
             activity = _buildActivity(unitId, practicing ? 'practicing' : 'reading');
           }
+          const _upd = { last_seen_at: new Date().toISOString(), current_activity: activity, hot_streak: window._myHotStreak || 0 };
+          if(typeof _myQuestionsToday === 'function'){ _upd.questions_today = _myQuestionsToday(); _upd.questions_day = window._questionsDay; }
           window._sb.schema('crm').from('user_profiles')
-            .update({ last_seen_at: new Date().toISOString(), current_activity: activity, hot_streak: window._myHotStreak || 0 })
+            .update(_upd)
             .eq('user_id', u.id)
             .then(({ error }) => { if(error) console.warn('[presença]', error.message); });
         };
@@ -17352,11 +17354,31 @@ function _onUnitChange(unitId){
 // Praticando questões: atualiza tipo='practicing' + hot_streak (acertos seguidos).
 // Chamado a cada resposta objetiva; debounce de 1.5s evita escrita por item no
 // modo "verificar tudo" (que processa vários itens num laço).
+// Contador de questões objetivas do DIA (pra Meta Coletiva). Vive em window e é
+// gravado pelo heartbeat; reseta sozinho quando vira o dia.
+function _myQuestionsToday(){
+  const today = _dayFmt(new Date());
+  if(window._questionsDay !== today){ window._questionsDay = today; window._questionsToday = 0; }
+  return window._questionsToday || 0;
+}
+async function _loadMyDailyCount(){
+  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
+  if(!uid || !window._sb) return;
+  try{
+    const { data } = await window._sb.schema('crm').from('user_profiles')
+      .select('questions_today, questions_day').eq('user_id', uid).maybeSingle();
+    const today = _dayFmt(new Date());
+    window._questionsDay = today;
+    window._questionsToday = (data && data.questions_day === today) ? (data.questions_today || 0) : 0;
+  }catch(e){ window._questionsToday = window._questionsToday || 0; }
+}
+window._loadMyDailyCount = _loadMyDailyCount;
 let _hotStreak = 0, _practiceUnit = null, _practiceEmittedUnit = null;
 function _recordPractice(unitId, correct){
   if(!(window.Auth && Auth.getUser && (Auth.getUser() || {}).id) || !window._sb) return;
   _hotStreak = correct ? (_hotStreak + 1) : 0;
   window._myHotStreak = _hotStreak;
+  window._questionsToday = _myQuestionsToday() + 1; // conta a questão objetiva do dia
   window._lastPracticeAt = Date.now();
   if(unitId){ _practiceUnit = unitId; window._practiceUnit = unitId; }
   // Feed: "está praticando questões em HB · 01 · …" (1× por unidade)
@@ -17380,8 +17402,9 @@ async function _presenceFetch(userIds){
   if(!ids.length || !window._sb) return out;
   try{
     const { data } = await window._sb.schema('crm').from('user_profiles')
-      .select('user_id, last_seen_at, current_activity, streak, streak_day, hot_streak').in('user_id', ids);
+      .select('user_id, last_seen_at, current_activity, streak, streak_day, hot_streak, questions_today, questions_day').in('user_id', ids);
     const now = Date.now();
+    const today = _dayFmt(new Date());
     const meId = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
     (data || []).forEach(r => {
       const seen = r.last_seen_at ? new Date(r.last_seen_at).getTime() : 0;
@@ -17401,6 +17424,7 @@ async function _presenceFetch(userIds){
         practicing: !!practicing,
         onFire: online && hot >= 5,
         hotStreak: hot,
+        questionsToday: (r.questions_day === today) ? (r.questions_today || 0) : 0,
         streak: _streakValid(r.streak, r.streak_day) ? r.streak : 0
       };
     });
@@ -17521,6 +17545,8 @@ if(typeof document !== 'undefined' && !window._accessVisBound){
 
 async function initUserSession(user){
   if(!user || !user.id) return;
+  // Contador diário de questões (Meta Coletiva) — carrega o acumulado de hoje.
+  if(typeof _loadMyDailyCount === 'function') _loadMyDailyCount().catch(()=>{});
   // 1) Entrega o "crachá" (token de login) à antena do realtime — necessário
   //    pra entregar linhas de tabelas com RLS ao vivo. Sem isto, o realtime
   //    conecta mas não recebe nada das tabelas protegidas.
@@ -22088,15 +22114,94 @@ async function _salasRenderFeed(drawer){
     const ini = av.querySelector('span'); if(ini) ini.style.display = 'none';
   });
 }
-function _salasFeedStopPoll(){ if(window._salasFeedTimer){ clearInterval(window._salasFeedTimer); window._salasFeedTimer = null; } }
-function _salasFeedStartPoll(drawer){
-  _salasFeedStopPoll();
-  window._salasFeedTimer = setInterval(() => {
+// Poll genérico do drawer: re-renderiza a aba dinâmica ativa (Feed ou Meta).
+function _salasDrawerStopPoll(){ if(window._salasDrawerTimer){ clearInterval(window._salasDrawerTimer); window._salasDrawerTimer = null; } }
+function _salasDrawerStartPoll(drawer){
+  _salasDrawerStopPoll();
+  window._salasDrawerTimer = setInterval(() => {
     if(document.visibilityState !== 'visible') return;
-    const active = drawer.querySelector('.salas-stab.on');
-    if(active && active.dataset.stab === 'feed' && !drawer.hidden) _salasRenderFeed(drawer);
-    else _salasFeedStopPoll();
+    if(drawer.hidden){ _salasDrawerStopPoll(); return; }
+    const active = drawer.querySelector('.salas-stab.on'); const k = active && active.dataset.stab;
+    if(k === 'feed') _salasRenderFeed(drawer);
+    else if(k === 'meta'){ if(!window._salasMetaEditing) _salasRenderMeta(drawer); }
+    else _salasDrawerStopPoll();
   }, 30000);
+}
+function _salasMetaInjectStyles(){
+  if(document.getElementById('uq-smeta-styles')) return;
+  const st = document.createElement('style'); st.id = 'uq-smeta-styles';
+  st.textContent = `
+  .smeta{ display:flex; flex-direction:column; gap:.9rem; }
+  .smeta-head{ display:flex; align-items:center; justify-content:space-between; gap:.6rem; flex-wrap:wrap; }
+  .smeta-goal{ font-family:var(--sans); font-size:.82rem; color:var(--text-dim); }
+  .smeta-goal strong{ color:var(--accent); }
+  .smeta-nogoal{ color:var(--text-mute); }
+  .smeta-edit{ background:none; border:1px solid var(--accent-border-soft); border-radius:var(--radius); color:var(--text-dim); font-family:var(--sans); font-size:.66rem; letter-spacing:.04em; padding:.28rem .6rem; cursor:pointer; }
+  .smeta-edit:hover{ color:var(--accent); border-color:var(--accent-border); }
+  .smeta-input{ width:80px; box-sizing:border-box; padding:.4rem .5rem; background:var(--bg); color:var(--text); border:1px solid var(--accent-border-soft); border-radius:var(--radius); font-family:var(--sans); font-size:.85rem; }
+  .smeta-edit-row{ font-family:var(--sans); font-size:.78rem; color:var(--text-dim); display:flex; align-items:center; gap:.5rem; }
+  .smeta-edit-actions{ display:flex; gap:.4rem; }
+  .smeta-achieve{ font-family:var(--serif); font-size:1.05rem; color:var(--text); line-height:1.35; }
+  .smeta-achieve strong{ color:var(--accent); }
+  .smeta-bar{ height:8px; border-radius:99px; background:var(--accent-lo); overflow:hidden; }
+  .smeta-bar.sm{ height:5px; }
+  .smeta-bar-fill{ height:100%; background:var(--accent); border-radius:99px; transition:width .4s ease; }
+  .smeta-bar-lbl{ font-family:var(--mono); font-size:.62rem; color:var(--text-mute); letter-spacing:.04em; margin-top:.3rem; }
+  .smeta-members{ display:flex; flex-direction:column; gap:.7rem; margin-top:.4rem; }
+  .smeta-mem-top{ display:flex; align-items:center; justify-content:space-between; gap:.5rem; margin-bottom:.3rem; }
+  .smeta-mem-name{ font-family:var(--sans); font-size:.84rem; color:var(--text); }
+  .smeta-mem-q{ font-family:var(--mono); font-size:.7rem; color:var(--text-mute); }
+  .smeta-mem.is-hit .smeta-mem-q{ color:#57c785; font-weight:600; }
+  .smeta-mem.is-hit .smeta-bar-fill{ background:#57c785; }
+  `;
+  document.head.appendChild(st);
+}
+async function _salasRenderMeta(drawer){
+  const pane = drawer.querySelector('[data-spane="meta"]'); if(!pane) return;
+  const roomId = _salasCurrentId;
+  if(!roomId){ pane.innerHTML = '<p class="salas-soon">Selecione uma sala.</p>'; return; }
+  _salasMetaInjectStyles();
+  const room = _salasRooms.find(r => String(r.id) === String(roomId)) || {};
+  const isOwner = String(room.creator_id) === String(_salasMyUid());
+  const goal = room.daily_goal || 0;
+  const members = (await _salasFetchMembers(roomId)).filter(m => m.status === 'member');
+  if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(members.map(m => m.user_id));
+  const pres = (typeof _presenceFetch === 'function') ? await _presenceFetch(members.map(m => m.user_id)) : {};
+  const qOf = (m) => { const p = pres[String(m.user_id)]; return (p && p.questionsToday) || 0; };
+  const total = members.reduce((s, m) => s + qOf(m), 0);
+  const goalTotal = goal > 0 ? goal * members.length : 0;
+  const pct = goalTotal > 0 ? Math.min(100, Math.round(total / goalTotal * 100)) : 0;
+  let html = `<div class="smeta">`;
+  if(window._salasMetaEditing && isOwner){
+    html += `<div class="smeta-head"><label class="smeta-edit-row">Meta (questões/dia por integrante): <input type="number" id="smetaGoalInput" min="0" step="5" value="${goal}" class="smeta-input"></label><div class="smeta-edit-actions"><button class="coop-btn-ghost" data-meta-cancel type="button">Cancelar</button><button class="coop-btn-primary" data-meta-save type="button">Salvar</button></div></div>`;
+  } else if(goal > 0){
+    html += `<div class="smeta-head"><div class="smeta-goal">Meta: <strong>${goal}</strong> questões/dia · por integrante</div>${isOwner ? `<button class="smeta-edit" data-meta-edit type="button">editar</button>` : ''}</div>`;
+  } else {
+    html += `<div class="smeta-head"><div class="smeta-goal smeta-nogoal">${isOwner ? 'Defina a meta diária do grupo.' : 'O dono ainda não definiu uma meta.'}</div>${isOwner ? `<button class="smeta-edit" data-meta-edit type="button">definir</button>` : ''}</div>`;
+  }
+  html += `<div class="smeta-achieve">O grupo já fez <strong>${total}</strong> ${total === 1 ? 'questão' : 'questões'} hoje!</div>`;
+  if(goalTotal > 0){
+    html += `<div><div class="smeta-bar"><div class="smeta-bar-fill" style="width:${pct}%"></div></div><div class="smeta-bar-lbl">${total} / ${goalTotal} questões do grupo (${pct}%)</div></div>`;
+  }
+  html += `<div class="smeta-members">${members.map(m => {
+    const u = _salasResolveUser(m.user_id); const name = u.nickname || u.handle || 'Aluno';
+    const q = qOf(m); const mpct = goal > 0 ? Math.min(100, Math.round(q / goal * 100)) : 0; const hit = goal > 0 && q >= goal;
+    return `<div class="smeta-mem${hit ? ' is-hit' : ''}"><div class="smeta-mem-top"><span class="smeta-mem-name">${Util.esc(name)}</span><span class="smeta-mem-q">${q}${goal > 0 ? ' / ' + goal : ''}${hit ? ' · meta batida' : ''}</span></div>${goal > 0 ? `<div class="smeta-bar sm"><div class="smeta-bar-fill" style="width:${mpct}%"></div></div>` : ''}</div>`;
+  }).join('')}</div>`;
+  html += `</div>`;
+  pane.innerHTML = html;
+}
+async function _salasSaveMeta(drawer){
+  const inp = drawer.querySelector('#smetaGoalInput'); if(!inp || !window._sb || !_salasCurrentId) return;
+  const val = Math.max(0, parseInt(inp.value, 10) || 0);
+  try{
+    const { error } = await window._sb.schema('aluno').from('study_rooms').update({ daily_goal: val }).eq('id', _salasCurrentId);
+    if(error){ if(window.ueToast) ueToast('Erro ao salvar meta: ' + error.message, 'error'); return; }
+    const rr = _salasRooms.find(r => String(r.id) === String(_salasCurrentId)); if(rr) rr.daily_goal = val;
+    window._salasMetaEditing = false;
+    _salasRenderMeta(drawer);
+    if(window.ueToast) ueToast('Meta atualizada!', 'success');
+  }catch(e){ console.warn('[meta save]', e); }
 }
 
 /* ═══════════════════ SALAS DE ESTUDOS (Fase 5.3) — Parte A ═══════════════════ */
@@ -22282,11 +22387,22 @@ function _salasWireDrawer(drawer){
     const b = e.target.closest('[data-stab]'); if(!b) return; const k = b.dataset.stab;
     drawer.querySelectorAll('.salas-stab').forEach(x => x.classList.toggle('on', x === b));
     drawer.querySelectorAll('.salas-pane').forEach(p => p.classList.toggle('on', p.dataset.spane === k));
-    if(k === 'feed'){ _salasRenderFeed(drawer); _salasFeedStartPoll(drawer); } else { _salasFeedStopPoll(); }
+    window._salasMetaEditing = false;
+    if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
+    else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
+    else { _salasDrawerStopPoll(); }
   });
-  // Clicar no apelido/avatar do feed abre o perfil
-  if(!drawer.__profBound){ drawer.__profBound = true; drawer.addEventListener('click', e => { const op = e.target.closest('[data-open-profile]'); if(op && typeof window.openUserProfile === 'function') openUserProfile(op.getAttribute('data-open-profile')); }); }
-  const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; _salasFeedStopPoll(); });
+  // Clicar no apelido/avatar do feed abre o perfil; editar meta (dono)
+  if(!drawer.__profBound){
+    drawer.__profBound = true;
+    drawer.addEventListener('click', e => {
+      const op = e.target.closest('[data-open-profile]'); if(op && typeof window.openUserProfile === 'function'){ openUserProfile(op.getAttribute('data-open-profile')); return; }
+      if(e.target.closest('[data-meta-edit]')){ window._salasMetaEditing = true; _salasRenderMeta(drawer); return; }
+      if(e.target.closest('[data-meta-cancel]')){ window._salasMetaEditing = false; _salasRenderMeta(drawer); return; }
+      if(e.target.closest('[data-meta-save]')){ _salasSaveMeta(drawer); return; }
+    });
+  }
+  const x = drawer.querySelector('.salas-drawer-x'); if(x) x.addEventListener('click', () => { drawer.hidden = true; _salasDrawerStopPoll(); });
   const rz = drawer.querySelector('.salas-drawer-resize');
   if(rz) rz.addEventListener('mousedown', e => {
     e.preventDefault(); document.body.style.userSelect = 'none';
