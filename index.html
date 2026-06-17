@@ -9183,8 +9183,17 @@ window.TAG_REGISTRY = {
           if(typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return;
           const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
           if(!u || !u.id || !window._sb) return;
+          // FONTE ÚNICA da presença: grava último acesso + o que estuda AGORA +
+          // acertos seguidos. "Estudando X" só se está numa unidade neste momento
+          // (window._currentUnitId); fora de unidade → null. Nunca congela.
+          let activity = null;
+          const unitId = window._currentUnitId || null;
+          if(unitId && typeof _buildActivity === 'function'){
+            const practicing = window._lastPracticeAt && (Date.now() - window._lastPracticeAt < 2 * 60 * 1000) && String(window._practiceUnit || '') === String(unitId);
+            activity = _buildActivity(unitId, practicing ? 'practicing' : 'reading');
+          }
           window._sb.schema('crm').from('user_profiles')
-            .update({ last_seen_at: new Date().toISOString() })
+            .update({ last_seen_at: new Date().toISOString(), current_activity: activity, hot_streak: window._myHotStreak || 0 })
             .eq('user_id', u.id)
             .then(({ error }) => { if(error) console.warn('[presença]', error.message); });
         };
@@ -17328,45 +17337,28 @@ function _activityUnitLabel(a){
   if(a.unit_title) parts.push(a.unit_title);
   return parts.join(' · ');
 }
-// Grava "estou LENDO esta unidade" — só quando a unidade muda (evita flood).
-let _lastActivityUnit = null;
-async function _recordCurrentActivity(unitId){
-  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
-  if(!uid || !window._sb || !unitId) return;
-  if(String(_lastActivityUnit) === String(unitId)) return;
-  _lastActivityUnit = unitId;
-  _practiceEmittedUnit = null; // reabre a possibilidade de emitir "praticando" nesta unidade
-  const act = _buildActivity(unitId, 'reading');
-  try{
-    await window._sb.schema('crm').from('user_profiles')
-      .update({ current_activity: act }).eq('user_id', uid);
-  }catch(e){ console.warn('[activity]', e); }
-  // Feed: "está estudando HB · 01 · unidade"
-  if(typeof _roomEmit === 'function') _roomEmit('studying', { sigla: act.sigla, unit_number: act.unit_number, unit_title: act.unit_title, unit_id: unitId }).catch(()=>{});
-}
-// Limpa a atividade ao SAIR de uma unidade (ir pra qualquer página que não seja
-// uma unidade). Assim "estudando HB" reflete o agora, não congela na última.
-// Escreve uma única vez (quando havia uma unidade ativa).
-async function _clearCurrentActivity(){
-  if(_lastActivityUnit === null) return;
-  _lastActivityUnit = null;
+// Transição de unidade (App.render chama quando window._currentUnitId muda).
+// A ESCRITA da presença é no heartbeat (fonte única). Aqui só: reseta o controle
+// do feed "praticando", avisa o feed "está estudando" ao ENTRAR numa unidade, e
+// dispara um beat imediato pra a mudança refletir na hora (não esperar 25s).
+function _onUnitChange(unitId){
   _practiceEmittedUnit = null;
-  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
-  if(!uid || !window._sb) return;
-  try{
-    await window._sb.schema('crm').from('user_profiles')
-      .update({ current_activity: null }).eq('user_id', uid);
-  }catch(e){ console.warn('[activity clear]', e); }
+  if(unitId && typeof _roomEmit === 'function'){
+    const m = (typeof _unitMetaById === 'function') ? (_unitMetaById(unitId) || {}) : {};
+    _roomEmit('studying', { sigla: m.sigla, unit_number: m.number, unit_title: m.title, unit_id: unitId }).catch(()=>{});
+  }
+  if(typeof window._presenceBeat === 'function') window._presenceBeat();
 }
 // Praticando questões: atualiza tipo='practicing' + hot_streak (acertos seguidos).
 // Chamado a cada resposta objetiva; debounce de 1.5s evita escrita por item no
 // modo "verificar tudo" (que processa vários itens num laço).
-let _hotStreak = 0, _practiceTimer = null, _practiceUnit = null, _practiceEmittedUnit = null;
+let _hotStreak = 0, _practiceUnit = null, _practiceEmittedUnit = null;
 function _recordPractice(unitId, correct){
   if(!(window.Auth && Auth.getUser && (Auth.getUser() || {}).id) || !window._sb) return;
   _hotStreak = correct ? (_hotStreak + 1) : 0;
   window._myHotStreak = _hotStreak;
-  if(unitId) _practiceUnit = unitId;
+  window._lastPracticeAt = Date.now();
+  if(unitId){ _practiceUnit = unitId; window._practiceUnit = unitId; }
   // Feed: "está praticando questões em HB · 01 · …" (1× por unidade)
   if(typeof _roomEmit === 'function' && unitId && String(_practiceEmittedUnit) !== String(unitId)){
     _practiceEmittedUnit = unitId;
@@ -17377,16 +17369,8 @@ function _recordPractice(unitId, correct){
   if(typeof _roomEmit === 'function' && correct && _hotStreak >= 5 && _hotStreak % 5 === 0){
     _roomEmit('streak', { count: _hotStreak }).catch(()=>{});
   }
-  if(_practiceTimer) return;
-  _practiceTimer = setTimeout(() => { _practiceTimer = null; _flushPractice(); }, 1500);
-}
-async function _flushPractice(){
-  const uid = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
-  if(!uid || !window._sb) return;
-  try{
-    await window._sb.schema('crm').from('user_profiles')
-      .update({ current_activity: _buildActivity(_practiceUnit, 'practicing'), hot_streak: _hotStreak }).eq('user_id', uid);
-  }catch(e){ console.warn('[practice]', e); }
+  // Reflete praticando + hot_streak NA HORA (heartbeat é a fonte única da escrita).
+  if(typeof window._presenceBeat === 'function') window._presenceBeat();
 }
 window._recordPractice = _recordPractice;
 // Busca presença (online / atividade / streak / on-fire) de uma lista de ids.
@@ -17404,9 +17388,13 @@ async function _presenceFetch(userIds){
       // online = visto nos últimos 75s; o próprio usuário é sempre online (ele
       // está claramente usando o app — nunca deve se ver "offline").
       const online = (meId && String(r.user_id) === String(meId)) || (!!seen && (now - seen) < 75 * 1000);
-      const a = r.current_activity || null;
-      const actAt = (a && a.at) ? new Date(a.at).getTime() : 0;
-      const practicing = online && a && a.type === 'practicing' && actAt && (now - actAt) < 2 * 60 * 1000;
+      const a0 = r.current_activity || null;
+      const actAt = (a0 && a0.at) ? new Date(a0.at).getTime() : 0;
+      // Só conta a atividade se for RECENTE (< 90s). O heartbeat a renova de 25s
+      // em 25s enquanto está na unidade; ao sair/recarregar fora dela, ela expira
+      // e "estudando X" some — nunca congela na última matéria.
+      const a = (a0 && actAt && (now - actAt) < 90 * 1000) ? a0 : null;
+      const practicing = online && a && a.type === 'practicing';
       const hot = r.hot_streak || 0;
       out[String(r.user_id)] = {
         online, lastSeen: seen, activity: a,
@@ -32201,11 +32189,14 @@ const App = {
 
     // Parte C — rastreia "o que estou estudando agora" ao abrir uma unidade
     // (a própria função só grava quando a unidade muda).
-    if(user && route && route.view === 'unit' && route.params && route.params.unitId && typeof _recordCurrentActivity === 'function'){
-      _recordCurrentActivity(route.params.unitId);
-    } else if(user && typeof _clearCurrentActivity === 'function'){
-      // Saiu da unidade → limpa "estudando X" (não congela na última matéria).
-      _clearCurrentActivity();
+    // Presença: marca a unidade atual (ou null). A escrita real é no heartbeat,
+    // a fonte única — assim "estudando X" reflete o agora e nunca congela.
+    {
+      const _newUnit = (route && route.view === 'unit' && route.params && route.params.unitId) ? String(route.params.unitId) : null;
+      if(user && String(window._currentUnitId || '') !== String(_newUnit || '')){
+        window._currentUnitId = _newUnit;
+        if(typeof _onUnitChange === 'function') _onUnitChange(_newUnit);
+      }
     }
 
     // Garante que o Store do usuário esteja inicializado ANTES de desenhar.
