@@ -1,11 +1,15 @@
 # Falcon — Plataforma Ubique
 
-SaaS de educação. Frontend estático servido pelo **GitHub Pages**:
+SaaS de educação. Frontend estático servido pelo **Firebase Hosting**:
 
-- **Aluno:** https://vincfud98.github.io/Falcon/
-- **Admin:** https://vincfud98.github.io/Falcon/admin.html
+- **Aluno:** https://falcon-ubique.web.app/
+- **Admin:** https://falcon-ubique.web.app/admin.html
+
+> Os domínios `*.web.app` e `*.firebaseapp.com` são gerados automaticamente pelo Firebase quando o projeto é criado.
 
 Backend é **mock** (localStorage + BroadcastChannel) via `ubique-shared.js`. Não tem servidor por enquanto.
+
+O código continua versionado no GitHub (https://github.com/Vincfud98/Falcon) — só o **hosting** mudou de GitHub Pages para Firebase.
 
 ---
 
@@ -147,7 +151,7 @@ git push
 
 ---
 
-## Rodar localmente (testar antes de mandar pro GitHub Pages)
+## Rodar localmente (testar antes do deploy)
 
 Não precisa servidor. Só dá duplo-clique no `index.html` ou `admin.html` — abre no navegador.
 
@@ -162,6 +166,89 @@ npx serve .
 ```
 
 Depois abre http://localhost:8000
+
+---
+
+## Deploy no Firebase Hosting
+
+### Setup inicial (uma vez, por pessoa, em cada PC)
+
+**1. Instalar o Firebase CLI**
+
+```bash
+npm install -g firebase-tools
+```
+
+(Se der erro de permissão no Mac: `sudo npm install -g firebase-tools`.)
+
+**2. Login no Firebase**
+
+```bash
+firebase login
+```
+
+Abre o navegador, autentica com a conta Google que tem acesso ao projeto `falcon-ubique`.
+
+> **Importante:** o dono do projeto Firebase precisa **convidar a outra pessoa** no Console (https://console.firebase.google.com/project/falcon-ubique/settings/iam) com permissão "Editor" ou "Firebase Hosting Admin" pra ela conseguir fazer deploy.
+
+**3. Conferir que está apontando pro projeto certo**
+
+Na raiz do `Falcon`:
+```bash
+firebase use
+```
+
+Deve mostrar `Active Project: falcon-ubique (default)`. Se não, roda:
+```bash
+firebase use falcon-ubique
+```
+
+### Deploy manual (qualquer um pode rodar)
+
+Sempre faça **`git pull`** antes pra garantir que está com o código mais recente:
+
+```bash
+git pull
+firebase deploy --only hosting
+```
+
+Em ~30 segundos o site já está atualizado em https://falcon-ubique.web.app/
+
+### Deploy automático no `git push` (opcional, recomendado)
+
+Configurando uma vez, todo `git push` na branch `main` faz deploy automático no Firebase. Vocês dois nunca mais precisam rodar `firebase deploy`.
+
+Pra configurar (faz uma vez só, qualquer um dos dois faz):
+
+```bash
+firebase init hosting:github
+```
+
+Ele vai:
+1. Pedir pra autorizar no GitHub
+2. Escolher o repo `Vincfud98/Falcon`
+3. Criar uma service account no Firebase
+4. Adicionar a credencial como **Secret** no GitHub automaticamente
+5. Gerar os arquivos `.github/workflows/firebase-hosting-merge.yml` e `firebase-hosting-pull-request.yml`
+
+Depois disso, é só fazer `git push` que o site atualiza sozinho.
+
+### Preview antes do deploy (canal de preview)
+
+Quer testar uma mudança grande sem subir pra produção?
+
+```bash
+firebase hosting:channel:deploy preview-x
+```
+
+Ele gera uma URL temporária tipo `https://falcon-ubique--preview-x-xxxxxxxx.web.app` que expira em 7 dias. Útil pra mostrar pro amigo antes de subir oficial.
+
+### Domínio personalizado (opcional)
+
+Se quiser usar tipo `app.ubique.com.br` em vez de `falcon-ubique.web.app`:
+1. Console Firebase → Hosting → "Add custom domain"
+2. Adiciona registros DNS no seu provedor (Registro.br, Cloudflare, etc.)
+3. Aguarda propagação (~24h)
 
 ---
 
@@ -281,10 +368,12 @@ git remote set-url origin git@github.com:Vincfud98/Falcon.git
 ## Links úteis
 
 - **Repo:** https://github.com/Vincfud98/Falcon
-- **Site aluno:** https://vincfud98.github.io/Falcon/
-- **Site admin:** https://vincfud98.github.io/Falcon/admin.html
+- **Site aluno:** https://falcon-ubique.web.app/
+- **Site admin:** https://falcon-ubique.web.app/admin.html
+- **Console Firebase:** https://console.firebase.google.com/project/falcon-ubique
 - **Schema dos blocos:** `learning-blocks-schema.md`
 - **Claude Code docs:** https://docs.claude.com/en/docs/claude-code/overview
+- **Firebase Hosting docs:** https://firebase.google.com/docs/hosting
 - **Git cheatsheet:** https://education.github.com/git-cheat-sheet-education.pdf
 
 ---
