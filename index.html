@@ -7574,6 +7574,10 @@ html[data-theme="light"] .hl-mark[data-hl-color="veil"]{background:var(--text);c
 
 /* ═══ Reading list page ═══ */
 .rl-list{display:flex;flex-direction:column;gap:.8rem;margin-top:2rem}
+.rl-group{margin-top:2rem}
+.rl-group .rl-list{margin-top:.8rem}
+.rl-group-head{display:flex;align-items:center;gap:.5rem;font-family:var(--sans);font-weight:300;font-size:.6rem;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);padding-bottom:.4rem;border-bottom:1px solid var(--accent-border-soft)}
+.rl-group-count{font-family:var(--mono);font-size:.55rem;color:var(--text-dim);background:var(--accent-lo);border-radius:99px;padding:.1rem .45rem}
 .rl-row{
   display:grid;grid-template-columns:auto 1fr auto;gap:1.2rem;align-items:center;
   padding:1.1rem 1.4rem;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;
@@ -23298,13 +23302,13 @@ Renderers.simulados = function(route){
   const _subjStore = (window.UbiqueStore && UbiqueStore.subjects.list()) || [];
   const _subjName = {}; _subjStore.forEach(s => { _subjName[String(s.id)] = s.subject || s.title || ('#'+s.id); });
   const _simSubjIds = s => (s.subjectIds || []).map(String);
-  // Pré-seleciona a matéria ATIVA (se houver simulado que a contenha). No
-  // catálogo (sem matéria ativa) fica em "Todas". Só quando não há filtro
-  // explícito na URL.
+  // Pré-seleciona a matéria ATIVA (sempre que houver matéria, mesmo que ela
+  // não tenha simulados — aí a lista filtra pra zero e mostra "Nenhum simulado
+  // encontrado", em vez de exibir os de outras matérias). No catálogo (sem
+  // matéria ativa) fica em "Todas". Só quando não há filtro explícito na URL.
   if(!filters.subject){
     const _subj = activeSubject();
-    const _sid = _subj ? String(_subj._subjectId) : '';
-    if(_sid && sims.some(s => _simSubjIds(s).includes(_sid))) filters.subject = _sid;
+    if(_subj && _subj._subjectId != null) filters.subject = String(_subj._subjectId);
   }
 
   // Apply filters — matéria casa por id contido em subjectIds ("contém o conteúdo")
@@ -23318,7 +23322,9 @@ Renderers.simulados = function(route){
 
   // Build filter options — matérias que DE FATO aparecem nos simulados,
   // ordenadas por nome (value = id; rótulo = nome do cadastro).
-  const subjectIdsInSims = [...new Set(sims.flatMap(_simSubjIds))]
+  // Inclui a matéria selecionada (ativa) mesmo que não tenha simulados, pra ela
+  // aparecer no dropdown (e a lista filtrar pra zero, mostrando o vazio).
+  const subjectIdsInSims = [...new Set([...sims.flatMap(_simSubjIds), ...(filters.subject ? [String(filters.subject)] : [])])]
     .sort((a,b) => String(_subjName[a]||a).localeCompare(String(_subjName[b]||b), 'pt-BR'));
   const difficulties = ['easy','medium','hard','very-hard'];
   const topicIds = [...new Set(sims.flatMap(s => s.topics||[]))];
@@ -28818,13 +28824,31 @@ Renderers.notes = function(route){
     q: route.query.q || ''
   };
   const sortBy = route.query.sort || 'date-desc';
-  // Escopo: matéria ativa → só notas dos módulos dela; catálogo → todas.
-  const _subj = activeSubject();
-  const _scopeMods = _subj
-    ? (_subj.modules||[])
+  // Escopo por matéria: o dropdown "Matéria" (?subject=) tem prioridade; senão,
+  // a matéria ativa da topbar; senão (catálogo), todas. Assim dá pra filtrar por
+  // matéria MESMO fora do curso ("Seus cursos").
+  const _activeSubj = activeSubject();
+  const _filterSubjId = (route.query.subject != null && route.query.subject !== '')
+    ? String(route.query.subject)
+    : (_activeSubj ? String(_activeSubj._subjectId) : '');
+  const _subjCourse = _filterSubjId
+    ? ((window.COURSES||[]).find(c => c && String(c._subjectId) === _filterSubjId) || null)
+    : null;
+  const _scopeMods = _subjCourse
+    ? (_subjCourse.modules||[])
     : ((window.COURSES && window.COURSES.filter(Boolean)) || [window.COURSE].filter(Boolean)).reduce((a,c)=>a.concat(c.modules||[]),[]);
-  const _scopeModIds = _subj ? new Set((_subj.modules||[]).map(m=>m.id)) : null;
+  const _scopeModIds = _subjCourse ? new Set((_subjCourse.modules||[]).map(m=>m.id)) : null;
   const inScope = n => !_scopeModIds || _scopeModIds.has(n.moduleId);
+  // Opções do dropdown de Matéria: matérias que têm notas (módulo da nota → matéria).
+  const _modToSubj = {}; const _subjTitleById = {};
+  (window.COURSES||[]).forEach(c => { if(c && c._subjectId != null){ _subjTitleById[String(c._subjectId)] = c.title || 'Matéria'; (c.modules||[]).forEach(m => { _modToSubj[String(m.id)] = String(c._subjectId); }); } });
+  const subjectIdsWithNotes = [...new Set((Store.get().notes||[]).map(n => _modToSubj[String(n.moduleId)]).filter(Boolean))]
+    .sort((a,b) => String(_subjTitleById[a]||a).localeCompare(String(_subjTitleById[b]||b), 'pt-BR'));
+  const subjectFilterOpts = `<div class="fb-group"><span class="fb-label">Matéria</span>
+    <select class="fb-select" data-filter="subject">
+      <option value="">Todas</option>
+      ${subjectIdsWithNotes.map(id => `<option value="${Util.attr(id)}" ${String(_filterSubjId)===String(id)?'selected':''}>${Util.esc(_subjTitleById[id]||('#'+id))}</option>`).join('')}
+    </select></div>`;
   // Precompute module/unit order maps for deterministic module/unit sorting
   const modOrder = {}; const unitOrder = {};
   _scopeMods.forEach((m, mi) => {
@@ -29110,7 +29134,7 @@ Renderers.notes = function(route){
   </div>
   <div class="notes-view-content" data-view="notes">
   <div class="filter-bar">
-    ${moduleOpts}${unitOpts}${topicOpts}${tagOpts}
+    ${subjectFilterOpts}${moduleOpts}${unitOpts}${topicOpts}${tagOpts}
     <div class="fb-group"><span class="fb-label">Ordenar</span>
       <select class="fb-select" id="notesSortBy">
         <option value="date-desc" ${sortBy==='date-desc'?'selected':''}>Mais recentes</option>
@@ -29272,6 +29296,8 @@ Renderers.notes.mount = function(stageEl, route){
   function applyFilter(key, val){
     const q = Object.assign({}, route.query); delete q.__item;
     q[key] = val;
+    // Trocar a matéria zera os filtros dependentes (eram da matéria anterior).
+    if(key === 'subject'){ delete q.module; delete q.chapter; delete q.unit; delete q.topic; delete q.tag; }
     Object.keys(q).forEach(k => { if(!q[k]) delete q[k]; });
     Router.go(`/notes${Router.querystring(q)}`);
   }
@@ -29539,14 +29565,9 @@ window.NotesCompiler = NotesCompiler;
 
 /* READING LIST PAGE */
 Renderers.reading = function(route){
-  // Escopo: matéria ativa → só itens dos módulos dela; catálogo → todos.
-  const _subj = activeSubject();
-  const _scopeModIds = _subj ? new Set((_subj.modules||[]).map(m=>m.id)) : null;
-  const entries = Store.listReadingList().filter(e => !_scopeModIds || _scopeModIds.has(e.moduleId));
-  // Resolve cada entrada → { e, m, chapter, unit, block }. Bloco vem de
-  // UbiqueStore.unit_blocks (fonte real); unit.groups fica vazio nas
-  // unidades do Supabase. Entradas órfãs (bloco apagado) caem fora.
-  const resolved = entries.map(e => {
+  // Resolve TODOS os itens salvos → { e, m, chapter, unit, block }. Bloco vem de
+  // UbiqueStore.unit_blocks (fonte real). Entradas órfãs (bloco apagado) caem fora.
+  const all = Store.listReadingList().map(e => {
     const found = Util.findUnit(e.moduleId, e.unitId);
     if(!found) return null;
     let block = (found.unit.groups||[]).flatMap(g => g.blocks||[]).find(b => String(b.id) === String(e.blockId));
@@ -29556,22 +29577,74 @@ Renderers.reading = function(route){
     if(!block) return null;
     return { e, m: found.module, chapter: found.chapter, unit: found.unit, block };
   }).filter(Boolean);
+  all.forEach((r,i) => { r._ord = i; }); // ordem de adição (índice original)
 
-  // Hydrate each entry with fresh block + unit + module refs
-  const rows = resolved.map((r,i) => {
-    const { m, chapter, unit, block } = r;
+  // Mapa módulo → matéria (pra filtro/escopo por matéria, funciona fora do curso).
+  const _modToSubj = {}; const _subjTitleById = {};
+  (window.COURSES||[]).forEach(c => { if(c && c._subjectId != null){ _subjTitleById[String(c._subjectId)] = c.title || 'Matéria'; (c.modules||[]).forEach(m => { _modToSubj[String(m.id)] = String(c._subjectId); }); } });
+  const rowSubj = r => _modToSubj[String(r.m.id)] || '';
+
+  // Filtros — matéria: ?subject= (dropdown) tem prioridade; senão a matéria ativa
+  // da topbar; senão (catálogo) todas.
+  const _activeSubj = activeSubject();
+  const filterSubjId = (route.query.subject != null && route.query.subject !== '')
+    ? String(route.query.subject)
+    : (_activeSubj ? String(_activeSubj._subjectId) : '');
+  const fModule = route.query.module || '';
+  const fUnit   = route.query.unit   || '';
+  const fTopic  = route.query.topic  || '';
+  const fTag    = route.query.tag    || '';
+  const sortBy  = route.query.sort   || 'added';
+  const groupBy = route.query.group  || '';
+
+  // Rótulos de tópico (id → "número · nome") e tag (id|nome → nome de exibição).
+  const topicDisplay = id => { const t = Util.getTopic(id); if(t) return (t.number?t.number+' · ':'')+t.name; const m = (window.COURSES||[]).flatMap(c=>c.modules||[]).find(mm=>String(mm.id)===String(id)); return m ? ((m.number?m.number+' · ':'')+(m.title||m.label||'Módulo')) : String(id); };
+  const _tagsStore = (window.UbiqueStore && UbiqueStore.tags && UbiqueStore.tags.list()) || [];
+  const tagDisplay = v => { const needle = String(v).toLowerCase(); const hit = _tagsStore.find(x => x && (String(x.id)===String(v) || String(x.tag||'').toLowerCase()===needle)); return hit ? hit.tag : String(v); };
+
+  // Universo das opções (cascata: módulo/unidade/tópico/tag escopados pela matéria).
+  const base = filterSubjId ? all.filter(r => rowSubj(r) === filterSubjId) : all.slice();
+  const subjectIds = [...new Set(all.map(rowSubj).filter(Boolean))].sort((a,b) => String(_subjTitleById[a]||a).localeCompare(String(_subjTitleById[b]||b), 'pt-BR'));
+  const moduleIds  = [...new Set(base.map(r => String(r.m.id)))];
+  const unitIds    = [...new Set(base.filter(r => !fModule || String(r.m.id)===String(fModule)).map(r => String(r.unit.id)))];
+  const topicIds   = [...new Set(base.flatMap(r => (r.block.topics||[]).map(String)))];
+  const tagIds     = [...new Set(base.flatMap(r => (r.block.tags||[]).map(String)))];
+
+  // Aplica filtros
+  let rows = all.slice();
+  if(filterSubjId) rows = rows.filter(r => rowSubj(r) === filterSubjId);
+  if(fModule) rows = rows.filter(r => String(r.m.id) === String(fModule));
+  if(fUnit)   rows = rows.filter(r => String(r.unit.id) === String(fUnit));
+  if(fTopic)  rows = rows.filter(r => (r.block.topics||[]).map(String).includes(String(fTopic)));
+  if(fTag)    rows = rows.filter(r => (r.block.tags||[]).map(String).includes(String(fTag)));
+
+  // Ordena
+  const _date = r => (r.e && r.e.addedAt) || 0;
+  const _modName = r => (r.m.label||'') + ' ' + (r.m.title||'');
+  if(sortBy === 'recent')      rows.sort((a,b) => _date(b)-_date(a) || a._ord-b._ord);
+  else if(sortBy === 'old')    rows.sort((a,b) => _date(a)-_date(b) || a._ord-b._ord);
+  else if(sortBy === 'topic')  rows.sort((a,b) => topicDisplay((a.block.topics||[])[0]||'').localeCompare(topicDisplay((b.block.topics||[])[0]||''), 'pt-BR', {numeric:true}) || a._ord-b._ord);
+  else if(sortBy === 'tag')    rows.sort((a,b) => tagDisplay((a.block.tags||[])[0]||'').localeCompare(tagDisplay((b.block.tags||[])[0]||''), 'pt-BR') || a._ord-b._ord);
+  else if(sortBy === 'module') rows.sort((a,b) => _modName(a).localeCompare(_modName(b), 'pt-BR', {numeric:true}) || a._ord-b._ord);
+  else                         rows.sort((a,b) => a._ord-b._ord); // 'added'
+
+  // Render de uma linha (numeração corrida pela ordem exibida)
+  let _n = 0;
+  const rowHTML = r => {
+    const { m, chapter, unit, block } = r; _n++;
     const chapterPart = chapter ? `/c/${chapter.id}` : '';
     const href = `#/m/${m.id}${chapterPart}/u/${unit.id}?b=${block.id}`;
     const icon = Icons[block.type] || Icons.text;
     const done = Store.isBookmarked(unit.id, block.id);
     const typeLabel = ({text:'Leitura',textgallery:'Leitura + galeria',gallery:'Galeria',video:'Vídeo',quiz:'Questões',essay:'Discursivas',flashcards:'Flashcards',sources:'Fontes',keypoints:'Pontos-chave'})[block.type] || block.type;
     return `<article class="rl-row ${done?'is-done':''}" data-block-id="${Util.attr(block.id)}" data-unit-id="${Util.attr(unit.id)}">
-      <div class="rl-index">${Util.pad2(i+1)}</div>
+      <div class="rl-index">${Util.pad2(_n)}</div>
       <div class="rl-body">
         <div class="rl-crumb">${Util.esc(m.label)} · ${Util.esc(m.title)}${chapter?` › Cap. ${Util.esc(chapter.number)}`:''} › Unid. ${Util.esc(unit.number)} · ${Util.esc(unit.title)}</div>
         <h3 class="rl-title">${Util.esc(block.title||'(sem título)')}</h3>
         <div class="rl-meta">
           <span class="rl-type"><span class="rl-type-icon">${icon}</span>${Util.esc(typeLabel)}</span>
+          ${Util.chips(block.topics, block.tags)}
           ${done?'<span class="rl-status">Concluído</span>':''}
         </div>
       </div>
@@ -29580,21 +29653,81 @@ Renderers.reading = function(route){
         <button class="icon-btn on" data-action="remove">${Icons.readingList}<span>Remover</span></button>
       </div>
     </article>`;
-  }).join('');
+  };
 
-  const empty = `<div class="empty"><div class="empty-title">Sua lista de leitura está vazia</div>
-    <div class="empty-body">Abra qualquer bloco de aprendizado e clique em <strong>Ler depois</strong> para adicionar aqui. A lista mantém a ordem em que você salvou cada item, como uma playlist de estudo.</div></div>`;
+  // Agrupa (quando AGRUPAR != "não agrupar")
+  const groupKeyLabel = r => {
+    if(groupBy === 'module') return { k:String(r.m.id), label:`${r.m.label} · ${r.m.title}` };
+    if(groupBy === 'topic'){ const t = (r.block.topics||[])[0]; return { k: t!=null?String(t):'__none', label: t!=null?topicDisplay(t):'Sem tópico' }; }
+    if(groupBy === 'tag'){ const g = (r.block.tags||[])[0]; return { k: g!=null?String(g):'__none', label: g!=null?('#'+tagDisplay(g)):'Sem tag' }; }
+    if(groupBy === 'date'){ let key='—'; try{ key = new Date(_date(r)).toLocaleDateString('pt-BR',{day:'2-digit',month:'short',year:'numeric'}); }catch(_){} return { k:key, label:key }; }
+    return null;
+  };
+  let listHTML = '';
+  if(rows.length && groupBy){
+    const groups = []; const idx = {};
+    rows.forEach(r => { const gl = groupKeyLabel(r); if(idx[gl.k]==null){ idx[gl.k]=groups.length; groups.push({ label:gl.label, items:[] }); } groups[idx[gl.k]].items.push(r); });
+    listHTML = groups.map(g => `<div class="rl-group"><div class="rl-group-head">${Util.esc(g.label)} <span class="rl-group-count">${g.items.length}</span></div><div class="rl-list">${g.items.map(rowHTML).join('')}</div></div>`).join('');
+  } else if(rows.length){
+    listHTML = `<div class="rl-list" data-a="6">${rows.map(rowHTML).join('')}</div>`;
+  }
+
+  const empty = `<div class="empty"><div class="empty-title">${all.length ? 'Nenhum item com esses filtros' : 'Sua lista de leitura está vazia'}</div>
+    <div class="empty-body">${all.length ? 'Ajuste os filtros para ver mais itens da sua lista.' : 'Abra qualquer bloco de aprendizado e clique em <strong>Ler depois</strong> para adicionar aqui. A lista mantém a ordem em que você salvou cada item, como uma playlist de estudo.'}</div></div>`;
+
+  // Barra de filtros (mesmo CSS .filter-bar/.fb-* das Notas)
+  const subjOpts = `<div class="fb-group"><span class="fb-label">Matéria</span><select class="fb-select" data-filter="subject"><option value="">Todas</option>${subjectIds.map(id => `<option value="${Util.attr(id)}" ${String(filterSubjId)===String(id)?'selected':''}>${Util.esc(_subjTitleById[id]||('#'+id))}</option>`).join('')}</select></div>`;
+  const modOpts = `<div class="fb-group"><span class="fb-label">Módulo</span><select class="fb-select" data-filter="module"><option value="">Todos</option>${moduleIds.map(id => { const m = Util.findModule(id); return m ? `<option value="${Util.attr(id)}" ${String(fModule)===String(id)?'selected':''}>${Util.esc(m.label+' · '+m.title)}</option>` : ''; }).join('')}</select></div>`;
+  const uOpts = `<div class="fb-group"><span class="fb-label">Unidade</span><select class="fb-select" data-filter="unit"><option value="">Todas</option>${unitIds.map(id => { const r = base.find(x => String(x.unit.id)===String(id)); const u = r ? r.unit : null; return u ? `<option value="${Util.attr(id)}" ${String(fUnit)===String(id)?'selected':''}>${Util.esc('Unid. '+u.number+' · '+u.title)}</option>` : ''; }).join('')}</select></div>`;
+  const tOpts = `<div class="fb-group"><span class="fb-label">Tópico</span><select class="fb-select" data-filter="topic"><option value="">Todos</option>${topicIds.map(id => `<option value="${Util.attr(id)}" ${String(fTopic)===String(id)?'selected':''}>${Util.esc(topicDisplay(id))}</option>`).join('')}</select></div>`;
+  const gOpts = `<div class="fb-group"><span class="fb-label">Tag</span><select class="fb-select" data-filter="tag"><option value="">Todas</option>${tagIds.map(v => `<option value="${Util.attr(v)}" ${String(fTag)===String(v)?'selected':''}>#${Util.esc(tagDisplay(v))}</option>`).join('')}</select></div>`;
+  const sortOpts = `<div class="fb-group"><span class="fb-label">Ordenar</span><select class="fb-select" id="rlSortBy">
+      <option value="added" ${sortBy==='added'?'selected':''}>Ordem de adição</option>
+      <option value="recent" ${sortBy==='recent'?'selected':''}>Mais recentes</option>
+      <option value="old" ${sortBy==='old'?'selected':''}>Mais antigos</option>
+      <option value="topic" ${sortBy==='topic'?'selected':''}>Tópico (A–Z)</option>
+      <option value="tag" ${sortBy==='tag'?'selected':''}>Tag (A–Z)</option>
+      <option value="module" ${sortBy==='module'?'selected':''}>Módulo / unidade</option>
+    </select></div>`;
+  const groupOpts = `<div class="fb-group"><span class="fb-label">Agrupar</span><select class="fb-select" id="rlGroupBy">
+      <option value="" ${groupBy===''?'selected':''}>Não agrupar</option>
+      <option value="module" ${groupBy==='module'?'selected':''}>Por módulo / unidade</option>
+      <option value="topic" ${groupBy==='topic'?'selected':''}>Por tópico</option>
+      <option value="tag" ${groupBy==='tag'?'selected':''}>Por tag</option>
+      <option value="date" ${groupBy==='date'?'selected':''}>Por data</option>
+    </select></div>`;
+  const filterBar = `<div class="filter-bar">${subjOpts}${modOpts}${uOpts}${tOpts}${gOpts}${sortOpts}${groupOpts}<button class="fb-clear" id="rlClear">Limpar</button><span class="fb-count">${rows.length} ite${rows.length===1?'m':'ns'}</span></div>`;
 
   return `<div class="hero">
     <span class="s-label" data-a="1">Lista de leitura</span>
     <h1 class="s-title hero" data-a="2">Minha lista de estudo</h1>
-    <p class="s-subtitle" data-a="3">${resolved.length} ite${resolved.length===1?'m':'ns'} · ordenados pela ordem de adição</p>
+    <p class="s-subtitle" data-a="3">${all.length} ite${all.length===1?'m':'ns'} salvo${all.length===1?'':'s'}</p>
     <div class="s-divider" data-a="4"></div>
-    <p class="s-body" data-a="5">Sua playlist pessoal de blocos salvos para revisar. Leia na ordem em que salvou ou marque como concluído para ir limpando a lista.</p>
+    <p class="s-body" data-a="5">Sua playlist pessoal de blocos salvos para revisar. Filtre por matéria, módulo, tópico ou tag — ou agrupe pra revisar por tema.</p>
   </div>
-  ${rows ? `<div class="rl-list" data-a="6">${rows}</div>` : empty}`;
+  ${all.length ? filterBar : ''}
+  ${listHTML || empty}`;
 };
 Renderers.reading.mount = function(stageEl, route){
+  function applyFilter(key, val){
+    const q = Object.assign({}, route.query);
+    q[key] = val;
+    // Trocar a matéria zera os dependentes; trocar o módulo zera a unidade.
+    if(key === 'subject'){ delete q.module; delete q.unit; delete q.topic; delete q.tag; }
+    if(key === 'module'){ delete q.unit; }
+    Object.keys(q).forEach(k => { if(!q[k]) delete q[k]; });
+    Router.go(`/reading${Router.querystring(q)}`);
+  }
+  stageEl.querySelectorAll('[data-filter]').forEach(el => {
+    const key = el.getAttribute('data-filter');
+    el.addEventListener('change', () => applyFilter(key, el.value));
+  });
+  const sortSel = stageEl.querySelector('#rlSortBy');
+  if(sortSel) sortSel.addEventListener('change', () => applyFilter('sort', sortSel.value === 'added' ? '' : sortSel.value));
+  const groupSel = stageEl.querySelector('#rlGroupBy');
+  if(groupSel) groupSel.addEventListener('change', () => applyFilter('group', groupSel.value));
+  const clear = stageEl.querySelector('#rlClear');
+  if(clear) clear.addEventListener('click', () => Router.go('/reading'));
   stageEl.querySelectorAll('.rl-row').forEach(row => {
     const bid = row.getAttribute('data-block-id');
     const uid = row.getAttribute('data-unit-id');
