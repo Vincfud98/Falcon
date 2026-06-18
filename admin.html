@@ -17684,7 +17684,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(window.UBIQUE_USE_SUPABASE){
       try{
         const { data, error } = await conteudo()
-          .from('subjects').select('*').order('id');
+          .from('subjects').select('*').order('position', { nullsFirst:false }).order('id');
         if(error){ console.warn('[loadSubjects]', error); return; }
         const mapped = (data || []).map(_subjectFromSupa);
         subjectsCache = mapped;
@@ -17695,7 +17695,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
 
   function renderSubjects(){
-    const rows = subjectsCache;
+    // Ordem manual do admin (position); sem posição → vai pro fim, desempate por id.
+    const rows = (subjectsCache || []).slice().sort((a,b) =>
+      ((a.position != null ? a.position : 1e9) - (b.position != null ? b.position : 1e9))
+      || (Number(a.id) - Number(b.id)));
     document.getElementById('count-subjects').textContent = rows.length;
     const countGer = document.getElementById('count-group-gerenciar');
     if(countGer) countGer.textContent = rows.length;
@@ -17788,6 +17791,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   function renderSubjectsCards(rows){
     const container = document.getElementById('subjectsCards');
     if(!container) return;
+    // Estilos do arrastar-e-soltar (reordenar matérias) — injetados uma vez.
+    if(!document.getElementById('subjReorderStyles')){
+      const st = document.createElement('style'); st.id = 'subjReorderStyles';
+      st.textContent = '.subj-card{cursor:grab}.subj-card.is-dragging{opacity:.45}.subj-card.drag-over{outline:2px dashed var(--accent);outline-offset:3px}.subj-drag-grip{position:absolute;top:.6rem;left:.6rem;z-index:3;font-size:.85rem;line-height:1;color:var(--text);background:rgba(0,0,0,.45);backdrop-filter:blur(4px);border:1px solid var(--accent-border-soft);border-radius:3px;padding:.2rem .4rem;cursor:grab}';
+      document.head.appendChild(st);
+    }
 
     if(!rows.length){
       container.className = '';
@@ -17844,11 +17853,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       const coverHTML = `
         <div style="position:absolute;top:0;left:0;right:0;height:140px;${coverBg};border-bottom:1px solid var(--accent-border-soft);display:flex;align-items:center;justify-content:center;color:var(--text-mute);font-family:var(--serif);font-size:1.4rem;font-weight:300;background-color:var(--accent-xlo);border-top-left-radius:var(--radius-lg);border-top-right-radius:var(--radius-lg);overflow:hidden">
           ${coverContent}
+          <span class="subj-drag-grip" title="Arraste para reordenar">⠿</span>
           ${statusBadge}
         </div>`;
 
       return `
-        <article class="card" data-subject-id="${r.id}" style="padding-top:160px">
+        <article class="card subj-card" draggable="true" data-subject-id="${r.id}" style="padding-top:160px">
           ${coverHTML}
           ${r.sigla ? `<span class="card-label">${esc(r.sigla)}</span>` : ''}
           <h3 class="card-title">${esc(r.subject || '—')}</h3>
@@ -17863,6 +17873,62 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           </div>
         </article>`;
     }).join('');
+
+    // Arrastar-e-soltar pra reordenar (liga uma vez no container).
+    if(!container.__dndBound){
+      container.__dndBound = true;
+      let dragId = null;
+      container.addEventListener('dragstart', e => {
+        const card = e.target.closest('.subj-card[data-subject-id]'); if(!card) return;
+        dragId = card.getAttribute('data-subject-id');
+        card.classList.add('is-dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        try{ e.dataTransfer.setData('text/plain', dragId); }catch(_){}
+      });
+      container.addEventListener('dragend', () => {
+        container.querySelectorAll('.is-dragging,.drag-over').forEach(el => el.classList.remove('is-dragging','drag-over'));
+      });
+      container.addEventListener('dragover', e => {
+        e.preventDefault();
+        const card = e.target.closest('.subj-card[data-subject-id]');
+        container.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+        if(card && card.getAttribute('data-subject-id') !== dragId) card.classList.add('drag-over');
+      });
+      container.addEventListener('drop', async e => {
+        e.preventDefault();
+        const target = e.target.closest('.subj-card[data-subject-id]');
+        container.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+        const tid = target && target.getAttribute('data-subject-id');
+        const did = dragId; dragId = null;
+        if(did && tid && String(tid) !== String(did)) await _subjReorder(did, tid);
+      });
+    }
+  }
+
+  // Reordena as matérias (drag-and-drop): insere a arrastada ANTES da alvo,
+  // reatribui posições 1..N e persiste as que mudaram. Atualização otimista.
+  async function _subjReorder(dragId, targetId){
+    const ordered = (subjectsCache || []).slice().sort((a,b) =>
+      ((a.position != null ? a.position : 1e9) - (b.position != null ? b.position : 1e9))
+      || (Number(a.id) - Number(b.id)));
+    const from = ordered.findIndex(s => String(s.id) === String(dragId));
+    if(from < 0) return;
+    const moved = ordered.splice(from, 1)[0];
+    let insertAt = ordered.findIndex(s => String(s.id) === String(targetId));
+    if(insertAt < 0) insertAt = ordered.length;
+    ordered.splice(insertAt, 0, moved);
+    // Reatribui posições e coleta o que mudou.
+    const updates = [];
+    ordered.forEach((s, idx) => { const pos = idx + 1; if(s.position !== pos){ s.position = pos; updates.push({ id: s.id, position: pos }); } });
+    if(!updates.length) return;
+    // Atualização otimista: store + re-render imediato.
+    if(window.UbiqueStore && UbiqueStore.subjects){ updates.forEach(u => { try{ UbiqueStore.subjects.update(u.id, { position: u.position }); }catch(_){} }); }
+    renderSubjects();
+    // Persiste no Supabase.
+    if(window.UBIQUE_USE_SUPABASE){
+      try{ for(const u of updates){ const { error } = await conteudo().from('subjects').update({ position: u.position }).eq('id', u.id); if(error) console.warn('[subj reorder]', error); } }
+      catch(e){ console.warn('[subj reorder ex]', e); }
+    }
   }
 
   // ═══════════════════════════════════════════════════════════

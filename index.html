@@ -8572,6 +8572,8 @@ window.TAG_REGISTRY = {
       concurso_ids: Array.isArray(subject.concurso_ids) ? subject.concurso_ids : [],
       show_when_locked: subject.show_when_locked !== false, // default: mostra
       _subjectId: subject.id,
+      _position: (subject.position != null ? subject.position : null), // ordem manual do admin
+      _createdAt: subject.created_at || null,                          // "lançamento" (p/ grupo Obter)
     };
   }
 
@@ -8813,7 +8815,7 @@ window.TAG_REGISTRY = {
       console.log('[hydrate] buscando conteúdo do Supabase...');
       const sb = window._sb.schema('conteudo');
       const [subjR, modR, chR, unR, secR, blkR, dlR] = await Promise.all([
-        sb.from('subjects').select('*').order('id'),
+        sb.from('subjects').select('*').order('position', { nullsFirst:false }).order('id'),
         sb.from('modules').select('*').order('position').order('id'),
         sb.from('course_chapters').select('*').order('position').order('id'),
         sb.from('units').select('*').order('position').order('id'),
@@ -25304,6 +25306,26 @@ Renderers.catalog = function(route){
       ? (UbiqueStore.exams.list() || []).find(x => String(x.id) === String(_examId)) : null;
     _examName = _ex ? (_ex.name || _ex.id) : '';
   }
+  // Ordena em 3 grupos: (0) tem acesso, (1) pode comprar (Obter), (2) em breve.
+  // "Acesso" e "Em breve" seguem a ordem manual do admin (_position); "Obter"
+  // mostra os lançamentos mais recentes primeiro (_createdAt desc).
+  const _catBucket = c => {
+    const hasContent = c.modules && c.modules.length > 0;
+    const owned = Commerce.isOwned(c.id);
+    const releaseTime = c.releaseAt ? new Date(c.releaseAt).getTime() : 0;
+    const lockedByRelease = c.status === 'scheduled' || c.status === 'coming-soon' || (releaseTime > 0 && releaseTime > Date.now());
+    const canOpen = hasContent && owned && !lockedByRelease;
+    const canBuy = !owned && hasContent && !lockedByRelease;
+    return canOpen ? 0 : (canBuy ? 1 : 2);
+  };
+  const _catPos = c => (c._position != null ? c._position : Number.MAX_SAFE_INTEGER);
+  const _catCreated = c => (c._createdAt ? new Date(c._createdAt).getTime() : 0);
+  courses = courses.slice().sort((a,b) => {
+    const ba = _catBucket(a), bb = _catBucket(b);
+    if(ba !== bb) return ba - bb;
+    if(ba === 1) return _catCreated(b) - _catCreated(a);                       // Obter: mais recentes primeiro
+    return _catPos(a) - _catPos(b) || String(a.id).localeCompare(String(b.id)); // acesso/em breve: ordem do admin
+  });
   const cards = courses.map((c,i) => {
     const hasContent = c.modules && c.modules.length > 0;
     const owned = Commerce.isOwned(c.id);
