@@ -27833,12 +27833,15 @@ function _bankFiltersToQuery(f, applied){
    filtros, pra escondê-los na UI e manter a cascata Tópico/Subtópico. */
 
 // Resolve a "matéria do edital" (top-level edital_topic) correspondente à
-// matéria ativa, dentro do edital do concurso ativo. Usa o FK explícito
-// edital_topics.subject_id (mesma lógica de availableEditalTopics p/ casar
-// edital ↔ concurso). Retorna '' se não houver vínculo cadastrado.
-function _bankResolveMateriaTopic(examId, subjectId){
-  if(subjectId == null || !window.UbiqueStore) return '';
+// matéria ativa, dentro do edital do concurso ativo. Duas camadas (igual
+// _bankBuildUnitContext): (1) FK explícito edital_topics.subject_id ==
+// matéria._subjectId  (PREFERIDO); (2) match por nome (título do tópico ≈
+// título da matéria). Retorna '' se nada casar.
+function _bankResolveMateriaTopic(examId, subj){
+  if(!subj || !window.UbiqueStore) return '';
   const S = UbiqueStore;
+  const subjectId = (subj._subjectId != null) ? subj._subjectId : subj.id;
+  const subjTitle = String(subj.title || '').trim().toLowerCase();
   const topics  = (S.edital_topics && S.edital_topics.list && S.edital_topics.list()) || [];
   const editais = (S.editais && S.editais.list && S.editais.list()) || [];
   let allowed = null;
@@ -27851,29 +27854,76 @@ function _bankResolveMateriaTopic(examId, subjectId){
       if(lowName.indexOf(xid) >= 0) allowed.add(e.id);
     });
   }
-  for(let i = 0; i < topics.length; i++){
-    const t = topics[i];
-    if(!t || t.parent_id != null) continue;            // só top-level (matéria)
-    if(String(t.subject_id) !== String(subjectId)) continue;
-    if(allowed && !allowed.has(t.edital_id)) continue;  // do concurso ativo
-    return String(t.id);
+  const tops = topics.filter(function(t){
+    if(!t || t.parent_id != null) return false;          // só top-level (matéria)
+    if(allowed && !allowed.has(t.edital_id)) return false; // do concurso ativo
+    return true;
+  });
+  // (1) FK explícito
+  if(subjectId != null){
+    for(let i = 0; i < tops.length; i++){
+      if(tops[i].subject_id != null && String(tops[i].subject_id) === String(subjectId)) return String(tops[i].id);
+    }
   }
+  // (2) match por nome
+  if(subjTitle){
+    for(let i = 0; i < tops.length; i++){
+      if(String(tops[i].title || '').trim().toLowerCase() === subjTitle) return String(tops[i].id);
+    }
+  }
+  // (3) derivar do que as UNIDADES da matéria realmente linkam no edital
+  //     (pega vínculos explícitos também). Sobe até a raiz (top-level) e
+  //     escolhe a matéria mais frequente entre as unidades de escopo.
+  try {
+    const scope = (window.Portal && Portal.scopeUnitDbIdSet) ? Portal.scopeUnitDbIdSet() : null;
+    if(scope && scope.size){
+      const uctx = (typeof _bankBuildUnitContext === 'function') ? _bankBuildUnitContext() : {};
+      const byId = {};
+      topics.forEach(function(t){ if(t) byId[String(t.id)] = t; });
+      const rootOf = function(tid){
+        let cur = byId[String(tid)], guard = 0;
+        while(cur && cur.parent_id != null && guard++ < 50){ cur = byId[String(cur.parent_id)]; }
+        return cur || null;
+      };
+      const counts = {};
+      scope.forEach(function(uid){
+        const c = uctx[uid] || uctx[String(uid)];
+        if(!c || !Array.isArray(c.edital_topic_ids)) return;
+        c.edital_topic_ids.forEach(function(tid){
+          const r = rootOf(tid);
+          if(!r) return;
+          if(allowed && !allowed.has(r.edital_id)) return;
+          counts[String(r.id)] = (counts[String(r.id)] || 0) + 1;
+        });
+      });
+      let best = '', bestN = 0;
+      Object.keys(counts).forEach(function(k){ if(counts[k] > bestN){ bestN = counts[k]; best = k; } });
+      if(best) return best;
+    }
+  } catch(e){ /* silencioso — fallback opcional */ }
   return '';
 }
 
 // Lê o contexto ativo (concurso + matéria) e diz o que travar/esconder.
+// Blindado: qualquer falha de dado devolve "sem trava" (filtros normais),
+// nunca quebra a página.
 function _bankLockContext(){
-  const subj   = (typeof activeSubject === 'function') ? activeSubject() : null;
-  const examId = (typeof activeExamId === 'function') ? (activeExamId() || '') : '';
-  const ctx = {
-    lockExam:    !!examId,        // dentro de um concurso → esconde "Concurso"
-    examId:      examId,
-    lockMateria: !!subj,          // dentro de uma matéria → esconde "Matéria"
-    subjectId:   subj ? subj.id : null,
-    materiaTopicId: ''
-  };
-  if(subj) ctx.materiaTopicId = _bankResolveMateriaTopic(examId, subj.id) || '';
-  return ctx;
+  try {
+    const subj   = (typeof activeSubject === 'function') ? activeSubject() : null;
+    const examId = (typeof activeExamId === 'function') ? (activeExamId() || '') : '';
+    const ctx = {
+      lockExam:    !!examId,        // dentro de um concurso → esconde "Concurso"
+      examId:      examId,
+      lockMateria: !!subj,          // dentro de uma matéria → esconde "Matéria"
+      subjectId:   subj ? ((subj._subjectId != null) ? subj._subjectId : subj.id) : null,
+      materiaTopicId: ''
+    };
+    if(subj) ctx.materiaTopicId = _bankResolveMateriaTopic(examId, subj) || '';
+    return ctx;
+  } catch(e){
+    console.warn('[bank] _bankLockContext falhou, seguindo sem trava:', e);
+    return { lockExam:false, examId:'', lockMateria:false, subjectId:null, materiaTopicId:'' };
+  }
 }
 
 // Injeta o contexto travado nos filtros parseados. Marca _lockExam/
