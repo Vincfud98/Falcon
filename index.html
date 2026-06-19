@@ -27826,6 +27826,75 @@ function _bankFiltersToQuery(f, applied){
   return out;
 }
 
+/* ─── Contexto "universo" do banco (concurso = CACD, matéria = HM) ───
+   Quando o aluno já ENTROU num concurso e/ou numa matéria, os filtros de
+   Concurso/Matéria são redundantes (a topbar e o escopo da matéria já
+   restringem). Estes helpers detectam esse contexto e o injetam nos
+   filtros, pra escondê-los na UI e manter a cascata Tópico/Subtópico. */
+
+// Resolve a "matéria do edital" (top-level edital_topic) correspondente à
+// matéria ativa, dentro do edital do concurso ativo. Usa o FK explícito
+// edital_topics.subject_id (mesma lógica de availableEditalTopics p/ casar
+// edital ↔ concurso). Retorna '' se não houver vínculo cadastrado.
+function _bankResolveMateriaTopic(examId, subjectId){
+  if(subjectId == null || !window.UbiqueStore) return '';
+  const S = UbiqueStore;
+  const topics  = (S.edital_topics && S.edital_topics.list && S.edital_topics.list()) || [];
+  const editais = (S.editais && S.editais.list && S.editais.list()) || [];
+  let allowed = null;
+  if(examId){
+    const xid = String(examId).toLowerCase();
+    allowed = new Set();
+    editais.forEach(function(e){
+      const lowName = String(e.name || '').toLowerCase();
+      if(e.exam_id && String(e.exam_id).toLowerCase() === xid){ allowed.add(e.id); return; }
+      if(lowName.indexOf(xid) >= 0) allowed.add(e.id);
+    });
+  }
+  for(let i = 0; i < topics.length; i++){
+    const t = topics[i];
+    if(!t || t.parent_id != null) continue;            // só top-level (matéria)
+    if(String(t.subject_id) !== String(subjectId)) continue;
+    if(allowed && !allowed.has(t.edital_id)) continue;  // do concurso ativo
+    return String(t.id);
+  }
+  return '';
+}
+
+// Lê o contexto ativo (concurso + matéria) e diz o que travar/esconder.
+function _bankLockContext(){
+  const subj   = (typeof activeSubject === 'function') ? activeSubject() : null;
+  const examId = (typeof activeExamId === 'function') ? (activeExamId() || '') : '';
+  const ctx = {
+    lockExam:    !!examId,        // dentro de um concurso → esconde "Concurso"
+    examId:      examId,
+    lockMateria: !!subj,          // dentro de uma matéria → esconde "Matéria"
+    subjectId:   subj ? subj.id : null,
+    materiaTopicId: ''
+  };
+  if(subj) ctx.materiaTopicId = _bankResolveMateriaTopic(examId, subj.id) || '';
+  return ctx;
+}
+
+// Injeta o contexto travado nos filtros parseados. Marca _lockExam/
+// _lockMateria (pra UI esconder) e _skipExamFilter/_skipTopic1Filter (pra
+// engine NÃO re-filtrar por algo que o escopo da matéria já cobre — senão
+// descartaria as questões inéditas e quebraria a contagem).
+function _bankApplyLockContext(f){
+  const L = _bankLockContext();
+  f._lockExam    = L.lockExam;
+  f._lockMateria = L.lockMateria;
+  if(L.lockExam){
+    if(!f.exam) f.exam = L.examId;          // concurso implícito (cascata + filtro no modo global)
+    if(L.lockMateria) f._skipExamFilter = true;  // dentro da matéria: escopo já cobre o concurso
+  }
+  if(L.lockMateria){
+    if(!f.topic1 && L.materiaTopicId) f.topic1 = L.materiaTopicId; // matéria implícita (cascata Tópico)
+    f._skipTopic1Filter = true;             // escopo de unidades da matéria já restringe
+  }
+  return f;
+}
+
 /* Coleta descendentes (recursivo) de um edital_topic_id. */
 function _bankEditalDescendants(topicId){
   if(!topicId || !window.UbiqueStore || !UbiqueStore.edital_topics) return [];
@@ -28252,7 +28321,9 @@ function _bankApplyFilters(items, f, opts){
   //     (derivado via match do exam.id no edital.name; ex.: "CACD 2026" → cacd)
   //  Questões Ubique (inéditas) sem nenhum link a um edital ainda não casam
   //  com concurso — admin precisa linkar a unidade ao edital pra cobertura.
-  if(f.exam){
+  //  _skipExamFilter: dentro de uma matéria o escopo de unidades já restringe
+  //  ao concurso; aplicar o filtro de edital aqui descartaria inéditas.
+  if(f.exam && !f._skipExamFilter){
     const target = String(f.exam).toLowerCase();
     out = out.filter(function(q){
       if(q.exam_id && String(q.exam_id).toLowerCase() === target) return true;
@@ -28274,7 +28345,10 @@ function _bankApplyFilters(items, f, opts){
   // EDITAL — Matéria → Tópico → Subtópico. Aplica o nó mais profundo
   // informado e checa se a questão está em UMA unidade vinculada a algum
   // descendente desse nó.
-  const editalNode = f.topic3 || f.topic2 || f.topic1;
+  // _skipTopic1Filter: matéria travada (implícita) → topic1 NÃO entra como
+  // filtro (o escopo de unidades da matéria já cobre); só Tópico/Subtópico
+  // escolhidos pelo aluno é que afunilam o edital.
+  const editalNode = f.topic3 || f.topic2 || (f._skipTopic1Filter ? '' : f.topic1);
   if(editalNode){
     const descendants = _bankEditalDescendants(editalNode);
     const descSet = new Set(descendants);
@@ -28415,9 +28489,16 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
       '</div></div>';
   }
 
-  const editalHint = f.exam
-    ? 'Cascata: vincular a um subtópico cobre tudo abaixo dele.'
-    : 'Escolha um concurso pra ver as matérias e tópicos do edital.';
+  // Título/dica adaptam ao contexto: dentro da matéria a seção vira só o
+  // recorte do edital (Tópico/Subtópico); fora dela, a cascata completa.
+  const editalLabel = f._lockMateria ? 'Tópicos do edital'
+                    : f._lockExam    ? 'Edital'
+                    : 'Concurso e edital';
+  const editalHint = f._lockMateria
+    ? 'Você está dentro desta matéria — escolha um tópico do edital pra afunilar (opcional).'
+    : f.exam
+      ? 'Cascata: vincular a um subtópico cobre tudo abaixo dele.'
+      : 'Escolha um concurso pra ver as matérias e tópicos do edital.';
 
   return '<form class="bf-panel" id="bankFilterPanel" onsubmit="return false">'+
     '<header class="bf-panel-head">'+
@@ -28430,11 +28511,15 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
       '<textarea class="bf-textarea" data-bf="keyword" placeholder="Busca no enunciado, nas alternativas e nos comentários…" rows="2">'+Util.esc(f.keyword||'')+'</textarea>'+
     '</div>'+
     // ─── Concurso e edital (cascata: Concurso → Matéria → Tópico → Subtópico) ───
-    sectionHead('Concurso e edital', editalHint) +
+    sectionHead(editalLabel, editalHint) +
     '<div class="bf-grid">'+
-      buildSelect('exam', f.exam, exams, { label:'Concurso', empty:'Todos os concursos' })+
-      buildSelect('topic1', f.topic1, topics1, { label:'Matéria', empty: f.exam ? 'Todas as matérias' : '— Escolha o concurso primeiro —' })+
-      buildSelect('topic2', f.topic2, topics2, { label:'Tópico', empty: f.topic1 ? 'Qualquer tópico' : '— Escolha a matéria primeiro —' })+
+      // Concurso: escondido quando o aluno já está dentro de um concurso
+      // (universo travado). Idem Matéria quando já está dentro de uma matéria.
+      (f._lockExam ? '' :
+        buildSelect('exam', f.exam, exams, { label:'Concurso', empty:'Todos os concursos' }))+
+      (f._lockMateria ? '' :
+        buildSelect('topic1', f.topic1, topics1, { label:'Matéria', empty: f.exam ? 'Todas as matérias' : '— Escolha o concurso primeiro —' }))+
+      buildSelect('topic2', f.topic2, topics2, { label:'Tópico', empty: (f._lockMateria || f.topic1) ? 'Qualquer tópico' : '— Escolha a matéria primeiro —' })+
       buildSelect('topic3', f.topic3, topics3, { label:'Subtópico', empty: f.topic2 ? 'Qualquer subtópico' : '— Escolha o tópico primeiro —' })+
     '</div>'+
     // ─── Refinar ───
@@ -28469,7 +28554,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
    ────────────────────────────────────────────────────────────────── */
 Renderers.questionBank = function(route){
   const bankItems = _bankItemsForQuestions();
-  const f = _bankParseFilters(route.query);
+  const f = _bankApplyLockContext(_bankParseFilters(route.query));
   const panelHtml = _renderBankFilterPanel(bankItems, f, false);
 
   // Auto-rescan silenciosa SEMPRE na abertura do banco — idempotente.
@@ -28513,7 +28598,7 @@ Renderers.questionBank = function(route){
   // Aplicou filtros: roda engine, monta bloco sintético quiz PRESERVANDO
   // a estrutura de grupos originais (enunciado/reference_text/etc.).
   const results = _bankApplyFilters(bankItems, f, { isEssay:false });
-  const PAGE_SIZE = 20;
+  const PAGE_SIZE = 50;
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
   const synthBlock = _bankBuildSynthQuizBlock(shown);
@@ -28526,7 +28611,7 @@ Renderers.questionBank = function(route){
     const blockHtml = Blocks.quiz.render(synthBlock, synthCtx);
     resultsHtml = '<div class="bf-results" data-bf-results data-card="questions">'+ blockHtml +'</div>';
     if(results.length > shown.length){
-      resultsHtml += '<div class="bf-more-row"><button type="button" class="btn-ghost bf-more" id="bfMore">Carregar mais ('+(results.length - shown.length)+' restantes)</button></div>';
+      resultsHtml += '<div class="bf-more-row"><button type="button" class="btn-ghost bf-more" id="bfMore">Carregar mais questões ('+(results.length - shown.length)+' restantes)</button></div>';
     }
   } else {
     resultsHtml = '<div class="empty">Renderer de quiz indisponível.</div>';
@@ -28605,12 +28690,12 @@ function _bankBuildSynthQuizBlock(filteredQuestions){
 
 Renderers.questionBank.mount = function(stageEl, route){
   _wireBankFilterPanel(stageEl, route, false);
-  const f = _bankParseFilters(route.query);
+  const f = _bankApplyLockContext(_bankParseFilters(route.query));
   if(!f.applied) return;
   // Hidrata o quiz interativo: monta o bloco sintético com Blocks.quiz.mount
   const bankItems = _bankItemsForQuestions();
   const results = _bankApplyFilters(bankItems, f, { isEssay:false });
-  const PAGE_SIZE = 20;
+  const PAGE_SIZE = 50;
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
   const synthBlock = _bankBuildSynthQuizBlock(shown);
@@ -28635,7 +28720,7 @@ Renderers.questionBank.mount = function(stageEl, route){
    ────────────────────────────────────────────────────────────────── */
 Renderers.essayBank = function(route){
   const bankItems = _bankItemsForEssays();
-  const f = _bankParseFilters(route.query);
+  const f = _bankApplyLockContext(_bankParseFilters(route.query));
   const panelHtml = _renderBankFilterPanel(bankItems, f, true);
 
   const hero = '<div class="hero">'+
@@ -28697,7 +28782,7 @@ Renderers.essayBank = function(route){
 
 Renderers.essayBank.mount = function(stageEl, route){
   _wireBankFilterPanel(stageEl, route, true);
-  const f = _bankParseFilters(route.query);
+  const f = _bankApplyLockContext(_bankParseFilters(route.query));
   if(!f.applied) return;
   const bankItems = _bankItemsForEssays();
   const results = _bankApplyFilters(bankItems, f, { isEssay:true });
