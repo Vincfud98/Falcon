@@ -49077,12 +49077,25 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       filtered = all.filter(function(v){ return v && v.term; });
       noMatchNote = '<p style="font-family:var(--sans);font-size:.72rem;color:var(--text-mute);font-style:italic;margin:0 0 .5rem">Nenhum verbete com “' + esc(q) + '”. Mostrando todos — escolha qualquer um pra ligar ao trecho.</p>';
     }
-    filtered = filtered.slice().sort(function(a, b){ return String(a.term || '').localeCompare(String(b.term || ''), 'pt-BR'); });
     if(!all.length){
       list.innerHTML = '<p style="font-family:var(--sans);font-size:.78rem;color:var(--text-mute);font-style:italic;padding:.6rem">Nenhum verbete cadastrado ainda. Crie verbetes na aba “Verbetes”.</p>';
       return;
     }
-    list.innerHTML = noMatchNote + filtered.map(function(v){
+    // D2b — verbetes da MATÉRIA da unidade atual vêm primeiro ("Desta matéria").
+    let curSubj = null;
+    try{
+      if(window.UbiqueStore && ueCurrentUnitId != null){
+        const u = (UbiqueStore.units.list() || []).find(function(x){ return String(x.id) === String(ueCurrentUnitId); });
+        const ch = u ? (UbiqueStore.chapters.list() || []).find(function(x){ return String(x.id) === String(u.chapter_id); }) : null;
+        const m = ch ? (UbiqueStore.modules.list() || []).find(function(x){ return String(x.id) === String(ch.module_id); }) : null;
+        curSubj = m ? m.subject_id : null;
+      }
+    }catch(_){}
+    const inSubj = function(v){ return curSubj != null && Array.isArray(v.subject_ids) && v.subject_ids.map(String).indexOf(String(curSubj)) >= 0; };
+    const byTerm = function(a, b){ return String(a.term || '').localeCompare(String(b.term || ''), 'pt-BR'); };
+    const primary = filtered.filter(inSubj).sort(byTerm);
+    const rest = filtered.filter(function(v){ return !inSubj(v); }).sort(byTerm);
+    const itemHTML = function(v){
       const homonym = termCount[_normalizeForMatch(v.term || '')] > 1;
       const aliases = (Array.isArray(v.aliases) ? v.aliases : []).filter(Boolean).join(', ');
       const defPrev = _uePlainForMatch(v.definition || '').slice(0, 100);
@@ -49095,7 +49108,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           (aliases ? '<div style="font-family:var(--mono);font-size:.62rem;color:var(--accent);margin-top:.15rem">apelidos: ' + esc(aliases) + '</div>' : '') +
           (defPrev ? '<div style="font-family:var(--sans);font-size:.7rem;color:var(--text-mute);margin-top:.2rem;line-height:1.4">' + esc(defPrev) + (defPrev.length >= 100 ? '…' : '') + '</div>' : '') +
         '</button>';
-    }).join('');
+    };
+    const groupHead = function(txt){ return '<div style="font-family:var(--mono);font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin:.2rem 0 .4rem">' + esc(txt) + '</div>'; };
+    let html = noMatchNote;
+    if(primary.length && rest.length){
+      html += groupHead('Desta matéria') + primary.map(itemHTML).join('') + groupHead('Outros verbetes') + rest.map(itemHTML).join('');
+    } else {
+      html += primary.concat(rest).map(itemHTML).join('');
+    }
+    list.innerHTML = html;
     // Clique via DELEGAÇÃO (evita colisão de aspas no onclick com ids de texto).
     list.onclick = function(e){
       const btn = e.target.closest('[data-vbid]');
@@ -56102,6 +56123,14 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
         <div class="field"><label>URL</label><input class="field-input" id="vbLink" placeholder="https://pt.wikipedia.org/wiki/..."></div>
       </div>
 
+      <!-- Matérias relacionadas (D2b) -->
+      <div>
+        <div class="sub-h"><span class="sub-h-text">Matérias</span><span class="sub-h-rule"></span></div>
+        <p class="s-body" style="font-size:.78rem;color:var(--text-mute);margin:0 0 .6rem">A quais matérias este verbete se relaciona. Usado pra priorizar os verbetes da matéria ao inserir num texto.</p>
+        <input class="field-input" id="vbSubjectsSearch" placeholder="Buscar matéria…" autocomplete="off" style="margin-bottom:.5rem">
+        <div class="decide-options" id="vbSubjectsPicker" style="max-height:200px;overflow-y:auto"></div>
+      </div>
+
       <!-- Termos relacionados -->
       <div>
         <div class="sub-h"><span class="sub-h-text">Veja também</span><span class="sub-h-rule"></span></div>
@@ -56511,6 +56540,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   let _vbEditingId = null;
   let _vbImagesState = [];
   let _vbRelatedState = new Set();
+  let _vbSubjectsState = new Set(); // matérias (subject_ids) do verbete
 
   function _esc(s){
     if(typeof esc === 'function') return esc(s);
@@ -56585,6 +56615,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     _vbEditingId = id || null;
     _vbImagesState = [];
     _vbRelatedState = new Set();
+    _vbSubjectsState = new Set();
     _clearMsg('vbModalMsg');
 
     if(id){
@@ -56598,6 +56629,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       document.getElementById('vbLink').value = v.link || '';
       _vbImagesState = (v.images || []).map(function(img){ return Object.assign({}, img); });
       _vbRelatedState = new Set(v.related_term_ids || []);
+      _vbSubjectsState = new Set((v.subject_ids || []).map(String));
       document.getElementById('btnDeleteVerbete').style.display = '';
     } else {
       document.getElementById('verbeteModalTitle').textContent = 'Novo Verbete';
@@ -56612,6 +56644,8 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     renderVbImagesList();
     const _rs = document.getElementById('vbRelatedSearch'); if(_rs) _rs.value = '';
     renderVbRelatedPicker();
+    const _ss = document.getElementById('vbSubjectsSearch'); if(_ss) _ss.value = '';
+    renderVbSubjectsPicker();
     document.getElementById('verbeteModal').classList.add('active');
   }
 
@@ -56683,6 +56717,40 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     }).join('');
   }
 
+  // D2b — matérias (subject_ids) a que o verbete se relaciona. Usado depois pra
+  // priorizar verbetes da matéria da unidade no "Inserir verbete".
+  function renderVbSubjectsPicker(){
+    const c = document.getElementById('vbSubjectsPicker');
+    if(!c) return;
+    const base = (window.UbiqueStore && UbiqueStore.subjects) ? (UbiqueStore.subjects.list() || []) : [];
+    if(base.length === 0){
+      c.innerHTML = '<p class="s-body" style="font-size:.78rem;font-style:italic;color:var(--text-mute);padding:.5rem;margin:0">Nenhuma matéria cadastrada ainda.</p>';
+      return;
+    }
+    const _norm = function(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').trim(); };
+    const qEl = document.getElementById('vbSubjectsSearch');
+    const q = _norm(qEl ? qEl.value : '');
+    const all = (!q ? base : base.filter(function(s){
+      if(_vbSubjectsState.has(String(s.id))) return true;
+      return _norm((s.subject || s.title || '') + ' ' + (s.sigla || '')).indexOf(q) >= 0;
+    })).slice().sort(function(a,b){ return String(a.subject||a.title||'').localeCompare(String(b.subject||b.title||''),'pt-BR'); });
+    if(all.length === 0){
+      c.innerHTML = '<p class="s-body" style="font-size:.78rem;font-style:italic;color:var(--text-mute);padding:.5rem;margin:0">Nenhuma matéria encontrada pra essa busca.</p>';
+      return;
+    }
+    c.innerHTML = all.map(function(s){
+      const active = _vbSubjectsState.has(String(s.id));
+      const name = s.subject || s.title || ('#' + s.id);
+      return '<button type="button" class="decide-option' + (active?' is-selected':'') + '" data-vb-subject="' + _esc(String(s.id)) + '" style="width:100%;text-align:left">' +
+        '<span class="decide-option-mark">' + (active?'✓':'') + '</span>' +
+        '<span class="decide-option-body">' +
+          '<span class="decide-option-title">' + _esc(name) + '</span>' +
+          (s.sigla ? '<span class="decide-option-desc">' + _esc(s.sigla) + '</span>' : '') +
+        '</span>' +
+      '</button>';
+    }).join('');
+  }
+
   function saveVerbete(){
     _clearMsg('vbModalMsg');
     const term = document.getElementById('vbTerm').value.trim();
@@ -56704,6 +56772,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       images: _vbImagesState.filter(function(img){ return img.url; }),
       link: document.getElementById('vbLink').value.trim(),
       related_term_ids: [..._vbRelatedState],
+      subject_ids: [..._vbSubjectsState],
       topics: [],
       tags: []
     };
@@ -56744,7 +56813,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   if(!window._vbDelegationBound){
     window._vbDelegationBound = true;
     document.addEventListener('click', function(e){
-      const t = e.target.closest('[id], [data-vb-related]');
+      const t = e.target.closest('[id], [data-vb-related], [data-vb-subject]');
       if(!t) return;
       if(t.id === 'btnOpenCreateVerbete'){ openVerbeteModal(null); }
       else if(t.id === 'btnAddVbImage'){
@@ -56759,6 +56828,12 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
         else _vbRelatedState.add(id);
         renderVbRelatedPicker();
       }
+      else if(t.dataset && t.dataset.vbSubject){
+        const sid = String(t.dataset.vbSubject);
+        if(_vbSubjectsState.has(sid)) _vbSubjectsState.delete(sid);
+        else _vbSubjectsState.add(sid);
+        renderVbSubjectsPicker();
+      }
     });
     document.addEventListener('input', function(e){
       if(e.target && e.target.id === 'verbeteSearch'){
@@ -56766,6 +56841,8 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
         renderVerbeteCards();
       } else if(e.target && e.target.id === 'vbRelatedSearch'){
         renderVbRelatedPicker();
+      } else if(e.target && e.target.id === 'vbSubjectsSearch'){
+        renderVbSubjectsPicker();
       }
     });
   }
