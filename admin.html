@@ -48975,9 +48975,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(!plainLower) return [];
     const existingIds = new Set(p.fragments.map(function(f){ return f && f.id; }));
     const existingTexts = new Set(p.fragments.map(function(f){ return f && f.text ? _normalizeForMatch(f.text) : null; }).filter(Boolean));
+    // "Veto": verbetes que o admin removeu DESTE parágrafo de propósito não
+    // voltam no auto-reconhecimento (D1).
+    const ignored = new Set((Array.isArray(p._ignoredVerbetes) ? p._ignoredVerbetes : []).map(String));
     const matched = [];
     verbetes.forEach(function(v){
       if(!v || existingIds.has(v.id)) return;
+      if(ignored.has(String(v.id))) return; // vetado neste parágrafo
       const names = [v.term].concat(Array.isArray(v.aliases) ? v.aliases : []).filter(Boolean);
       for(let n = 0; n < names.length; n++){
         const name = names[n];
@@ -49115,6 +49119,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const fragId = v ? v.id : verbeteId; // mesmo formato da auto-detecção
     const dup = p.fragments.some(function(f){ return f && String(f.id) === String(fragId) && _normalizeForMatch(f.text) === _normalizeForMatch(text); });
     if(!dup) p.fragments.push({ id: fragId, text: text });
+    // Inserção manual desfaz um eventual "veto" desse verbete neste parágrafo.
+    if(Array.isArray(p._ignoredVerbetes)) p._ignoredVerbetes = p._ignoredVerbetes.filter(function(x){ return String(x) !== String(fragId); });
     _ueSaveStructured(bid);
     _ueRerenderBlockBody(bid);
     window.ueCloseInsertVerbete();
@@ -49141,10 +49147,25 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   };
 
   window.ueRemoveFragment = function(bid, pIdx, fIdx){
-    if(!confirm('Apagar este fragment?')) return;
     const b = _ueGetBlock(bid); if(!b || !b.content) return;
     const p = (b.content.paragraphs || [])[pIdx]; if(!p || !Array.isArray(p.fragments)) return;
+    const f = p.fragments[fIdx];
+    // Liga a um verbete (auto-detectado ou inserido)? Então o "remover" é só
+    // DESTE parágrafo — o verbete continua no banco. E vetamos pra não voltar
+    // no "Reconhecer verbetes".
+    let isVerbete = !!(f && f._auto);
+    if(f && f.id && !isVerbete && window.UbiqueStore && UbiqueStore.verbetes){
+      isVerbete = !!(UbiqueStore.verbetes.list() || []).find(function(v){ return v && String(v.id) === String(f.id); });
+    }
+    const msg = isVerbete
+      ? 'Remover este verbete DESTE parágrafo?\n\nEle CONTINUA no banco de verbetes (e em outros parágrafos) — só não aparece aqui, e não volta no “Reconhecer verbetes”.'
+      : 'Remover este fragment deste parágrafo?';
+    if(!confirm(msg)) return;
     p.fragments.splice(fIdx, 1);
+    if(isVerbete && f && f.id != null){
+      if(!Array.isArray(p._ignoredVerbetes)) p._ignoredVerbetes = [];
+      if(!p._ignoredVerbetes.some(function(x){ return String(x) === String(f.id); })) p._ignoredVerbetes.push(f.id);
+    }
     _ueSaveStructured(bid);
     _ueRerenderBlockBody(bid);
   };
@@ -56095,6 +56116,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       <div>
         <div class="sub-h"><span class="sub-h-text">Veja também</span><span class="sub-h-rule"></span></div>
         <p class="s-body" style="font-size:.78rem;color:var(--text-mute);margin:0 0 .6rem">Outros verbetes relacionados. Aparecem no tooltip e na galeria flutuante.</p>
+        <input class="field-input" id="vbRelatedSearch" placeholder="Buscar verbete (nome ou apelido)…" autocomplete="off" style="margin-bottom:.5rem">
         <div class="decide-options" id="vbRelatedPicker" style="max-height:240px;overflow-y:auto"></div>
       </div>
 
@@ -56598,6 +56620,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     }
 
     renderVbImagesList();
+    const _rs = document.getElementById('vbRelatedSearch'); if(_rs) _rs.value = '';
     renderVbRelatedPicker();
     document.getElementById('verbeteModal').classList.add('active');
   }
@@ -56637,11 +56660,25 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   function renderVbRelatedPicker(){
     const c = document.getElementById('vbRelatedPicker');
     if(!c) return;
-    const all = (UbiqueStore.verbetes.list() || []).filter(function(v){
+    const base = (UbiqueStore.verbetes.list() || []).filter(function(v){
       return v.id !== _vbEditingId; // não vincula a si mesmo
     });
-    if(all.length === 0){
+    if(base.length === 0){
       c.innerHTML = '<p class="s-body" style="font-size:.78rem;font-style:italic;color:var(--text-mute);padding:.5rem;margin:0">Nenhum outro verbete cadastrado ainda.</p>';
+      return;
+    }
+    // Busca por nome/apelido (ignora caso e acento). Mantém os JÁ selecionados
+    // sempre visíveis, pra não "sumir" um vínculo ao filtrar.
+    const _norm = function(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').trim(); };
+    const qEl = document.getElementById('vbRelatedSearch');
+    const q = _norm(qEl ? qEl.value : '');
+    const all = !q ? base : base.filter(function(v){
+      if(_vbRelatedState.has(v.id)) return true;
+      const hay = [v.term].concat(Array.isArray(v.aliases) ? v.aliases : []).filter(Boolean).map(_norm).join(' · ');
+      return hay.indexOf(q) >= 0;
+    });
+    if(all.length === 0){
+      c.innerHTML = '<p class="s-body" style="font-size:.78rem;font-style:italic;color:var(--text-mute);padding:.5rem;margin:0">Nenhum verbete encontrado pra essa busca.</p>';
       return;
     }
     c.innerHTML = all.map(function(v){
@@ -56737,6 +56774,8 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       if(e.target && e.target.id === 'verbeteSearch'){
         _verbeteSearch = e.target.value;
         renderVerbeteCards();
+      } else if(e.target && e.target.id === 'vbRelatedSearch'){
+        renderVbRelatedPicker();
       }
     });
   }
