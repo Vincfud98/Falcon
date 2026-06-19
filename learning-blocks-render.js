@@ -465,6 +465,32 @@
     return '<iframe src="' + attrHtml(info.embed) + '" style="width:100%;height:100%;border:0" allow="' + allow + '" allowfullscreen loading="lazy"></iframe>';
   }
 
+  // ─────────── Google Drive: link público → URL utilizável ───────────
+  // Extrai o ID de um link do Drive nos formatos:
+  //   …/file/d/ID/…  ·  …?id=ID  ·  …/open?id=ID  ·  …/d/ID
+  function _lbDriveId(input){
+    if(!input) return null;
+    const s = String(input).trim();
+    let m = s.match(/\/file\/d\/([a-zA-Z0-9_-]{10,})/);          if(m) return m[1];
+    m = s.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);                   if(m) return m[1];
+    m = s.match(/\/d\/([a-zA-Z0-9_-]{10,})/);                     if(m) return m[1];
+    return null;
+  }
+  // Link do Drive → URL de IMAGEM direta (thumbnail escalável). Outros links
+  // (ou vazio) passam direto. Use no SRC/background de capas e imagens.
+  function _lbDriveImageUrl(input){
+    const id = _lbDriveId(input);
+    if(!id) return input || '';
+    return 'https://drive.google.com/thumbnail?id=' + id + '&sz=w1920';
+  }
+  // Link do Drive → URL de MÍDIA tocável (áudio/vídeo direto). Outros links
+  // (ou vazio) passam direto. Use no src de <audio>/new Audio().
+  function _lbDriveMediaUrl(input){
+    const id = _lbDriveId(input);
+    if(!id) return input || '';
+    return 'https://drive.google.com/uc?export=download&id=' + id;
+  }
+
   /* ─────────── carrossel reutilizável ─────────── */
   function renderSlideCarousel(items, blockId, slideRender){
     if(!items || !items.length) return '<p class="s-body" style="font-style:italic;color:var(--text-mute)">Sem itens.</p>';
@@ -1602,6 +1628,8 @@
     parseList:           _lbParseList,
     embedVideo:          _lbEmbedVideo,
     detectVideo:         _lbDetectVideo,
+    driveImageUrl:       _lbDriveImageUrl,
+    driveMediaUrl:       _lbDriveMediaUrl,
     renderSlideCarousel: renderSlideCarousel,
     // Y3 — Questões objetivas
     parseQuestionOrigin:      _lbParseQuestionOrigin,
