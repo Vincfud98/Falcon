@@ -1266,7 +1266,7 @@
         const sanitize = _lbSanitizeRichHTML;
         const altText = (c.caption || '').toString().replace(/<[^>]*>/g, '').slice(0, 200);
         return '<figure style="margin:0;text-align:center;max-width:680px">' +
-          '<img src="' + attrHtml(c.url||'') + '" alt="' + attrHtml(altText) + '" style="max-width:100%;border-radius:var(--radius-lg)">' +
+          '<img src="' + attrHtml(_lbDriveImageUrl(c.url||'')) + '" alt="' + attrHtml(altText) + '" style="max-width:100%;border-radius:var(--radius-lg)">' +
           (c.caption ? '<figcaption style="margin-top:.6rem;font-family:var(--serif);font-style:italic;font-size:.85rem;color:var(--text-mute);line-height:1.65">' + sanitize(c.caption) + '</figcaption>' : '') +
         '</figure>';
       }
