@@ -3101,6 +3101,24 @@ html[data-theme="light"] .bf-select{color-scheme:light}
   font-family:var(--serif);font-size:1rem;color:var(--accent);
   margin-bottom:.6rem;letter-spacing:.01em;
 }
+/* Rádio "Organização dos resultados" */
+.bf-orgrow{display:flex;flex-wrap:wrap;gap:.5rem}
+.bf-org{
+  display:inline-flex;align-items:center;gap:.45rem;padding:.5rem .85rem;
+  border:1px solid var(--border);border-radius:var(--radius,6px);
+  font-family:var(--sans);font-weight:300;font-size:.82rem;color:var(--text-mute);
+  cursor:pointer;transition:border-color .2s ease, background .2s ease, color .2s ease;
+}
+.bf-org:hover{border-color:var(--accent)}
+.bf-org.is-on{border-color:var(--accent);background:var(--accent-glow);color:var(--text)}
+.bf-org input{accent-color:var(--accent);margin:0;cursor:pointer}
+/* Cabeçalho de seção por matéria nos resultados (caramelo + divider) */
+.bf-msection{display:flex;align-items:center;gap:.9rem;margin:1.9rem 0 .5rem}
+.bf-msection-label{
+  font-family:var(--serif);font-size:1.2rem;color:var(--accent);
+  letter-spacing:.01em;white-space:nowrap;
+}
+.bf-msection-rule{flex:1;height:1px;background:linear-gradient(90deg,var(--accent),transparent);opacity:.55}
 /* Footer */
 .bf-panel-foot{
   display:flex;align-items:center;justify-content:flex-end;gap:.6rem;
@@ -27889,6 +27907,9 @@ function _bankParseFilters(routeQuery){
     origem:    String(q.origem || ''),  // 'past_exam' | 'ubique' | ''
     status:    splitCSV(q.status),       // ['unanswered','right',...]
     difficulty: String(q.diff || ''),
+    // Organização dos resultados: 'secao' (separa por matéria, padrão) |
+    // 'flat' (sem separação) | 'mix' (intercala as matérias).
+    org:       (q.org === 'flat' || q.org === 'mix') ? q.org : 'secao',
     applied:   q.applied === '1' || q.applied === 1 || q.applied === true
   };
 }
@@ -27909,6 +27930,7 @@ function _bankFiltersToQuery(f, applied){
   if(f.origem)      out.origem = f.origem;
   if(f.status && f.status.length) out.status = f.status.join(',');
   if(f.difficulty)  out.diff = f.difficulty;
+  if(f.org && f.org !== 'secao') out.org = f.org;  // 'secao' é o padrão (implícito)
   if(applied)       out.applied = '1';
   return out;
 }
@@ -28380,7 +28402,7 @@ function _buildQuestionBankFromBlocks(){
         // QuestionBank.getById devolve item com referência, e o render do
         // quiz duplica (header do grupo + dentro da questão).
         // Mantém keyword-search funcional: a referência continua sendo
-        // varrida pelo grupo (g.reference_text é puxado em _bankBuildSynthQuizBlock).
+        // varrida pelo grupo (g.reference_text é puxado em _bankBuildResultSections).
         const item = Object.assign({}, q);
         if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
         // appears_in pra cadeia indireta funcionar
@@ -28728,6 +28750,20 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
                f.exam ? 'Todas as matérias' : '— Escolha o concurso primeiro —');
   const materiaBlocksHtml = (f.materias || []).map(materiaBlock).join('');
 
+  // Organização dos resultados (rádio: secao | flat | mix) — só pra questões.
+  const orgOptions = [
+    ['secao', 'Separar matérias por seção'],
+    ['flat',  'Sem separação por matéria'],
+    ['mix',   'Misturar as questões']
+  ];
+  const orgMode = f.org || 'secao';
+  const orgHtml = isEssay ? '' :
+    sectionHead('Organização dos resultados', 'Como as questões aparecem depois de buscar') +
+    '<div class="bf-orgrow">' + orgOptions.map(function(o){
+      const on = orgMode === o[0];
+      return '<label class="bf-org'+(on?' is-on':'')+'"><input type="radio" name="bforg" value="'+o[0]+'"'+(on?' checked':'')+'><span>'+Util.esc(o[1])+'</span></label>';
+    }).join('') + '</div>';
+
   return '<form class="bf-panel" id="bankFilterPanel" onsubmit="return false" data-locked-materia="'+Util.attr(f._lockedMateria||'')+'">'+
     '<header class="bf-panel-head">'+
       '<div class="bf-panel-title">Filtros</div>'+
@@ -28759,6 +28795,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
           }).join('') + '</div>'
         : '<div class="bf-empty-hint">Nenhuma tag cadastrada no registry global ainda.</div>')+
     '</div>'+
+    orgHtml +
     '<footer class="bf-panel-foot">'+
       '<button type="button" class="btn-ghost bf-clear" id="bfClear">Limpar filtros</button>'+
       '<button type="submit" class="btn-primary bf-submit" id="bfApply">'+
@@ -28821,15 +28858,20 @@ Renderers.questionBank = function(route){
   const PAGE_SIZE = 50;
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
-  const synthBlock = _bankBuildSynthQuizBlock(shown);
+  const sections = _bankBuildResultSections(shown, f.org || 'secao');
   const synthCtx = { unitId:'__bank_q', store: Store, suppressActions: true };
 
   let resultsHtml = '';
   if(!results.length){
     resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Nenhuma questão bateu com os filtros</div><div class="empty-body">Tente afrouxar os critérios ou limpar e refazer.</div></div>';
   } else if(typeof Blocks !== 'undefined' && Blocks.quiz && Blocks.quiz.render){
-    const blockHtml = Blocks.quiz.render(synthBlock, synthCtx);
-    resultsHtml = '<div class="bf-results" data-bf-results data-card="questions">'+ blockHtml +'</div>';
+    const multi = sections.length > 1;
+    resultsHtml = sections.map(function(sec, i){
+      const head = (multi && sec.title)
+        ? '<div class="bf-msection"><span class="bf-msection-label">'+Util.esc(sec.title)+'</span><span class="bf-msection-rule"></span></div>'
+        : '';
+      return head + '<div class="bf-results" data-bf-results data-card="questions" data-sec-idx="'+i+'">'+ Blocks.quiz.render(sec.block, synthCtx) +'</div>';
+    }).join('');
     if(results.length > shown.length){
       resultsHtml += '<div class="bf-more-row"><button type="button" class="btn-ghost bf-more" id="bfMore">Carregar mais questões ('+(results.length - shown.length)+' restantes)</button></div>';
     }
@@ -28848,19 +28890,33 @@ Renderers.questionBank = function(route){
     '</div>';
 };
 
-// Constrói um synth block agrupando as questões filtradas pelo seu
-// grupo de origem (block_id|group_id em appears_in). Cada grupo
-// preserva enunciado/reference_text/reference_image/origin do bloco
-// original. Quando o filtro pega só 1 questão de um grupo de 5,
-// o grupo aparece com aquela única questão (mantendo o contexto).
-// Resultado: bank UI fica EXATAMENTE como LB de quiz com grupos.
-function _bankBuildSynthQuizBlock(filteredQuestions){
-  // Index original groups por (block_id, group_id) consultando unit_blocks
+// Resolve a matéria (subject) de uma unidade → {id, title, pos}.
+function _bankMateriaOfUnit(unitId, ctx, subjById){
+  const c = unitId != null ? ctx[String(unitId)] : null;
+  const sid = (c && c.subject_id != null) ? String(c.subject_id) : '';
+  const s = sid ? subjById[sid] : null;
+  return {
+    id:    sid || '__none__',
+    title: s ? (s.subject || s.name || ('Matéria ' + sid)) : 'Outras matérias',
+    pos:   (s && s.position != null) ? s.position : 9999
+  };
+}
+
+// Constrói as SEÇÕES de resultado a partir das questões filtradas.
+// Cada questão é agrupada pelo seu grupo de origem (block_id|group_id),
+// preservando enunciado/reference_text/origin. Cada grupo é taggeado com a
+// sua matéria. Depois, o `mode` arranja os grupos:
+//   'secao' → uma seção por matéria (ordem `position`), com cabeçalho.
+//   'flat'  → uma seção única, grupos na ordem natural (sem cabeçalho).
+//   'mix'   → uma seção única, grupos INTERCALADOS por matéria (round-robin
+//             determinístico — mistura de verdade, mas estável).
+// Retorna [{ title, block }]. `title` null = sem cabeçalho.
+function _bankBuildResultSections(filteredQuestions, mode){
   const originalGroupsMap = {};
   if(window.UbiqueStore && UbiqueStore.unit_blocks){
     (UbiqueStore.unit_blocks.list() || []).forEach(function(b){
-      if(!b || !b.content) return false;
-      if(b.type !== 'objective_questions' && b.type !== 'quiz') return false;
+      if(!b || !b.content) return;
+      if(b.type !== 'objective_questions' && b.type !== 'quiz') return;
       if(!Array.isArray(b.content.groups)) return;
       b.content.groups.forEach(function(g){
         const key = String(b.id) + '|' + String(g.id || '');
@@ -28875,37 +28931,52 @@ function _bankBuildSynthQuizBlock(filteredQuestions){
       });
     });
   }
-  // Agrupa questões pela primeira aparição (preserva ordem de inserção)
+  const ctx = _bankBuildUnitContext();
+  const subjById = {};
+  ((window.UbiqueStore && UbiqueStore.subjects && UbiqueStore.subjects.list && UbiqueStore.subjects.list()) || [])
+    .forEach(function(s){ if(s) subjById[String(s.id)] = s; });
+
   const groupKeys = [];
   const groupBuckets = {};
   (filteredQuestions || []).forEach(function(q){
     const usage = (q && Array.isArray(q.appears_in) && q.appears_in[0]) || null;
-    const key = usage
-      ? String(usage.block_id) + '|' + String(usage.group_id || '')
-      : '__ungrouped__';
+    const key = usage ? String(usage.block_id) + '|' + String(usage.group_id || '') : '__ungrouped__';
     if(!(key in groupBuckets)){
       groupBuckets[key] = {
         meta: originalGroupsMap[key] || { enunciado:'', reference_text:'', reference_image:'', origin:'' },
+        materia: _bankMateriaOfUnit(usage ? usage.unit_id : null, ctx, subjById),
         questions: []
       };
       groupKeys.push(key);
     }
     groupBuckets[key].questions.push({ bank_id: q.id });
   });
-  // Constrói groups[] no formato esperado por Blocks.quiz
-  const synthGroups = groupKeys.map(function(k, idx){
+  const groups = groupKeys.map(function(k, idx){
     const bucket = groupBuckets[k];
-    return Object.assign({}, bucket.meta, {
-      id: 'bg-' + idx,
-      questions: bucket.questions
-    });
+    return Object.assign({}, bucket.meta, { id:'bg-'+idx, questions: bucket.questions, __materia: bucket.materia });
   });
-  return {
-    id: '__bank_block_q',
-    type: 'quiz',
-    title: '',
-    groups: synthGroups.length ? synthGroups : [{ id:'bg-empty', enunciado:'', questions:[] }]
+
+  const mkBlock = function(gs, sufx){
+    return { id:'__bank_block_q'+(sufx||''), type:'quiz', title:'',
+             groups: gs.length ? gs : [{ id:'bg-empty', enunciado:'', questions:[] }] };
   };
+  if(!groups.length) return [{ title:null, block: mkBlock([]) }];
+
+  if(mode === 'flat'){
+    return [{ title:null, block: mkBlock(groups) }];
+  }
+  if(mode === 'mix'){
+    const byMat = {}; const order = [];
+    groups.forEach(function(g){ const id = g.__materia.id; if(!byMat[id]){ byMat[id] = []; order.push(id); } byMat[id].push(g); });
+    const mixed = []; let added = true;
+    while(added){ added = false; order.forEach(function(id){ if(byMat[id].length){ mixed.push(byMat[id].shift()); added = true; } }); }
+    return [{ title:null, block: mkBlock(mixed) }];
+  }
+  // 'secao' — uma seção por matéria, ordenada por position
+  const byMat = {}; const mats = [];
+  groups.forEach(function(g){ const m = g.__materia; if(!byMat[m.id]){ byMat[m.id] = { m:m, gs:[] }; mats.push(m.id); } byMat[m.id].gs.push(g); });
+  mats.sort(function(a,b){ return (byMat[a].m.pos - byMat[b].m.pos) || String(byMat[a].m.title).localeCompare(String(byMat[b].m.title), 'pt-BR'); });
+  return mats.map(function(id, i){ return { title: byMat[id].m.title, block: mkBlock(byMat[id].gs, '_'+i) }; });
 }
 
 Renderers.questionBank.mount = function(stageEl, route){
@@ -28918,11 +28989,14 @@ Renderers.questionBank.mount = function(stageEl, route){
   const PAGE_SIZE = 50;
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
-  const synthBlock = _bankBuildSynthQuizBlock(shown);
+  const sections = _bankBuildResultSections(shown, f.org || 'secao');
   const synthCtx = { unitId:'__bank_q', store: Store, suppressActions: true };
-  const resultsEl = stageEl.querySelector('[data-bf-results]');
-  if(resultsEl && typeof Blocks !== 'undefined' && Blocks.quiz && Blocks.quiz.mount){
-    try { Blocks.quiz.mount(resultsEl, synthBlock, synthCtx); } catch(e){ console.warn('[bankQuestions] mount falhou:', e); }
+  if(typeof Blocks !== 'undefined' && Blocks.quiz && Blocks.quiz.mount){
+    stageEl.querySelectorAll('[data-bf-results]').forEach(function(el){
+      const idx = parseInt(el.getAttribute('data-sec-idx'), 10) || 0;
+      const sec = sections[idx];
+      if(sec){ try { Blocks.quiz.mount(el, sec.block, synthCtx); } catch(e){ console.warn('[bankQuestions] mount falhou:', e); } }
+    });
   }
   // Paginação
   const moreBtn = stageEl.querySelector('#bfMore');
@@ -29113,7 +29187,8 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       tags:        Array.from(panel.querySelectorAll('[data-bf-tag].is-on')).map(function(b){ return b.getAttribute('data-bf-tag'); }),
       origem:      (panel.querySelector('[data-bf="origem"]')||{}).value || '',
       status:      Array.from(panel.querySelectorAll('[data-bf-status]:checked')).map(function(c){ return c.getAttribute('data-bf-status'); }),
-      difficulty:  (panel.querySelector('[data-bf="difficulty"]')||{}).value || ''
+      difficulty:  (panel.querySelector('[data-bf="difficulty"]')||{}).value || '',
+      org:         (panel.querySelector('input[name="bforg"]:checked')||{}).value || 'secao'
     };
   }
   function apply(){
@@ -29145,6 +29220,11 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
   // repinta o painel (sem perder o estado applied). Tópico/Subtópico só valem no Buscar.
   panel.querySelectorAll('[data-bf-mat]').forEach(function(cb){
     cb.addEventListener('change', function(){ repaint(); });
+  });
+  // Trocar a organização (seção/sem separação/misturar) reorganiza os resultados
+  // imediatamente (preserva o estado applied).
+  panel.querySelectorAll('input[name="bforg"]').forEach(function(rb){
+    rb.addEventListener('change', function(){ repaint(); });
   });
   // Trocar o Concurso muda a lista de matérias do edital → zera a seleção e repinta.
   const examSel = panel.querySelector('[data-bf="exam"]');
