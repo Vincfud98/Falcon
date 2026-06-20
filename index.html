@@ -3153,6 +3153,8 @@ html[data-theme="light"] .bf-select{color-scheme:light}
   font-family:var(--mono);font-size:.68rem;color:var(--text-dim);
   letter-spacing:.06em;
 }
+.bf-compile{margin-left:auto;font-size:.7rem;letter-spacing:.1em;display:inline-flex;align-items:center;gap:.4rem}
+.bf-compile svg{width:14px;height:14px}
 .bf-more-row{display:flex;justify-content:center;margin:2rem 0 1rem}
 .bf-more{padding:.6rem 1.2rem;font-size:.7rem;letter-spacing:.12em}
 
@@ -28979,6 +28981,7 @@ Renderers.questionBank = function(route){
       '<div class="bf-results-head">'+
         '<span class="bf-results-count">'+results.length+' '+(results.length===1?'questão':'questões')+'</span>'+
         '<span class="bf-results-meta">Mostrando '+shown.length+' de '+results.length+' · página '+page+'</span>'+
+        (results.length ? '<button type="button" class="btn-ghost bf-compile" id="bfCompile" title="Gerar um arquivo de prova imprimível (questões + folha de respostas + gabarito e comentários)">'+Icons.download+' Compilar prova</button>' : '')+
       '</div>'+
       resultsHtml +
     '</div>';
@@ -29102,6 +29105,249 @@ function _bankBuildResultSections(filteredQuestions, mode){
   return mats.map(function(id, i){ return { title: byMat[id].m.title, block: mkBlock(byMat[id].gs, '_'+i) }; });
 }
 
+/* ───────── QuestionsCompiler — "Prova Objetiva" imprimível ─────────
+   Espelha o NotesCompiler: monta um HTML autossuficiente (com @page/print) a
+   partir das questões filtradas e dispara download. Estrutura:
+     1) Cabeçalho + Prova (questões por matéria, 2 colunas)
+     2) (quebra) Folha de respostas (estilo cartão CESPE; "item" deles = nossa questão)
+     3) (quebra) Gabarito seco ("1 C · 2 E · …") + comentários em ordem
+   Estático/não-interativo — só o estilo. */
+const QuestionsCompiler = (function(){
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function itemKind(item){
+    const o = (item.options || []).map(function(x){ return String(x); });
+    if(o.length === 2 && o.some(function(x){ return /^certo$/i.test(x); }) && o.some(function(x){ return /^errado$/i.test(x); })) return 'tf';
+    return 'mc';
+  }
+  function letterOf(item){
+    if(itemKind(item) === 'tf') return (String(item.key) === 'Certo' || item.key === true) ? 'C' : 'E';
+    const opts = item.options || [];
+    const idx = opts.findIndex(function(o){ return String(o) === String(item.key); });
+    return idx >= 0 ? String.fromCharCode(65 + idx) : '?';
+  }
+  function originTag(item){
+    const LB = window.LearningBlocks || {};
+    let exam = item.exam_id ? String(item.exam_id).toUpperCase() : '';
+    let year = (item.year != null && item.year !== '') ? item.year : null;
+    if((!exam || !year) && item.origin && LB.parseQuestionOrigin){
+      const p = LB.parseQuestionOrigin(item.origin);
+      if(p){ if(!exam) exam = p.exam || ''; if(!year) year = p.year || null; }
+    }
+    if(!year) return '';
+    return (exam ? exam + ' ' : '') + year;
+  }
+  function driveImg(url){
+    const LB = window.LearningBlocks || {};
+    if(url && LB.driveImageUrl) { try { return LB.driveImageUrl(url); } catch(e){} }
+    return url || '';
+  }
+
+  // Monta o corpo da prova + coleta a lista achatada e numerada (flat).
+  function buildCorpo(sections, itemById, flat){
+    let n = 0;
+    return (sections || []).map(function(sec){
+      let body = '';
+      (sec.block.groups || []).forEach(function(g){
+        const qlist = (g.questions || []).map(function(qq){ return itemById[String(qq.bank_id)]; }).filter(Boolean);
+        if(!qlist.length) return;
+        // Cabeçalho do grupo: texto-base + imagem de referência + comando.
+        let ref = '';
+        const img = g.reference_image ? '<div class="pc-ref-img"><img src="'+esc(driveImg(g.reference_image))+'" alt=""></div>' : '';
+        const refTxt = g.reference_text ? '<div class="pc-ref-txt">'+esc(g.reference_text).replace(/\n/g,'<br>')+'</div>' : '';
+        const cmd = g.enunciado ? '<div class="pc-cmd">'+esc(g.enunciado).replace(/\n/g,'<br>')+'</div>' : '';
+        if(img || refTxt || cmd) ref = '<div class="pc-ref">'+img+refTxt+cmd+'</div>';
+        // Itens
+        let items = '';
+        qlist.forEach(function(item){
+          n++;
+          flat.push({ n:n, item:item });
+          const tag = originTag(item);
+          const badge = tag ? '<span class="pc-origin">'+esc(tag)+'</span>' : '';
+          if(itemKind(item) === 'tf'){
+            items += '<div class="pc-q"><span class="pc-num">'+n+'</span>'+badge+'<span class="pc-stmt">'+esc(item.assertion||'')+'</span></div>';
+          } else {
+            const opts = (item.options || []).map(function(o, i){ return '<div class="pc-opt"><b>'+String.fromCharCode(65+i)+')</b> '+esc(o)+'</div>'; }).join('');
+            items += '<div class="pc-q"><span class="pc-num">'+n+'</span>'+badge+'<span class="pc-stmt">'+esc(item.assertion||'')+'</span><div class="pc-opts">'+opts+'</div></div>';
+          }
+        });
+        body += '<div class="pc-grupo">'+ref+items+'</div>';
+      });
+      const band = sec.title ? '<h2 class="pc-materia">'+esc(sec.title)+'</h2>' : '';
+      return band + body;
+    }).join('');
+  }
+
+  // Folha de respostas (estilo cartão). bolinhas C/E (tf) ou A–E (mc) por questão.
+  function buildFolha(flat, meta){
+    const field = function(label, val){ return '<div class="fl-field"><span class="fl-lbl">'+esc(label)+'</span><span class="fl-val">'+esc(val||'')+'</span></div>'; };
+    const rows = flat.map(function(f){
+      const tf = itemKind(f.item) === 'tf';
+      const letters = tf ? ['C','E'] : (f.item.options||[]).map(function(o,i){ return String.fromCharCode(65+i); });
+      const bubbles = letters.map(function(L){ return '<span class="fl-bub">'+L+'</span>'; }).join('');
+      return '<div class="fl-row"><span class="fl-n">'+f.n+'</span><span class="fl-bubs">'+bubbles+'</span></div>';
+    }).join('');
+    return ''+
+      '<section class="folha">'+
+        '<div class="fl-head">'+
+          '<div class="fl-head-title">Folha de Respostas</div>'+
+          '<div class="fl-head-meta">'+esc(meta.total)+' '+(meta.total===1?'questão':'questões')+'</div>'+
+        '</div>'+
+        '<div class="fl-id">'+
+          field('Nome do candidato', meta.candidato)+
+          field('Concurso', meta.concursoName || meta.concursoSigla)+
+          field('Ano(s)', (meta.anos||[]).join(', '))+
+          field('Data', meta.dateStr)+
+          field('Duração', '')+
+          field('Resultado', '')+
+        '</div>'+
+        '<div class="fl-note"><strong>Preenchimento:</strong> preencha o círculo da resposta de cada questão com caneta preta. C = Certo, E = Errado; nas de múltipla escolha, A–E. Confira pelo gabarito ao final.</div>'+
+        '<div class="fl-grid">'+rows+'</div>'+
+        '<div class="fl-foot">Ubique · bom estudo!</div>'+
+      '</section>';
+  }
+
+  function buildGabarito(flat){
+    const seco = flat.map(function(f){ return '<span class="gb-cell"><b>'+f.n+'</b> '+letterOf(f.item)+'</span>'; }).join('');
+    const coment = flat.map(function(f){
+      const tag = originTag(f.item);
+      const stmt = f.item.assertion ? '<div class="gb-stmt">'+esc(f.item.assertion)+'</div>' : '';
+      const c = f.item.comments ? esc(f.item.comments).replace(/\n/g,'<br>') : '<em>Sem comentário cadastrado.</em>';
+      return '<div class="gb-com"><div class="gb-com-head"><span class="gb-num">'+f.n+'</span><span class="gb-key">'+letterOf(f.item)+'</span>'+(tag?'<span class="pc-origin">'+esc(tag)+'</span>':'')+'</div>'+stmt+'<div class="gb-txt">'+c+'</div></div>';
+    }).join('');
+    return ''+
+      '<section class="gabarito">'+
+        '<h2 class="gb-title">Gabarito</h2>'+
+        '<div class="gb-seco">'+seco+'</div>'+
+        '<h2 class="gb-title">Comentários</h2>'+
+        coment+
+      '</section>';
+  }
+
+  function buildHTML(sections, itemById, meta){
+    const flat = [];
+    const corpo = buildCorpo(sections, itemById, flat);
+    meta.total = flat.length;
+    const folha = buildFolha(flat, meta);
+    const gabarito = buildGabarito(flat);
+    const infoBits = [
+      meta.concursoName || meta.concursoSigla ? ('Concurso: ' + (meta.concursoName || meta.concursoSigla)) : '',
+      (meta.materias && meta.materias.length) ? ('Matérias: ' + meta.materias.join(', ')) : '',
+      (meta.anos && meta.anos.length) ? ('Ano(s): ' + meta.anos.join(', ')) : '',
+      'Questões: ' + flat.length
+    ].filter(Boolean);
+    return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Prova Objetiva — '+esc(meta.concursoSigla||'Ubique')+'</title><style>'+
+      '@page{size:A4;margin:16mm 14mm}'+
+      '*{box-sizing:border-box}'+
+      'html,body{margin:0;padding:0;background:#fff;color:#1a1712;font-family:\'Inter\',\'Helvetica Neue\',Arial,sans-serif;font-size:11.5px;line-height:1.5}'+
+      '.wrap{max-width:900px;margin:0 auto;padding:24px 28px 48px}'+
+      'h1,h2{font-family:\'Cormorant Garamond\',\'Playfair Display\',Georgia,serif;font-weight:600;margin:0}'+
+      '.cover{text-align:center;border-bottom:2px solid #1a1712;padding-bottom:14px;margin-bottom:18px}'+
+      '.cover .brand{font-size:10px;letter-spacing:.32em;text-transform:uppercase;color:#8a6a24;font-weight:600;margin-bottom:6px}'+
+      '.cover h1{font-size:32px;letter-spacing:-.01em}'+
+      '.cover .cand{margin-top:10px;font-size:12px}'+
+      '.cover .info{margin-top:8px;font-size:10.5px;color:#5a4f3f}'+
+      '.instr{margin:14px 0 20px;padding:10px 14px;background:#f6f1e6;border-left:3px solid #8a6a24;font-size:10.5px;color:#3a3228}'+
+      '.instr b{color:#8a6a24}'+
+      '.pc-corpo{column-count:2;column-gap:2rem}'+
+      '.pc-materia{column-span:all;font-size:18px;color:#8a6a24;margin:14px 0 8px;padding-bottom:5px;border-bottom:1px solid #8a6a24}'+
+      '.pc-grupo{break-inside:avoid;margin:0 0 14px;padding-bottom:10px;border-bottom:1px dashed rgba(26,23,18,.16)}'+
+      '.pc-ref{border-left:3px solid #8a6a24;background:#faf7f0;padding:8px 10px;margin-bottom:8px;border-radius:3px}'+
+      '.pc-ref-img{margin-bottom:6px}.pc-ref-img img{max-width:100%;border-radius:3px}'+
+      '.pc-ref-txt{font-size:10.5px;color:#2a2419;text-align:justify}'+
+      '.pc-cmd{font-size:10.5px;margin-top:6px;font-style:italic;color:#3a3228}'+
+      '.pc-q{margin:6px 0;text-align:justify}'+
+      '.pc-num{display:inline-block;min-width:1.4em;font-weight:700;color:#8a6a24;font-variant-numeric:tabular-nums}'+
+      '.pc-origin{display:inline-block;font-size:8px;letter-spacing:.04em;padding:1px 5px;margin:0 5px;border:1px solid #c8a97e;border-radius:999px;color:#8a6a24;vertical-align:middle}'+
+      '.pc-stmt{}.pc-opts{margin:4px 0 0 1.4em}.pc-opt{margin:2px 0}'+
+      '.page-break{break-before:page;height:0}'+
+      // Folha
+      '.folha{padding-top:6px}'+
+      '.fl-head{display:flex;align-items:baseline;justify-content:space-between;background:#f3e2cf;border:1px solid #d8b48a;border-radius:4px;padding:8px 14px}'+
+      '.fl-head-title{font-family:\'Cormorant Garamond\',Georgia,serif;font-weight:700;font-size:22px}'+
+      '.fl-head-meta{font-weight:700;font-size:13px;letter-spacing:.04em}'+
+      '.fl-id{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}'+
+      '.fl-field{flex:1 1 30%;border:1px solid #cbb89a;border-radius:3px;padding:5px 8px;min-height:34px}'+
+      '.fl-lbl{display:block;font-size:7.5px;letter-spacing:.12em;text-transform:uppercase;color:#8a6a24;font-weight:600}'+
+      '.fl-val{font-size:12px}'+
+      '.fl-note{font-size:9.5px;color:#3a3228;margin:6px 0 12px;padding:6px 10px;border:1px dashed #cbb89a;border-radius:3px}'+
+      '.fl-note strong{color:#8a6a24}'+
+      '.fl-grid{column-count:4;column-gap:14px}'+
+      '.fl-row{break-inside:avoid;display:flex;align-items:center;gap:6px;padding:2px 4px;border-bottom:1px solid #eee}'+
+      '.fl-n{min-width:1.8em;text-align:right;font-weight:700;font-size:10px;color:#5a4f3f;font-variant-numeric:tabular-nums}'+
+      '.fl-bubs{display:flex;gap:4px}'+
+      '.fl-bub{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border:1px solid #8a6a24;border-radius:50%;font-size:8px;color:#8a6a24}'+
+      '.fl-foot{text-align:center;font-size:9px;color:#8a7e68;margin-top:14px;letter-spacing:.1em}'+
+      // Gabarito
+      '.gabarito{padding-top:6px}'+
+      '.gb-title{font-size:20px;color:#8a6a24;margin:16px 0 8px;border-bottom:1px solid #8a6a24;padding-bottom:4px}'+
+      '.gb-seco{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11px;margin-bottom:10px}'+
+      '.gb-cell{font-variant-numeric:tabular-nums}.gb-cell b{color:#8a6a24}'+
+      '.gb-com{break-inside:avoid;margin:0 0 10px;padding-bottom:8px;border-bottom:1px dashed rgba(26,23,18,.16)}'+
+      '.gb-com-head{display:flex;align-items:center;gap:8px;margin-bottom:3px}'+
+      '.gb-num{font-weight:700;color:#8a6a24}.gb-key{font-weight:700;border:1px solid #8a6a24;border-radius:3px;padding:0 6px;color:#8a6a24}'+
+      '.gb-stmt{font-size:10.5px;color:#2a2419;margin-bottom:3px;text-align:justify}'+
+      '.gb-txt{font-size:10.5px;color:#3a3228;text-align:justify}'+
+      '</style></head><body><div class="wrap">'+
+        '<header class="cover">'+
+          '<div class="brand">Ubique · Course Platform</div>'+
+          '<h1>Prova Objetiva</h1>'+
+          (meta.candidato ? '<div class="cand">Candidato(a): <strong>'+esc(meta.candidato)+'</strong></div>' : '')+
+          '<div class="info">'+infoBits.map(esc).join('  ·  ')+'</div>'+
+        '</header>'+
+        '<div class="instr"><b>Instruções:</b> cada item deve ser julgado como <b>Certo (C)</b> ou <b>Errado (E)</b>; questões de múltipla escolha têm uma única alternativa correta (A–E). Marque as respostas na folha de respostas ao final. O gabarito e os comentários estão na última parte.</div>'+
+        '<div class="pc-corpo">'+corpo+'</div>'+
+        '<div class="page-break"></div>'+
+        folha+
+        '<div class="page-break"></div>'+
+        gabarito+
+      '</div></body></html>';
+  }
+
+  function download(sections, itemById, meta){
+    const html = buildHTML(sections, itemById, meta || {});
+    const blob = new Blob([html], { type:'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const datePart = new Date().toISOString().slice(0,10);
+    a.href = url;
+    a.download = 'prova-' + (meta && meta.concursoSigla ? String(meta.concursoSigla).toLowerCase() + '-' : '') + datePart + '.html';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  }
+  return { download, buildHTML };
+})();
+window.QuestionsCompiler = QuestionsCompiler;
+
+// Junta tudo e dispara o download da prova a partir do estado atual de filtros.
+function _bankCompileProva(route){
+  const f = _bankApplyLockContext(_bankParseFilters(route.query));
+  const bankItems = _bankItemsForQuestions();
+  const results = _bankApplyFilters(bankItems, f, { isEssay:false });
+  if(!results.length){ alert('Nenhuma questão para compilar. Ajuste os filtros e busque primeiro.'); return; }
+  const itemById = {};
+  results.forEach(function(it){ if(it && it.id != null) itemById[String(it.id)] = it; });
+  const sections = _bankBuildResultSections(results, f.org || 'secao');
+  // Metadados do cabeçalho
+  const exams = (window.BankFilters && BankFilters.availableExams) ? BankFilters.availableExams() : [];
+  const examObj = exams.find(function(x){ return String(x.id) === String(f.exam); });
+  const concursoSigla = f.exam ? String(f.exam).toUpperCase() : '';
+  const materias = sections.map(function(s){ return s.title; }).filter(Boolean);
+  const anosSet = {};
+  results.forEach(function(it){ const y = _bankQuestionYear(it); if(y) anosSet[y] = 1; });
+  const anos = Object.keys(anosSet).map(Number).sort(function(a,b){ return a - b; });
+  let dateStr = '';
+  try { dateStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); } catch(e){}
+  QuestionsCompiler.download(sections, itemById, {
+    candidato:    (window.MOCK_USER && window.MOCK_USER.name) || '',
+    concursoSigla: concursoSigla,
+    concursoName: examObj ? examObj.name : concursoSigla,
+    materias:     materias,
+    anos:         anos,
+    dateStr:      dateStr
+  });
+}
+
 Renderers.questionBank.mount = function(stageEl, route){
   _wireBankFilterPanel(stageEl, route, false);
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
@@ -29128,6 +29374,14 @@ Renderers.questionBank.mount = function(stageEl, route){
       const q = Object.assign({}, route.query);
       q.p = String(page + 1);
       Router.go('/portal/questions' + Router.querystring(q));
+    });
+  }
+  // Compilar prova (baixar HTML imprimível: prova + folha + gabarito/comentários).
+  const compileBtn = stageEl.querySelector('#bfCompile');
+  if(compileBtn){
+    compileBtn.addEventListener('click', function(){
+      try { _bankCompileProva(route); }
+      catch(e){ console.warn('[compilar prova] falhou:', e); alert('Não consegui gerar a prova agora. Tente novamente.'); }
     });
   }
 };
