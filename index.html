@@ -28522,6 +28522,20 @@ function _bankItemsForEssays(){
   return _bankScopeFilter(out);
 }
 
+/* Match exato (lexical) de um item contra um termo já em minúsculas.
+   Varre enunciado/afirmativa/comentário/comando/alternativas/texto de apoio. */
+function _bankItemMatchesKeyword(q, needle, isEssay){
+  if(!needle) return true;
+  const pieces = [q.statement, q.assertion, q.comment, q.command, q.prompt, q.reference_text, q._refTextForSearch];
+  if(Array.isArray(q.options)){
+    q.options.forEach(function(o){ pieces.push(typeof o === 'string' ? o : (o && (o.text || o.label))); });
+  }
+  if(isEssay && Array.isArray(q.criteria)){
+    q.criteria.forEach(function(c){ pieces.push(c.label, c.description); });
+  }
+  return pieces.filter(Boolean).join(' • ').toLowerCase().indexOf(needle) >= 0;
+}
+
 /* Engine: aplica todos os filtros a uma lista de items (bank questions ou
    bank essays). Retorna a sublista que passa em TODOS os filtros. */
 function _bankApplyFilters(items, f, opts){
@@ -28531,22 +28545,11 @@ function _bankApplyFilters(items, f, opts){
   let out = (items||[]).slice();
 
   // Keyword (textarea — qualquer das palavras precisa aparecer no haystack).
-  // No modo IA, NÃO filtra por palavra aqui — quem restringe é a busca semântica (no fim).
+  // No modo IA, NÃO filtra por palavra aqui — a busca por IA (no fim) já faz a
+  // UNIÃO de (match exato ∪ semântico), pra nunca perder o que o literal acharia.
   if(f.keyword && !f.aiSearch){
     const needle = f.keyword.toLowerCase();
-    out = out.filter(function(q){
-      const pieces = [q.statement, q.assertion, q.comment, q.command, q.prompt, q.reference_text, q._refTextForSearch];
-      if(Array.isArray(q.options)){
-        q.options.forEach(function(o){
-          pieces.push(typeof o === 'string' ? o : (o && (o.text || o.label)));
-        });
-      }
-      if(isEssay && Array.isArray(q.criteria)){
-        q.criteria.forEach(function(c){ pieces.push(c.label, c.description); });
-      }
-      const hay = pieces.filter(Boolean).join(' • ').toLowerCase();
-      return hay.indexOf(needle) >= 0;
-    });
+    out = out.filter(function(q){ return _bankItemMatchesKeyword(q, needle, isEssay); });
   }
   // CONCURSO — match em camadas:
   //  1) q.exam_id explícito (raro)
@@ -28679,7 +28682,14 @@ function _bankApplyFilters(items, f, opts){
     const cache = window._bankAiCache;
     if(cache && cache.q === f.keyword && cache.status === 'ready'){
       const ids = cache.ids, rank = cache.rank;
-      out = out.filter(function(q){ return q.bank_question_id != null && ids.has(String(q.bank_question_id)); });
+      const needle = String(f.keyword).toLowerCase();
+      // UNIÃO: passa se for semelhante por significado (acima do corte) OU se
+      // tiver match EXATO da palavra — assim a IA nunca perde o que o literal acha.
+      out = out.filter(function(q){
+        return (q.bank_question_id != null && ids.has(String(q.bank_question_id)))
+            || _bankItemMatchesKeyword(q, needle, false);
+      });
+      // Ordena por relevância semântica; quem entrou só pelo literal vai depois.
       out.sort(function(a, b){ return (rank[String(b.bank_question_id)] || 0) - (rank[String(a.bank_question_id)] || 0); });
     } else {
       if(typeof _bankEnsureAiSearch === 'function') _bankEnsureAiSearch(f.keyword);
