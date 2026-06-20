@@ -3153,6 +3153,9 @@ html[data-theme="light"] .bf-select{color-scheme:light}
   font-family:var(--mono);font-size:.68rem;color:var(--text-dim);
   letter-spacing:.06em;
 }
+.bf-submit-ai{display:inline-flex;align-items:center;gap:.4rem;border-color:var(--accent);color:var(--accent)}
+.bf-submit-ai:hover{background:var(--accent-glow)}
+.bf-submit-ai svg{width:14px;height:14px}
 .bf-compile{margin-left:auto;font-size:.7rem;letter-spacing:.1em;display:inline-flex;align-items:center;gap:.4rem}
 .bf-compile svg{width:14px;height:14px}
 .bf-more-row{display:flex;justify-content:center;margin:2rem 0 1rem}
@@ -27927,6 +27930,8 @@ function _bankParseFilters(routeQuery){
     anos:      splitCSV(q.anos),          // ['2024','2023',...] — vazio = todos
     // Exibir: 'full' (grupos completos) | '' (apenas as questões que correspondem, padrão).
     exibir:    (q.exib === 'full') ? 'full' : '',
+    // Busca por IA (semântica): usa o texto de Palavras-chave como consulta.
+    aiSearch:  q.ai === '1' || q.ai === 1 || q.ai === true,
     applied:   q.applied === '1' || q.applied === 1 || q.applied === true
   };
 }
@@ -27951,6 +27956,7 @@ function _bankFiltersToQuery(f, applied){
   if(f.prioridade) out.pri = f.prioridade;          // '' (indiferente) é o padrão
   if(f.anos && f.anos.length) out.anos = f.anos.join(',');
   if(f.exibir === 'full') out.exib = 'full';        // '' (apenas correspondentes) é o padrão
+  if(f.aiSearch)    out.ai = '1';                    // busca semântica (IA)
   if(applied)       out.applied = '1';
   return out;
 }
@@ -28421,6 +28427,7 @@ function _buildQuestionBankFromBlocks(){
             const item = Object.assign({}, it);
             if(!item.statement) item.statement = it.assertion || '';
             if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
+            item.bank_question_id = g.bank_question_id;  // p/ mapear a busca semântica (IA)
             item.appears_in = [{ unit_id: b.unit_id, block_id: b.id, group_id: g.id }];
             item._refTextForSearch = bg.reference_text || bg.enunciado || bg.description || '';
             out.push(item);
@@ -28523,8 +28530,9 @@ function _bankApplyFilters(items, f, opts){
   const ctx = _bankBuildUnitContext();
   let out = (items||[]).slice();
 
-  // Keyword (textarea — qualquer das palavras precisa aparecer no haystack)
-  if(f.keyword){
+  // Keyword (textarea — qualquer das palavras precisa aparecer no haystack).
+  // No modo IA, NÃO filtra por palavra aqui — quem restringe é a busca semântica (no fim).
+  if(f.keyword && !f.aiSearch){
     const needle = f.keyword.toLowerCase();
     out = out.filter(function(q){
       const pieces = [q.statement, q.assertion, q.comment, q.command, q.prompt, q.reference_text, q._refTextForSearch];
@@ -28664,7 +28672,49 @@ function _bankApplyFilters(items, f, opts){
              })
              .map(function(x){ return x.q; });
   }
+  // BUSCA POR IA (semântica) — restringe e ORDENA pela relevância do significado.
+  // O resultado vem de uma Edge Function (assíncrona). Aqui usamos o cache; se
+  // ainda não chegou pra esta consulta, dispara uma vez e re-renderiza ao concluir.
+  if(!isEssay && f.aiSearch && f.keyword){
+    const cache = window._bankAiCache;
+    if(cache && cache.q === f.keyword && cache.status === 'ready'){
+      const ids = cache.ids, rank = cache.rank;
+      out = out.filter(function(q){ return q.bank_question_id != null && ids.has(String(q.bank_question_id)); });
+      out.sort(function(a, b){ return (rank[String(b.bank_question_id)] || 0) - (rank[String(a.bank_question_id)] || 0); });
+    } else {
+      if(typeof _bankEnsureAiSearch === 'function') _bankEnsureAiSearch(f.keyword);
+      out = [];  // enquanto carrega; o render mostra "Buscando com IA…" e re-renderiza ao concluir
+    }
+  }
   return out;
+}
+
+// Dispara a busca semântica (Edge Function bank-search) UMA vez por consulta e
+// guarda em window._bankAiCache; ao concluir, re-renderiza. Espelha o padrão do
+// QuestionStats (sem loop: só dispara quando a consulta muda e não está em voo).
+let _bankAiInFlight = null;
+function _bankEnsureAiSearch(query){
+  const c = window._bankAiCache;
+  if(c && c.q === query && (c.status === 'ready' || c.status === 'error')) return;
+  if(_bankAiInFlight === query) return;
+  _bankAiInFlight = query;
+  window._bankAiCache = { q: query, status: 'loading', ids: new Set(), rank: {} };
+  const done = function(patch){
+    window._bankAiCache = Object.assign({ q: query }, patch);
+    _bankAiInFlight = null;
+    if(window.App && App.render) App.render();
+  };
+  try {
+    window._sb.functions.invoke('bank-search', { body: { q: query, limit: 120 } })
+      .then(function(r){
+        if(r && r.error){ console.warn('[bank-search]', r.error); done({ status:'error', ids:new Set(), rank:{} }); return; }
+        const list = (r && r.data && Array.isArray(r.data.ids)) ? r.data.ids : [];
+        const ids = new Set(), rank = {};
+        list.forEach(function(x){ const id = String(x.id != null ? x.id : x); ids.add(id); rank[id] = (x.score != null ? x.score : 0); });
+        done({ status:'ready', ids:ids, rank:rank });
+      })
+      .catch(function(e){ console.warn('[bank-search ex]', e); done({ status:'error', ids:new Set(), rank:{} }); });
+  } catch(e){ console.warn('[bank-search throw]', e); done({ status:'error', ids:new Set(), rank:{} }); }
 }
 
 /* Renderiza o painel de filtros do banco. `bankItems` é a lista
@@ -28894,6 +28944,12 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
     orgHtml +
     '<footer class="bf-panel-foot">'+
       '<button type="button" class="btn-ghost bf-clear" id="bfClear">Limpar filtros</button>'+
+      // Busca por IA (semântica) — usa o texto de Palavras-chave como consulta. Só questões.
+      (isEssay ? '' :
+        '<button type="button" class="btn-ghost bf-submit-ai" id="bfApplyAi" title="Busca por significado: entende o contexto (ex.: ONU acha Nações Unidas, ECOSOC…)">'+
+          '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8z"/></svg>'+
+          ' Buscar com IA'+
+        '</button>')+
       '<button type="submit" class="btn-primary bf-submit" id="bfApply">'+
         '<svg viewBox="0 0 24 24" width="14" height="14"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><line x1="21" y1="21" x2="16" y2="16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'+
         ' Buscar '+(isEssay?'discursivas':'questões')+
@@ -28958,8 +29014,15 @@ Renderers.questionBank = function(route){
   const synthCtx = { unitId:'__bank_q', store: _bankAnswerStore(), suppressActions: true };
 
   let resultsHtml = '';
-  if(!results.length){
-    resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Nenhuma questão bateu com os filtros</div><div class="empty-body">Tente afrouxar os critérios ou limpar e refazer.</div></div>';
+  const _ai = window._bankAiCache;
+  const _aiBusy = f.aiSearch && f.keyword && !(_ai && _ai.q === f.keyword && _ai.status === 'ready');
+  const _aiErr = f.aiSearch && f.keyword && _ai && _ai.q === f.keyword && _ai.status === 'error';
+  if(_aiBusy && !_aiErr){
+    resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Buscando com IA…</div><div class="empty-body">Entendendo o significado da sua busca e achando as questões mais relevantes.</div></div>';
+  } else if(_aiErr){
+    resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Não consegui buscar com IA agora</div><div class="empty-body">Tente de novo, ou use o "Buscar" por palavra.</div></div>';
+  } else if(!results.length){
+    resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">'+(f.aiSearch?'Nenhuma questão relevante encontrada':'Nenhuma questão bateu com os filtros')+'</div><div class="empty-body">Tente afrouxar os critérios ou limpar e refazer.</div></div>';
   } else if(typeof Blocks !== 'undefined' && Blocks.quiz && Blocks.quiz.render){
     const multi = sections.length > 1;
     resultsHtml = sections.map(function(sec, i){
@@ -29631,11 +29694,21 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       anos:        Array.from(panel.querySelectorAll('[data-bf-ano]:checked')).map(function(c){ return c.getAttribute('data-bf-ano'); }),
       prioridade:  (panel.querySelector('input[name="bfpri"]:checked')||{}).value || '',
       exibir:      (panel.querySelector('input[name="bfexib"]:checked')||{}).value || '',
-      org:         (panel.querySelector('input[name="bforg"]:checked')||{}).value || 'secao'
+      org:         (panel.querySelector('input[name="bforg"]:checked')||{}).value || 'secao',
+      // preserva o modo IA atual (a repintura por radio não pode perdê-lo)
+      aiSearch:    !!(route && route.query && route.query.ai === '1')
     };
   }
   function apply(){
-    Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(gather(), true)));
+    const f = gather(); f.aiSearch = false;  // "Buscar" (palavra) sai do modo IA
+    Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(f, true)));
+  }
+  // Busca por IA: mesma coleta, mas marca aiSearch (usa o texto de Palavras-chave).
+  function applyAi(){
+    const f = gather();
+    if(!String(f.keyword || '').trim()){ alert('Digite o que você quer buscar em "Palavras-chave" e clique em Buscar com IA.'); return; }
+    f.aiSearch = true;
+    Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(f, true)));
   }
   // Repinta o painel preservando o estado applied — usado quando a seleção de
   // matérias muda (precisa abrir/fechar os blocos de tópico/subtópico delas).
@@ -29647,6 +29720,8 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
   panel.addEventListener('submit', function(e){ e.preventDefault(); apply(); });
   const applyBtn = panel.querySelector('#bfApply');
   if(applyBtn) applyBtn.addEventListener('click', function(e){ e.preventDefault(); apply(); });
+  const applyAiBtn = panel.querySelector('#bfApplyAi');
+  if(applyAiBtn) applyAiBtn.addEventListener('click', function(e){ e.preventDefault(); applyAi(); });
   const clearBtn = panel.querySelector('#bfClear');
   if(clearBtn) clearBtn.addEventListener('click', function(e){
     e.preventDefault();
