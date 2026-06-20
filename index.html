@@ -3102,6 +3102,9 @@ html[data-theme="light"] .bf-select{color-scheme:light}
   margin-bottom:.6rem;letter-spacing:.01em;
 }
 /* Rádio "Organização dos resultados" */
+.bf-radioset{margin-top:.7rem}
+.bf-radioset:first-of-type{margin-top:.2rem}
+.bf-radioset .bf-label{display:block;margin-bottom:.4rem}
 .bf-orgrow{display:flex;flex-wrap:wrap;gap:.5rem}
 .bf-org{
   display:inline-flex;align-items:center;gap:.45rem;padding:.5rem .85rem;
@@ -27910,6 +27913,11 @@ function _bankParseFilters(routeQuery){
     // Organização dos resultados: 'secao' (separa por matéria, padrão) |
     // 'flat' (sem separação) | 'mix' (intercala as matérias).
     org:       (q.org === 'flat' || q.org === 'mix') ? q.org : 'secao',
+    // Priorizar por ano da questão: 'rec' (mais recentes) | 'ant' (mais antigas) | '' (indiferente).
+    prioridade: (q.pri === 'rec' || q.pri === 'ant') ? q.pri : '',
+    anos:      splitCSV(q.anos),          // ['2024','2023',...] — vazio = todos
+    // Exibir: 'full' (grupos completos) | '' (apenas as questões que correspondem, padrão).
+    exibir:    (q.exib === 'full') ? 'full' : '',
     applied:   q.applied === '1' || q.applied === 1 || q.applied === true
   };
 }
@@ -27931,8 +27939,22 @@ function _bankFiltersToQuery(f, applied){
   if(f.status && f.status.length) out.status = f.status.join(',');
   if(f.difficulty)  out.diff = f.difficulty;
   if(f.org && f.org !== 'secao') out.org = f.org;  // 'secao' é o padrão (implícito)
+  if(f.prioridade) out.pri = f.prioridade;          // '' (indiferente) é o padrão
+  if(f.anos && f.anos.length) out.anos = f.anos.join(',');
+  if(f.exibir === 'full') out.exib = 'full';        // '' (apenas correspondentes) é o padrão
   if(applied)       out.applied = '1';
   return out;
+}
+
+/* Ano da questão (extraído do código de origem, ex.: "#15-1/2024" → 2024).
+   Inéditas/sem origin parseável → null. */
+function _bankQuestionYear(q){
+  const LB = window.LearningBlocks || {};
+  if(q && q.origin && LB.parseQuestionOrigin){
+    const p = LB.parseQuestionOrigin(q.origin);
+    if(p && p.year) return parseInt(p.year, 10) || null;
+  }
+  return null;
 }
 
 /* ─── Contexto "universo" do banco (concurso = CACD, matéria = HM) ───
@@ -28597,6 +28619,37 @@ function _bankApplyFilters(items, f, opts){
       return f.status.indexOf(st) >= 0;
     });
   }
+  // ANO (multi) — mantém só questões cujo ano (do origin) está entre os escolhidos.
+  // Vazio = sem restrição. Inéditas (sem ano) só entram quando nenhum ano é exigido.
+  if(f.anos && f.anos.length){
+    const yset = new Set(f.anos.map(String));
+    out = out.filter(function(q){ const y = _bankQuestionYear(q); return y != null && yset.has(String(y)); });
+  }
+  // EXIBIR "grupos completos" — se um grupo casou (≥1 questão), traz TODAS as
+  // questões daquele grupo de origem, mesmo as que não casaram com os filtros
+  // (ex.: keyword "ONU" achou só a questão 3 → traz o grupo inteiro). As irmãs
+  // compartilham o grupo (mesmo origin/ano), então não conflitam com os filtros.
+  if(!isEssay && f.exibir === 'full' && out.length){
+    const _gk = function(q){ const u = (q && Array.isArray(q.appears_in) && q.appears_in[0]) || null; return u ? String(u.block_id)+'|'+String(u.group_id||'') : null; };
+    const keys = new Set();
+    out.forEach(function(q){ const k = _gk(q); if(k) keys.add(k); });
+    if(keys.size){
+      out = (items || []).filter(function(q){ const k = _gk(q); return k && keys.has(k); });
+    }
+  }
+  // PRIORIZAR por ano (mais recentes / mais antigas). Ordenação ESTÁVEL: questões
+  // do mesmo grupo (mesmo ano) ficam juntas; inéditas (sem ano) vão pro fim.
+  if(f.prioridade === 'rec' || f.prioridade === 'ant'){
+    const dir = f.prioridade === 'rec' ? -1 : 1;
+    out = out.map(function(q, i){ return { q:q, i:i, y:_bankQuestionYear(q) }; })
+             .sort(function(a, b){
+               if(a.y == null && b.y == null) return a.i - b.i;
+               if(a.y == null) return 1;
+               if(b.y == null) return -1;
+               return ((a.y - b.y) * dir) || (a.i - b.i);
+             })
+             .map(function(x){ return x.q; });
+  }
   return out;
 }
 
@@ -28665,6 +28718,14 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
           }).join('') : '<div class="bf-multi-item" style="opacity:.55;cursor:default">Nada cadastrado aqui</div>')+
         '</div>'+
       '</div></div>';
+  }
+  // Conjunto de rádios (escolhe 1) no estilo dos chips de organização.
+  function buildRadioSet(name, label, options, current){
+    return '<div class="bf-radioset"><label class="bf-label">'+Util.esc(label)+'</label>'+
+      '<div class="bf-orgrow">'+ options.map(function(o){
+        const on = String(current||'') === String(o[0]);
+        return '<label class="bf-org'+(on?' is-on':'')+'"><input type="radio" name="'+name+'" value="'+Util.attr(o[0])+'"'+(on?' checked':'')+'><span>'+Util.esc(o[1])+'</span></label>';
+      }).join('') +'</div></div>';
   }
   // Bloco de UMA matéria: título + Tópico(multi) + Subtópico(multi) dela.
   function materiaBlock(mid){
@@ -28750,19 +28811,33 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
                f.exam ? 'Todas as matérias' : '— Escolha o concurso primeiro —');
   const materiaBlocksHtml = (f.materias || []).map(materiaBlock).join('');
 
-  // Organização dos resultados (rádio: secao | flat | mix) — só pra questões.
-  const orgOptions = [
-    ['secao', 'Separar matérias por seção'],
-    ['flat',  'Sem separação por matéria'],
-    ['mix',   'Misturar as questões']
-  ];
-  const orgMode = f.org || 'secao';
+  // Ano da questão (multi) — anos DISTINTOS presentes no banco escopado,
+  // rotulados com o concurso ativo (ex.: "CACD 2024"), do mais recente ao mais antigo.
+  const _examName = (function(){ const e = exams.find(function(x){ return String(x.id) === String(f.exam); }); return e ? e.name : ''; })();
+  const _yearSet = {};
+  (bankItems || []).forEach(function(q){ const y = _bankQuestionYear(q); if(y) _yearSet[y] = 1; });
+  const yearOptions = Object.keys(_yearSet).map(Number).sort(function(a,b){ return b - a; })
+    .map(function(y){ return { id: String(y), name: (_examName ? _examName + ' ' : '') + y }; });
+  const anoHtml = isEssay ? '' :
+    buildMulti('ano', 'Ano da questão', yearOptions, new Set(f.anos || []), 'data-bf-ano', 'Todos os anos');
+
+  // Organização e exibição (3 rádios) — só pra questões.
   const orgHtml = isEssay ? '' :
-    sectionHead('Organização dos resultados', 'Como as questões aparecem depois de buscar') +
-    '<div class="bf-orgrow">' + orgOptions.map(function(o){
-      const on = orgMode === o[0];
-      return '<label class="bf-org'+(on?' is-on':'')+'"><input type="radio" name="bforg" value="'+o[0]+'"'+(on?' checked':'')+'><span>'+Util.esc(o[1])+'</span></label>';
-    }).join('') + '</div>';
+    sectionHead('Organização e exibição', 'Como as questões aparecem depois de buscar') +
+    buildRadioSet('bfpri', 'Priorizar questões', [
+      ['',    'Indiferente'],
+      ['rec', 'Mais recentes'],
+      ['ant', 'Mais antigas']
+    ], f.prioridade || '') +
+    buildRadioSet('bfexib', 'Exibir', [
+      ['',     'Apenas as questões que correspondem'],
+      ['full', 'Grupos completos (todas as questões)']
+    ], f.exibir || '') +
+    buildRadioSet('bforg', 'Separação por matéria', [
+      ['secao', 'Separar por seção'],
+      ['flat',  'Sem separação'],
+      ['mix',   'Misturar as questões']
+    ], f.org || 'secao');
 
   return '<form class="bf-panel" id="bankFilterPanel" onsubmit="return false" data-locked-materia="'+Util.attr(f._lockedMateria||'')+'">'+
     '<header class="bf-panel-head">'+
@@ -28782,6 +28857,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
     sectionHead('Refinar', 'Filtros adicionais opcionais') +
     '<div class="bf-grid">'+
       origemHtml+
+      anoHtml+
       buildSelect('difficulty', f.difficulty, difficulties, { label:'Dificuldade', empty:'Qualquer dificuldade' })+
       statusHtml+
     '</div>'+
@@ -29188,6 +29264,9 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       origem:      (panel.querySelector('[data-bf="origem"]')||{}).value || '',
       status:      Array.from(panel.querySelectorAll('[data-bf-status]:checked')).map(function(c){ return c.getAttribute('data-bf-status'); }),
       difficulty:  (panel.querySelector('[data-bf="difficulty"]')||{}).value || '',
+      anos:        Array.from(panel.querySelectorAll('[data-bf-ano]:checked')).map(function(c){ return c.getAttribute('data-bf-ano'); }),
+      prioridade:  (panel.querySelector('input[name="bfpri"]:checked')||{}).value || '',
+      exibir:      (panel.querySelector('input[name="bfexib"]:checked')||{}).value || '',
       org:         (panel.querySelector('input[name="bforg"]:checked')||{}).value || 'secao'
     };
   }
@@ -29221,9 +29300,9 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
   panel.querySelectorAll('[data-bf-mat]').forEach(function(cb){
     cb.addEventListener('change', function(){ repaint(); });
   });
-  // Trocar a organização (seção/sem separação/misturar) reorganiza os resultados
-  // imediatamente (preserva o estado applied).
-  panel.querySelectorAll('input[name="bforg"]').forEach(function(rb){
+  // Trocar organização/priorização/exibição reorganiza os resultados na hora
+  // (preserva o estado applied). (Filtro de Ano aplica no Buscar, como os outros.)
+  panel.querySelectorAll('input[name="bforg"], input[name="bfpri"], input[name="bfexib"]').forEach(function(rb){
     rb.addEventListener('change', function(){ repaint(); });
   });
   // Trocar o Concurso muda a lista de matérias do edital → zera a seleção e repinta.
