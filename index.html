@@ -3091,6 +3091,16 @@ html[data-theme="light"] .bf-select{color-scheme:light}
   margin:0;accent-color:var(--accent);width:14px;height:14px;cursor:pointer;
 }
 .bf-multi-sub{font-size:.76rem;color:var(--text-mute);padding-left:.85rem}
+/* Bloco por matéria (filtro multi: Tópico/Subtópico daquela matéria) */
+.bf-materia-block{
+  margin-top:.7rem;padding:.8rem .9rem;
+  border:1px solid var(--border);border-left:3px solid var(--accent);
+  border-radius:var(--radius,6px);background:var(--accent-glow);
+}
+.bf-materia-title{
+  font-family:var(--serif);font-size:1rem;color:var(--accent);
+  margin-bottom:.6rem;letter-spacing:.01em;
+}
 /* Footer */
 .bf-panel-foot{
   display:flex;align-items:center;justify-content:flex-end;gap:.6rem;
@@ -27840,14 +27850,41 @@ function _bankQuestionStatus(bankId){
 function _bankParseFilters(routeQuery){
   const q = routeQuery || {};
   const splitCSV = function(s){ return String(s||'').split(',').map(function(x){return x.trim();}).filter(Boolean); };
+  // ─── Seleção do edital por matéria (MULTI) ───
+  // "Matéria" = nível 0 da árvore do edital (top-level topic). Agora é multi:
+  // o aluno marca N matérias e, em cada uma, N tópicos e N subtópicos.
+  // Formato compacto na URL (separadores ; : , não ocorrem em UUID):
+  //   mat=<mid1>;<mid2>                       → matérias marcadas (ordem mantida)
+  //   mt=<mid1>:<t2a>,<t2b>;<mid2>:<t2c>      → tópicos por matéria
+  //   ms=<mid1>:<t3a>;<mid2>:<t3b>,<t3c>      → subtópicos por matéria
+  const splitSemi = function(s){ return String(s||'').split(';').map(function(x){return x.trim();}).filter(Boolean); };
+  const parseByMateria = function(s){
+    const out = {};
+    splitSemi(s).forEach(function(part){
+      const i = part.indexOf(':');
+      if(i < 0) return;
+      const mid = part.slice(0, i).trim();
+      const list = splitCSV(part.slice(i + 1));
+      if(mid && list.length) out[mid] = list;
+    });
+    return out;
+  };
+  let materias = splitSemi(q.mat);
+  const mtopics = parseByMateria(q.mt);
+  const msubs   = parseByMateria(q.ms);
+  // Back-compat: URLs antigas single (t1/t2/t3) viram uma matéria com 1 tópico/sub.
+  if(!materias.length && q.t1){
+    const t1 = String(q.t1);
+    materias = [t1];
+    if(q.t2) mtopics[t1] = [String(q.t2)];
+    if(q.t3) msubs[t1] = [String(q.t3)];
+  }
   return {
     keyword:   String(q.k || '').trim(),
     exam:      String(q.exam || ''),
-    // f.subject removido — "Matéria" agora é o nível 0 da árvore do edital
-    // (topic1), eliminando a redundância subjects vs edital top-level.
-    topic1:    String(q.t1 || ''),  // Matéria (= top-level do edital)
-    topic2:    String(q.t2 || ''),  // Tópico
-    topic3:    String(q.t3 || ''),  // Subtópico
+    materias:  materias,   // [matéria/top-level id, ...]
+    mtopics:   mtopics,    // { matéria_id: [tópico id, ...] }
+    msubs:     msubs,      // { matéria_id: [subtópico id, ...] }
     tags:      splitCSV(q.tags),
     origem:    String(q.origem || ''),  // 'past_exam' | 'ubique' | ''
     status:    splitCSV(q.status),       // ['unanswered','right',...]
@@ -27859,9 +27896,15 @@ function _bankFiltersToQuery(f, applied){
   const out = {};
   if(f.keyword)     out.k = f.keyword;
   if(f.exam)        out.exam = f.exam;
-  if(f.topic1)      out.t1 = f.topic1;
-  if(f.topic2)      out.t2 = f.topic2;
-  if(f.topic3)      out.t3 = f.topic3;
+  const buildByMateria = function(map){
+    return (f.materias||[]).map(function(mid){
+      const list = (map && map[mid]) || [];
+      return list.length ? mid + ':' + list.join(',') : '';
+    }).filter(Boolean).join(';');
+  };
+  if(f.materias && f.materias.length) out.mat = f.materias.join(';');
+  const mt = buildByMateria(f.mtopics); if(mt) out.mt = mt;
+  const ms = buildByMateria(f.msubs);   if(ms) out.ms = ms;
   if(f.tags && f.tags.length) out.tags = f.tags.join(',');
   if(f.origem)      out.origem = f.origem;
   if(f.status && f.status.length) out.status = f.status.join(',');
@@ -27971,20 +28014,28 @@ function _bankLockContext(){
 }
 
 // Injeta o contexto travado nos filtros parseados. Marca _lockExam/
-// _lockMateria (pra UI esconder) e _skipExamFilter/_skipTopic1Filter (pra
-// engine NÃO re-filtrar por algo que o escopo da matéria já cobre — senão
-// descartaria as questões inéditas e quebraria a contagem).
+// _lockMateria (pra UI esconder) e _skipExamFilter (pra engine NÃO re-filtrar
+// por concurso quando o escopo da matéria já cobre — senão descartaria
+// inéditas e quebraria a contagem). _lockedMateria guarda a matéria implícita
+// (quando dentro de uma matéria), pra engine NÃO aplicar o nó-matéria como
+// filtro (escopo de unidades já restringe) — só os tópicos/subtópicos
+// escolhidos pelo aluno é que afunilam.
 function _bankApplyLockContext(f){
   const L = _bankLockContext();
   f._lockExam    = L.lockExam;
   f._lockMateria = L.lockMateria;
+  f._lockedMateria = '';
   if(L.lockExam){
     if(!f.exam) f.exam = L.examId;          // concurso implícito (cascata + filtro no modo global)
     if(L.lockMateria) f._skipExamFilter = true;  // dentro da matéria: escopo já cobre o concurso
   }
   if(L.lockMateria){
-    if(!f.topic1 && L.materiaTopicId) f.topic1 = L.materiaTopicId; // matéria implícita (cascata Tópico)
-    f._skipTopic1Filter = true;             // escopo de unidades da matéria já restringe
+    // Dentro de uma matéria: ela é a ÚNICA matéria, implícita. Se a URL não
+    // trouxe matéria (campo escondido), injeta a resolvida pra cascata Tópico.
+    if(L.materiaTopicId){
+      f._lockedMateria = L.materiaTopicId;
+      if(!f.materias || !f.materias.length) f.materias = [L.materiaTopicId];
+    }
   }
   return f;
 }
@@ -28456,19 +28507,22 @@ function _bankApplyFilters(items, f, opts){
       return false;
     });
   }
-  // (filtro de Matéria standalone removido — Matéria agora é o top-level
-  // da árvore do edital, capturado por f.topic1 abaixo)
-
-  // EDITAL — Matéria → Tópico → Subtópico. Aplica o nó mais profundo
-  // informado e checa se a questão está em UMA unidade vinculada a algum
-  // descendente desse nó.
-  // _skipTopic1Filter: matéria travada (implícita) → topic1 NÃO entra como
-  // filtro (o escopo de unidades da matéria já cobre); só Tópico/Subtópico
-  // escolhidos pelo aluno é que afunilam o edital.
-  const editalNode = f.topic3 || f.topic2 || (f._skipTopic1Filter ? '' : f.topic1);
-  if(editalNode){
-    const descendants = _bankEditalDescendants(editalNode);
-    const descSet = new Set(descendants);
+  // EDITAL (MULTI) — para cada matéria marcada, junta os "ramos" escolhidos
+  // (tópicos ∪ subtópicos). Regras:
+  //  - matéria sem nenhum ramo → a matéria INTEIRA entra como filtro… EXCETO
+  //    a matéria TRAVADA (aluno já está dentro dela): aí o escopo de unidades
+  //    já restringe, e aplicar o nó-matéria descartaria inéditas → não filtra.
+  //  - entre matérias é OU; dentro da matéria, os ramos também são OU.
+  //  - "vincular um nó cobre tudo abaixo dele" (nó + descendentes).
+  const _selNodes = [];
+  (f.materias || []).forEach(function(mid){
+    const subs = ((f.mtopics && f.mtopics[mid]) || []).concat((f.msubs && f.msubs[mid]) || []);
+    if(subs.length){ subs.forEach(function(n){ _selNodes.push(n); }); }
+    else if(mid !== f._lockedMateria){ _selNodes.push(mid); } // matéria inteira (modo global)
+  });
+  if(_selNodes.length){
+    const descSet = new Set();
+    _selNodes.forEach(function(n){ _bankEditalDescendants(n).forEach(function(d){ descSet.add(d); }); });
     out = out.filter(function(q){
       // 1) Campo explícito (raro mas suportado)
       if(q.edital_topic_id != null && descSet.has(String(q.edital_topic_id))) return true;
@@ -28536,9 +28590,8 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
   //   Seção 2 — Refinar:  Origem, Dificuldade, Status (só questões)
   //   Seção 3 — Tags (cross-cutting, multi-AND)
   const exams = BankFilters.availableExams();
-  const topics1 = BankFilters.availableEditalTopics(null, f.exam || null);
-  const topics2 = f.topic1 ? BankFilters.availableEditalTopics(f.topic1, f.exam || null) : [];
-  const topics3 = f.topic2 ? BankFilters.availableEditalTopics(f.topic2, f.exam || null) : [];
+  const materiaOptions = BankFilters.availableEditalTopics(null, f.exam || null); // matérias (top-level do edital)
+  const _editalChildren = function(parentId){ return BankFilters.availableEditalTopics(parentId, f.exam || null); };
   const tags = BankFilters.availableTags();
   const difficulties = BankFilters.availableDifficulties();
 
@@ -28569,6 +28622,51 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
       (hint ? '<span class="bf-section-hint">'+Util.esc(hint)+'</span>' : '')+
     '</div>';
   }
+  // Multiselect genérico (popover de checkboxes, mesmo padrão do Status).
+  //   multiKey  → vai em data-bf-multi (ex.: 'mat', 'mt:<mid>', 'ms:<mid>')
+  //   itemAttr  → atributo do checkbox que carrega o id (ex.: 'data-bf-mat')
+  function buildMulti(multiKey, label, options, selectedSet, itemAttr, emptyLabel){
+    const optLabel = function(o){ return (o.code ? o.code + ' · ' : '') + (o.name || o.title || o.id) + (o.alias ? '  ·  ' + o.alias : ''); };
+    const chosen = options.filter(function(o){ return selectedSet.has(String(o.id)); }).map(optLabel);
+    const triggerLabel = chosen.length ? chosen.join(', ') : emptyLabel;
+    return '<div class="bf-field bf-field-multi">'+
+      '<label class="bf-label">'+Util.esc(label)+'</label>'+
+      '<div class="bf-multi" data-bf-multi="'+Util.attr(multiKey)+'" data-empty-label="'+Util.attr(emptyLabel)+'">'+
+        '<button type="button" class="bf-multi-trigger" data-bf-toggle'+(options.length?'':' disabled')+'>'+
+          '<span class="bf-multi-label">'+Util.esc(options.length ? triggerLabel : '— Nenhum cadastrado —')+'</span>'+
+          '<svg viewBox="0 0 24 24" width="14" height="14"><polyline points="6 9 12 15 18 9" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>'+
+        '</button>'+
+        '<div class="bf-multi-pop" hidden>'+
+          (options.length ? options.map(function(o){
+            const checked = selectedSet.has(String(o.id)) ? ' checked' : '';
+            return '<label class="bf-multi-item"><input type="checkbox" '+itemAttr+'="'+Util.attr(o.id)+'"'+checked+'><span>'+Util.esc(optLabel(o))+'</span></label>';
+          }).join('') : '<div class="bf-multi-item" style="opacity:.55;cursor:default">Nada cadastrado aqui</div>')+
+        '</div>'+
+      '</div></div>';
+  }
+  // Bloco de UMA matéria: título + Tópico(multi) + Subtópico(multi) dela.
+  function materiaBlock(mid){
+    const mObj = materiaOptions.find(function(o){ return String(o.id) === String(mid); });
+    const mName = mObj ? ((mObj.code ? mObj.code + ' · ' : '') + (mObj.name || mObj.title || mid)) : 'Matéria';
+    const topicos = _editalChildren(mid);
+    // Subtópicos = filhos de TODOS os tópicos da matéria (lista estável,
+    // independente de quais tópicos estão marcados — a regra "união de ramos"
+    // cuida do resto na hora de filtrar).
+    const subtopicos = [];
+    const seenSub = {};
+    topicos.forEach(function(t){
+      _editalChildren(t.id).forEach(function(s){ if(!seenSub[String(s.id)]){ seenSub[String(s.id)] = 1; subtopicos.push(s); } });
+    });
+    const selT = new Set((f.mtopics && f.mtopics[mid]) || []);
+    const selS = new Set((f.msubs && f.msubs[mid]) || []);
+    return '<div class="bf-materia-block" data-bf-materia="'+Util.attr(mid)+'">'+
+      '<div class="bf-materia-title">'+Util.esc(mName)+'</div>'+
+      '<div class="bf-grid">'+
+        buildMulti('mt:'+mid, 'Tópico', topicos, selT, 'data-bf-topic', 'Qualquer tópico')+
+        buildMulti('ms:'+mid, 'Subtópico', subtopicos, selS, 'data-bf-subtopic', 'Qualquer subtópico')+
+      '</div>'+
+    '</div>';
+  }
 
   // Origem: sempre 2 opções
   const origemHtml = '<div class="bf-field">'+
@@ -28595,7 +28693,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
     const triggerLabel = labels.length ? labels.join(', ') : 'Qualquer status';
     statusHtml = '<div class="bf-field bf-field-multi">'+
       '<label class="bf-label">Status da questão</label>'+
-      '<div class="bf-multi" data-bf-multi="status">'+
+      '<div class="bf-multi" data-bf-multi="status" data-empty-label="Qualquer status">'+
         '<button type="button" class="bf-multi-trigger" data-bf-toggle>'+
           '<span class="bf-multi-label">'+Util.esc(triggerLabel)+'</span>'+
           '<svg viewBox="0 0 24 24" width="14" height="14"><polyline points="6 9 12 15 18 9" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>'+
@@ -28611,17 +28709,26 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
   }
 
   // Título/dica adaptam ao contexto: dentro da matéria a seção vira só o
-  // recorte do edital (Tópico/Subtópico); fora dela, a cascata completa.
+  // recorte do edital (Tópico/Subtópico); fora dela, escolha de matérias.
   const editalLabel = f._lockMateria ? 'Tópicos do edital'
-                    : f._lockExam    ? 'Edital'
-                    : 'Concurso e edital';
+                    : f._lockExam    ? 'Matérias e edital'
+                    : 'Concurso, matérias e edital';
   const editalHint = f._lockMateria
-    ? 'Você está dentro desta matéria — escolha um tópico do edital pra afunilar (opcional).'
+    ? 'Você está dentro desta matéria — escolha tópicos/subtópicos pra afunilar (opcional).'
     : f.exam
-      ? 'Cascata: vincular a um subtópico cobre tudo abaixo dele.'
-      : 'Escolha um concurso pra ver as matérias e tópicos do edital.';
+      ? 'Marque uma ou mais matérias; em cada uma, escolha tópicos/subtópicos (opcional).'
+      : 'Escolha um concurso pra ver as matérias do edital.';
 
-  return '<form class="bf-panel" id="bankFilterPanel" onsubmit="return false">'+
+  // Topo da seção: Concurso (se não travado) + seletor MULTI de Matérias (se
+  // não travado numa matéria). Abaixo, um bloco por matéria marcada.
+  const examFieldHtml = f._lockExam ? '' :
+    buildSelect('exam', f.exam, exams, { label:'Concurso', empty:'Todos os concursos' });
+  const materiaSelHtml = f._lockMateria ? '' :
+    buildMulti('mat', 'Matérias', materiaOptions, new Set(f.materias || []), 'data-bf-mat',
+               f.exam ? 'Todas as matérias' : '— Escolha o concurso primeiro —');
+  const materiaBlocksHtml = (f.materias || []).map(materiaBlock).join('');
+
+  return '<form class="bf-panel" id="bankFilterPanel" onsubmit="return false" data-locked-materia="'+Util.attr(f._lockedMateria||'')+'">'+
     '<header class="bf-panel-head">'+
       '<div class="bf-panel-title">Filtros</div>'+
       '<div class="bf-panel-sub">Configure os filtros antes de carregar as '+(isEssay?'discursivas':'questões')+'. '+(bankItems.length)+' '+(isEssay?'discursivas':'questões')+' no banco.</div>'+
@@ -28631,18 +28738,10 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
       '<label class="bf-label">Palavras-chave</label>'+
       '<textarea class="bf-textarea" data-bf="keyword" placeholder="Busca no enunciado, nas alternativas e nos comentários…" rows="2">'+Util.esc(f.keyword||'')+'</textarea>'+
     '</div>'+
-    // ─── Concurso e edital (cascata: Concurso → Matéria → Tópico → Subtópico) ───
+    // ─── Concurso, matérias (multi) e edital por matéria ───
     sectionHead(editalLabel, editalHint) +
-    '<div class="bf-grid">'+
-      // Concurso: escondido quando o aluno já está dentro de um concurso
-      // (universo travado). Idem Matéria quando já está dentro de uma matéria.
-      (f._lockExam ? '' :
-        buildSelect('exam', f.exam, exams, { label:'Concurso', empty:'Todos os concursos' }))+
-      (f._lockMateria ? '' :
-        buildSelect('topic1', f.topic1, topics1, { label:'Matéria', empty: f.exam ? 'Todas as matérias' : '— Escolha o concurso primeiro —' }))+
-      buildSelect('topic2', f.topic2, topics2, { label:'Tópico', empty: (f._lockMateria || f.topic1) ? 'Qualquer tópico' : '— Escolha a matéria primeiro —' })+
-      buildSelect('topic3', f.topic3, topics3, { label:'Subtópico', empty: f.topic2 ? 'Qualquer subtópico' : '— Escolha o tópico primeiro —' })+
-    '</div>'+
+    ((examFieldHtml || materiaSelHtml) ? '<div class="bf-grid">'+ examFieldHtml + materiaSelHtml +'</div>' : '') +
+    materiaBlocksHtml +
     // ─── Refinar ───
     sectionHead('Refinar', 'Filtros adicionais opcionais') +
     '<div class="bf-grid">'+
@@ -28968,14 +29067,16 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
     document.addEventListener('keydown', function(e){
       if(e.key === 'Escape' && !pop.hasAttribute('hidden')) close();
     });
-    // Checkbox changes atualizam o label do trigger em tempo real
-    pop.querySelectorAll('[data-bf-status]').forEach(function(cb){
+    // Checkbox changes atualizam o label do trigger em tempo real (genérico:
+    // status, matérias, tópicos, subtópicos). O texto-vazio vem de data-empty-label.
+    const emptyLabel = wrap.getAttribute('data-empty-label') || '';
+    pop.querySelectorAll('input[type=checkbox]').forEach(function(cb){
       cb.addEventListener('change', function(){
-        const labels = Array.from(pop.querySelectorAll('[data-bf-status]:checked')).map(function(c){
-          return (c.parentElement && c.parentElement.querySelector('span') ? c.parentElement.querySelector('span').textContent.trim() : '');
+        const labels = Array.from(pop.querySelectorAll('input[type=checkbox]:checked')).map(function(c){
+          return (c.parentElement && c.parentElement.querySelector('span')) ? c.parentElement.querySelector('span').textContent.trim() : '';
         }).filter(Boolean);
         const lbl = trigger.querySelector('.bf-multi-label');
-        if(lbl) lbl.textContent = labels.length ? labels.join(', ') : 'Qualquer status';
+        if(lbl) lbl.textContent = labels.length ? labels.join(', ') : emptyLabel;
       });
     });
   });
@@ -28988,27 +29089,41 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
     });
   });
 
-  // Cascading: quando muda exam, limpa subject (no submit). Quando
-  // muda topic1, limpa topic2 e topic3 etc. Eles ficam visualmente
-  // selecionados até o submit refazer a query.
+  // Lê o estado atual do painel (multi: matérias + tópicos/subtópicos por matéria).
   function gather(){
-    const f = {
+    const lockedMat = panel.getAttribute('data-locked-materia') || '';
+    const materias = lockedMat
+      ? [lockedMat]
+      : Array.from(panel.querySelectorAll('[data-bf-mat]:checked')).map(function(c){ return c.getAttribute('data-bf-mat'); });
+    const mtopics = {}, msubs = {};
+    materias.forEach(function(mid){
+      const blk = panel.querySelector('.bf-materia-block[data-bf-materia="'+mid+'"]');
+      if(!blk) return;
+      const ts = Array.from(blk.querySelectorAll('[data-bf-topic]:checked')).map(function(c){ return c.getAttribute('data-bf-topic'); });
+      const ss = Array.from(blk.querySelectorAll('[data-bf-subtopic]:checked')).map(function(c){ return c.getAttribute('data-bf-subtopic'); });
+      if(ts.length) mtopics[mid] = ts;
+      if(ss.length) msubs[mid] = ss;
+    });
+    return {
       keyword:     (panel.querySelector('[data-bf="keyword"]')||{}).value || '',
       exam:        (panel.querySelector('[data-bf="exam"]')||{}).value || '',
-      topic1:      (panel.querySelector('[data-bf="topic1"]')||{}).value || '',
-      topic2:      (panel.querySelector('[data-bf="topic2"]')||{}).value || '',
-      topic3:      (panel.querySelector('[data-bf="topic3"]')||{}).value || '',
+      materias:    materias,
+      mtopics:     mtopics,
+      msubs:       msubs,
       tags:        Array.from(panel.querySelectorAll('[data-bf-tag].is-on')).map(function(b){ return b.getAttribute('data-bf-tag'); }),
       origem:      (panel.querySelector('[data-bf="origem"]')||{}).value || '',
       status:      Array.from(panel.querySelectorAll('[data-bf-status]:checked')).map(function(c){ return c.getAttribute('data-bf-status'); }),
       difficulty:  (panel.querySelector('[data-bf="difficulty"]')||{}).value || ''
     };
-    return f;
   }
   function apply(){
-    const f = gather();
-    const q = _bankFiltersToQuery(f, true);
-    Router.go('/portal/'+cardKey+Router.querystring(q));
+    Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(gather(), true)));
+  }
+  // Repinta o painel preservando o estado applied — usado quando a seleção de
+  // matérias muda (precisa abrir/fechar os blocos de tópico/subtópico delas).
+  const wasApplied = !!(route && route.query && route.query.applied === '1');
+  function repaint(){
+    Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(gather(), wasApplied)));
   }
   // Submit do form OU click no bfApply OU Enter no textarea (Ctrl+Enter)
   panel.addEventListener('submit', function(e){ e.preventDefault(); apply(); });
@@ -29026,70 +29141,17 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       if((e.key === 'Enter') && (e.ctrlKey || e.metaKey)){ e.preventDefault(); apply(); }
     });
   }
-  // Cascading dinâmico (sem re-render do painel): ao mudar o pai,
-  // RECONSTRÓI as <option>s do filho com base na lista do BankFilters.
-  // Antes só limpávamos o value (clearChildren) — daí o filho ficava
-  // travado se o sub-cadastro só populava no full re-render.
-  function repopulateSelect(sel, options, emptyLabel){
-    if(!sel) return;
-    const wasDisabled = sel.disabled;
-    sel.innerHTML = '';
-    const optEmpty = document.createElement('option');
-    optEmpty.value = '';
-    optEmpty.textContent = emptyLabel;
-    sel.appendChild(optEmpty);
-    if(!options.length){
-      const note = document.createElement('option');
-      note.value = '';
-      note.disabled = true;
-      note.textContent = '— Nenhuma cadastrada ainda —';
-      sel.appendChild(note);
-      sel.disabled = true;
-      sel.setAttribute('aria-disabled','true');
-    } else {
-      sel.disabled = false;
-      sel.removeAttribute('aria-disabled');
-      options.forEach(function(o){
-        const opt = document.createElement('option');
-        opt.value = o.id;
-        const base = (o.code ? o.code + ' · ' : '') + (o.name || o.title || o.id);
-        opt.textContent = o.alias ? (base + '  ·  ' + o.alias) : base;
-        sel.appendChild(opt);
-      });
-    }
-    sel.value = '';  // sempre reseta seleção do filho
-    void wasDisabled;
-  }
+  // Marcar/desmarcar uma MATÉRIA abre/fecha o bloco de tópico/subtópico dela →
+  // repinta o painel (sem perder o estado applied). Tópico/Subtópico só valem no Buscar.
+  panel.querySelectorAll('[data-bf-mat]').forEach(function(cb){
+    cb.addEventListener('change', function(){ repaint(); });
+  });
+  // Trocar o Concurso muda a lista de matérias do edital → zera a seleção e repinta.
   const examSel = panel.querySelector('[data-bf="exam"]');
-  const t1Sel = panel.querySelector('[data-bf="topic1"]');  // Matéria
-  const t2Sel = panel.querySelector('[data-bf="topic2"]');  // Tópico
-  const t3Sel = panel.querySelector('[data-bf="topic3"]');  // Subtópico
-  // Cascata estrita: Concurso → Matéria (top-level) → Tópico → Subtópico.
-  // Mudar um nível reseta tudo abaixo.
   if(examSel){
     examSel.addEventListener('change', function(){
-      const examId = examSel.value || null;
-      if(t1Sel){
-        const newTopics = window.BankFilters.availableEditalTopics(null, examId);
-        repopulateSelect(t1Sel, newTopics, examId ? 'Todas as matérias' : '— Escolha o concurso primeiro —');
-      }
-      if(t2Sel) repopulateSelect(t2Sel, [], examId ? '— Escolha a matéria primeiro —' : '— Escolha o concurso primeiro —');
-      if(t3Sel) repopulateSelect(t3Sel, [], '— Escolha o tópico primeiro —');
-    });
-  }
-  if(t1Sel && t2Sel){
-    t1Sel.addEventListener('change', function(){
-      const examId = examSel ? (examSel.value || null) : null;
-      const newOpts = t1Sel.value ? window.BankFilters.availableEditalTopics(t1Sel.value, examId) : [];
-      repopulateSelect(t2Sel, newOpts, t1Sel.value ? 'Qualquer tópico' : '— Escolha a matéria primeiro —');
-      if(t3Sel) repopulateSelect(t3Sel, [], '— Escolha o tópico primeiro —');
-    });
-  }
-  if(t2Sel && t3Sel){
-    t2Sel.addEventListener('change', function(){
-      const examId = examSel ? (examSel.value || null) : null;
-      const newOpts = t2Sel.value ? window.BankFilters.availableEditalTopics(t2Sel.value, examId) : [];
-      repopulateSelect(t3Sel, newOpts, t2Sel.value ? 'Qualquer subtópico' : '— Escolha o tópico primeiro —');
+      const f = Object.assign(gather(), { exam: examSel.value || '', materias: [], mtopics: {}, msubs: {} });
+      Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(f, wasApplied)));
     });
   }
 }
