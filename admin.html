@@ -47543,21 +47543,43 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     await Promise.all([_ubtLoadCarteiras(), _ubtLoadExtrato(), _ubtLoadCustos()]);
   }
 
+  // Cor determinística por concurso (mesma sigla → mesma cor, sempre).
+  function _ubtColor(seed){
+    const s = String(seed || '');
+    if(!s) return 'var(--accent)';
+    let h = 0; for(let i=0;i<s.length;i++) h = (h*31 + s.charCodeAt(i)) % 360;
+    return 'hsl(' + h + ', 52%, 56%)';
+  }
+
   async function _ubtLoadCarteiras(){
     const box = document.getElementById('ubtCarteirasTable');
     try {
-      const [profilesRes, contasRes] = await Promise.all([
-        supabase.schema('crm').from('user_profiles').select('user_id, display_name, nickname, handle'),
-        supabase.schema('carteira').from('contas').select('user_id, saldo')
-      ]);
+      // Fonte dos alunos = Portaria (tem _app_user_id + exam_ids); saldos = carteira.
+      if((!Array.isArray(platformAccessCache) || !platformAccessCache.length) && typeof loadPlatformAccess === 'function'){
+        await loadPlatformAccess();
+      }
+      const contasRes = await supabase.schema('carteira').from('contas').select('user_id, saldo');
       const saldoBy = {};
       (contasRes.data || []).forEach(c => { saldoBy[c.user_id] = Number(c.saldo); });
-      _ubtUsers = (profilesRes.data || []).map(p => ({
-        user_id: p.user_id,
-        name: p.display_name || p.nickname || p.handle || '(sem nome)',
-        handle: p.handle || '',
-        saldo: saldoBy[p.user_id] || 0
-      })).sort((a,b) => b.saldo - a.saldo);
+      const examMap = {};
+      (typeof examsCache !== 'undefined' ? examsCache : []).forEach(e => { examMap[String(e.id)] = e; });
+      _ubtUsers = (Array.isArray(platformAccessCache) ? platformAccessCache : [])
+        .filter(r => r.role !== 'admin' && r.role !== 'superadmin')
+        .map(r => {
+          const uid = r._app_user_id || null;
+          const exId = (Array.isArray(r.exam_ids) && r.exam_ids.length) ? String(r.exam_ids[0]) : '';
+          const ex = exId ? examMap[exId] : null;
+          return {
+            user_id: uid,
+            name: r.full_name || r.email || '(sem nome)',
+            email: r.email || '',
+            examLabel: ex ? (ex.sigla || ex.name || '') : '',
+            color: _ubtColor(exId || (ex && (ex.sigla || ex.name)) || ''),
+            saldo: uid ? (saldoBy[uid] || 0) : null,
+            linked: !!uid
+          };
+        })
+        .sort((a,b) => (b.saldo || 0) - (a.saldo || 0));
       _ubtRenderCarteiras();
     } catch(e){ console.warn('[ubt carteiras]', e); if(box) box.innerHTML = '<div class="card" style="text-align:center;padding:2.5rem"><p class="card-body" style="margin:0">Erro ao carregar carteiras.</p></div>'; }
   }
@@ -47567,25 +47589,35 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(!box) return;
     const q = (document.getElementById('ubt-search')?.value || '').toLowerCase().trim();
     let rows = _ubtUsers;
-    if(q) rows = rows.filter(u => u.name.toLowerCase().includes(q) || u.handle.toLowerCase().includes(q));
+    if(q) rows = rows.filter(u => u.name.toLowerCase().includes(q) || (u.email||'').toLowerCase().includes(q) || (u.examLabel||'').toLowerCase().includes(q));
     const c1 = document.getElementById('ubt-carteiras-count'); if(c1) c1.textContent = _ubtUsers.length + (_ubtUsers.length === 1 ? ' aluno' : ' alunos');
     const c2 = document.getElementById('count-ubt-carteiras'); if(c2) c2.textContent = _ubtUsers.length;
-    if(!rows.length){ box.innerHTML = '<div class="card" style="text-align:center;padding:3rem 2rem"><p class="card-body" style="font-style:italic;margin:0">Nenhum aluno encontrado.</p></div>'; return; }
-    box.innerHTML = `
-      <table class="data-table" style="width:100%">
-        <thead><tr><th>Aluno</th><th style="text-align:right">Saldo (ⓤ)</th><th></th></tr></thead>
-        <tbody>
-          ${rows.map(u => `
-            <tr data-id="${esc(u.user_id)}">
-              <td>
-                <div style="font-family:var(--serif);font-weight:400;font-size:.95rem;color:var(--text)">${esc(u.name)}</div>
-                ${u.handle ? `<div style="font-family:var(--mono);font-size:.72rem;color:var(--text-mute);margin-top:.15rem">@${esc(u.handle)}</div>` : ''}
-              </td>
-              <td style="text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:.95rem;color:var(--text)">${_ubtN(u.saldo)}</td>
-              <td style="text-align:right"><button class="btn btn-ghost btn-sm" data-ubt-grant="${esc(u.user_id)}" data-name="${esc(u.name)}">+ adicionar</button></td>
-            </tr>`).join('')}
-        </tbody>
-      </table>`;
+    if(!rows.length){ box.innerHTML = '<div class="empty-state">Nenhum aluno encontrado.</div>'; return; }
+    box.innerHTML = '<div class="activities-tab-timeline">' + rows.map(u => {
+      const initials = (u.name || '?').trim().split(/\s+/).slice(0,2).map(w => (w[0]||'')).join('').toUpperCase() || '?';
+      const examChip = u.examLabel
+        ? `<span class="atl-item-type" style="color:${u.color};border-color:${u.color};background:transparent">${esc(u.examLabel)}</span>`
+        : `<span class="atl-item-type" style="color:var(--text-mute);border-color:var(--accent-border-soft,rgba(200,169,126,.2));background:transparent">sem concurso</span>`;
+      const saldoTxt = u.linked ? ('<span style="font-family:var(--serif)">ⓤ</span> ' + _ubtN(u.saldo)) : '—';
+      const action = u.linked
+        ? `<button class="btn btn-ghost btn-sm" data-ubt-grant="${esc(u.user_id)}" data-name="${esc(u.name)}">+ adicionar</button>`
+        : `<span style="font-size:.66rem;color:var(--text-mute);font-family:var(--mono)">sem login ainda</span>`;
+      return `
+        <div class="atl-item" style="border-left-color:${u.color};cursor:default">
+          <div class="atl-item-icon" style="color:${u.color};font-family:var(--serif)">${esc(initials)}</div>
+          <div class="atl-item-body">
+            <div class="atl-item-head">
+              <span class="atl-item-client">${esc(u.name)}</span>
+              ${examChip}
+            </div>
+            ${u.email ? `<div style="font-family:var(--mono);font-size:.7rem;color:var(--text-mute)">${esc(u.email)}</div>` : ''}
+          </div>
+          <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:.45rem">
+            <div style="font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:1.05rem;color:var(--text)">${saldoTxt}</div>
+            ${action}
+          </div>
+        </div>`;
+    }).join('') + '</div>';
   }
 
   async function _ubtLoadExtrato(){
