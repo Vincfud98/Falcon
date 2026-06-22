@@ -5989,6 +5989,27 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   display:grid;grid-template-columns:240px 1fr;gap:2.4rem;align-items:start;
 }
 @media(max-width:720px){.account-grid{grid-template-columns:1fr}}
+/* ─── Carteira (UbiTokens) — aba em /conta + custo nos botões ─── */
+.ubt-sym{font-family:var(--serif);font-weight:600}
+.wallet-balance{display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap;background:var(--accent-lo);border:1px solid var(--accent-border);border-radius:var(--radius);padding:1rem 1.3rem;margin-bottom:1.3rem}
+.wallet-balance-lbl{font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-mute)}
+.wallet-balance-val{font-size:1.9rem;font-family:var(--serif);color:var(--text);line-height:1}
+.wallet-balance-val strong{font-weight:600}
+.wallet-balance .btn-ghost{margin-left:auto}
+.wallet-subnav{display:flex;gap:.4rem;margin-bottom:1rem;border-bottom:1px solid var(--border-soft)}
+.wallet-subtab{background:none;border:none;padding:.5rem .8rem;font-family:var(--sans);font-size:.82rem;color:var(--text-mute);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.wallet-subtab:hover{color:var(--text-dim)}
+.wallet-subtab.is-active{color:var(--accent);border-bottom-color:var(--accent)}
+.wallet-list{display:flex;flex-direction:column}
+.wallet-row{display:grid;grid-template-columns:auto 1fr auto auto;gap:.9rem;align-items:center;padding:.55rem .2rem;border-bottom:1px solid var(--border-soft);font-size:.82rem;color:var(--text-dim)}
+.wallet-row-head{font-size:.66rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-mute)}
+.wallet-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.wallet-neg{color:var(--text-dim)}
+.wallet-pos{color:#3a9d5a}
+.wallet-cost{grid-template-columns:1fr auto}
+.wallet-cost-desc{font-size:.72rem;color:var(--text-mute);margin-top:.15rem}
+/* pílula de custo ao lado dos botões de IA */
+.ubt-cost{display:inline-flex;align-items:center;gap:.25rem;font-size:.72rem;color:var(--accent);background:var(--accent-lo);border:1px solid var(--accent-border);border-radius:999px;padding:.12rem .55rem;font-variant-numeric:tabular-nums;white-space:nowrap;vertical-align:middle}
 /* ─── Editor de crop circular (usado em /conta — UserAvatarCrop) ───
    Mesmo padrão do admin (espelhado aqui pra valer no aluno). */
 .avatar-crop-frame{
@@ -15192,6 +15213,7 @@ Blocks.essay = {
                 ${linesHint}
                 <div class="essay-foot-actions">
                   <button class="btn-primary essay-submit">${isSimAndamento ? 'Salvar resposta' : 'Enviar para Avaliação'}</button>
+                  ${(!isSimAndamento) ? `<span class="ubt-cost" data-essay-cost title="Custo em UbiTokens, proporcional ao tamanho do texto. Debitado da sua carteira ao enviar."><span class="ubt-sym">ⓤ</span> <span data-essay-cost-val>~0.05</span></span>` : ''}
                   ${(!isSimAndamento) ? `<button class="essay-coop-btn" type="button" data-action="coop-essay" data-tip="Enviar para Colega de Estudo" aria-label="Enviar para Colega de Estudo"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 19a5.4 5.4 0 0 1 10.8 0"/><circle cx="17.2" cy="8.6" r="2.5"/><path d="M16.6 13.3a4.7 4.7 0 0 1 4 5.7"/></svg></button>` : ''}
                   ${(hasAside && !isSimAndamento) ? `<button class="btn-ghost essay-toggle-aside" type="button">${prior ? 'Ocultar critérios' : 'Mostrar critérios'}</button>` : ''}
                 </div>
@@ -15226,6 +15248,19 @@ Blocks.essay = {
 
       const ta = itemEl.querySelector('.essay-textarea');
       const submitBtn = itemEl.querySelector('.essay-submit');
+      // Custo em UbiTokens: estimativa dinâmica pelo tamanho do texto (~1 UBT
+      // por redação completa ≈ 4000 caracteres escritos). O débito REAL acontece
+      // no servidor (correct-essay) pelo consumo de tokens; aqui é só a prévia.
+      const costValEl = itemEl.querySelector('[data-essay-cost-val]');
+      if(costValEl && ta){
+        const updCost = function(){
+          const chars = (ta.value || '').trim().length;
+          const est = Math.max(0.05, Math.min(2, chars / 4000));
+          costValEl.textContent = '~' + est.toFixed(2);
+        };
+        ta.addEventListener('input', updCost);
+        updCost();
+      }
       // CoopStudy — enviar a discursiva pra um colega corrigir
       const coopBtn = itemEl.querySelector('[data-action="coop-essay"]');
       if(coopBtn){
@@ -18274,6 +18309,74 @@ const Renderers = {};
    ────────────────────────────────────────────────────────────────────── */
 window._accountState = window._accountState || { tab: 'perfil' };
 
+// Formata UBT com 2 casas (símbolo ⓤ é aplicado no HTML).
+function _ubtFmt(n){ const v = Number(n); return (isFinite(v) ? v : 0).toFixed(2); }
+
+// Carrega saldo + extrato + tabela de custos na aba Carteira e liga as sub-abas.
+// Lê direto do schema carteira (RLS garante que o aluno só vê a própria conta).
+async function _loadWalletPane(stageEl, user){
+  if(!stageEl || !user || !window._sb) return;
+  const C = window._sb.schema('carteira');
+  const fmtDt = function(s){ try { return new Date(s).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }); } catch(_){ return s || ''; } };
+  // Saldo
+  try {
+    const { data } = await C.from('contas').select('saldo').eq('user_id', user.id).maybeSingle();
+    const el = stageEl.querySelector('#walletSaldo');
+    if(el) el.textContent = _ubtFmt(data ? data.saldo : 0);
+  } catch(e){ console.warn('[carteira saldo]', e); }
+  // Extrato
+  try {
+    const { data } = await C.from('lancamentos')
+      .select('criado_em,delta,saldo_apos,descricao,origem,acao')
+      .eq('user_id', user.id).order('criado_em', { ascending:false }).limit(200);
+    const box = stageEl.querySelector('#walletExtrato');
+    if(box){
+      if(!data || !data.length){
+        box.innerHTML = '<div class="empty" style="margin-top:1rem"><div class="empty-body">Nenhuma movimentação ainda.</div></div>';
+      } else {
+        box.innerHTML = '<div class="wallet-row wallet-row-head"><span>Data</span><span>Descrição</span><span class="wallet-num">UBT</span><span class="wallet-num">Saldo</span></div>' +
+          data.map(function(r){
+            const delta = Number(r.delta);
+            const cls = delta < 0 ? 'wallet-neg' : 'wallet-pos';
+            const desc = Util.esc(r.descricao || r.acao || r.origem || '—');
+            return '<div class="wallet-row"><span>'+Util.esc(fmtDt(r.criado_em))+'</span><span>'+desc+'</span>'+
+              '<span class="wallet-num '+cls+'">'+(delta>0?'+':'')+_ubtFmt(delta)+'</span>'+
+              '<span class="wallet-num">'+_ubtFmt(r.saldo_apos)+'</span></div>';
+          }).join('');
+      }
+    }
+  } catch(e){ console.warn('[carteira extrato]', e); }
+  // Tabela de custos
+  try {
+    const { data } = await C.from('tabela_custos').select('rotulo,categoria,unidade,valor,descricao').eq('ativo', true);
+    const box = stageEl.querySelector('#walletCustos');
+    if(box){
+      if(!data || !data.length){
+        box.innerHTML = '<div class="empty" style="margin-top:1rem"><div class="empty-body">Sem custos cadastrados.</div></div>';
+      } else {
+        const sufx = function(u){ return u==='por_min' ? '/min' : (u==='por_char' ? '/caractere' : (u==='por_1k_tokens' ? ' por uso' : '')); };
+        box.innerHTML = data.map(function(r){
+          const d = r.descricao ? '<div class="wallet-cost-desc">'+Util.esc(r.descricao)+'</div>' : '';
+          return '<div class="wallet-row wallet-cost"><span><strong>'+Util.esc(r.rotulo)+'</strong>'+d+'</span>'+
+            '<span class="wallet-num"><span class="ubt-sym">ⓤ</span> '+_ubtFmt(r.valor)+Util.esc(sufx(r.unidade))+'</span></div>';
+        }).join('');
+      }
+    }
+  } catch(e){ console.warn('[carteira custos]', e); }
+  // Sub-abas (Extrato / Tabela de custos)
+  const subtabs = Array.from(stageEl.querySelectorAll('[data-wallet-sub]'));
+  const subpanes = Array.from(stageEl.querySelectorAll('[data-wallet-pane]'));
+  subtabs.forEach(function(b){
+    if(b.__wired) return; b.__wired = true;
+    b.addEventListener('click', function(){
+      const s = b.getAttribute('data-wallet-sub');
+      subtabs.forEach(function(x){ x.classList.toggle('is-active', x === b); });
+      subpanes.forEach(function(p){ p.hidden = p.getAttribute('data-wallet-pane') !== s; });
+    });
+  });
+}
+window._loadWalletPane = _loadWalletPane;
+
 Renderers.account = function(route){
   const user = Auth.getUser();
   if(!user){
@@ -18407,10 +18510,34 @@ Renderers.account = function(route){
       </div>
     </div>`;
 
+  // — Tab Carteira (UbiTokens) — preenchida no mount via _loadWalletPane —
+  const walletTab = `
+    <div class="account-pane" data-pane="carteira">
+      <div class="wallet-balance">
+        <div>
+          <span class="wallet-balance-lbl">Saldo</span>
+          <div class="wallet-balance-val"><span class="ubt-sym">ⓤ</span> <strong id="walletSaldo">—</strong></div>
+        </div>
+        <button class="btn-ghost" id="walletBuyBtn" type="button" disabled title="Em breve você poderá comprar UbiTokens por aqui.">Comprar UbiTokens (em breve)</button>
+      </div>
+      <div class="wallet-subnav" role="tablist">
+        <button class="wallet-subtab is-active" data-wallet-sub="extrato" type="button">Extrato</button>
+        <button class="wallet-subtab" data-wallet-sub="custos" type="button">Tabela de custos</button>
+      </div>
+      <div class="wallet-sub-pane" data-wallet-pane="extrato">
+        <div id="walletExtrato" class="wallet-list"><div class="empty"><div class="empty-body">Carregando…</div></div></div>
+      </div>
+      <div class="wallet-sub-pane" data-wallet-pane="custos" hidden>
+        <p class="field-help" style="margin-bottom:.7rem">Custo estimado de cada ação que usa IA, para transparência.</p>
+        <div id="walletCustos" class="wallet-list"><div class="empty"><div class="empty-body">Carregando…</div></div></div>
+      </div>
+    </div>`;
+
   const tabsHTML = `
     <div class="account-tabs" role="tablist">
       <button class="account-tab${tab==='perfil'?' is-active':''}" data-acc-tab="perfil" role="tab" aria-selected="${tab==='perfil'}">Perfil & Aparência</button>
       <button class="account-tab${tab==='colegas'?' is-active':''}" data-acc-tab="colegas" role="tab" aria-selected="${tab==='colegas'}">Colegas de estudo</button>
+      <button class="account-tab${tab==='carteira'?' is-active':''}" data-acc-tab="carteira" role="tab" aria-selected="${tab==='carteira'}">Carteira</button>
       <button class="account-tab${tab==='conta'?' is-active':''}" data-acc-tab="conta" role="tab" aria-selected="${tab==='conta'}">Conta</button>
     </div>`;
 
@@ -18419,6 +18546,7 @@ Renderers.account = function(route){
     <div class="account-panes">
       <div class="account-pane-wrap" data-pane-for="perfil" ${tab==='perfil'?'':'hidden'}>${profileTab}</div>
       <div class="account-pane-wrap" data-pane-for="colegas" ${tab==='colegas'?'':'hidden'}>${peersTab}</div>
+      <div class="account-pane-wrap" data-pane-for="carteira" ${tab==='carteira'?'':'hidden'}>${walletTab}</div>
       <div class="account-pane-wrap" data-pane-for="conta" ${tab==='conta'?'':'hidden'}>${accTab}</div>
     </div>`;
 
@@ -18462,8 +18590,11 @@ Renderers.account.mount = function(stageEl){
       try{ history.replaceState(null, '', url); }catch(_){}
       // Re-render colegas quando entra na tab (estado pode ter mudado)
       if(t === 'colegas') renderPeersAllSubpanes();
+      if(t === 'carteira') _loadWalletPane(stageEl, user);
     });
   });
+  // Se já abriu direto na Carteira, carrega de cara.
+  if((window._accountState.tab || 'perfil') === 'carteira') _loadWalletPane(stageEl, user);
 
   // ── Tab "Colegas de estudo" — render dinâmico ──
   function renderUserCard(u, actionsHtml, presence){
