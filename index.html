@@ -29620,6 +29620,243 @@ function _bankCompileProva(route){
   });
 }
 
+/* ───────── EssaysCompiler — "Prova Discursiva" imprimível ─────────
+   Espelha o QuestionsCompiler, mas pra discursivas:
+     1) Cabeçalho + Prova (1 coluna): texto(s)-base + comando + LINHAS p/ resposta
+        (respeita o limite de linhas da questão, se houver)
+     2) (quebra) Espelho de correção: critérios + resposta oficial + modelos
+   Resolve cada discursiva via _resolveEssayItem (pega refs/critérios/modelos do
+   banco real). Estático/não-interativo. */
+const EssaysCompiler = (function(){
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  function rich(s){ const str = String(s==null?'':s); if(/<[a-z][\s\S]*>/i.test(str)) return str; return esc(str).replace(/\n/g,'<br>'); }
+  function driveImg(url){ const LB = window.LearningBlocks||{}; if(url && LB.driveImageUrl){ try{ return LB.driveImageUrl(url); }catch(e){} } return url||''; }
+  function originTag(item){
+    const LB = window.LearningBlocks || {};
+    let exam = item.exam_id ? String(item.exam_id).toUpperCase() : '';
+    let year = (item.year != null && item.year !== '') ? item.year : null;
+    if((!exam || !year) && item.origin && LB.parseQuestionOrigin){
+      const p = LB.parseQuestionOrigin(item.origin);
+      if(p){ if(!exam) exam = p.exam || ''; if(!year) year = p.year || null; }
+    }
+    if(!year) return '';
+    return (exam ? exam + ' ' : '') + year;
+  }
+  function roman(n){ return ['I','II','III','IV','V','VI','VII','VIII','IX','X'][n-1] || String(n); }
+  function resolve(ref){ try { return (typeof _resolveEssayItem === 'function') ? (_resolveEssayItem(ref) || ref) : ref; } catch(e){ return ref; } }
+  function answerLines(it){
+    let n = parseInt(it && it.maxLines, 10);
+    if(!n || n < 1) n = 30;       // padrão quando a questão não define limite
+    if(n > 90) n = 90;            // teto de segurança (não estoura o arquivo)
+    let s = ''; for(let i=0;i<n;i++) s += '<div class="el-line"></div>';
+    return '<div class="el-answer"><div class="el-answer-head">Resposta'+(it && it.maxLines ? ' <small>(até '+esc(it.maxLines)+' linhas)</small>' : '')+'</div>'+s+'</div>';
+  }
+
+  function buildCorpo(sections, flat){
+    let n = 0;
+    return (sections || []).map(function(sec){
+      const secStart = n + 1;
+      let body = '';
+      (sec.block.items || []).forEach(function(ref){
+        const it = resolve(ref);
+        n++; flat.push({ n:n, item:it });
+        const tag = originTag(it);
+        const head = '<div class="ec-q-head"><span class="ec-num">'+n+'</span>'+(tag?'<span class="pc-origin">'+esc(tag)+'</span>':'')+'</div>';
+        let refs = '';
+        (it.references || []).forEach(function(r, ri){
+          if(!r) return;
+          const label = '<div class="ec-ref-label">'+esc(r.label || ('Texto '+roman(ri+1)))+'</div>';
+          const title = r.title ? '<div class="ec-ref-title">'+esc(r.title)+'</div>' : '';
+          const img = r.image ? '<div class="pc-ref-img"><img src="'+esc(driveImg(r.image))+'" alt=""></div>' : '';
+          const bodyTxt = r.body ? '<div class="pc-ref-txt">'+rich(r.body)+'</div>' : '';
+          if(title || img || bodyTxt) refs += '<div class="pc-ref">'+label+title+img+bodyTxt+'</div>';
+        });
+        const stmt = it.statement ? '<div class="ec-stmt">'+rich(it.statement)+'</div>' : '';
+        const cmd = it.command ? '<div class="ec-cmd">'+rich(it.command)+'</div>' : '';
+        body += '<div class="ec-q">'+head+refs+stmt+cmd+answerLines(it)+'</div>';
+      });
+      const secEnd = n;
+      let band = '';
+      if(sec.title){
+        const range = (secEnd >= secStart) ? ('Discursiva'+(secEnd>secStart?('s '+secStart+' a '+secEnd):(' '+secStart))) : '';
+        band = '<h2 class="pc-materia">'+esc(sec.title)+(range ? '<small>'+range+'</small>' : '')+'</h2>';
+      }
+      return band + body;
+    }).join('');
+  }
+
+  function buildEspelho(flat){
+    const blocks = flat.map(function(f){
+      const it = f.item;
+      const tag = originTag(it);
+      const prompt = it.command || it.statement || '';
+      const promptHtml = prompt ? '<div class="es-prompt">'+rich(prompt)+'</div>' : '';
+      let crit = '';
+      if(Array.isArray(it.criteria) && it.criteria.length){
+        crit = '<div class="es-sub">Critérios de correção</div><ul class="es-crit">'+
+          it.criteria.map(function(c){
+            const peso = (c.maxScore!=null && c.maxScore!=='') ? ' <span class="es-peso">('+esc(c.maxScore)+' pt)</span>' : '';
+            const desc = c.description ? ' — '+rich(c.description) : '';
+            return '<li><strong>'+esc(c.label||'Critério')+'</strong>'+peso+desc+'</li>';
+          }).join('')+'</ul>';
+      }
+      let oficial = '';
+      if(it.officialAnswer){ oficial = '<div class="es-sub">Espelho / resposta oficial</div><div class="es-txt">'+rich(it.officialAnswer)+'</div>'; }
+      let models = '';
+      if(Array.isArray(it.modelAnswers) && it.modelAnswers.length){
+        models = '<div class="es-sub">Modelos de resposta</div>'+
+          it.modelAnswers.map(function(m){
+            const meta2 = [m.title, m.author, (m.grade!=null&&m.grade!=='')?('Nota '+m.grade):''].filter(Boolean).map(esc).join(' · ');
+            return '<div class="es-model">'+(meta2?'<div class="es-model-head">'+meta2+'</div>':'')+(m.description?'<div class="es-txt">'+rich(m.description)+'</div>':'')+(m.body?'<div class="es-txt">'+rich(m.body)+'</div>':'')+'</div>';
+          }).join('');
+      }
+      const empty = (!crit && !oficial && !models) ? '<div class="es-txt"><em>Sem espelho/critérios cadastrados.</em></div>' : '';
+      return '<div class="es-item"><div class="es-head"><span class="gb-num">'+f.n+'</span>'+(tag?'<span class="pc-origin">'+esc(tag)+'</span>':'')+'</div>'+promptHtml+crit+oficial+models+empty+'</div>';
+    }).join('');
+    return '<section class="espelho"><h2 class="gb-title">Espelho de correção</h2>'+blocks+'</section>';
+  }
+
+  function buildHTML(sections, meta){
+    const flat = [];
+    const corpo = buildCorpo(sections, flat);
+    meta.total = flat.length;
+    const espelho = buildEspelho(flat);
+    const infoBits = [
+      meta.concursoName || meta.concursoSigla ? ('Concurso: ' + (meta.concursoName || meta.concursoSigla)) : '',
+      (meta.materias && meta.materias.length) ? ('Matérias: ' + meta.materias.join(', ')) : '',
+      (meta.anos && meta.anos.length) ? ('Ano(s): ' + meta.anos.join(', ')) : '',
+      'Discursivas: ' + flat.length
+    ].filter(Boolean);
+    const _nm = meta.candidato || '', _em = meta.email || '', _cpf = meta.cpf || '', _cid = meta.copiaId || '';
+    let _issuedAt = ''; try { _issuedAt = new Date().toISOString(); } catch(e){}
+    const _licParts = [_nm, _em, _cpf].filter(Boolean);
+    const licLine = _licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + (_cid ? '  ·  ID ' + _cid : ''))
+                                     : (_cid ? ('Cópia ID ' + _cid) : '');
+    const forensic = ['emitido-para='+_nm, 'email='+_em, 'cpf='+_cpf, 'copia-id='+_cid, 'emitido-em='+_issuedAt].join(' | ').replace(/--+/g,'-');
+    const metaTags =
+      '<meta name="x-emitido-para" content="'+esc(_nm)+'">'+
+      '<meta name="x-email" content="'+esc(_em)+'">'+
+      '<meta name="x-cpf" content="'+esc(_cpf)+'">'+
+      '<meta name="x-copia-id" content="'+esc(_cid)+'">'+
+      '<meta name="x-emitido-em" content="'+esc(_issuedAt)+'">';
+    return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'+metaTags+'<title>Prova Discursiva — '+esc(meta.concursoSigla||'Ubique')+'</title><style>'+
+      '@page{size:A4;margin:18mm 14mm 16mm}'+
+      '*{box-sizing:border-box}'+
+      'html,body{margin:0;padding:0;background:#fff;color:#1a1712;font-family:\'Inter\',\'Helvetica Neue\',Arial,sans-serif;font-size:11.5px;line-height:1.5;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
+      '.wrap{max-width:900px;margin:0 auto;padding:24px 28px 48px}'+
+      'h1,h2{font-family:\'Cormorant Garamond\',\'Playfair Display\',Georgia,serif;font-weight:600;margin:0}'+
+      '.cover{text-align:center;border-bottom:2px solid #1a1712;padding-bottom:14px;margin-bottom:18px}'+
+      '.cover .brand{font-size:10px;letter-spacing:.32em;text-transform:uppercase;color:#8a6a24;font-weight:600;margin-bottom:6px}'+
+      '.cover h1{font-size:32px;letter-spacing:-.01em}'+
+      '.cover .cand{margin-top:10px;font-size:12px}'+
+      '.cover .info{margin-top:8px;font-size:10.5px;color:#5a4f3f}'+
+      '.instr{margin:14px 0 20px;padding:10px 14px;background:#f6f1e6;border-left:3px solid #8a6a24;font-size:10.5px;color:#3a3228}'+
+      '.instr b{color:#8a6a24}'+
+      '.pc-materia{break-inside:avoid;text-align:center;background:#d8b48a;color:#3a2c12;font-weight:700;font-size:15px;padding:6px 10px;border-radius:4px;margin:14px 0 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
+      '.pc-materia small{display:block;font-family:\'Inter\',Arial,sans-serif;font-weight:400;font-size:10.5px;margin-top:2px}'+
+      '.pc-origin{display:inline-block;font-size:8px;letter-spacing:.04em;padding:1px 5px;border:1px solid #c8a97e;border-radius:999px;color:#8a6a24;vertical-align:middle}'+
+      // Discursiva: 1 coluna (textos longos + linhas de resposta).
+      '.ec-q{margin:0 0 18px;padding-top:10px;border-top:2px solid #c8a97e}'+
+      '.ec-q-head{margin-bottom:6px;display:flex;align-items:center;gap:8px}'+
+      '.ec-num{font-weight:700;color:#8a6a24;font-size:15px;font-variant-numeric:tabular-nums}'+
+      '.pc-ref{break-inside:avoid;border-left:3px solid #8a6a24;background:#faf7f0;padding:8px 10px;margin-bottom:8px;border-radius:3px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
+      '.ec-ref-label{font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:#8a6a24;font-weight:700;margin-bottom:2px}'+
+      '.ec-ref-title{font-weight:700;font-size:11px;margin-bottom:3px}'+
+      '.pc-ref-img{margin-bottom:6px;text-align:center}.pc-ref-img img{max-width:100%;max-height:320px;border-radius:3px}'+
+      '.pc-ref-txt{font-size:10.5px;color:#2a2419;text-align:justify}'+
+      '.pc-ref p{margin:0 0 .4em}.pc-ref p:last-child{margin-bottom:0}'+
+      '.ec-stmt{font-size:11px;text-align:justify;margin:6px 0}'+
+      '.ec-stmt p{margin:0 0 .4em}'+
+      '.ec-cmd{font-size:11px;font-weight:600;text-align:justify;margin:6px 0 4px}'+
+      '.ec-cmd p{margin:0 0 .4em}'+
+      // Linhas de resposta
+      '.el-answer{margin-top:8px}'+
+      '.el-answer-head{font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:#8a6a24;font-weight:700;margin-bottom:6px}'+
+      '.el-answer-head small{font-weight:400;letter-spacing:.02em;text-transform:none;color:#8a7e68}'+
+      '.el-line{height:8mm;border-bottom:1px solid #b9a888}'+
+      '.page-break{break-before:page;height:0}'+
+      // Espelho
+      '.espelho{padding-top:6px}'+
+      '.gb-title{font-size:20px;color:#8a6a24;margin:16px 0 10px;border-bottom:1px solid #8a6a24;padding-bottom:4px}'+
+      '.es-item{break-inside:avoid;margin:0 0 14px;padding-bottom:12px;border-bottom:1px dashed rgba(26,23,18,.16)}'+
+      '.es-head{display:flex;align-items:center;gap:8px;margin-bottom:5px}'+
+      '.gb-num{font-weight:700;color:#8a6a24;font-size:14px}'+
+      '.es-prompt{font-size:10.5px;color:#2a2419;text-align:justify;margin-bottom:6px}'+
+      '.es-prompt p{margin:0 0 .3em}'+
+      '.es-sub{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#8a6a24;font-weight:700;margin:8px 0 4px}'+
+      '.es-crit{margin:0 0 4px;padding-left:18px;font-size:10.5px;color:#2a2419}'+
+      '.es-crit li{margin:2px 0}'+
+      '.es-peso{color:#8a6a24;font-weight:700}'+
+      '.es-txt{font-size:10.5px;color:#3a3228;text-align:justify}'+
+      '.es-txt p{margin:0 0 .4em}'+
+      '.es-model{margin:4px 0 8px;padding:6px 8px;background:#faf7f0;border-radius:3px;border:1px solid #ece2cf}'+
+      '.es-model-head{font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:#8a6a24;font-weight:700;margin-bottom:3px}'+
+      '.print-license{display:none}'+
+      '@media print{.print-license{display:block;position:fixed;top:0;left:0;right:0;text-align:center;font-size:8px;letter-spacing:.02em;color:#666;padding:4mm 8mm 0}}'+
+      '</style></head><body>'+
+        '<!-- '+forensic+' -->'+
+        (licLine ? '<div class="print-license">'+esc(licLine)+'</div>' : '')+
+        '<div class="wrap">'+
+        '<header class="cover">'+
+          '<div class="brand">Ubique · Course Platform</div>'+
+          '<h1>Prova Discursiva</h1>'+
+          (meta.candidato ? '<div class="cand">Candidato(a): <strong>'+esc(meta.candidato)+'</strong></div>' : '')+
+          '<div class="info">'+infoBits.map(esc).join('  ·  ')+'</div>'+
+        '</header>'+
+        '<div class="instr"><b>Instruções:</b> redija sua resposta nas linhas indicadas para cada questão, respeitando o limite de linhas quando houver. O espelho de correção (critérios, resposta oficial e modelos) está na última parte — use-o só depois de escrever.</div>'+
+        '<div class="ec-corpo">'+corpo+'</div>'+
+        '<div class="page-break"></div>'+
+        espelho+
+      '</div></body></html>';
+  }
+
+  function download(sections, meta){
+    const html = buildHTML(sections, meta || {});
+    const blob = new Blob([html], { type:'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const datePart = new Date().toISOString().slice(0,10);
+    a.href = url;
+    a.download = 'prova-discursiva-' + (meta && meta.concursoSigla ? String(meta.concursoSigla).toLowerCase() + '-' : '') + datePart + '.html';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  }
+  return { download, buildHTML };
+})();
+window.EssaysCompiler = EssaysCompiler;
+
+// Junta tudo e dispara o download da PROVA DISCURSIVA a partir dos filtros atuais.
+function _bankCompileEssayProva(route){
+  const f = _bankApplyLockContext(_bankParseFilters(route.query));
+  const bankItems = _bankItemsForEssays();
+  const results = _bankApplyFilters(bankItems, f, { isEssay:true });
+  if(!results.length){ alert('Nenhuma discursiva para compilar. Ajuste os filtros e busque primeiro.'); return; }
+  const sections = _bankBuildEssaySections(results, f.org || 'secao');
+  const exams = (window.BankFilters && BankFilters.availableExams) ? BankFilters.availableExams() : [];
+  const examObj = exams.find(function(x){ return String(x.id) === String(f.exam); });
+  const concursoSigla = f.exam ? String(f.exam).toUpperCase() : '';
+  const materias = sections.map(function(s){ return s.title; }).filter(Boolean);
+  const anosSet = {};
+  results.forEach(function(it){ const y = _bankQuestionYear(it); if(y) anosSet[y] = 1; });
+  const anos = Object.keys(anosSet).map(Number).sort(function(a,b){ return a - b; });
+  let dateStr = '';
+  try { dateStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); } catch(e){}
+  let copiaId = '';
+  try { copiaId = 'UBQ-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2,6).toUpperCase(); } catch(e){}
+  EssaysCompiler.download(sections, {
+    candidato:    (window.MOCK_USER && window.MOCK_USER.name) || '',
+    email:        (window.MOCK_USER && window.MOCK_USER.email) || '',
+    cpf:          (window.MOCK_USER && window.MOCK_USER.cpf) || '',
+    copiaId:      copiaId,
+    concursoSigla: concursoSigla,
+    concursoName: examObj ? examObj.name : concursoSigla,
+    materias:     materias,
+    anos:         anos,
+    dateStr:      dateStr
+  });
+}
+
 Renderers.questionBank.mount = function(stageEl, route){
   _wireBankFilterPanel(stageEl, route, false);
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
@@ -29723,6 +29960,7 @@ Renderers.essayBank = function(route){
       '<div class="bf-results-head">'+
         '<span class="bf-results-count">'+results.length+' '+(results.length===1?'discursiva':'discursivas')+'</span>'+
         '<span class="bf-results-meta">Mostrando '+shown.length+' de '+results.length+' · página '+page+'</span>'+
+        (results.length ? '<button type="button" class="btn-ghost bf-compile" id="bfCompile" title="Gerar um arquivo de prova discursiva imprimível (textos-base + comando + linhas para resposta + espelho de correção)">'+Icons.download+' Compilar prova</button>' : '')+
       '</div>'+
       resultsHtml +
     '</div>';
@@ -29753,6 +29991,15 @@ Renderers.essayBank.mount = function(stageEl, route){
       const q = Object.assign({}, route.query);
       q.p = String(page + 1);
       Router.go('/portal/essays' + Router.querystring(q));
+    });
+  }
+  // Compilar prova discursiva (baixar HTML imprimível: textos-base + comando +
+  // linhas para resposta + espelho de correção).
+  const compileBtn = stageEl.querySelector('#bfCompile');
+  if(compileBtn){
+    compileBtn.addEventListener('click', function(){
+      try { _bankCompileEssayProva(route); }
+      catch(e){ console.warn('[compilar prova discursiva] falhou:', e); alert('Não consegui gerar a prova agora. Tente novamente.'); }
     });
   }
 };
