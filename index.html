@@ -14660,11 +14660,16 @@ async function _correctEssayViaAI(item, essayText){
       window._sb.functions.invoke('correct-essay', { body: { item: _enrichedItem, essay_text: essayText } }),
       new Promise(r => setTimeout(() => r({ error: { message: 'timeout 120s' } }), 120000))
     ]);
+    // UbiTokens — saldo insuficiente: a Edge Function devolve ubt_error (HTTP 200).
+    // Não corrige nem cai no mock; sinaliza pro handler bloquear com aviso.
+    if(racing && racing.data && racing.data.ubt_error){
+      return { blocked: true, saldo: racing.data.saldo, needed: racing.data.needed };
+    }
     if(!racing.error && racing.data && !racing.data.error){
       const mapped = _mapClaudeEssayPayload(racing.data, item, essayText);
       if(mapped){
         console.log('[essay AI] ✅ corrigido via', mapped.aiProvider, mapped.aiModel, '— score:', mapped.score, '/', mapped.maxScore);
-        return { payload: mapped, usedAI: true };
+        return { payload: mapped, usedAI: true, ubt: racing.data._ubt || null };
       } else {
         console.warn('[essay AI] resposta da Edge Function em formato inesperado. Raw:', racing.data);
       }
@@ -15316,6 +15321,12 @@ Blocks.essay = {
           //    Lógica extraída em _correctEssayViaAI (Bug #4 Fase C) pra ser
           //    reusada também pelo handler "Finalizar simulado".
           const _aiResult = await _correctEssayViaAI(item, text);
+          if(_aiResult && _aiResult.blocked){
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalLabel;
+            if(typeof window.ueToast === 'function') window.ueToast('Saldo de UbiTokens insuficiente para corrigir. Adicione mais na sua Carteira (Minha Conta) ou aguarde a renovação.', 'error');
+            return;
+          }
           if(_aiResult){
             payload = _aiResult.payload;
             usedAI = true;
@@ -15334,8 +15345,9 @@ Blocks.essay = {
 
           if(typeof window.ueToast === 'function'){
             const scoreStr = (typeof payload.score === 'number') ? payload.score.toFixed(1) : payload.score;
+            const _deb = (_aiResult && _aiResult.ubt && _aiResult.ubt.cost) ? (' · ⓤ' + Number(_aiResult.ubt.cost).toFixed(2)) : '';
             const msg = usedAI
-              ? `✓ Corrigido por IA (${payload.aiProvider || 'google'}): ${scoreStr} pts`
+              ? `✓ Corrigido por IA: ${scoreStr} pts${_deb}`
               : `✓ Corrigido (mock — IA indisponível): ${scoreStr} pts`;
             window.ueToast(msg, 'success');
           }
@@ -28895,6 +28907,7 @@ function _bankEnsureAiSearch(query){
     window._sb.functions.invoke('bank-search', { body: { q: query, limit: 120 } })
       .then(function(r){
         if(r && r.error){ console.warn('[bank-search]', r.error); done({ status:'error', ids:new Set(), rank:{} }); return; }
+        if(r && r.data && r.data.ubt_error){ console.warn('[bank-search] saldo insuficiente'); done({ status:'error', ids:new Set(), rank:{} }); return; }
         const list = (r && r.data && Array.isArray(r.data.ids)) ? r.data.ids : [];
         // A Edge Function já re-ranqueou com IA (Haiku) e devolve SÓ os relevantes.
         // Não há mais corte por pontuação aqui — confiamos no conjunto retornado.
