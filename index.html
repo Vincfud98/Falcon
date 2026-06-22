@@ -6022,6 +6022,19 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   display:grid;grid-template-columns:240px 1fr;gap:2.4rem;align-items:start;
 }
 @media(max-width:720px){.account-grid{grid-template-columns:1fr}}
+/* ─── Toast (ueToast) — avisos no canto superior direito ─── */
+#ueToastHost{position:fixed;top:64px;right:16px;z-index:9999;display:flex;flex-direction:column;gap:.5rem;max-width:340px;pointer-events:none}
+.ue-toast{
+  pointer-events:auto;font-family:var(--sans);font-weight:300;font-size:.82rem;line-height:1.45;
+  background:var(--bg-elevated,#1c1916);color:var(--text);border:1px solid var(--border);
+  border-left:3px solid var(--accent);border-radius:var(--radius);padding:.7rem .9rem;
+  box-shadow:0 6px 24px rgba(0,0,0,.28);opacity:0;transform:translateX(12px);transition:opacity .25s ease,transform .25s ease;
+}
+.ue-toast.is-in{opacity:1;transform:translateX(0)}
+.ue-toast-success{border-left-color:#7cb98b}
+.ue-toast-error{border-left-color:#d17272}
+.ue-toast-warn{border-left-color:#d19b72}
+.ue-toast-info{border-left-color:var(--accent)}
 /* ─── Carteira (UbiTokens) — aba em /conta + custo nos botões ─── */
 .ubt-sym{font-family:var(--serif);font-weight:600}
 .wallet-balance{display:flex;align-items:center;gap:1.2rem;flex-wrap:wrap;background:var(--accent-lo);border:1px solid var(--accent-border);border-radius:var(--radius);padding:1rem 1.3rem;margin-bottom:1.3rem}
@@ -15328,8 +15341,7 @@ Blocks.essay = {
       const costValEl = itemEl.querySelector('[data-essay-cost-val]');
       if(costValEl && ta){
         const updCost = function(){
-          const chars = (ta.value || '').trim().length;
-          const est = Math.max(0.05, Math.min(2, chars / 4000));
+          const est = window.UbtWallet ? UbtWallet.essayCost(ta.value) : Math.max(0.05, (ta.value||'').length / 9000);
           costValEl.textContent = '~' + est.toFixed(2);
         };
         ta.addEventListener('input', updCost);
@@ -15382,7 +15394,7 @@ Blocks.essay = {
           // definitiva também (defesa em profundidade).
           if(window.UbtWallet){
             const _saldo = UbtWallet.get();
-            const _est = Math.max(0.05, Math.min(2, (text.length || 0) / 4000));
+            const _est = UbtWallet.essayCost(text);
             if(_saldo != null && _saldo < _est){
               if(typeof window.ueToast === 'function')
                 window.ueToast('Saldo de UbiTokens insuficiente (você tem ⓤ' + _saldo.toFixed(2) + ', a correção custa ~ⓤ' + _est.toFixed(2) + '). Adicione mais na sua Carteira (Minha Conta) ou aguarde a renovação.', 'error');
@@ -18455,7 +18467,7 @@ async function _loadWalletPane(stageEl, user){
       if(!data || !data.length){
         box.innerHTML = '<div class="empty" style="margin-top:1rem"><div class="empty-body">Sem custos cadastrados.</div></div>';
       } else {
-        const sufx = function(u){ return u==='por_min' ? '/min' : (u==='por_char' ? '/caractere' : (u==='por_1k_tokens' ? ' por uso' : '')); };
+        const sufx = function(u){ return u==='por_min' ? '/min' : (u==='por_char' ? '/caractere' : (u==='por_1k_chars' ? ' por 1k caracteres' : (u==='por_1k_tokens' ? ' por uso' : ''))); };
         box.innerHTML = data.map(function(r){
           const d = r.descricao ? '<div class="wallet-cost-desc">'+Util.esc(r.descricao)+'</div>' : '';
           return '<div class="wallet-row wallet-cost"><span><strong>'+Util.esc(r.rotulo)+'</strong>'+d+'</span>'+
@@ -18478,10 +18490,27 @@ async function _loadWalletPane(stageEl, user){
 }
 window._loadWalletPane = _loadWalletPane;
 
+// Toast real (estava sendo chamado em todo o app via `if(window.ueToast)`, mas
+// nunca fora implementado — por isso os avisos não apareciam). Canto sup. direito.
+window.ueToast = window.ueToast || function(msg, type){
+  try {
+    let host = document.getElementById('ueToastHost');
+    if(!host){ host = document.createElement('div'); host.id = 'ueToastHost'; document.body.appendChild(host); }
+    const el = document.createElement('div');
+    el.className = 'ue-toast ue-toast-' + (type || 'info');
+    el.textContent = String(msg == null ? '' : msg);
+    host.appendChild(el);
+    requestAnimationFrame(function(){ el.classList.add('is-in'); });
+    const ttl = (type === 'error') ? 7000 : (type === 'warn' ? 5000 : 3500);
+    setTimeout(function(){ el.classList.remove('is-in'); setTimeout(function(){ try{ el.remove(); }catch(_){} }, 300); }, ttl);
+  } catch(_){}
+};
+
 // UbtWallet — saldo em cache + chip da topbar. Usado pra mostrar o saldo
 // sempre visível e pra pré-checar (no navegador) antes de gastar IA.
 window.UbtWallet = (function(){
   let _saldo = null;
+  let _essayRate = 0.12;   // UBT por 1k caracteres do texto do aluno (default; banco manda)
   function _render(){
     const el = document.getElementById('tbUbtVal');
     if(el) el.textContent = (_saldo == null) ? '—' : _ubtFmt(_saldo);
@@ -18490,16 +18519,25 @@ window.UbtWallet = (function(){
     try {
       const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
       if(!u || !window._sb){ _saldo = null; _render(); return null; }
-      const { data } = await window._sb.schema('carteira').from('contas').select('saldo').eq('user_id', u.id).maybeSingle();
-      _saldo = data ? Number(data.saldo) : 0;
+      const C = window._sb.schema('carteira');
+      const [contaRes, custoRes] = await Promise.all([
+        C.from('contas').select('saldo').eq('user_id', u.id).maybeSingle(),
+        C.from('tabela_custos').select('valor').eq('acao', 'correcao_redacao').maybeSingle()
+      ]);
+      _saldo = contaRes.data ? Number(contaRes.data.saldo) : 0;
+      if(custoRes.data && custoRes.data.valor != null) _essayRate = Number(custoRes.data.valor) || _essayRate;
       _render();
       return _saldo;
     } catch(e){ console.warn('[UbtWallet load]', e); return _saldo; }
   }
+  // Custo estimado da correção pelo TAMANHO do texto do aluno (mesma fórmula do servidor).
+  function essayCost(text){ return Math.max(0.05, ((String(text||'').length) / 1000) * _essayRate); }
   return {
     load,
     get: function(){ return _saldo; },
     set: function(v){ if(typeof v === 'number'){ _saldo = v; _render(); } },
+    essayRate: function(){ return _essayRate; },
+    essayCost: essayCost,
     render: _render
   };
 })();
