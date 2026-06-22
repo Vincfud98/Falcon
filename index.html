@@ -28908,26 +28908,39 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
   (bankItems || []).forEach(function(q){ const y = _bankQuestionYear(q); if(y) _yearSet[y] = 1; });
   const yearOptions = Object.keys(_yearSet).map(Number).sort(function(a,b){ return b - a; })
     .map(function(y){ return { id: String(y), name: (_examSigla ? _examSigla + ' ' : '') + y }; });
-  const anoHtml = isEssay ? '' :
-    buildMulti('ano', 'Ano da questão', yearOptions, new Set(f.anos || []), 'data-bf-ano', 'Todos os anos');
+  const anoHtml = buildMulti('ano', isEssay ? 'Ano da discursiva' : 'Ano da questão', yearOptions, new Set(f.anos || []), 'data-bf-ano', 'Todos os anos');
 
-  // Organização e exibição (3 rádios) — só pra questões.
-  const orgHtml = isEssay ? '' :
-    sectionHead('Organização e exibição', 'Como as questões aparecem depois de buscar') +
-    buildRadioSet('bfpri', 'Priorizar questões', [
-      ['',    'Indiferente'],
-      ['rec', 'Mais recentes'],
-      ['ant', 'Mais antigas']
-    ], f.prioridade || '') +
-    buildRadioSet('bfexib', 'Exibir', [
-      ['',     'Apenas as questões que correspondem'],
-      ['full', 'Grupos completos (todas as questões)']
-    ], f.exibir || '') +
-    buildRadioSet('bforg', 'Separação por matéria', [
-      ['secao', 'Separar por seção'],
-      ['flat',  'Sem separação'],
-      ['mix',   'Misturar as questões']
-    ], f.org || 'secao');
+  // Organização. Pras discursivas, "Exibir grupos completos" não se aplica
+  // (cada discursiva é 1 item, sem grupo) — então mostramos só Priorizar e
+  // Separação por matéria. Os ids dos rádios (bfpri/bforg) são os mesmos, então
+  // gather()/parse/serialize já cuidam dos dois casos sem mudança.
+  const orgHtml = isEssay
+    ? (sectionHead('Organização', 'Como as discursivas aparecem depois de buscar') +
+       buildRadioSet('bfpri', 'Priorizar', [
+         ['',    'Indiferente'],
+         ['rec', 'Mais recentes'],
+         ['ant', 'Mais antigas']
+       ], f.prioridade || '') +
+       buildRadioSet('bforg', 'Separação por matéria', [
+         ['secao', 'Separar por seção'],
+         ['flat',  'Sem separação'],
+         ['mix',   'Misturar as discursivas']
+       ], f.org || 'secao'))
+    : (sectionHead('Organização e exibição', 'Como as questões aparecem depois de buscar') +
+       buildRadioSet('bfpri', 'Priorizar questões', [
+         ['',    'Indiferente'],
+         ['rec', 'Mais recentes'],
+         ['ant', 'Mais antigas']
+       ], f.prioridade || '') +
+       buildRadioSet('bfexib', 'Exibir', [
+         ['',     'Apenas as questões que correspondem'],
+         ['full', 'Grupos completos (todas as questões)']
+       ], f.exibir || '') +
+       buildRadioSet('bforg', 'Separação por matéria', [
+         ['secao', 'Separar por seção'],
+         ['flat',  'Sem separação'],
+         ['mix',   'Misturar as questões']
+       ], f.org || 'secao'));
 
   return '<form class="bf-panel" id="bankFilterPanel" onsubmit="return false" data-locked-materia="'+Util.attr(f._lockedMateria||'')+'">'+
     '<header class="bf-panel-head">'+
@@ -29186,6 +29199,46 @@ function _bankBuildResultSections(filteredQuestions, mode){
   groups.forEach(function(g){ const m = g.__materia; if(!byMat[m.id]){ byMat[m.id] = { m:m, gs:[] }; mats.push(m.id); } byMat[m.id].gs.push(g); });
   mats.sort(function(a,b){ return (byMat[a].m.pos - byMat[b].m.pos) || String(byMat[a].m.title).localeCompare(String(byMat[b].m.title), 'pt-BR'); });
   return mats.map(function(id, i){ return { title: byMat[id].m.title, block: mkBlock(byMat[id].gs, '_'+i) }; });
+}
+
+// Constrói as SEÇÕES de resultado das DISCURSIVAS. Espelha _bankBuildResultSections,
+// mas discursiva é 1 item por questão (sem grupos/texto-base a resolver), então é
+// mais simples: tagueia cada discursiva com sua matéria (via appears_in[0].unit_id)
+// e arranja conforme o modo. Retorna [{ title, block }] com block.type='essay'.
+//   'secao' → uma seção por matéria (ordem `position`), com cabeçalho.
+//   'flat'  → uma seção única, na ordem natural (sem cabeçalho).
+//   'mix'   → uma seção única, discursivas INTERCALADAS por matéria (round-robin).
+function _bankBuildEssaySections(filteredEssays, mode){
+  const ctx = _bankBuildUnitContext();
+  const subjById = {};
+  ((window.UbiqueStore && UbiqueStore.subjects && UbiqueStore.subjects.list && UbiqueStore.subjects.list()) || [])
+    .forEach(function(s){ if(s) subjById[String(s.id)] = s; });
+
+  const tagged = (filteredEssays || []).map(function(q){
+    const u = (q && Array.isArray(q.appears_in) && q.appears_in[0]) || null;
+    return { item: { bank_id: q.id }, materia: _bankMateriaOfUnit(u ? u.unit_id : null, ctx, subjById) };
+  });
+
+  const mkBlock = function(items, sufx){
+    return { id:'__bank_block_e'+(sufx||''), type:'essay', title:'', items: items };
+  };
+  if(!tagged.length) return [{ title:null, block: mkBlock([]) }];
+
+  if(mode === 'flat'){
+    return [{ title:null, block: mkBlock(tagged.map(function(t){ return t.item; })) }];
+  }
+  if(mode === 'mix'){
+    const byMat = {}; const order = [];
+    tagged.forEach(function(t){ const id = t.materia.id; if(!byMat[id]){ byMat[id] = []; order.push(id); } byMat[id].push(t.item); });
+    const mixed = []; let added = true;
+    while(added){ added = false; order.forEach(function(id){ if(byMat[id].length){ mixed.push(byMat[id].shift()); added = true; } }); }
+    return [{ title:null, block: mkBlock(mixed) }];
+  }
+  // 'secao' — uma seção por matéria, ordenada por position
+  const byMat = {}; const mats = [];
+  tagged.forEach(function(t){ const m = t.materia; if(!byMat[m.id]){ byMat[m.id] = { m:m, items:[] }; mats.push(m.id); } byMat[m.id].items.push(t.item); });
+  mats.sort(function(a,b){ return (byMat[a].m.pos - byMat[b].m.pos) || String(byMat[a].m.title).localeCompare(String(byMat[b].m.title), 'pt-BR'); });
+  return mats.map(function(id, i){ return { title: byMat[id].m.title, block: mkBlock(byMat[id].items, '_'+i) }; });
 }
 
 // Store "proxy" pro render do banco: resolve a resposta SÓ pelo id do item
@@ -29562,14 +29615,7 @@ Renderers.essayBank = function(route){
   const PAGE_SIZE = 5;
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
-
-  // Bloco sintético essay: Blocks.essay espera items[] com bank_id
-  const synthBlock = {
-    id: '__bank_block_e',
-    type: 'essay',
-    title: '',
-    items: shown.map(function(q){ return { bank_id: q.id }; })
-  };
+  const sections = _bankBuildEssaySections(shown, f.org || 'secao');
   const synthCtx = { unitId:'__bank_e', store: Store, suppressActions: true,
     moduleId: null, chapterId: null, unitTitle: 'Banco de discursivas' };
 
@@ -29577,8 +29623,13 @@ Renderers.essayBank = function(route){
   if(!results.length){
     resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Nenhuma discursiva bateu com os filtros</div><div class="empty-body">Tente afrouxar os critérios ou limpar e refazer.</div></div>';
   } else if(typeof Blocks !== 'undefined' && Blocks.essay && Blocks.essay.render){
-    const blockHtml = Blocks.essay.render(synthBlock, synthCtx);
-    resultsHtml = '<div class="bf-results" data-bf-results data-card="essays">'+ blockHtml +'</div>';
+    const multi = sections.length > 1;
+    resultsHtml = sections.map(function(sec, i){
+      const head = (multi && sec.title)
+        ? '<div class="bf-msection"><span class="bf-msection-label">'+Util.esc(sec.title)+'</span><span class="bf-msection-rule"></span></div>'
+        : '';
+      return head + '<div class="bf-results" data-bf-results data-card="essays" data-sec-idx="'+i+'">'+ Blocks.essay.render(sec.block, synthCtx) +'</div>';
+    }).join('');
     if(results.length > shown.length){
       resultsHtml += '<div class="bf-more-row"><button type="button" class="btn-ghost bf-more" id="bfMore">Carregar mais ('+(results.length - shown.length)+' restantes)</button></div>';
     }
@@ -29606,17 +29657,15 @@ Renderers.essayBank.mount = function(stageEl, route){
   const PAGE_SIZE = 5;
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
-  const synthBlock = {
-    id: '__bank_block_e',
-    type: 'essay',
-    title: '',
-    items: shown.map(function(q){ return { bank_id: q.id }; })
-  };
+  const sections = _bankBuildEssaySections(shown, f.org || 'secao');
   const synthCtx = { unitId:'__bank_e', store: Store, suppressActions: true,
     moduleId: null, chapterId: null, unitTitle: 'Banco de discursivas' };
-  const resultsEl = stageEl.querySelector('[data-bf-results]');
-  if(resultsEl && typeof Blocks !== 'undefined' && Blocks.essay && Blocks.essay.mount){
-    try { Blocks.essay.mount(resultsEl, synthBlock, synthCtx); } catch(e){ console.warn('[bankEssays] mount falhou:', e); }
+  if(typeof Blocks !== 'undefined' && Blocks.essay && Blocks.essay.mount){
+    stageEl.querySelectorAll('[data-bf-results][data-card="essays"]').forEach(function(el){
+      const idx = parseInt(el.getAttribute('data-sec-idx'), 10) || 0;
+      const sec = sections[idx];
+      if(sec){ try { Blocks.essay.mount(el, sec.block, synthCtx); } catch(e){ console.warn('[bankEssays] mount falhou:', e); } }
+    });
   }
   const moreBtn = stageEl.querySelector('#bfMore');
   if(moreBtn){
