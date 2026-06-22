@@ -1159,6 +1159,16 @@ html[data-theme="light"] .sim-exam-topbar{
 }
 .tb-user-stack{display:flex;flex-direction:column;gap:.05rem}
 /* Sino de notificações (Fase 2.4) */
+.tb-ubt{
+  display:inline-flex;align-items:center;gap:.3rem;
+  height:32px;padding:0 .7rem;border-radius:999px;
+  border:1px solid var(--accent-border);background:var(--accent-lo);
+  color:var(--accent);text-decoration:none;
+  font-family:var(--mono);font-size:.8rem;font-variant-numeric:tabular-nums;
+  transition:all .25s ease;white-space:nowrap;
+}
+.tb-ubt:hover{background:var(--accent);color:var(--bg)}
+.tb-ubt .ubt-sym{font-family:var(--serif);font-weight:600}
 .tb-bell{
   position:relative;display:inline-flex;align-items:center;justify-content:center;
   width:32px;height:32px;border-radius:50%;
@@ -8281,6 +8291,10 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
         </div>
       </div>
     </div>
+    <!-- Saldo de UbiTokens (clica → Carteira) -->
+    <a class="tb-ubt" id="tbUbt" href="#/conta/carteira" title="Seus UbiTokens — clique para ver a Carteira" aria-label="UbiTokens">
+      <span class="ubt-sym">ⓤ</span> <span id="tbUbtVal">—</span>
+    </a>
     <!-- Bell de notificações (Fase 2.4) -->
     <a class="tb-bell" id="tbBell" href="#/notificacoes" title="Notificações" aria-label="Notificações">
       <svg viewBox="0 0 24 24"><path d="M18 16v-5a6 6 0 0 0-12 0v5l-2 2v1h16v-1z"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
@@ -15363,6 +15377,19 @@ Blocks.essay = {
             return;
           }
 
+          // Pré-checagem de saldo (instantânea, no navegador): bloqueia ANTES de
+          // chamar a IA, sem nem mostrar "Corrigindo…". O servidor faz a checagem
+          // definitiva também (defesa em profundidade).
+          if(window.UbtWallet){
+            const _saldo = UbtWallet.get();
+            const _est = Math.max(0.05, Math.min(2, (text.length || 0) / 4000));
+            if(_saldo != null && _saldo < _est){
+              if(typeof window.ueToast === 'function')
+                window.ueToast('Saldo de UbiTokens insuficiente (você tem ⓤ' + _saldo.toFixed(2) + ', a correção custa ~ⓤ' + _est.toFixed(2) + '). Adicione mais na sua Carteira (Minha Conta) ou aguarde a renovação.', 'error');
+              return;
+            }
+          }
+
           // Loading state — Claude pode demorar até ~60s para correção
           // longa; UX clara evita que o aluno ache que travou.
           const originalLabel = submitBtn.textContent;
@@ -15394,6 +15421,13 @@ Blocks.essay = {
 
           ctx.store.updateEssay(ctx.unitId, block.id, itemId, payload);
           injectEssayEvaluation(itemEl, item, payload);
+
+          // Atualiza o saldo (topbar/cache): usa o saldo devolvido pela função, ou
+          // relê do banco. Só quando foi correção real por IA (mock não cobra).
+          if(usedAI && window.UbtWallet){
+            if(_aiResult && _aiResult.ubt && typeof _aiResult.ubt.saldo === 'number') UbtWallet.set(_aiResult.ubt.saldo);
+            else UbtWallet.load();
+          }
 
           submitBtn.disabled = false;
           submitBtn.textContent = originalLabel;
@@ -18443,6 +18477,32 @@ async function _loadWalletPane(stageEl, user){
   });
 }
 window._loadWalletPane = _loadWalletPane;
+
+// UbtWallet — saldo em cache + chip da topbar. Usado pra mostrar o saldo
+// sempre visível e pra pré-checar (no navegador) antes de gastar IA.
+window.UbtWallet = (function(){
+  let _saldo = null;
+  function _render(){
+    const el = document.getElementById('tbUbtVal');
+    if(el) el.textContent = (_saldo == null) ? '—' : _ubtFmt(_saldo);
+  }
+  async function load(){
+    try {
+      const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+      if(!u || !window._sb){ _saldo = null; _render(); return null; }
+      const { data } = await window._sb.schema('carteira').from('contas').select('saldo').eq('user_id', u.id).maybeSingle();
+      _saldo = data ? Number(data.saldo) : 0;
+      _render();
+      return _saldo;
+    } catch(e){ console.warn('[UbtWallet load]', e); return _saldo; }
+  }
+  return {
+    load,
+    get: function(){ return _saldo; },
+    set: function(v){ if(typeof v === 'number'){ _saldo = v; _render(); } },
+    render: _render
+  };
+})();
 
 Renderers.account = function(route){
   const user = Auth.getUser();
@@ -34700,6 +34760,12 @@ const AppShell = {
       userName.textContent = user ? (label || user.nickname || user.name) : 'Visitante';
     }
     if(userRole) userRole.textContent = user ? ((user.role === 'admin' || user.role === 'superadmin') ? (user.role === 'superadmin' ? 'Super' : 'Admin') : 'Aluno') : 'Login';
+    // Saldo de UbiTokens na topbar (carrega 1x quando o usuário é conhecido).
+    const ubtChip = document.getElementById('tbUbt');
+    if(ubtChip) ubtChip.style.display = user ? '' : 'none';
+    if(user && window.UbtWallet){
+      if(UbtWallet.get() === null) UbtWallet.load(); else UbtWallet.render();
+    }
     // Sino de notificações — mostra badge com unreadCount
     if(bell){
       bell.style.display = user ? '' : 'none';
