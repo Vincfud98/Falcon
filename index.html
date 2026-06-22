@@ -28469,23 +28469,34 @@ function _buildEssayBankFromBlocks(){
     if(!b || !b.content) return;
     if(b.type !== 'essay') return;
     const items = b.content.items || [];
+    const qb = window._QBank || {};
     items.forEach(function(it){
       if(!it) return;
-      // O item do bloco referencia a discursiva do banco por bank_id (ou
-      // bank_question_id, conforme o caminho de criação). Sem essa referência
-      // não há o que mostrar no banco — ignora (espelha o builder das objetivas,
-      // que só emite itens resolvidos do banco).
-      const bankId = it.bank_id || it.bank_question_id || it.id;
+      // O item do bloco referencia a discursiva por bank_question_id (banco REAL
+      // questoes — conteúdo em window._QBank) OU por bank_id (legado —
+      // UbiqueStore.essays). Sem referência não há o que mostrar — ignora.
+      const isQBankRef = it.bank_question_id != null;
+      const bankId = it.bank_question_id || it.bank_id || it.id;
       if(!bankId) return;
-      // Resolve o conteúdo da discursiva do banco (enunciado/critérios/origin/ano)
-      // pros filtros (keyword/origem/ano) funcionarem e pra IA mapear depois.
-      // IMPORTANTE: resolve DIRETO do store (UbiqueStore.essays.get), NÃO via
-      // EssayBank.getById — getById cai no _getDerivedEBankMap, que chama este
-      // mesmo builder → recursão infinita (RangeError). O store é lookup simples.
-      const banked = (window.UbiqueStore && UbiqueStore.essays && UbiqueStore.essays.get) ? UbiqueStore.essays.get(bankId) : null;
+      // Conteúdo SÓ pros filtros (ano/origem/keyword). O render usa o resolver
+      // com o ref ORIGINAL (preservado em _essayRef), então não dependemos do
+      // que montamos aqui pra exibir. NÃO usar EssayBank.getById: ele cai no
+      // _getDerivedEBankMap → este mesmo builder → recursão infinita.
+      let banked = null;
+      if(isQBankRef){
+        banked = (qb.questions || []).find(function(x){ return String(x.id) === String(bankId); }) || null;
+      } else if(window.UbiqueStore && UbiqueStore.essays && UbiqueStore.essays.get){
+        banked = UbiqueStore.essays.get(bankId) || null;
+      }
       const item = Object.assign({}, banked || {}, it);
       item.id = String(bankId);                  // CRÍTICO: sobrevive ao dedup de _bankItemsForEssays
       item.bank_question_id = String(bankId);    // p/ mapear a busca semântica (IA) na D2
+      // Ref original pro render: o resolver _resolveEssayItem usa bank_id OU
+      // bank_question_id — preservamos exatamente o que a unidade usa, pro
+      // conteúdo (enunciado/critérios/modelos/textos-base) resolver igual.
+      item._essayRef = isQBankRef ? { bank_question_id: String(bankId) } : { bank_id: String(bankId) };
+      // statement p/ a busca por palavra-chave bater no enunciado/comando.
+      if(!item.statement) item.statement = (banked && (banked.command || banked.enunciado)) || item.statement || '';
       if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
       // appears_in: faz a cadeia matéria/edital/concurso funcionar (unit → edital).
       item.appears_in = [{ unit_id: b.unit_id, block_id: b.id }];
@@ -29232,7 +29243,10 @@ function _bankBuildEssaySections(filteredEssays, mode){
 
   const tagged = (filteredEssays || []).map(function(q){
     const u = (q && Array.isArray(q.appears_in) && q.appears_in[0]) || null;
-    return { item: { bank_id: q.id }, materia: _bankMateriaOfUnit(u ? u.unit_id : null, ctx, subjById) };
+    // Emite o ref ORIGINAL (bank_question_id p/ _QBank, ou bank_id p/ legado) pra
+    // o resolver achar o conteúdo certo. Fallback p/ bank_id se _essayRef faltar.
+    const ref = (q && q._essayRef) ? Object.assign({}, q._essayRef) : { bank_id: q.id };
+    return { item: ref, materia: _bankMateriaOfUnit(u ? u.unit_id : null, ctx, subjById) };
   });
 
   const mkBlock = function(items, sufx){
