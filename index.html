@@ -8252,6 +8252,9 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
   const URL = 'https://kluqjqojxzpuiauuidwx.supabase.co';
   const KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtsdXFqcW9qeHpwdWlhdXVpZHd4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk2MTU0NDMsImV4cCI6MjA4NTE5MTQ0M30.pY8-vlMFmKAZs5MROg8OJGzsNJGD3Gg0JXbulZmpuS4';
   try { window._sb = supabase.createClient(URL, KEY); } catch(e) { window._sb = null; }
+  // Expostos p/ chamadas que precisam de streaming manual (ex.: tutor-chat),
+  // já que functions.invoke não faz streaming. KEY é a chave anon (pública).
+  window._sbUrl = URL; window._sbKey = KEY;
   // ✅ Aluno também usa Supabase como fonte de conteúdo (Fase 2)
   window.UBIQUE_USE_SUPABASE = true;
 })();
@@ -27368,6 +27371,252 @@ function openUnitStatsModal(unit){
 window.openUnitStatsModal = openUnitStatsModal;
 
 /* UNIT VIEW */
+// ════════════════════════════════════════════════════════════════════
+// Tutor IA — drawer de chat na unidade (Fase 5A)
+//   Abre pelo botão ✨ da unidade. Manda o texto visível como contexto,
+//   chama a Edge Function tutor-chat em STREAMING (efeito digitando),
+//   debita UbiTokens pela carteira e salva a conversa por unidade.
+// ════════════════════════════════════════════════════════════════════
+window.TutorIA = (function(){
+  const SPARK = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8z"/></svg>';
+  const MODELOS = [
+    { key:'rapido',      nome:'Rápido',      modelo:'Haiku',  custo:'menor custo' },
+    { key:'equilibrado', nome:'Equilibrado', modelo:'Sonnet', custo:'custo médio' },
+    { key:'avancado',    nome:'Avançado',    modelo:'Opus',   custo:'maior custo' },
+  ];
+  const CUSTO_EST = { rapido:'~0,05', equilibrado:'~0,15', avancado:'~0,3' };
+
+  let _ctx = { unitId:null, unitTitle:'', unitText:'', conversaId:null, msgs:[] };
+  let _modelo = (function(){ try { return localStorage.getItem('falcon_tutor_modelo') || 'equilibrado'; } catch(_){ return 'equilibrado'; } })();
+  let _sending = false, _styled = false;
+
+  function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  // markdown-lite: **negrito**, `código`, "- " listas e quebras de linha.
+  function _md(s){
+    let h = _esc(s);
+    h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
+    h = h.replace(/^[ \t]*[-•]\s+(.*)$/gm, '<span class="tutor-li">$1</span>');
+    h = h.replace(/\n/g, '<br>');
+    return h;
+  }
+  function _scroll(){ const m = document.getElementById('tutorMsgs'); if(m) m.scrollTop = m.scrollHeight; }
+
+  function _ensureStyles(){
+    if(_styled) return; _styled = true;
+    const st = document.createElement('style');
+    st.textContent = `
+    .tutor-drawer{ position:fixed; top:var(--nav-h); right:0; height:calc(100vh - var(--nav-h)); width:420px; min-width:320px; max-width:80vw; background:var(--bg-card); border-left:1px solid var(--accent-border); box-shadow:-24px 0 60px -24px rgba(0,0,0,.6); z-index:96; display:flex; }
+    .tutor-drawer[hidden]{ display:none; }
+    .tutor-drawer-inner{ flex:1; min-width:0; display:flex; flex-direction:column; padding:1rem 1.1rem; }
+    .tutor-head{ display:flex; align-items:center; justify-content:space-between; gap:.6rem; padding-bottom:.7rem; border-bottom:1px solid var(--accent-border-soft); margin-bottom:.5rem; }
+    .tutor-head-l{ display:flex; align-items:center; gap:.45rem; min-width:0; font-family:var(--sans); }
+    .tutor-spark{ color:var(--accent); display:inline-flex; }
+    .tutor-spark svg{ display:block; }
+    .tutor-title{ font-weight:500; font-size:.92rem; color:var(--text); }
+    .tutor-unit{ font-size:.62rem; color:var(--text-mute); letter-spacing:.05em; text-transform:uppercase; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:140px; }
+    .tutor-x{ background:transparent; border:1px solid var(--accent-border-soft); border-radius:var(--radius); width:30px; height:30px; color:var(--text-dim); font-size:1rem; line-height:1; cursor:pointer; flex-shrink:0; }
+    .tutor-x:hover{ color:var(--accent); border-color:var(--accent-border); }
+    .tutor-msgs{ flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:.7rem; padding:.4rem .1rem .6rem; }
+    .tutor-msg{ display:flex; max-width:92%; }
+    .tutor-msg.user{ align-self:flex-end; }
+    .tutor-msg.assistant{ align-self:flex-start; }
+    .tutor-bubble{ font-family:var(--sans); font-size:.86rem; line-height:1.55; border-radius:12px; padding:.6rem .8rem; }
+    .tutor-msg.user .tutor-bubble{ background:var(--accent-lo); border:1px solid var(--accent-border-soft); color:var(--text); border-bottom-right-radius:3px; }
+    .tutor-msg.assistant .tutor-bubble{ background:var(--bg-elevated); border:1px solid var(--border); color:var(--text); border-bottom-left-radius:3px; }
+    .tutor-bubble strong{ color:var(--accent); font-weight:600; }
+    .tutor-bubble code{ font-family:var(--mono); font-size:.8em; background:var(--bg-card); padding:.05rem .3rem; border-radius:3px; }
+    .tutor-bubble .tutor-li{ display:list-item; margin-left:1.1rem; list-style:disc; }
+    .tutor-welcome{ font-family:var(--sans); font-size:.84rem; color:var(--text-dim); line-height:1.55; padding:.5rem .2rem; }
+    .tutor-welcome strong{ color:var(--accent); }
+    .tutor-typing{ letter-spacing:.12em; color:var(--text-mute); animation:tutorBlink 1s steps(3,end) infinite; }
+    @keyframes tutorBlink{ to{ opacity:.3; } }
+    .tutor-err{ color:#d47973; font-size:.82rem; }
+    .tutor-composer{ border-top:1px solid var(--accent-border-soft); padding-top:.6rem; }
+    .tutor-composer-top{ display:flex; align-items:center; justify-content:space-between; gap:.5rem; margin-bottom:.5rem; }
+    .tutor-model{ position:relative; }
+    .tutor-model-btn{ display:inline-flex; align-items:center; gap:.35rem; background:transparent; border:1px solid var(--accent-border-soft); border-radius:999px; padding:.28rem .65rem; cursor:pointer; color:var(--text-dim); font-family:var(--sans); font-size:.68rem; }
+    .tutor-model-btn:hover{ color:var(--accent); border-color:var(--accent-border); }
+    .tutor-model-chev{ font-size:.6rem; opacity:.7; }
+    .tutor-model-menu{ position:absolute; bottom:calc(100% + 6px); left:0; min-width:230px; background:var(--bg-card); border:1px solid var(--accent-border); border-radius:var(--radius); box-shadow:0 12px 30px -12px rgba(0,0,0,.6); padding:.3rem; z-index:5; }
+    .tutor-model-menu[hidden]{ display:none; }
+    .tutor-model-opt{ display:flex; align-items:center; justify-content:space-between; gap:.6rem; width:100%; background:transparent; border:none; border-radius:var(--radius); padding:.45rem .55rem; cursor:pointer; color:var(--text); font-family:var(--sans); font-size:.78rem; text-align:left; }
+    .tutor-model-opt:hover{ background:var(--accent-lo); }
+    .tutor-model-opt.on{ color:var(--accent); }
+    .tutor-model-opt small{ color:var(--text-mute); font-size:.86em; margin-left:.25rem; }
+    .tmo-cost{ color:var(--text-mute); font-size:.64rem; white-space:nowrap; }
+    .tutor-cost{ cursor:default; }
+    .tutor-input-row{ display:flex; align-items:flex-end; gap:.5rem; }
+    .tutor-input{ flex:1; min-width:0; resize:none; max-height:140px; background:var(--bg-elevated); border:1px solid var(--border); border-radius:12px; padding:.55rem .7rem; color:var(--text); font-family:var(--sans); font-size:.86rem; line-height:1.45; }
+    .tutor-input:focus{ outline:none; border-color:var(--accent-border); }
+    .tutor-send{ flex-shrink:0; width:38px; height:38px; display:inline-flex; align-items:center; justify-content:center; background:var(--accent-lo); border:1px solid var(--accent-border); border-radius:10px; color:var(--accent); cursor:pointer; }
+    .tutor-send:hover{ background:var(--accent); color:var(--bg-card); }
+    .tutor-send:disabled{ opacity:.5; cursor:default; }
+    @media (max-width:720px){ .tutor-drawer{ width:100vw; max-width:100vw; } }
+    `;
+    document.head.appendChild(st);
+  }
+
+  function _renderModelSelector(d){
+    const wrap = d.querySelector('#tutorModelWrap'); if(!wrap) return;
+    const m = MODELOS.find(x => x.key === _modelo) || MODELOS[1];
+    wrap.innerHTML = '<button type="button" class="tutor-model-btn" id="tutorModelBtn" data-tip="Trocar o modelo de IA (afeta o custo)">' + _esc(m.nome) + ' <span class="tutor-model-chev">&#9662;</span></button>'
+      + '<div class="tutor-model-menu" id="tutorModelMenu" hidden>'
+      + MODELOS.map(o => '<button type="button" class="tutor-model-opt' + (o.key===_modelo?' on':'') + '" data-model="' + o.key + '">'
+          + '<span class="tmo-l">' + _esc(o.nome) + ' <small>' + _esc(o.modelo) + '</small></span>'
+          + '<span class="tmo-cost">' + _esc(o.custo) + '</span></button>').join('')
+      + '</div>';
+    const btn = wrap.querySelector('#tutorModelBtn'), menu = wrap.querySelector('#tutorModelMenu');
+    btn.addEventListener('click', (e) => { e.stopPropagation(); menu.hidden = !menu.hidden; });
+    wrap.querySelectorAll('.tutor-model-opt').forEach(b => b.addEventListener('click', () => {
+      _modelo = b.getAttribute('data-model');
+      try { localStorage.setItem('falcon_tutor_modelo', _modelo); } catch(_){}
+      menu.hidden = true; _renderModelSelector(d); _updateCostHint();
+    }));
+    document.addEventListener('click', function _close(){ if(menu) menu.hidden = true; document.removeEventListener('click', _close); });
+    if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(wrap);
+  }
+
+  function _updateCostHint(){
+    const el = document.getElementById('tutorCostVal'); if(el) el.textContent = CUSTO_EST[_modelo] || '~';
+  }
+
+  function _drawer(){
+    let d = document.getElementById('tutorDrawer');
+    if(d) return d;
+    _ensureStyles();
+    d = document.createElement('aside');
+    d.id = 'tutorDrawer'; d.className = 'tutor-drawer'; d.hidden = true;
+    d.innerHTML =
+      '<div class="tutor-drawer-inner">'
+      + '<header class="tutor-head"><div class="tutor-head-l"><span class="tutor-spark">' + SPARK + '</span> <span class="tutor-title">Tutor IA</span> <span class="tutor-unit" id="tutorUnit"></span></div>'
+      + '<button class="tutor-x" id="tutorClose" aria-label="Fechar" data-tip="Fechar">&#10005;</button></header>'
+      + '<div class="tutor-msgs" id="tutorMsgs"></div>'
+      + '<div class="tutor-composer"><div class="tutor-composer-top"><div class="tutor-model" id="tutorModelWrap"></div>'
+      + '<span class="ubt-cost tutor-cost" id="tutorCost" data-tip="Custo aproximado por resposta, debitado da sua carteira"><span class="ubt-sym">&#9433;</span> <span id="tutorCostVal">~</span></span></div>'
+      + '<div class="tutor-input-row"><textarea id="tutorInput" class="tutor-input" rows="1" placeholder="Pergunte ao tutor sobre esta unidade…"></textarea>'
+      + '<button class="tutor-send" id="tutorSend" aria-label="Enviar" data-tip="Enviar (Enter)"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div></div></div>';
+    document.body.appendChild(d);
+    d.querySelector('#tutorClose').addEventListener('click', close);
+    const inp = d.querySelector('#tutorInput');
+    inp.addEventListener('input', () => { inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 140) + 'px'; });
+    inp.addEventListener('keydown', (e) => { if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); _send(); } });
+    d.querySelector('#tutorSend').addEventListener('click', _send);
+    _renderModelSelector(d);
+    if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(d);
+    return d;
+  }
+
+  function _addMsg(role, html){
+    const msgsEl = document.getElementById('tutorMsgs'); if(!msgsEl) return null;
+    const wrap = document.createElement('div'); wrap.className = 'tutor-msg ' + (role === 'user' ? 'user' : 'assistant');
+    wrap.innerHTML = '<div class="tutor-bubble">' + html + '</div>';
+    msgsEl.appendChild(wrap); _scroll();
+    return wrap;
+  }
+
+  function _renderWelcome(){
+    const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    const ap = (me && (me.nickname || me.displayName || me.name)) || '';
+    const msgsEl = document.getElementById('tutorMsgs'); if(!msgsEl) return;
+    const w = document.createElement('div'); w.className = 'tutor-welcome';
+    w.innerHTML = 'Olá' + (ap ? ', <strong>' + _esc(ap) + '</strong>' : '') + '! Sou seu tutor desta unidade. Pergunte o que quiser sobre <strong>' + _esc(_ctx.unitTitle || 'o conteúdo') + '</strong> — respondo de forma direta e te provoco a aprofundar para a prova.';
+    msgsEl.appendChild(w);
+  }
+
+  async function _loadHistory(){
+    _ctx.conversaId = null; _ctx.msgs = [];
+    const msgsEl = document.getElementById('tutorMsgs'); if(msgsEl) msgsEl.innerHTML = '';
+    try {
+      const C = window._sb.schema('ia');
+      const { data: convs } = await C.from('tutor_conversas').select('id').eq('unit_id', _ctx.unitId).order('atualizado_em', { ascending:false }).limit(1);
+      if(convs && convs.length){
+        _ctx.conversaId = convs[0].id;
+        const { data: ms } = await C.from('tutor_mensagens').select('role,conteudo').eq('conversa_id', _ctx.conversaId).order('criado_em', { ascending:true });
+        (ms || []).forEach(m => { _ctx.msgs.push({ role:m.role, content:m.conteudo }); _addMsg(m.role, _md(m.conteudo)); });
+      }
+    } catch(e){ console.warn('[tutor] histórico:', e && e.message); }
+    if(!_ctx.msgs.length) _renderWelcome();
+  }
+
+  async function _send(){
+    if(_sending) return;
+    const inp = document.getElementById('tutorInput'); if(!inp) return;
+    const text = (inp.value || '').trim(); if(!text) return;
+    inp.value = ''; inp.style.height = 'auto';
+    _sending = true;
+    const sendBtn = document.getElementById('tutorSend'); if(sendBtn) sendBtn.disabled = true;
+
+    _addMsg('user', _md(text));
+    const historico = _ctx.msgs.slice();
+    _ctx.msgs.push({ role:'user', content:text });
+    const botEl = _addMsg('assistant', '<span class="tutor-typing">&#9679;&#9679;&#9679;</span>');
+    const botBody = botEl.querySelector('.tutor-bubble');
+
+    const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    const apelido = (me && (me.nickname || me.displayName || me.name)) || 'aluno';
+    let acc = '';
+    try {
+      const { data: sess } = await window._sb.auth.getSession();
+      const token = sess && sess.session && sess.session.access_token;
+      const resp = await fetch((window._sbUrl || '') + '/functions/v1/tutor-chat', {
+        method:'POST',
+        headers:{ 'Authorization':'Bearer ' + token, 'apikey': window._sbKey || '', 'content-type':'application/json' },
+        body: JSON.stringify({ conversa_id:_ctx.conversaId, unit_id:_ctx.unitId, unit_title:_ctx.unitTitle, unit_text:_ctx.unitText, mensagem:text, historico:historico, modelo:_modelo, apelido:apelido, modo:'duvida' })
+      });
+      const ct = resp.headers.get('content-type') || '';
+      if(ct.indexOf('application/json') >= 0){
+        const j = await resp.json().catch(() => ({}));
+        if(j && j.ubt_error){
+          botBody.innerHTML = '<span class="tutor-err">Saldo de UbiTokens insuficiente para o tutor. Adicione mais na sua Carteira (Minha Conta) ou aguarde a renovação.</span>';
+          if(window.ueToast) ueToast('Saldo de UbiTokens insuficiente para o tutor.', 'error');
+        } else {
+          botBody.innerHTML = '<span class="tutor-err">Não consegui responder agora. Tente novamente.</span>';
+        }
+        _ctx.msgs.pop();
+        _sending = false; if(sendBtn) sendBtn.disabled = false; return;
+      }
+      const reader = resp.body.getReader(); const dec = new TextDecoder();
+      let buf = ''; botBody.innerHTML = '';
+      while(true){
+        const { done, value } = await reader.read(); if(done) break;
+        buf += dec.decode(value, { stream:true });
+        const parts = buf.split('\n\n'); buf = parts.pop() || '';
+        for(const p of parts){
+          const line = p.trim(); if(line.indexOf('data:') !== 0) continue;
+          let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch(_){ continue; }
+          if(ev.type === 'delta'){ acc += ev.text; botBody.innerHTML = _md(acc); _scroll(); }
+          else if(ev.type === 'done'){
+            _ctx.conversaId = ev.conversa_id || _ctx.conversaId;
+            if(window.UbtWallet) UbtWallet.load();
+          }
+        }
+      }
+      if(acc){ _ctx.msgs.push({ role:'assistant', content:acc }); }
+      else { botBody.innerHTML = '<span class="tutor-err">Resposta vazia. Tente novamente.</span>'; }
+    } catch(e){
+      botBody.innerHTML = '<span class="tutor-err">Erro de conexão. Tente novamente.</span>';
+      console.warn('[tutor] send:', e && e.message);
+    }
+    _sending = false; if(sendBtn) sendBtn.disabled = false;
+    const inp2 = document.getElementById('tutorInput'); if(inp2) inp2.focus();
+  }
+
+  function open(ctx){
+    const d = _drawer();
+    _ctx.unitId = (ctx && ctx.unitId) || null;
+    _ctx.unitTitle = (ctx && ctx.unitTitle) || '';
+    _ctx.unitText = (ctx && ctx.unitText) || '';
+    const u = d.querySelector('#tutorUnit'); if(u) u.textContent = _ctx.unitTitle || '';
+    d.hidden = false;
+    _updateCostHint();
+    _loadHistory().then(() => { const inp = document.getElementById('tutorInput'); if(inp) inp.focus(); });
+  }
+  function close(){ const d = document.getElementById('tutorDrawer'); if(d) d.hidden = true; }
+
+  return { open: open, close: close };
+})();
+
 Renderers.unit = function(route){
   const found = Util.findUnit(route.params.moduleId, route.params.unitId);
   if(!found) return `<div class="empty"><div class="empty-title">Unidade não encontrada</div></div>`;
@@ -27494,6 +27743,7 @@ Renderers.unit = function(route){
       <button class="icon-btn ${prog.state==='completed'?'on':''}" id="markCompleteBtn">${Icons.check} ${prog.state==='completed'?'Unidade concluída':'Marcar unidade como concluída'}</button>
       <button class="icon-btn" id="addNoteBtn">${Icons.note} Adicionar nota <span class="note-count-badge" id="noteCountBadge"${_unitNoteCount>0?'':' style="display:none"'}>${_unitNoteCount}</span></button>
       <button class="icon-btn" id="unitStatsBtn"${getUnitQuizStats(unit).hasVerified?'':' hidden'}>${Icons.statistics||''} Estatísticas</button>
+      <button class="icon-btn tutor-launch" id="tutorLaunchBtn" type="button" title="Abrir o tutor de IA desta unidade"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8z"/></svg> Tutor IA</button>
     </div>
   </div>
   <div class="unit-layout" id="unitLayout">
@@ -27757,6 +28007,14 @@ Renderers.unit.mount = function(stageEl, route){
   // Unit actions — cascade "Mark unit as finished" to every block inside
   const _unitStatsBtn = stageEl.querySelector('#unitStatsBtn');
   if(_unitStatsBtn) _unitStatsBtn.addEventListener('click', () => openUnitStatsModal(unit));
+
+  // Tutor IA — abre o drawer com o texto VISÍVEL da unidade como contexto.
+  const _tutorBtn = stageEl.querySelector('#tutorLaunchBtn');
+  if(_tutorBtn) _tutorBtn.addEventListener('click', () => {
+    let stageTxt = '';
+    try { const bs = stageEl.querySelector('#blockStage'); stageTxt = bs ? (bs.innerText || '').trim().slice(0, 14000) : ''; } catch(_){}
+    if(window.TutorIA) TutorIA.open({ unitId: unit.id, unitTitle: (unit.number ? unit.number + ' · ' : '') + unit.title, unitText: stageTxt });
+  });
 
   stageEl.querySelector('#markCompleteBtn').addEventListener('click', () => {
     const btn = stageEl.querySelector('#markCompleteBtn');
