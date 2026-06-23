@@ -27416,6 +27416,34 @@ window.TutorIA = (function(){
   }
   function _scroll(){ const m = document.getElementById('tutorMsgs'); if(m) m.scrollTop = m.scrollHeight; }
 
+  // Sugestões de continuação (follow-ups): a IA termina com uma linha
+  // "[FOLLOWUPS] q1 | q2 | q3". Separamos do texto e mostramos como chips.
+  function _stripFu(text, finalClean){
+    let t = String(text == null ? '' : text);
+    const idx = t.search(/\[FOLLOWUPS\]/i);
+    if(idx >= 0) t = t.slice(0, idx);
+    else if(!finalClean) t = t.replace(/\n*\[F(?:O(?:L(?:L(?:O(?:W(?:U(?:P(?:S(?:\])?)?)?)?)?)?)?)?)?\s*$/i, '');
+    return t.replace(/\s+$/, '');
+  }
+  function _parseFu(text){
+    const m = String(text == null ? '' : text).match(/\[FOLLOWUPS\]([\s\S]*)$/i);
+    if(!m) return [];
+    return m[1].split(/\||\n/).map(function(s){ return s.replace(/^[-*\d.\s]+/, '').trim(); }).filter(function(s){ return s.length > 2; }).slice(0, 4);
+  }
+  function _renderFollowups(msgEl, arr){
+    if(!msgEl || !arr || !arr.length) return;
+    const box = document.createElement('div'); box.className = 'tutor-followups';
+    arr.forEach(function(q){
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'tutor-fu'; b.textContent = q;
+      b.addEventListener('click', function(){
+        const inp = document.getElementById('tutorInput');
+        if(inp){ inp.value = q; inp.style.height = 'auto'; inp.style.height = Math.min(inp.scrollHeight, 140) + 'px'; inp.focus(); }
+      });
+      box.appendChild(b);
+    });
+    msgEl.appendChild(box);
+  }
+
   function _ensureStyles(){
     if(_styled) return; _styled = true;
     const st = document.createElement('style');
@@ -27432,9 +27460,12 @@ window.TutorIA = (function(){
     .tutor-x{ background:transparent; border:1px solid var(--accent-border-soft); border-radius:var(--radius); width:30px; height:30px; color:var(--text-dim); font-size:1rem; line-height:1; cursor:pointer; flex-shrink:0; }
     .tutor-x:hover{ color:var(--accent); border-color:var(--accent-border); }
     .tutor-msgs{ flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:.7rem; padding:.4rem .1rem .6rem; }
-    .tutor-msg{ display:flex; max-width:92%; }
-    .tutor-msg.user{ align-self:flex-end; }
-    .tutor-msg.assistant{ align-self:flex-start; }
+    .tutor-msg{ display:flex; flex-direction:column; max-width:92%; }
+    .tutor-msg.user{ align-self:flex-end; align-items:flex-end; }
+    .tutor-msg.assistant{ align-self:flex-start; align-items:flex-start; }
+    .tutor-followups{ display:flex; flex-direction:column; gap:.35rem; margin-top:.5rem; width:100%; }
+    .tutor-fu{ text-align:left; background:transparent; border:1px solid var(--accent-border-soft); border-radius:10px; padding:.45rem .65rem; color:var(--text-dim); font-family:var(--sans); font-size:.78rem; line-height:1.35; cursor:pointer; transition:background .15s, color .15s, border-color .15s; }
+    .tutor-fu:hover{ background:var(--accent-lo); color:var(--accent); border-color:var(--accent-border); }
     .tutor-bubble{ font-family:var(--sans); font-size:.86rem; line-height:1.55; border-radius:12px; padding:.6rem .8rem; }
     .tutor-msg.user .tutor-bubble{ background:var(--accent-lo); border:1px solid var(--accent-border-soft); color:var(--text); border-bottom-right-radius:3px; }
     .tutor-msg.assistant .tutor-bubble{ background:var(--bg-elevated); border:1px solid var(--border); color:var(--text); border-bottom-left-radius:3px; }
@@ -27452,9 +27483,11 @@ window.TutorIA = (function(){
     .tutor-bubble .tutor-hr{ border:none; border-top:1px solid var(--accent-border-soft); margin:.55rem 0; }
     .tutor-drawer-resize{ width:7px; cursor:ew-resize; flex-shrink:0; align-self:stretch; }
     .tutor-drawer-resize:hover{ background:var(--accent-lo); }
-    .tutor-fab{ position:fixed; right:20px; top:calc(var(--nav-h) + 22px); z-index:80; width:46px; height:46px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; background:var(--bg-card); border:1px solid var(--accent-border); color:var(--accent); cursor:pointer; box-shadow:0 8px 22px -10px rgba(0,0,0,.55); transition:background .2s, transform .15s; }
-    .tutor-fab:hover{ background:var(--accent-lo); transform:translateY(-1px); }
-    .tutor-fab svg{ width:20px; height:20px; }
+    /* Satélite: mesmo estilo do icon-btn (quadrado, cinza), só o ícone, fixo à
+       direita. Aparece só quando o botão "Tutor" das ações sai da tela. */
+    .tutor-fab{ position:fixed; right:20px; top:calc(var(--nav-h) + 22px); z-index:80; width:42px; height:42px; padding:0; display:inline-flex; align-items:center; justify-content:center; background:var(--bg-card); }
+    .tutor-fab[hidden]{ display:none; }
+    .tutor-fab svg{ width:16px; height:16px; }
     .tutor-welcome{ font-family:var(--sans); font-size:.84rem; color:var(--text-dim); line-height:1.55; padding:.5rem .2rem; }
     .tutor-welcome strong{ color:var(--accent); }
     .tutor-typing{ letter-spacing:.12em; color:var(--text-mute); animation:tutorBlink 1s steps(3,end) infinite; }
@@ -27623,15 +27656,20 @@ window.TutorIA = (function(){
         for(const p of parts){
           const line = p.trim(); if(line.indexOf('data:') !== 0) continue;
           let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch(_){ continue; }
-          if(ev.type === 'delta'){ acc += ev.text; botBody.innerHTML = _md(acc); _scroll(); }
+          if(ev.type === 'delta'){ acc += ev.text; botBody.innerHTML = _md(_stripFu(acc, false)); _scroll(); }
           else if(ev.type === 'done'){
             _ctx.conversaId = ev.conversa_id || _ctx.conversaId;
             if(window.UbtWallet) UbtWallet.load();
           }
         }
       }
-      if(acc){ _ctx.msgs.push({ role:'assistant', content:acc }); }
-      else { botBody.innerHTML = '<span class="tutor-err">Resposta vazia. Tente novamente.</span>'; }
+      if(acc){
+        const ans = _stripFu(acc, true);
+        botBody.innerHTML = _md(ans);
+        _ctx.msgs.push({ role:'assistant', content: ans });
+        _renderFollowups(botEl, _parseFu(acc));
+        _scroll();
+      } else { botBody.innerHTML = '<span class="tutor-err">Resposta vazia. Tente novamente.</span>'; }
     } catch(e){
       botBody.innerHTML = '<span class="tutor-err">Erro de conexão. Tente novamente.</span>';
       console.warn('[tutor] send:', e && e.message);
@@ -27782,6 +27820,7 @@ Renderers.unit = function(route){
       <button class="icon-btn ${prog.state==='completed'?'on':''}" id="markCompleteBtn">${Icons.check} ${prog.state==='completed'?'Unidade concluída':'Marcar unidade como concluída'}</button>
       <button class="icon-btn" id="addNoteBtn">${Icons.note} Adicionar nota <span class="note-count-badge" id="noteCountBadge"${_unitNoteCount>0?'':' style="display:none"'}>${_unitNoteCount}</span></button>
       <button class="icon-btn" id="unitStatsBtn"${getUnitQuizStats(unit).hasVerified?'':' hidden'}>${Icons.statistics||''} Estatísticas</button>
+      <button class="icon-btn" id="tutorLaunchBtn" type="button"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8z"/></svg> Tutor</button>
     </div>
   </div>
   <div class="unit-layout" id="unitLayout">
@@ -27799,7 +27838,7 @@ Renderers.unit = function(route){
       <div class="block-stage" id="blockStage" data-unit-id="${Util.attr(unit.id)}">${allBlocksHtml}${endNav}${recommendationsHtml}</div>
     </main>
   </div>
-  <button class="tutor-fab" id="tutorLaunchFab" type="button" aria-label="Abrir o Tutor" data-tip="Tutor — tire dúvidas sobre esta unidade"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8z"/></svg></button>`;
+  <button class="icon-btn tutor-fab" id="tutorLaunchFab" type="button" hidden aria-label="Abrir o Tutor" data-tip="Tutor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8z"/></svg></button>`;
 };
 
 Renderers.unit.mount = function(stageEl, route){
@@ -28047,16 +28086,24 @@ Renderers.unit.mount = function(stageEl, route){
   const _unitStatsBtn = stageEl.querySelector('#unitStatsBtn');
   if(_unitStatsBtn) _unitStatsBtn.addEventListener('click', () => openUnitStatsModal(unit));
 
-  // Tutor — botão satélite abre o drawer com o texto VISÍVEL da unidade.
-  const _tutorBtn = stageEl.querySelector('#tutorLaunchFab');
-  if(_tutorBtn){
-    _tutorBtn.addEventListener('click', () => {
-      let stageTxt = '';
-      try { const bs = stageEl.querySelector('#blockStage'); stageTxt = bs ? (bs.innerText || '').trim().slice(0, 14000) : ''; } catch(_){}
-      if(window.TutorIA) TutorIA.open({ unitId: unit.id, unitTitle: (unit.number ? unit.number + ' · ' : '') + unit.title, unitText: stageTxt });
-    });
-    if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(stageEl);
+  // Tutor — botão nas ações + satélite que aparece só quando o botão das ações
+  // sai da tela ao rolar (é como se o botão "se mudasse" pra lateral).
+  const _tutorActionsBtn = stageEl.querySelector('#tutorLaunchBtn');
+  const _tutorFab = stageEl.querySelector('#tutorLaunchFab');
+  const _openTutor = () => {
+    let stageTxt = '';
+    try { const bs = stageEl.querySelector('#blockStage'); stageTxt = bs ? (bs.innerText || '').trim().slice(0, 14000) : ''; } catch(_){}
+    if(window.TutorIA) TutorIA.open({ unitId: unit.id, unitTitle: (unit.number ? unit.number + ' · ' : '') + unit.title, unitText: stageTxt });
+  };
+  if(_tutorActionsBtn) _tutorActionsBtn.addEventListener('click', _openTutor);
+  if(_tutorFab) _tutorFab.addEventListener('click', _openTutor);
+  if(_tutorActionsBtn && _tutorFab && ('IntersectionObserver' in window)){
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((en) => { _tutorFab.hidden = en.isIntersecting; });
+    }, { root:null, threshold:0 });
+    io.observe(_tutorActionsBtn);
   }
+  if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(stageEl);
 
   stageEl.querySelector('#markCompleteBtn').addEventListener('click', () => {
     const btn = stageEl.querySelector('#markCompleteBtn');
