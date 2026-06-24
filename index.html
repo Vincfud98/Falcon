@@ -4297,7 +4297,7 @@ body.gallery-detail-open{overflow:hidden}
 .q-result-correct{background:rgba(93,212,159,.15);color:var(--green)}
 .q-result-wrong{background:rgba(232,120,120,.15);color:var(--red)}
 /* "Entender o erro com a IA" — aparece sob a questão C/E quando o aluno erra */
-.q-why-wrap{display:flex;flex-direction:column;gap:.5rem;margin:.7rem 0 .2rem;padding:.65rem .75rem;border:1px solid var(--accent-border-soft);border-radius:8px;background:var(--accent-lo)}
+.q-why-wrap{grid-column:1/-1;box-sizing:border-box;display:flex;flex-direction:column;gap:.5rem;margin:.7rem 0 .2rem;padding:.65rem .75rem;border:1px solid var(--accent-border-soft);border-radius:8px;background:var(--accent-lo)}
 .q-why-hint{font-family:var(--sans);font-size:.78rem;line-height:1.5;color:var(--text-dim)}
 .q-why-hint em{color:var(--text-mute);font-style:italic}
 .q-why-input{width:100%;box-sizing:border-box;resize:vertical;min-height:2.3rem;background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:7px;padding:.45rem .6rem;color:var(--text);font-family:var(--sans);font-size:.82rem;line-height:1.45}
@@ -13991,7 +13991,7 @@ Blocks.quiz = {
     // "por que acha que está errada?". O comentário da IA (inline, no bloco) só
     // roda no "Verificar respostas" E só se o aluno escreveu algo — o gabarito
     // detalhado do satélite continua igual e gratuito. _deferWhyField só mostra/
-    // some o campo; _deferWhyComment (no verify) dispara a IA.
+    // some o campo; _deferWhySpec (no verify) junta as specs p/ 1 chamada da IA.
     const _deferWhyClear = (itemEl) => { const w = itemEl.querySelector('.q-why-wrap'); if(w) w.remove(); const c = itemEl.querySelector('.q-ai-comment'); if(c) c.remove(); };
     const _deferWhyField = (itemEl, show) => {
       if(!show){ _deferWhyClear(itemEl); return; }
@@ -14001,11 +14001,13 @@ Blocks.quiz = {
         + '<textarea class="q-why-input" rows="2" placeholder="Por que você acha que está errada?"></textarea>';
       itemEl.appendChild(w);
     };
-    const _deferWhyComment = (itemEl, item, norm, keyIdx, correct) => {
+    // Devolve a "spec" do comentário (ou null se em branco). NÃO chama a IA aqui
+    // — o verify junta todas e faz UMA chamada (TutorIA.commentBatch).
+    const _deferWhySpec = (itemEl, item, norm, keyIdx, correct) => {
       const wrap = itemEl.querySelector('.q-why-wrap');
       const ta = wrap && wrap.querySelector('.q-why-input');
       const reason = ta ? (ta.value || '').trim() : '';
-      if(!reason || !norm || !norm.tf) return;          // sem motivo → sem IA, sem custo
+      if(!reason || !norm || !norm.tf) return null;          // sem motivo → sem IA, sem custo
       ta.disabled = true;
       const gabLabel = (norm.display && norm.display[keyIdx] === 'C') ? 'Certo' : 'Errado';
       const stmt = String(item.assertion || (itemEl.querySelector('.q-assertion') ? itemEl.querySelector('.q-assertion').textContent : '') || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -14013,7 +14015,7 @@ Blocks.quiz = {
       const head = String(item.origin || '').trim() || 'questão desta unidade';
       let box = itemEl.querySelector('.q-ai-comment');
       if(!box){ box = document.createElement('div'); box.className = 'q-ai-comment'; wrap.appendChild(box); }
-      if(window.TutorIA && TutorIA.commentQuestion) TutorIA.commentQuestion({ head, stmt, gabLabel, studentLabel:'Errado', correct, just, reason }, box);
+      return { head, stmt, gabLabel, studentLabel:'Errado', correct, just, reason, box };
     };
     stageEl.querySelectorAll(`[data-item-id]`).forEach(itemEl => {
       const itemId = itemEl.getAttribute('data-item-id');
@@ -14302,6 +14304,7 @@ Blocks.quiz = {
               });
             } else {
               // Verifica TODAS as respondidas ainda não verificadas (parcial).
+              const _whyBatch = [];
               allItems.forEach(it => {
                 const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
                 if(p && p.selected != null && !p.verified){
@@ -14314,9 +14317,11 @@ Blocks.quiz = {
                     { selected:p.selected, correct, verified:true, doubt:!!p.doubt });
                   if(window._recordPractice) window._recordPractice(ctx.unitId, correct);
                   const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
-                  if(itemEl){ revealItem(itemEl, selIdx, correct); _deferWhyComment(itemEl, it, norm, keyIdx, correct); }
+                  if(itemEl){ revealItem(itemEl, selIdx, correct); const spec = _deferWhySpec(itemEl, it, norm, keyIdx, correct); if(spec) _whyBatch.push(spec); }
                 }
               });
+              // Comentário da IA (só pros itens com motivo escrito) — 1 chamada.
+              if(_whyBatch.length && window.TutorIA && TutorIA.commentBatch) TutorIA.commentBatch(_whyBatch);
             }
             syncVerifyBar();
             updateSatellite(null);
@@ -27961,31 +27966,34 @@ window.TutorIA = (function(){
     }
     return base + 'Eu errei (marquei ' + chosenLabel + '). Explique por que o gabarito é ' + gabLabel + ', USANDO o texto desta unidade (cite o parágrafo) e o comentário oficial como apoio, sem se limitar a eles, e aponte o erro típico/pegadinha que costuma derrubar o candidato.';
   }
-  // Mensagem que pede o comentário de UMA questão (certo/errado/em branco),
-  // usada pelo comentário INLINE (chat e quiz block). Sempre ancora no texto da
-  // unidade + comentário oficial como apoio; se houver raciocínio do aluno,
-  // corrige em cima dele e nomeia a pegadinha.
-  function _commentQuestionMsg(o){
-    const base = 'Questão de ' + (o.head || 'prova') + ' (Certo/Errado): "' + o.stmt + '"\nGabarito oficial: ' + o.gabLabel + '.\n'
-      + (o.just ? 'Comentário oficial (use como APOIO, não copie literalmente): ' + o.just + '\n' : '')
-      + 'O aluno marcou ' + o.studentLabel + (o.correct ? ' (acertou).\n' : ' (errou).\n');
-    let task = 'Comente de forma enxuta e didática por que o gabarito é ' + o.gabLabel + ', USANDO o texto desta unidade (cite o parágrafo) e o comentário oficial como apoio, sem copiar.';
-    if(!o.correct && o.reason){
-      task += ' O aluno justificou assim por que achou ERRADA a assertiva: "' + o.reason + '". Avalie esse raciocínio: diga se procede, aponte exatamente onde ele falha (se falhar) e NOMEIE a pegadinha no estilo Cebraspe (troca de causa/efeito, generalização indevida, conceito trocado, atribuição equivocada, recorte temporal).';
-    } else if(!o.correct){
-      task += ' Aponte o erro típico/pegadinha que costuma derrubar o candidato neste item.';
+  // Divide a resposta do gabarito (marcada com [[Qn]]) nos N itens.
+  function _splitBatch(text, n){
+    const out = new Array(n).fill('');
+    const re = /\[\[\s*Q?(\d+)\s*\]\]/gi; const marks = []; let m;
+    while((m = re.exec(text))){ marks.push({ n: parseInt(m[1], 10), start: m.index, end: re.lastIndex }); }
+    for(let i = 0; i < marks.length; i++){
+      const qn = marks[i].n, s = marks[i].end, e = (i + 1 < marks.length) ? marks[i + 1].start : text.length;
+      if(qn >= 1 && qn <= n) out[qn - 1] = text.slice(s, e).trim();
     }
-    return base + task;
+    return out;
   }
-  // Comenta UMA questão de forma EFÊMERA (cobra + usa RAG, mas não grava no
-  // histórico do tutor) e renderiza o comentário, com streaming, em `targetEl`.
-  async function commentQuestion(o, targetEl){
-    if(!targetEl) return;
-    o = o || {};
-    _ensureStyles();   // garante os estilos do tutor mesmo se o drawer nunca abriu
-    targetEl.innerHTML = '<span class="tutor-typing">&#9679;&#9679;&#9679;</span>';
+  // Comenta VÁRIAS questões numa ÚNICA chamada (efêmera, modo gabarito objetivo)
+  // e distribui o comentário de cada item na sua caixa (`specs[i].box`).
+  async function commentBatch(specs){
+    if(!specs || !specs.length) return;
+    _ensureStyles();
+    specs.forEach(function(s){ if(s.box) s.box.innerHTML = '<span class="tutor-typing">&#9679;&#9679;&#9679;</span>'; });
     const ctx = _unitCtxFromPage();
-    let acc = '', sources = [];
+    const mensagem = specs.map(function(s, i){
+      return '[[Q' + (i + 1) + ']] Assertiva: "' + s.stmt + '" | Gabarito oficial: ' + s.gabLabel
+        + ' | O aluno marcou: ' + s.studentLabel + (s.correct ? ' (acertou)' : ' (errou)')
+        + (s.just ? ' | Comentário oficial (apoio): ' + s.just : '')
+        + (s.reason ? ' | Justificativa do aluno (avalie): "' + s.reason + '"' : '');
+    }).join('\n');
+    const render = function(acc, finalize){
+      const parts = _splitBatch(acc, specs.length);
+      specs.forEach(function(s, i){ if(s.box && parts[i]) s.box.innerHTML = _md(_stripFu(parts[i], !!finalize)); });
+    };
     try {
       const { data: sess } = await window._sb.auth.getSession();
       const token = sess && sess.session && sess.session.access_token;
@@ -27993,8 +28001,8 @@ window.TutorIA = (function(){
         method:'POST',
         headers:{ 'Authorization':'Bearer ' + token, 'apikey': window._sbKey || '', 'content-type':'application/json' },
         body: JSON.stringify({
-          ephemeral: true, unit_id: ctx.unitId, unit_title: ctx.unitTitle, unit_text: ctx.unitText,
-          mensagem: _commentQuestionMsg(o), historico: [], modelo: _modelo, apelido: '', modo: 'duvida',
+          ephemeral: true, comment_mode: true, unit_id: ctx.unitId, unit_title: ctx.unitTitle, unit_text: ctx.unitText,
+          mensagem: mensagem, historico: [], modelo: _modelo, apelido: '', modo: 'duvida',
           subject_id: (window.COURSE && window.COURSE._subjectId != null) ? String(window.COURSE._subjectId) : '',
           subjects: (window.COURSES || []).map(function(c){ return (c && c._subjectId != null) ? String(c._subjectId) : ''; }).filter(Boolean)
         })
@@ -28002,11 +28010,11 @@ window.TutorIA = (function(){
       const ct = resp.headers.get('content-type') || '';
       if(ct.indexOf('application/json') >= 0){
         const j = await resp.json().catch(function(){ return {}; });
-        targetEl.innerHTML = '<span class="tutor-err">' + ((j && j.ubt_error) ? 'Saldo de UbiTokens insuficiente para o comentário.' : 'Não consegui comentar agora.') + '</span>';
+        const msg = (j && j.ubt_error) ? 'Saldo de UbiTokens insuficiente para o comentário.' : 'Não consegui comentar agora.';
+        specs.forEach(function(s){ if(s.box) s.box.innerHTML = '<span class="tutor-err">' + msg + '</span>'; });
         return;
       }
-      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
-      targetEl.innerHTML = '';
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '', acc = '';
       while(true){
         const { done, value } = await reader.read(); if(done) break;
         buf += dec.decode(value, { stream:true });
@@ -28014,13 +28022,14 @@ window.TutorIA = (function(){
         for(const p of parts){
           const line = p.trim(); if(line.indexOf('data:') !== 0) continue;
           let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch(_){ continue; }
-          if(ev.type === 'delta'){ acc += ev.text; targetEl.innerHTML = _md(acc); _scroll(); }
-          else if(ev.type === 'done'){ if(Array.isArray(ev.sources)) sources = ev.sources; if(window.UbtWallet) UbtWallet.load(); }
+          if(ev.type === 'delta'){ acc += ev.text; render(acc, false); _scroll(); }
+          else if(ev.type === 'done'){ if(window.UbtWallet) UbtWallet.load(); }
         }
       }
-      if(acc){ targetEl.innerHTML = _md(acc); _linkifyCites(targetEl, sources); }
-      else targetEl.innerHTML = '<span class="tutor-err">Comentário vazio. Tente de novo.</span>';
-    } catch(e){ targetEl.innerHTML = '<span class="tutor-err">Erro de conexão ao comentar.</span>'; }
+      render(acc, true);
+      // Fallback: 1 item e o modelo não usou o marcador → mostra o texto todo.
+      if(specs.length === 1 && specs[0].box && !_splitBatch(acc, 1)[0]) specs[0].box.innerHTML = _md(_stripFu(acc, true));
+    } catch(e){ specs.forEach(function(s){ if(s.box) s.box.innerHTML = '<span class="tutor-err">Erro de conexão ao comentar.</span>'; }); }
   }
   // Card C/E no modelo ADIADO: seleciona (sem revelar); marcar "Errado" abre o
   // campo opcional do "por quê"; o gabarito + comentário da IA só vêm no
@@ -28048,8 +28057,9 @@ window.TutorIA = (function(){
     });
     const ctrl = {
       has: function(){ return !!selected; },
-      verify: function(){
-        if(done || !selected) return;
+      // Revela o gabarito (sem IA) e devolve a "spec" pro comentário em lote.
+      reveal: function(){
+        if(done || !selected) return null;
         done = true;
         const correct = (selected === gabCE);
         btns.forEach(function(x){ x.disabled = true; x.classList.remove('sel'); if(x.getAttribute('data-v') === gabCE) x.classList.add('ok'); else if(x.getAttribute('data-v') === selected) x.classList.add('no'); });
@@ -28057,7 +28067,7 @@ window.TutorIA = (function(){
         const reason = (selected === 'E' && ta) ? (ta.value || '').trim() : '';
         reveal.hidden = false;
         reveal.innerHTML = '<span class="tutor-ce-verdict ' + (correct ? 'ok' : 'no') + '">' + (correct ? 'Você acertou' : 'Você errou') + '</span> · Gabarito: <strong>' + gabLabel + '</strong>.<div class="tutor-ce-aicomment"></div>';
-        commentQuestion({ head: head, stmt: stmt, gabLabel: gabLabel, studentLabel: (selected === 'C' ? 'Certo' : 'Errado'), correct: correct, just: just, reason: reason }, reveal.querySelector('.tutor-ce-aicomment'));
+        return { head: head, stmt: stmt, gabLabel: gabLabel, studentLabel: (selected === 'C' ? 'Certo' : 'Errado'), correct: correct, just: just, reason: reason, box: reveal.querySelector('.tutor-ce-aicomment') };
       }
     };
     if(cards) cards.push(ctrl);
@@ -28107,7 +28117,8 @@ window.TutorIA = (function(){
       const answered = cards.filter(function(c){ return c.has(); });
       if(!answered.length){ if(window.ueToast) ueToast('Marque Certo ou Errado em pelo menos uma questão antes de verificar.', 'error'); return; }
       vb.disabled = true; vb.remove();
-      answered.forEach(function(c){ c.verify(); });
+      const specs = answered.map(function(c){ return c.reveal(); }).filter(Boolean);
+      if(specs.length) commentBatch(specs);   // 1 chamada → comenta todas
       _scroll();
     });
     wrap.appendChild(vb);
@@ -28717,7 +28728,7 @@ window.TutorIA = (function(){
       if(uid !== _openedUnit) _resetForLeave();
     });
   }
-  return { open: open, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong, commentQuestion: commentQuestion, ensureStyles: _ensureStyles };
+  return { open: open, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, ensureStyles: _ensureStyles };
 })();
 
 Renderers.unit = function(route){
