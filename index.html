@@ -27555,6 +27555,47 @@ window.TutorIA = (function(){
     msgEl.appendChild(box);
   }
 
+  // Rota de uma unidade — só acha se o aluno TEM o curso (COURSES é escopado).
+  // Se não achar, retorna null → não vira link (proteção de acesso).
+  function _unitHref(unitId){
+    const courses = (window.COURSES && window.COURSES.length) ? window.COURSES : [];
+    for(let k=0;k<courses.length;k++){
+      const mods = courses[k].modules || [];
+      for(let i=0;i<mods.length;i++){
+        const items = (window.Util && Util.unitsOfModule) ? (Util.unitsOfModule(mods[i]) || []) : [];
+        for(let j=0;j<items.length;j++){
+          const u = items[j].unit || items[j];
+          if(u && String(u.id) === String(unitId)){
+            const ch = items[j].chapter;
+            return '#/m/' + mods[i].id + (ch ? '/c/' + ch.id : '') + '/u/' + u.id;
+          }
+        }
+      }
+    }
+    return null;
+  }
+  // Fontes citadas (RAG) como chips clicáveis — só as que o aluno pode abrir.
+  function _renderFontes(msgEl, sources){
+    if(!msgEl || !Array.isArray(sources) || !sources.length) return;
+    const seen = {}, links = [];
+    sources.forEach(function(s){
+      if(!s || !s.unit_id || seen[s.unit_id]) return;
+      const href = _unitHref(s.unit_id);
+      if(!href) return;   // não tem acesso → não mostra link
+      seen[s.unit_id] = true;
+      links.push({ href: href, label: (s.n ? '[' + s.n + '] ' : '') + (s.label || ('Unidade ' + s.unit_id)) });
+    });
+    if(!links.length) return;
+    const box = document.createElement('div'); box.className = 'tutor-fontes';
+    box.innerHTML = '<span class="tutor-fontes-lbl">Fontes:</span>';
+    links.forEach(function(l){
+      const a = document.createElement('a'); a.className = 'tutor-fonte'; a.href = l.href; a.textContent = l.label;
+      a.addEventListener('click', function(){ close(); });   // fecha o drawer ao navegar
+      box.appendChild(a);
+    });
+    msgEl.appendChild(box);
+  }
+
   function _ensureStyles(){
     if(_styled) return; _styled = true;
     const st = document.createElement('style');
@@ -27580,6 +27621,10 @@ window.TutorIA = (function(){
     .tutor-msg-act{ width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; background:transparent; border:1px solid var(--accent-border-soft); border-radius:6px; color:var(--text-mute); cursor:pointer; transition:color .15s, border-color .15s, background .15s; }
     .tutor-msg-act:hover{ color:var(--accent); border-color:var(--accent-border); background:var(--accent-lo); }
     .tutor-msg-act svg{ width:13px; height:13px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+    .tutor-fontes{ display:flex; flex-wrap:wrap; align-items:center; gap:.35rem; margin-top:.5rem; width:100%; }
+    .tutor-fontes-lbl{ font-family:var(--sans); font-size:.66rem; letter-spacing:.04em; text-transform:uppercase; color:var(--text-mute); }
+    .tutor-fonte{ display:inline-flex; align-items:center; background:var(--accent-lo); border:1px solid var(--accent-border-soft); border-radius:999px; padding:.18rem .55rem; color:var(--accent); text-decoration:none; font-family:var(--sans); font-size:.7rem; }
+    .tutor-fonte:hover{ border-color:var(--accent); background:var(--accent-lo); text-decoration:underline; }
     .tutor-followups{ display:flex; flex-direction:column; gap:.35rem; margin-top:.5rem; width:100%; }
     .tutor-fu{ text-align:left; background:transparent; border:1px solid var(--accent-border-soft); border-radius:10px; padding:.45rem .65rem; color:var(--text-dim); font-family:var(--sans); font-size:.78rem; line-height:1.35; cursor:pointer; transition:background .15s, color .15s, border-color .15s; }
     .tutor-fu:hover{ background:var(--accent-lo); color:var(--accent); border-color:var(--accent-border); }
@@ -28114,14 +28159,14 @@ window.TutorIA = (function(){
 
     const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
     const apelido = (me && (me.nickname || me.displayName || me.name)) || 'aluno';
-    let acc = '';
+    let acc = '', ragSources = [];
     try {
       const { data: sess } = await window._sb.auth.getSession();
       const token = sess && sess.session && sess.session.access_token;
       const resp = await fetch((window._sbUrl || '') + '/functions/v1/tutor-chat', {
         method:'POST',
         headers:{ 'Authorization':'Bearer ' + token, 'apikey': window._sbKey || '', 'content-type':'application/json' },
-        body: JSON.stringify({ conversa_id:_ctx.conversaId, unit_id:_ctx.unitId, unit_title:_ctx.unitTitle, unit_text:unitTextToSend, mensagem:text, historico:historico, modelo:_modelo, apelido:apelido, modo:_modo, questoes_contexto: extra.questoes_contexto || '', gerar_ce: extra.gerar_ce || false, subject_id: (window.COURSE && window.COURSE._subjectId != null) ? String(window.COURSE._subjectId) : '' })
+        body: JSON.stringify({ conversa_id:_ctx.conversaId, unit_id:_ctx.unitId, unit_title:_ctx.unitTitle, unit_text:unitTextToSend, mensagem:text, historico:historico, modelo:_modelo, apelido:apelido, modo:_modo, questoes_contexto: extra.questoes_contexto || '', gerar_ce: extra.gerar_ce || false, subject_id: (window.COURSE && window.COURSE._subjectId != null) ? String(window.COURSE._subjectId) : '', subjects: (window.COURSES || []).map(function(c){ return (c && c._subjectId != null) ? String(c._subjectId) : ''; }).filter(Boolean) })
       });
       const ct = resp.headers.get('content-type') || '';
       if(ct.indexOf('application/json') >= 0){
@@ -28147,6 +28192,7 @@ window.TutorIA = (function(){
           if(ev.type === 'delta'){ acc += ev.text; botBody.innerHTML = _md(_stripFu(acc, false)); _scroll(); }
           else if(ev.type === 'done'){
             _ctx.conversaId = ev.conversa_id || _ctx.conversaId;
+            if(Array.isArray(ev.sources)) ragSources = ev.sources;
             if(window.UbtWallet) UbtWallet.load();
           }
         }
@@ -28161,6 +28207,7 @@ window.TutorIA = (function(){
           _renderCE(botEl, ce);
         } else {
           botBody.innerHTML = _md(ans);
+          _renderFontes(botEl, ragSources);
           _renderFollowups(botEl, _parseFu(acc));
           _msgFooter(botEl, ans);
         }
