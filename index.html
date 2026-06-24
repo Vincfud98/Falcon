@@ -14017,6 +14017,18 @@ Blocks.quiz = {
       if(!box){ box = document.createElement('div'); box.className = 'q-ai-comment'; wrap.appendChild(box); }
       return { head, stmt, gabLabel, studentLabel:'Errado', correct, just, reason, box };
     };
+    // Recarregou a unidade: re-mostra o motivo (travado) + o comentário da IA já
+    // salvos na resposta, sem chamar a IA de novo. Some no "Tentar novamente".
+    const _deferWhyRestore = (itemEl, reason, aiMd) => {
+      _deferWhyClear(itemEl);
+      const w = document.createElement('div'); w.className = 'q-why-wrap';
+      w.innerHTML = '<div class="q-why-hint">Seu raciocínio ao marcar <strong>Errado</strong>:</div>'
+        + '<textarea class="q-why-input" rows="2" disabled></textarea>'
+        + '<div class="q-ai-comment"></div>';
+      w.querySelector('.q-why-input').value = reason || '';
+      itemEl.appendChild(w);
+      if(aiMd && window.TutorIA && TutorIA.renderComment) TutorIA.renderComment(w.querySelector('.q-ai-comment'), aiMd);
+    };
     stageEl.querySelectorAll(`[data-item-id]`).forEach(itemEl => {
       const itemId = itemEl.getAttribute('data-item-id');
       const item = allItems.find(x => String(x.id) === String(itemId));
@@ -14099,6 +14111,15 @@ Blocks.quiz = {
         });
       }
     });
+    // Ao (re)montar: restaura motivo + comentário da IA já salvos (verificadas).
+    if(defer){
+      allItems.forEach(it => {
+        const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
+        if(!p || !p.verified || !p.why) return;
+        const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
+        if(itemEl) _deferWhyRestore(itemEl, p.why, p.ai || '');
+      });
+    }
     // Quiz satellite — update progress counter + detail on answer
     const sat = stageEl.querySelector('.qz-satellite');
     if(sat && !(ctx && ctx.simuladoMode)){
@@ -14317,7 +14338,16 @@ Blocks.quiz = {
                     { selected:p.selected, correct, verified:true, doubt:!!p.doubt });
                   if(window._recordPractice) window._recordPractice(ctx.unitId, correct);
                   const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
-                  if(itemEl){ revealItem(itemEl, selIdx, correct); const spec = _deferWhySpec(itemEl, it, norm, keyIdx, correct); if(spec) _whyBatch.push(spec); }
+                  if(itemEl){
+                    revealItem(itemEl, selIdx, correct);
+                    const spec = _deferWhySpec(itemEl, it, norm, keyIdx, correct);
+                    if(spec){
+                      // Persiste motivo + comentário na resposta da questão (volta ao recarregar).
+                      const _p = p, _it = it, _correct = correct;
+                      spec.onDone = function(md){ ctx.store.updateQuizAnswer(ctx.unitId, block.id, _it.id, { selected:_p.selected, correct:_correct, verified:true, doubt:!!_p.doubt, why: spec.reason, ai: md }); };
+                      _whyBatch.push(spec);
+                    }
+                  }
                 }
               });
               // Comentário da IA (só pros itens com motivo escrito) — 1 chamada.
@@ -28028,9 +28058,15 @@ window.TutorIA = (function(){
       }
       render(acc, true);
       // Fallback: 1 item e o modelo não usou o marcador → mostra o texto todo.
-      if(specs.length === 1 && specs[0].box && !_splitBatch(acc, 1)[0]) specs[0].box.innerHTML = _md(_stripFu(acc, true));
+      const finalParts = _splitBatch(acc, specs.length);
+      if(specs.length === 1 && specs[0].box && !finalParts[0]){ finalParts[0] = _stripFu(acc, true); specs[0].box.innerHTML = _md(finalParts[0]); }
+      // Avisa cada item com o markdown final (pra quem quiser PERSISTIR).
+      specs.forEach(function(s, i){ if(typeof s.onDone === 'function'){ try { s.onDone(finalParts[i] || ''); } catch(_){} } });
     } catch(e){ specs.forEach(function(s){ if(s.box) s.box.innerHTML = '<span class="tutor-err">Erro de conexão ao comentar.</span>'; }); }
   }
+  // Renderiza um comentário JÁ SALVO (markdown) numa caixa — usado ao recarregar
+  // a unidade pra mostrar de novo o comentário da IA sem chamar a IA de novo.
+  function renderComment(box, md){ if(!box) return; _ensureStyles(); box.innerHTML = _md(_stripFu(String(md == null ? '' : md), true)); }
   // Card C/E no modelo ADIADO: seleciona (sem revelar); marcar "Errado" abre o
   // campo opcional do "por quê"; o gabarito + comentário da IA só vêm no
   // "Verificar respostas". Registra um controlador em `cards`.
@@ -28728,7 +28764,7 @@ window.TutorIA = (function(){
       if(uid !== _openedUnit) _resetForLeave();
     });
   }
-  return { open: open, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, ensureStyles: _ensureStyles };
+  return { open: open, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, renderComment: renderComment, ensureStyles: _ensureStyles };
 })();
 
 Renderers.unit = function(route){
