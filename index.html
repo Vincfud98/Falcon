@@ -27781,10 +27781,17 @@ window.TutorIA = (function(){
     .tutor-ce-btn:disabled{ cursor:default; opacity:.85; }
     .tutor-ce-btn.ok{ color:#7cb98b; border-color:rgba(124,185,139,.6); background:rgba(124,185,139,.12); }
     .tutor-ce-btn.no{ color:#d47973; border-color:rgba(212,121,115,.6); background:rgba(212,121,115,.12); }
+    .tutor-ce-btn.sel{ color:var(--accent); border-color:var(--accent); background:var(--accent-lo); }
     .tutor-ce-reveal{ margin-top:.5rem; font-family:var(--sans); font-size:.76rem; line-height:1.5; color:var(--text-dim); }
     .tutor-ce-verdict{ font-weight:600; }
     .tutor-ce-verdict.ok{ color:#7cb98b; } .tutor-ce-verdict.no{ color:#d47973; }
-    .tutor-ce-why{ display:inline-block; margin-top:.4rem; }
+    .tutor-ce-aicomment{ margin-top:.45rem; }
+    .tutor-ce-aicomment .tutor-h, .tutor-ce-aicomment .tutor-p{ font-size:.8rem; }
+    .tutor-realq-verify{ align-self:flex-start; margin-top:.2rem; background:var(--accent); border:1px solid var(--accent); border-radius:8px; padding:.45rem .9rem; color:#1a1206; font-family:var(--sans); font-size:.8rem; font-weight:500; cursor:pointer; }
+    .tutor-realq-verify:hover{ filter:brightness(1.06); }
+    .tutor-realq-verify:disabled{ opacity:.6; cursor:default; }
+    .tutor-ce-why{ display:flex; flex-direction:column; margin-top:.45rem; }
+    .tutor-ce-why[hidden]{ display:none; }
     .tutor-ce-why-wrap{ display:flex; flex-direction:column; gap:.4rem; margin-top:.5rem; }
     .tutor-ce-why-input{ width:100%; box-sizing:border-box; resize:vertical; min-height:2.2rem; background:var(--bg-card); border:1px solid var(--accent-border-soft); border-radius:8px; padding:.4rem .55rem; color:var(--text); font-family:var(--sans); font-size:.78rem; line-height:1.45; }
     .tutor-ce-why-input:focus{ outline:none; border-color:var(--accent-border); }
@@ -27946,54 +27953,105 @@ window.TutorIA = (function(){
     }
     return base + 'Eu errei (marquei ' + chosenLabel + '). Explique por que o gabarito é ' + gabLabel + ', USANDO o texto desta unidade (cite o parágrafo) e o comentário oficial como apoio, sem se limitar a eles, e aponte o erro típico/pegadinha que costuma derrubar o candidato.';
   }
-  function _bankCECard(stmt, gabCE, just, head, paraTarget){
+  // Mensagem que pede o comentário de UMA questão (certo/errado/em branco),
+  // usada pelo comentário INLINE (chat e quiz block). Sempre ancora no texto da
+  // unidade + comentário oficial como apoio; se houver raciocínio do aluno,
+  // corrige em cima dele e nomeia a pegadinha.
+  function _commentQuestionMsg(o){
+    const base = 'Questão de ' + (o.head || 'prova') + ' (Certo/Errado): "' + o.stmt + '"\nGabarito oficial: ' + o.gabLabel + '.\n'
+      + (o.just ? 'Comentário oficial (use como APOIO, não copie literalmente): ' + o.just + '\n' : '')
+      + 'O aluno marcou ' + o.studentLabel + (o.correct ? ' (acertou).\n' : ' (errou).\n');
+    let task = 'Comente de forma enxuta e didática por que o gabarito é ' + o.gabLabel + ', USANDO o texto desta unidade (cite o parágrafo) e o comentário oficial como apoio, sem copiar.';
+    if(!o.correct && o.reason){
+      task += ' O aluno justificou assim por que achou ERRADA a assertiva: "' + o.reason + '". Avalie esse raciocínio: diga se procede, aponte exatamente onde ele falha (se falhar) e NOMEIE a pegadinha no estilo Cebraspe (troca de causa/efeito, generalização indevida, conceito trocado, atribuição equivocada, recorte temporal).';
+    } else if(!o.correct){
+      task += ' Aponte o erro típico/pegadinha que costuma derrubar o candidato neste item.';
+    }
+    return base + task;
+  }
+  // Comenta UMA questão de forma EFÊMERA (cobra + usa RAG, mas não grava no
+  // histórico do tutor) e renderiza o comentário, com streaming, em `targetEl`.
+  async function commentQuestion(o, targetEl){
+    if(!targetEl) return;
+    o = o || {};
+    targetEl.innerHTML = '<span class="tutor-typing">&#9679;&#9679;&#9679;</span>';
+    const ctx = _unitCtxFromPage();
+    let acc = '', sources = [];
+    try {
+      const { data: sess } = await window._sb.auth.getSession();
+      const token = sess && sess.session && sess.session.access_token;
+      const resp = await fetch((window._sbUrl || '') + '/functions/v1/tutor-chat', {
+        method:'POST',
+        headers:{ 'Authorization':'Bearer ' + token, 'apikey': window._sbKey || '', 'content-type':'application/json' },
+        body: JSON.stringify({
+          ephemeral: true, unit_id: ctx.unitId, unit_title: ctx.unitTitle, unit_text: ctx.unitText,
+          mensagem: _commentQuestionMsg(o), historico: [], modelo: _modelo, apelido: '', modo: 'duvida',
+          subject_id: (window.COURSE && window.COURSE._subjectId != null) ? String(window.COURSE._subjectId) : '',
+          subjects: (window.COURSES || []).map(function(c){ return (c && c._subjectId != null) ? String(c._subjectId) : ''; }).filter(Boolean)
+        })
+      });
+      const ct = resp.headers.get('content-type') || '';
+      if(ct.indexOf('application/json') >= 0){
+        const j = await resp.json().catch(function(){ return {}; });
+        targetEl.innerHTML = '<span class="tutor-err">' + ((j && j.ubt_error) ? 'Saldo de UbiTokens insuficiente para o comentário.' : 'Não consegui comentar agora.') + '</span>';
+        return;
+      }
+      const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
+      targetEl.innerHTML = '';
+      while(true){
+        const { done, value } = await reader.read(); if(done) break;
+        buf += dec.decode(value, { stream:true });
+        const parts = buf.split('\n\n'); buf = parts.pop() || '';
+        for(const p of parts){
+          const line = p.trim(); if(line.indexOf('data:') !== 0) continue;
+          let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch(_){ continue; }
+          if(ev.type === 'delta'){ acc += ev.text; targetEl.innerHTML = _md(acc); _scroll(); }
+          else if(ev.type === 'done'){ if(Array.isArray(ev.sources)) sources = ev.sources; if(window.UbtWallet) UbtWallet.load(); }
+        }
+      }
+      if(acc){ targetEl.innerHTML = _md(acc); _linkifyCites(targetEl, sources); }
+      else targetEl.innerHTML = '<span class="tutor-err">Comentário vazio. Tente de novo.</span>';
+    } catch(e){ targetEl.innerHTML = '<span class="tutor-err">Erro de conexão ao comentar.</span>'; }
+  }
+  // Card C/E no modelo ADIADO: seleciona (sem revelar); marcar "Errado" abre o
+  // campo opcional do "por quê"; o gabarito + comentário da IA só vêm no
+  // "Verificar respostas". Registra um controlador em `cards`.
+  function _bankCECard(stmt, gabCE, just, head, cards){
     const card = document.createElement('div'); card.className = 'tutor-ce-card';
     card.innerHTML = '<div class="tutor-ce-stmt">' + _esc(stmt) + '</div>'
       + '<div class="tutor-ce-btns"><button type="button" class="tutor-ce-btn" data-v="C">Certo</button><button type="button" class="tutor-ce-btn" data-v="E">Errado</button></div>'
+      + '<div class="tutor-ce-why" hidden><textarea class="tutor-ce-why-input" rows="2" placeholder="Opcional: por que você acha que está errada? Se escrever, eu comento em cima do seu raciocínio."></textarea></div>'
       + '<div class="tutor-ce-reveal" hidden></div>';
-    const reveal = card.querySelector('.tutor-ce-reveal');
     const gabLabel = (gabCE === 'C' ? 'Certo' : 'Errado');
-    card.querySelectorAll('.tutor-ce-btn').forEach(function(b){
+    const btns = card.querySelectorAll('.tutor-ce-btn');
+    const whyWrap = card.querySelector('.tutor-ce-why');
+    const ta = card.querySelector('.tutor-ce-why-input');
+    const reveal = card.querySelector('.tutor-ce-reveal');
+    let selected = null, done = false;
+    btns.forEach(function(b){
       b.addEventListener('click', function(){
-        if(card.classList.contains('answered')) return;
-        card.classList.add('answered');
-        const chosen = b.getAttribute('data-v');
-        const correct = (chosen === gabCE);
-        card.querySelectorAll('.tutor-ce-btn').forEach(function(x){
-          x.disabled = true;
-          if(x.getAttribute('data-v') === gabCE) x.classList.add('ok');
-          else if(x === b) x.classList.add('no');
-        });
-        reveal.hidden = false;
-        // ACERTOU → só o veredito (sem explicação, sem custo). ERROU → campo
-        // opcional de raciocínio + botão que dispara a explicação ancorada.
-        if(correct){
-          reveal.innerHTML = '<span class="tutor-ce-verdict ok">Você acertou</span> · Gabarito: <strong>' + gabLabel + '</strong>.';
-          if(paraTarget && (paraTarget.paragraph_id || paraTarget.block_id) && _unitHref(paraTarget.unit_id)){
-            const link = document.createElement('a'); link.className = 'tutor-cite tutor-realq-link'; link.href = '#'; link.textContent = 'ver no material';
-            link.addEventListener('click', function(ev){ ev.preventDefault(); _gotoCite(_unitHref(paraTarget.unit_id), paraTarget.paragraph_id, paraTarget.block_id); });
-            reveal.appendChild(document.createTextNode(' ')); reveal.appendChild(link);
-          }
-          _scroll(); return;
-        }
-        const chosenLabel = (chosen === 'C' ? 'Certo' : 'Errado');
-        reveal.innerHTML = '<span class="tutor-ce-verdict no">Você errou</span> · Gabarito: <strong>' + gabLabel + '</strong>.'
-          + '<div class="tutor-ce-why-wrap">'
-          +   '<textarea class="tutor-ce-why-input" rows="2" placeholder="Opcional: por que você marcou ' + chosenLabel + '? Se escrever, eu corrijo em cima do seu raciocínio."></textarea>'
-          +   '<button type="button" class="tutor-fu tutor-ce-why">Entender o erro</button>'
-          + '</div>';
-        const ta = reveal.querySelector('.tutor-ce-why-input');
-        const why = reveal.querySelector('.tutor-ce-why');
-        if(why) why.addEventListener('click', function(){
-          const reason = (ta && ta.value || '').trim();
-          if(ta) ta.disabled = true; why.disabled = true;
-          const disp = reason ? ('Marquei ' + chosenLabel + ' porque: ' + reason) : 'Me explica por que errei essa.';
-          _send(_explainWrongMsg(head, stmt, gabLabel, chosenLabel, just, reason), { displayText: disp });
-          _scroll();
-        });
-        _scroll();
+        if(done) return;
+        const v = b.getAttribute('data-v');
+        selected = (selected === v) ? null : v;   // toggle
+        btns.forEach(function(x){ x.classList.toggle('sel', x.getAttribute('data-v') === selected); });
+        whyWrap.hidden = (selected !== 'E');       // campo só ao marcar Errado
       });
     });
+    const ctrl = {
+      has: function(){ return !!selected; },
+      verify: function(){
+        if(done || !selected) return;
+        done = true;
+        const correct = (selected === gabCE);
+        btns.forEach(function(x){ x.disabled = true; x.classList.remove('sel'); if(x.getAttribute('data-v') === gabCE) x.classList.add('ok'); else if(x.getAttribute('data-v') === selected) x.classList.add('no'); });
+        if(ta) ta.disabled = true;
+        const reason = (selected === 'E' && ta) ? (ta.value || '').trim() : '';
+        reveal.hidden = false;
+        reveal.innerHTML = '<span class="tutor-ce-verdict ' + (correct ? 'ok' : 'no') + '">' + (correct ? 'Você acertou' : 'Você errou') + '</span> · Gabarito: <strong>' + gabLabel + '</strong>.<div class="tutor-ce-aicomment"></div>';
+        commentQuestion({ head: head, stmt: stmt, gabLabel: gabLabel, studentLabel: (selected === 'C' ? 'Certo' : 'Errado'), correct: correct, just: just, reason: reason }, reveal.querySelector('.tutor-ce-aicomment'));
+      }
+    };
+    if(cards) cards.push(ctrl);
     return card;
   }
   // Renderiza até `max` questões reais (ids do bank-search) como enquetes
@@ -28002,7 +28060,7 @@ window.TutorIA = (function(){
     if(!_ctx.shownQ) _ctx.shownQ = {};
     if(!msgEl || !Array.isArray(ids) || !ids.length) return { rendered:0, hasMore:false };
     const wrap = document.createElement('div'); wrap.className = 'tutor-realq';
-    const years = []; let rendered = 0, hasMore = false;
+    const years = []; const cards = []; let rendered = 0, hasMore = false;
     for(let k = 0; k < ids.length; k++){
       const qid = String(ids[k]);
       if(_ctx.shownQ[qid]) continue;
@@ -28022,7 +28080,7 @@ window.TutorIA = (function(){
       if(base){ const bx = document.createElement('div'); bx.className = 'tutor-realq-base'; bx.textContent = base; grp.appendChild(bx); }
       tf.forEach(function(it){
         const gabCE = (it.key === 'Certo') ? 'C' : 'E';
-        grp.appendChild(_bankCECard(_stripTags(it.assertion), gabCE, _stripTags(it.comments), head, it._paraTarget || null));
+        grp.appendChild(_bankCECard(_stripTags(it.assertion), gabCE, _stripTags(it.comments), head, cards));
       });
       wrap.appendChild(grp);
     }
@@ -28033,6 +28091,17 @@ window.TutorIA = (function(){
       inc.textContent = 'Tema recorrente — já cobrado em: ' + uniqYears.join(', ') + ' (' + years.length + '×)';
       wrap.insertBefore(inc, wrap.firstChild);
     }
+    // Botão "Verificar respostas" — só revela gabarito + comenta ao clicar
+    // (nada de resposta na hora). Cada questão respondida vira 1 comentário.
+    const vb = document.createElement('button'); vb.type = 'button'; vb.className = 'tutor-realq-verify'; vb.textContent = 'Verificar respostas';
+    vb.addEventListener('click', function(){
+      const answered = cards.filter(function(c){ return c.has(); });
+      if(!answered.length){ if(window.ueToast) ueToast('Marque Certo ou Errado em pelo menos uma questão antes de verificar.', 'error'); return; }
+      vb.disabled = true; vb.remove();
+      answered.forEach(function(c){ c.verify(); });
+      _scroll();
+    });
+    wrap.appendChild(vb);
     msgEl.appendChild(wrap); _scroll();
     return { rendered: rendered, hasMore: hasMore };
   }
