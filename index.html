@@ -27747,6 +27747,15 @@ window.TutorIA = (function(){
     .tutor-ce-verdict{ font-weight:600; }
     .tutor-ce-verdict.ok{ color:#7cb98b; } .tutor-ce-verdict.no{ color:#d47973; }
     .tutor-ce-why{ display:inline-block; margin-top:.4rem; }
+    .tutor-realq{ display:flex; flex-direction:column; gap:.7rem; margin-top:.55rem; width:100%; }
+    .tutor-realq-inc{ font-family:var(--sans); font-size:.7rem; color:var(--accent); background:var(--accent-lo); border:1px solid var(--accent-border-soft); border-radius:8px; padding:.35rem .55rem; }
+    .tutor-realq-grp{ display:flex; flex-direction:column; gap:.5rem; border-left:2px solid var(--accent-border); padding-left:.6rem; }
+    .tutor-realq-head{ display:flex; align-items:center; }
+    .tutor-realq-badge{ font-family:var(--sans); font-size:.64rem; letter-spacing:.03em; text-transform:uppercase; color:var(--text-mute); border:1px solid var(--accent-border-soft); border-radius:999px; padding:.12rem .5rem; }
+    .tutor-realq-badge.ubique{ color:var(--accent); border-color:var(--accent-border); }
+    .tutor-realq-base{ font-family:var(--sans); font-size:.74rem; line-height:1.5; color:var(--text-mute); font-style:italic; border-left:2px solid var(--accent-border-soft); padding-left:.5rem; }
+    .tutor-realq-oficial{ font-weight:600; color:var(--text-dim); }
+    .tutor-realq-link{ margin-left:.15rem; }
     .tutor-bubble{ font-family:var(--sans); font-size:.86rem; line-height:1.55; border-radius:12px; padding:.6rem .8rem; }
     .tutor-msg.user .tutor-bubble{ background:var(--accent-lo); border:1px solid var(--accent-border-soft); color:var(--text); border-bottom-right-radius:3px; }
     .tutor-msg.assistant .tutor-bubble{ background:var(--bg-elevated); border:1px solid var(--border); color:var(--text); border-bottom-left-radius:3px; }
@@ -27868,6 +27877,98 @@ window.TutorIA = (function(){
     });
     return out.join('\n');
   }
+  // ── Questões REAIS do banco como enquete VERBATIM (texto exato + gabarito +
+  //    comentário oficial), via resolveBankGroup. Nada de paráfrase da IA. ──
+  function _stripTags(s){ return String(s == null ? '' : s).replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim(); }
+  function _qHeadLabel(it){
+    if(it.source_type === 'ubique') return 'Ubique';
+    let base = '';
+    try {
+      const parsed = (window.LB && LB.parseQuestionOrigin) ? LB.parseQuestionOrigin(it.origin) : null;
+      base = (parsed && window.LB && LB.originToTag) ? LB.originToTag(parsed) : (it.origin || 'Prova passada');
+    } catch(_){ base = it.origin || 'Prova passada'; }
+    if(it.year && String(base).indexOf(String(it.year)) === -1) base += ' · ' + it.year;
+    return base || 'Prova passada';
+  }
+  // Um card C/E respondível com gabarito/comentário reais. `paraTarget` (opcional)
+  // = {unit_id, paragraph_id, block_id} pra oferecer "ver no material".
+  function _bankCECard(stmt, gabCE, just, head, paraTarget){
+    const card = document.createElement('div'); card.className = 'tutor-ce-card';
+    card.innerHTML = '<div class="tutor-ce-stmt">' + _esc(stmt) + '</div>'
+      + '<div class="tutor-ce-btns"><button type="button" class="tutor-ce-btn" data-v="C">Certo</button><button type="button" class="tutor-ce-btn" data-v="E">Errado</button></div>'
+      + '<div class="tutor-ce-reveal" hidden></div>';
+    const reveal = card.querySelector('.tutor-ce-reveal');
+    card.querySelectorAll('.tutor-ce-btn').forEach(function(b){
+      b.addEventListener('click', function(){
+        if(card.classList.contains('answered')) return;
+        card.classList.add('answered');
+        const chosen = b.getAttribute('data-v');
+        const correct = (chosen === gabCE);
+        card.querySelectorAll('.tutor-ce-btn').forEach(function(x){
+          x.disabled = true;
+          if(x.getAttribute('data-v') === gabCE) x.classList.add('ok');
+          else if(x === b) x.classList.add('no');
+        });
+        reveal.hidden = false;
+        reveal.innerHTML = '<span class="tutor-ce-verdict ' + (correct ? 'ok' : 'no') + '">' + (correct ? 'Você acertou' : 'Você errou') + '</span> · Gabarito: <strong>' + (gabCE === 'C' ? 'Certo' : 'Errado') + '</strong>.'
+          + (just ? ' <span class="tutor-realq-oficial">Comentário oficial:</span> ' + _esc(just) : '')
+          + ' <button type="button" class="tutor-fu tutor-ce-why">Me explica melhor</button>';
+        const why = reveal.querySelector('.tutor-ce-why');
+        if(why) why.addEventListener('click', function(){
+          _send('Sobre a questão de ' + head + ': "' + stmt + '" — gabarito ' + (gabCE === 'C' ? 'Certo' : 'Errado') + '. Me explica melhor, USANDO o material da unidade (cite o parágrafo se ajudar) e o comentário oficial como apoio, sem se limitar a eles.', { displayText: 'Me explica melhor essa questão.' });
+          _scroll();
+        });
+        if(paraTarget && (paraTarget.paragraph_id || paraTarget.block_id) && _unitHref(paraTarget.unit_id)){
+          const link = document.createElement('a'); link.className = 'tutor-cite tutor-realq-link'; link.href = '#'; link.textContent = 'ver no material';
+          link.addEventListener('click', function(ev){ ev.preventDefault(); _gotoCite(_unitHref(paraTarget.unit_id), paraTarget.paragraph_id, paraTarget.block_id); });
+          reveal.appendChild(document.createTextNode(' '));
+          reveal.appendChild(link);
+        }
+        _scroll();
+      });
+    });
+    return card;
+  }
+  // Renderiza até `max` questões reais (ids do bank-search) como enquetes
+  // verbatim, sem repetir as já mostradas. Retorna {rendered, skippedDup, total}.
+  function _renderBankQuestions(msgEl, ids, max){
+    if(!_ctx.shownQ) _ctx.shownQ = {};
+    if(!msgEl || !Array.isArray(ids) || !ids.length) return { rendered:0, hasMore:false };
+    const wrap = document.createElement('div'); wrap.className = 'tutor-realq';
+    const years = []; let rendered = 0, hasMore = false;
+    for(let k = 0; k < ids.length; k++){
+      const qid = String(ids[k]);
+      if(_ctx.shownQ[qid]) continue;
+      const bg = (typeof window.resolveBankGroup === 'function') ? window.resolveBankGroup(qid) : null;
+      if(!bg) continue;
+      const tf = (bg.items || []).filter(function(it){ return Array.isArray(it.options) && it.options.length === 2; });
+      if(!tf.length) continue;            // múltipla escolha → entra numa próxima fase
+      if(rendered >= (max || 3)){ hasMore = true; break; }
+      _ctx.shownQ[qid] = true; rendered++;
+      const head = _qHeadLabel(tf[0]);
+      if(tf[0].year) years.push(tf[0].year);
+      const grp = document.createElement('div'); grp.className = 'tutor-realq-grp';
+      const h = document.createElement('div'); h.className = 'tutor-realq-head';
+      h.innerHTML = '<span class="tutor-realq-badge' + (tf[0].source_type === 'ubique' ? ' ubique' : '') + '">' + _esc(head) + '</span>';
+      grp.appendChild(h);
+      const base = _stripTags(bg.reference_text || bg.enunciado || '');
+      if(base){ const bx = document.createElement('div'); bx.className = 'tutor-realq-base'; bx.textContent = base; grp.appendChild(bx); }
+      tf.forEach(function(it){
+        const gabCE = (it.key === 'Certo') ? 'C' : 'E';
+        grp.appendChild(_bankCECard(_stripTags(it.assertion), gabCE, _stripTags(it.comments), head, it._paraTarget || null));
+      });
+      wrap.appendChild(grp);
+    }
+    if(!rendered) return { rendered:0, hasMore:false };
+    const uniqYears = Array.from(new Set(years.map(String))).filter(Boolean).sort();
+    if(uniqYears.length >= 2){
+      const inc = document.createElement('div'); inc.className = 'tutor-realq-inc';
+      inc.textContent = 'Tema recorrente — já cobrado em: ' + uniqYears.join(', ') + ' (' + years.length + '×)';
+      wrap.insertBefore(inc, wrap.firstChild);
+    }
+    msgEl.appendChild(wrap); _scroll();
+    return { rendered: rendered, hasMore: hasMore };
+  }
   async function _buscarQuestoes(){
     if(_sending) return;
     const typed = _inpText();
@@ -27875,21 +27976,24 @@ window.TutorIA = (function(){
     if(!query){ for(let i = _ctx.msgs.length - 1; i >= 0; i--){ if(_ctx.msgs[i].role === 'user'){ query = _ctx.msgs[i].content; break; } } }
     if(!query) query = _ctx.unitTitle || '';
     if(!query){ if(window.ueToast) ueToast('Digite o tema das questões que você quer.', 'error'); return; }
+    if(typed) _inpClear();
     const note = _localNote('Buscando questões reais do banco sobre "' + query.slice(0, 60) + '"…');
     let ids = [];
     try {
       const r = await window._sb.functions.invoke('bank-search', { body: { q: query } });
       if(r && r.data && r.data.ubt_error){ if(note) note.textContent = 'Saldo de UbiTokens insuficiente para buscar no banco.'; return; }
       const list = (r && r.data && Array.isArray(r.data.ids)) ? r.data.ids : [];
-      ids = list.map(function(x){ return String(x.id != null ? x.id : x); }).slice(0, 6);
+      ids = list.map(function(x){ return String(x.id != null ? x.id : x); });
       if(window.UbtWallet) UbtWallet.load();
     } catch(e){ if(note) note.textContent = 'Não consegui buscar no banco agora.'; return; }
-    const ctx = _fmtQuestoes(ids);
     if(note && note.parentNode) note.parentNode.removeChild(note);
-    if(!ctx){ _localNote('Não encontrei questões no banco sobre esse tema.'); return; }
-    const msg = typed || ('Quais questões reais do banco já abordaram o tema "' + query.slice(0, 80) + '"? Comente as mais relevantes, diferencie Ubique de prova passada e diga como eu deveria abordá-las.');
-    if(typed) _inpClear();
-    _send(msg, { questoes_contexto: ctx });
+    const el = _addMsg('assistant', _md('Questões reais que já caíram sobre **' + query.slice(0, 80) + '**. Responda e veja o gabarito e o comentário oficial:'));
+    const res = _renderBankQuestions(el, ids, 3);
+    if(!res.rendered){
+      el.querySelector('.tutor-bubble').innerHTML = _md('Não encontrei questões de Certo/Errado novas sobre esse tema no banco. (Questões de múltipla escolha ainda não entram aqui — em breve.)');
+    } else if(res.hasMore){
+      _localNote('Tem mais questões sobre o tema. É só clicar em "Questões" de novo ou pedir "mais questões" que eu trago outras, sem repetir.');
+    }
   }
 
   // ── 5C: gerar questões Certo/Errado e responder como enquete no chat ──
@@ -28176,7 +28280,7 @@ window.TutorIA = (function(){
   }
 
   async function _loadHistory(){
-    _ctx.conversaId = null; _ctx.msgs = [];
+    _ctx.conversaId = null; _ctx.msgs = []; _ctx.shownQ = {};
     const msgsEl = document.getElementById('tutorMsgs'); if(msgsEl) msgsEl.innerHTML = '';
     try {
       const C = window._sb.schema('ia');
