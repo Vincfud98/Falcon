@@ -4296,6 +4296,17 @@ body.gallery-detail-open{overflow:hidden}
 }
 .q-result-correct{background:rgba(93,212,159,.15);color:var(--green)}
 .q-result-wrong{background:rgba(232,120,120,.15);color:var(--red)}
+/* "Entender o erro com a IA" — aparece sob a questão C/E quando o aluno erra */
+.q-why-wrap{display:flex;flex-direction:column;gap:.5rem;margin:.7rem 0 .2rem;padding:.65rem .75rem;border:1px solid var(--accent-border-soft);border-radius:8px;background:var(--accent-lo)}
+.q-why-hint{font-family:var(--sans);font-size:.78rem;line-height:1.5;color:var(--text-dim)}
+.q-why-hint em{color:var(--text-mute);font-style:italic}
+.q-why-input{width:100%;box-sizing:border-box;resize:vertical;min-height:2.3rem;background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:7px;padding:.45rem .6rem;color:var(--text);font-family:var(--sans);font-size:.82rem;line-height:1.45}
+.q-why-input:focus{outline:none;border-color:var(--accent)}
+.q-why-input.q-why-empty{border-color:var(--red)}
+.q-why-input:disabled{opacity:.6}
+.q-why-btn{align-self:flex-start;background:transparent;border:1px solid var(--accent-border);border-radius:7px;padding:.4rem .7rem;color:var(--accent);font-family:var(--sans);font-size:.8rem;cursor:pointer;transition:background .15s}
+.q-why-btn:hover:not(:disabled){background:var(--accent-lo)}
+.q-why-btn:disabled{opacity:.6;cursor:default}
 /* Coluna de ações no canto direito da questão: ver gabarito + dúvida.
    Empilhamento vertical, mesma largura, alinhamento ao topo. */
 .q-actions{display:flex;flex-direction:column;gap:.45rem;align-items:center;align-self:flex-start}
@@ -13973,6 +13984,31 @@ Blocks.quiz = {
     const groups = normalizeQuizBlock(block);
     const allItems = groups.flatMap(g => g.items);
     const defer = !!(ctx && ctx.deferFeedback); // prova real: marca → verifica depois
+    // Errou numa C/E → oferece "entender o erro com a IA": textarea OPCIONAL
+    // (só roda a IA, e só cobra, se o aluno escrever o raciocínio). Reusa o
+    // tutor (TutorIA.explainWrong) → mesma explicação ancorada do chat.
+    const _quizWhyRemove = (itemEl) => { const w = itemEl.querySelector('.q-why-wrap'); if(w) w.remove(); };
+    const _quizWhyAttach = (itemEl, item, norm, keyIdx, chosenIdx) => {
+      _quizWhyRemove(itemEl);
+      if(!norm || !norm.tf) return;   // só Certo/Errado por ora
+      const lbl = (i) => (norm.display && norm.display[i] === 'C') ? 'Certo' : 'Errado';
+      const gabLabel = lbl(keyIdx), chosenLabel = lbl(chosenIdx);
+      const stmt = String(item.assertion || item.statement || (itemEl.querySelector('.q-assertion') ? itemEl.querySelector('.q-assertion').textContent : '') || '').replace(/\s+/g, ' ').trim();
+      const just = String(item.comments || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const head = String(item.origin || '').trim() || 'questão desta unidade';
+      const wrap = document.createElement('div'); wrap.className = 'q-why-wrap';
+      wrap.innerHTML = '<div class="q-why-hint">Quer entender o erro? Escreva por que você marcou <strong>' + Util.esc(chosenLabel) + '</strong> e a IA explica em cima do seu raciocínio (ancorada no texto + comentário oficial). <em>Só roda — e só gasta UbiTokens — se você escrever algo; em branco, nada acontece.</em></div>'
+        + '<textarea class="q-why-input" rows="2" placeholder="Por que você marcou ' + Util.esc(chosenLabel) + '?"></textarea>'
+        + '<button type="button" class="q-why-btn">Entender o erro com a IA</button>';
+      const ta = wrap.querySelector('.q-why-input'), btn = wrap.querySelector('.q-why-btn');
+      btn.addEventListener('click', () => {
+        const reason = (ta.value || '').trim();
+        if(!reason){ ta.focus(); ta.classList.add('q-why-empty'); setTimeout(() => ta.classList.remove('q-why-empty'), 1200); return; }
+        btn.disabled = true; ta.disabled = true; btn.textContent = 'Abrindo o tutor…';
+        if(window.TutorIA && TutorIA.explainWrong) TutorIA.explainWrong({ head, stmt, gabLabel, chosenLabel, just, reason });
+      });
+      itemEl.appendChild(wrap);
+    };
     stageEl.querySelectorAll(`[data-item-id]`).forEach(itemEl => {
       const itemId = itemEl.getAttribute('data-item-id');
       const item = allItems.find(x => String(x.id) === String(itemId));
@@ -14019,6 +14055,7 @@ Blocks.quiz = {
             ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { selected:null, correct:null, doubt:existingDoubt });
             itemEl.querySelectorAll('.q-option').forEach(b => b.classList.remove('selected','correct','wrong'));
             const er = assertion.querySelector('.q-result'); if(er) er.remove();
+            _quizWhyRemove(itemEl);
             return;
           }
           ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { selected:value, correct, doubt:existingDoubt });
@@ -14034,6 +14071,7 @@ Blocks.quiz = {
           icon.title = correct ? 'Correto' : 'Incorreto';
           icon.textContent = correct ? '✓' : '✗';
           assertion.appendChild(icon);
+          if(correct) _quizWhyRemove(itemEl); else _quizWhyAttach(itemEl, item, norm, keyIdx, idx);
         });
       });
       // Doubt toggle
@@ -28521,6 +28559,16 @@ window.TutorIA = (function(){
   function ask(ctx, message, displayText){
     return open(ctx).then(function(){ _send(message, { displayText: displayText }); });
   }
+  // Chamado de FORA (ex.: quiz block da unidade): abre o tutor na unidade atual
+  // e explica uma questão C/E errada, ancorando no texto + comentário oficial +
+  // raciocínio do aluno. Reaproveita _explainWrongMsg (mesma lógica do chat).
+  function explainWrong(o){
+    o = o || {};
+    const ctx = _unitCtxFromPage();
+    const head = o.head || (ctx.unitTitle || 'questão desta unidade');
+    const disp = o.reason ? ('Marquei ' + (o.chosenLabel || '') + ' porque: ' + o.reason) : 'Me explica por que errei essa.';
+    return ask(ctx, _explainWrongMsg(head, o.stmt || '', o.gabLabel || '', o.chosenLabel || '', o.just || '', o.reason || ''), disp);
+  }
   function close(){ const d = document.getElementById('tutorDrawer'); if(d) d.hidden = true; }   // só esconde (mantém a conversa)
   // Sai da unidade → limpa a VISÃO (o dado continua no banco e recarrega ao voltar).
   function _resetForLeave(){
@@ -28591,7 +28639,7 @@ window.TutorIA = (function(){
       if(uid !== _openedUnit) _resetForLeave();
     });
   }
-  return { open: open, close: close, ask: ask, excerptMenu: excerptMenu };
+  return { open: open, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong };
 })();
 
 Renderers.unit = function(route){
