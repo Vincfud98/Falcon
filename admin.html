@@ -16546,8 +16546,40 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // ═══════════════════════════════════════════════════════════
   // AUTH
   // ═══════════════════════════════════════════════════════════
+  // Confere se o usuário logado é admin/superadmin — pelo mesmo RPC que o app
+  // do aluno usa (get_my_profile), com fallback em crm.app_users. Fail-closed.
+  async function _isSessionAdmin(user){
+    try{
+      const r = await supabase.rpc('get_my_profile');
+      if(!r.error && Array.isArray(r.data) && r.data.length){
+        const role = String(r.data[0].role || '').toLowerCase();
+        return role === 'admin' || role === 'superadmin';
+      }
+    }catch(_){}
+    try{
+      const { data } = await supabase.schema('crm').from('app_users')
+        .select('role').eq('id', user && user.id).maybeSingle();
+      const role = String((data && data.role) || '').toLowerCase();
+      return role === 'admin' || role === 'superadmin';
+    }catch(_){}
+    return false;
+  }
+
   async function checkSession(){
-    // 1. Handoff imediato vindo do index.html (clique no botão Admin)
+    // 1. Sessão Supabase REAL primeiro — tem o UUID verdadeiro (necessário pra
+    //    gravar) e é onde aplicamos a TRAVA de cargo. Só admin/superadmin entra.
+    try{
+      const { data: { session } } = await supabase.auth.getSession();
+      if(session && session.user){
+        if(await _isSessionAdmin(session.user)){ showMain(session.user); return; }
+        // Logado, mas NÃO é admin → manda pra área do aluno (fecha o furo de acesso).
+        location.replace('index.html');
+        return;
+      }
+    }catch(_){}
+
+    // 2. Handoff de troca de painel (vindo do index.html) — fallback de EXIBIÇÃO
+    //    quando não há sessão Supabase. Id local (sem UUID real / sem escrita).
     try{
       const raw = sessionStorage.getItem('ubique.panel.handoff');
       if(raw){
@@ -16560,7 +16592,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }
     }catch(_){}
 
-    // 2. Token de sessão admin persistido pelo index.html no login
+    // 3. Token admin persistido pelo index.html (só é setado pra quem é admin).
     try{
       const raw = localStorage.getItem('ubique.admin.token');
       if(raw){
@@ -16572,12 +16604,6 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           localStorage.removeItem('ubique.admin.token');
         }
       }
-    }catch(_){}
-
-    // 3. Sessão Supabase real (usuários com conta no Supabase)
-    try{
-      const { data: { session } } = await supabase.auth.getSession();
-      if(session){ showMain(session.user); return; }
     }catch(_){}
 
     // 4. Sem sessão válida → volta pro login unificado no index.html
