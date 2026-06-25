@@ -1,8 +1,10 @@
 name: Deploy para Firebase Hosting
 
-# Publica o site no Firebase Hosting automaticamente a cada push na branch main.
-# Restaura o comportamento "push = site atualiza" (que o GitHub Pages fazia).
-# Requer o secret FIREBASE_SERVICE_ACCOUNT_UBIQUE_FALCON configurado no repositório.
+# Publica o site no Firebase Hosting a cada push na branch main.
+# Usa o firebase CLI direto + RETRY automático, porque o endpoint de token
+# OAuth do Google às vezes falha de forma transitória ("Premature close" /
+# "Failed to authenticate"). Assim o deploy se recupera sozinho.
+# Requer o secret FIREBASE_SERVICE_ACCOUNT_UBIQUE_FALCON (chave de conta de serviço).
 
 on:
   push:
@@ -14,9 +16,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: FirebaseExtended/action-hosting-deploy@v0
+      - uses: actions/setup-node@v4
         with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_UBIQUE_FALCON }}
-          channelId: live
-          projectId: ubique-falcon
+          node-version: "20"
+      - name: Instalar Firebase CLI
+        run: npm install -g firebase-tools
+      - name: Deploy (com retry para falhas transitorias de auth do Google)
+        env:
+          FIREBASE_SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_UBIQUE_FALCON }}
+        run: |
+          printf '%s' "$FIREBASE_SA" > "$RUNNER_TEMP/sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="$RUNNER_TEMP/sa.json"
+          n=0
+          max=6
+          until [ "$n" -ge "$max" ]; do
+            n=$((n+1))
+            echo "::group::Tentativa $n de $max"
+            if firebase deploy --only hosting --project ubique-falcon --non-interactive; then
+              echo "::endgroup::"
+              echo "Deploy concluido com sucesso na tentativa $n."
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "Tentativa $n falhou (provavel falha transitoria de auth). Aguardando 20s..."
+            sleep 20
+          done
+          echo "Deploy falhou apos $max tentativas."
+          exit 1
