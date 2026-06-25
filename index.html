@@ -28827,7 +28827,7 @@ window.TutorIA = (function(){
   // ─────────────────────────────────────────────────────────────────────────
   const VOZ_PHONE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.81.36 1.6.7 2.34a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.74-1.27a2 2 0 0 1 2.11-.45c.74.34 1.53.57 2.34.7A2 2 0 0 1 22 16.92z"/></svg>';
   let _vozEl = null, _vozConv = null, _vozTimer = null;
-  let _vozStartMs = 0, _vozMaxMin = null, _vozLive = false;
+  let _vozStartMs = 0, _vozMaxMin = null, _vozLive = false, _vozToken = null, _vozConvId = null;
 
   function _vozBuild(){
     // Ancora DENTRO do drawer do tutor (escurece só o chat; a unidade fica
@@ -28855,7 +28855,7 @@ window.TutorIA = (function(){
   }
 
   function _vozClose(){
-    if(_vozLive){ _vozEndCall(); }
+    if(_vozLive){ _vozFinish('pause'); }
     if(_vozEl) _vozEl.hidden = true;
   }
 
@@ -28888,22 +28888,23 @@ window.TutorIA = (function(){
     const startBtn = _vozEl.querySelector('#vozStart');
     if(startBtn){ startBtn.disabled = true; startBtn.textContent = 'Conectando…'; }
     try {
-      const { data: tok, error: tokErr } = await window._sb.functions.invoke('voice-tutor', { body: { mode: 'start' } });
+      const ctx = _unitCtxFromPage();
+      const { data: tok, error: tokErr } = await window._sb.functions.invoke('voice-tutor', { body: { mode: 'start', unit_id: ctx.unitId } });
       if(tokErr || !tok || !tok.ok){
         return _vozShowErr((tok && tok.error === 'saldo_insuficiente')
           ? 'Saldo de UbiTokens insuficiente para a chamada. Adicione mais na sua Carteira (Minha Conta).'
           : 'Não consegui iniciar a chamada agora. Tente de novo em instantes.');
       }
       _vozMaxMin = tok.ilimitado ? null : Number(tok.minutos_max);
-      const ctx = _unitCtxFromPage();
-      // tira o rótulo/número da frente ("01 · O período…" -> "O período…"),
-      // que falado em voz fica esquisito.
+      _vozToken = tok.voice_token || null;
+      // tira o rótulo/número da frente ("01 · O período…" -> "O período…").
       const temaLimpo = (ctx.unitTitle || '').replace(/^[^·]*·\s*/, '').trim();
       const vars = {
         apelido: tok.apelido || 'candidato',
         tema_unidade: temaLimpo || ctx.unitTitle || 'o assunto da sua unidade',
         texto_unidade: (ctx.unitText || '(sem unidade carregada)').slice(0, 9000),
-        voice_token: tok.voice_token || ''   // crachá — o webhook usa pra saber quem cobrar
+        voice_token: tok.voice_token || '',   // crachá — cobrança/caderno no webhook
+        caderno: tok.caderno || ''            // se houver, o Manfredo retoma de onde parou
       };
       const mod = await import('https://esm.sh/@elevenlabs/client');
       const Conversation = mod.Conversation || (mod.default && mod.default.Conversation);
@@ -28912,13 +28913,14 @@ window.TutorIA = (function(){
         dynamicVariables: vars,
         onConnect: function(){ _vozSetStatus('listening'); },
         onModeChange: function(m){ _vozSetStatus(m && m.mode === 'speaking' ? 'speaking' : 'listening'); },
-        onDisconnect: function(){ if(_vozLive) _vozEndCall('Chamada encerrada.'); },
+        onDisconnect: function(){ if(_vozLive) _vozFinish('pause'); },
         onError: function(err){ console.warn('[voz] erro', err); }
       };
       // NB: a velocidade (tts.speed) é um "override" que a ElevenLabs só aceita
       // se o agente tiver a permissão ligada — senão DERRUBA a conexão. Por ora
       // conectamos sem override (velocidade 1× natural); ligamos depois.
       _vozConv = await Conversation.startSession(opts);
+      _vozConvId = (_vozConv && _vozConv.getId) ? _vozConv.getId() : null;
       _vozLive = true;
       _vozLiveView();
       _vozStartMs = Date.now();
@@ -28936,9 +28938,11 @@ window.TutorIA = (function(){
       + '<div class="voz-status"><span class="voz-dot live" id="vozDot"></span> <span id="vozStatus">Conectando…</span> <span class="voz-timer" id="vozTimer">0:00</span> <span class="voz-min" id="vozMin"></span></div>'
       + '<div class="voz-actions">'
       + '<button type="button" class="btn-ghost voz-mute" id="vozMute" data-tip="Mudo"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>'
-      + '<button type="button" class="voz-end" id="vozEnd"><svg viewBox="0 0 24 24"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.34.7A2 2 0 0 1 23 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 3.07 4.18 2 2 0 0 1 5 2h3a2 2 0 0 1 2 1.72c.13.81.36 1.6.7 2.34a2 2 0 0 1-.45 2.11L8.97 9.44"/><line x1="23" y1="1" x2="1" y2="23"/></svg> Encerrar</button>'
+      + '<button type="button" class="btn-ghost" id="vozPause" data-tip="Pausar — guarda a conversa pra retomar depois">Pausar</button>'
+      + '<button type="button" class="voz-end" id="vozEnd" data-tip="Encerrar a sessão"><svg viewBox="0 0 24 24"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.34.7A2 2 0 0 1 23 16.92v3a2 2 0 0 1-2.18 2A19.79 19.79 0 0 1 3.07 4.18 2 2 0 0 1 5 2h3a2 2 0 0 1 2 1.72c.13.81.36 1.6.7 2.34a2 2 0 0 1-.45 2.11L8.97 9.44"/><line x1="23" y1="1" x2="1" y2="23"/></svg> Encerrar</button>'
       + '</div></div>';
-    body.querySelector('#vozEnd').addEventListener('click', function(){ _vozEndCall(); });
+    body.querySelector('#vozPause').addEventListener('click', _vozPause);
+    body.querySelector('#vozEnd').addEventListener('click', _vozEncerrar);
     const mute = body.querySelector('#vozMute');
     let muted = false;
     mute.addEventListener('click', function(){
@@ -28947,6 +28951,14 @@ window.TutorIA = (function(){
       mute.classList.toggle('on', muted);
     });
     _vozUpdateMin();
+  }
+
+  function _vozPause(){ _vozFinish('pause'); }
+  async function _vozEncerrar(){
+    if(_vozToken){
+      try { await window._sb.functions.invoke('voice-tutor', { body: { mode: 'intent', voice_token: _vozToken, intent: 'end' } }); } catch(_){}
+    }
+    _vozFinish('end');
   }
 
   function _vozSetStatus(mode){
@@ -28963,7 +28975,7 @@ window.TutorIA = (function(){
     const t = _vozEl.querySelector('#vozTimer');
     if(t) t.textContent = Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
     _vozUpdateMin();
-    if(_vozMaxMin != null && sec >= _vozMaxMin * 60){ _vozEndCall('Seus minutos de UbiTokens acabaram.'); }
+    if(_vozMaxMin != null && sec >= _vozMaxMin * 60){ _vozFinish('pause', 'Seus minutos de UbiTokens acabaram. A conversa foi salva pra retomar depois.'); }
   }
 
   function _vozUpdateMin(){
@@ -28974,24 +28986,26 @@ window.TutorIA = (function(){
     el.textContent = '· ' + Math.max(0, _vozMaxMin - Math.floor(sec / 60)) + ' min';
   }
 
-  function _vozCallChip(secs){
+  function _vozCallChip(kind, secs){
     const msgs = document.getElementById('tutorMsgs');
     if(!msgs) return;
+    const dur = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+    const label = (kind === 'end') ? 'Sessão de voz encerrada' : 'Chamada de voz com o Manfredo';
     const chip = document.createElement('div');
     chip.className = 'tutor-call-chip';
-    chip.innerHTML = '<svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.81.36 1.6.7 2.34a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.74-1.27a2 2 0 0 1 2.11-.45c.74.34 1.53.57 2.34.7A2 2 0 0 1 22 16.92z"/></svg> Chamada de voz com o Manfredo · ' + Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+    chip.innerHTML = '<svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.81.36 1.6.7 2.34a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.74-1.27a2 2 0 0 1 2.11-.45c.74.34 1.53.57 2.34.7A2 2 0 0 1 22 16.92z"/></svg> ' + label + ' · ' + dur;
     msgs.appendChild(chip);
     msgs.scrollTop = msgs.scrollHeight;
   }
 
-  function _vozEndCall(msg){
+  function _vozFinish(kind, msg){
     const was = _vozLive;
     const dur = _vozStartMs ? Math.floor((Date.now() - _vozStartMs) / 1000) : 0;
     _vozLive = false;
     if(_vozTimer){ clearInterval(_vozTimer); _vozTimer = null; }
     if(was){ try { if(_vozConv && _vozConv.endSession) _vozConv.endSession(); } catch(_){} }
-    _vozConv = null; _vozStartMs = 0;
-    if(was) _vozCallChip(dur);
+    _vozConv = null; _vozStartMs = 0; _vozToken = null; _vozConvId = null;
+    if(was) _vozCallChip(kind, dur);
     if(msg && _vozEl){
       const body = _vozEl.querySelector('#vozBody');
       if(body){
