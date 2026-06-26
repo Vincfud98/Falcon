@@ -6487,6 +6487,10 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   padding:.35rem .85rem;width:fit-content;max-width:88%;border:1px solid var(--border);border-radius:999px;
   background:var(--bg-elevated);color:var(--text-mute);font-family:var(--sans);font-size:.72rem;text-align:center}
 .tutor-call-chip svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;flex-shrink:0}
+.tutor-call-resumo{background:none;border:none;color:var(--accent);font-family:var(--sans);font-size:.72rem;
+  cursor:pointer;text-decoration:underline;padding:0 0 0 .25rem}
+.tutor-call-resumo:hover{opacity:.8}
+.tutor-call-resumo:disabled{color:var(--text-mute);text-decoration:none;cursor:default}
 
 /* ─── GLOSSARY LOOKUP modal (acionado pela ctxToolbar) ─── */
 .gloss-lookup-entry{
@@ -28597,6 +28601,11 @@ window.TutorIA = (function(){
         if(mr.error) console.warn('[tutor] ler mensagens erro:', mr.error.message);
         (mr.data || []).forEach(function(m){
           const raw = m.conteudo || '';
+          if(m.role === 'voice'){
+            let d = {}; try { d = JSON.parse(raw) || {}; } catch(_){}
+            _vozCallChip(d.kind || 'pause', Number(d.secs) || 0, d.convId || null);
+            return; // chip de chamada — não entra no histórico do Claude
+          }
           if(m.role !== 'assistant'){
             _ctx.msgs.push({ role:m.role, content: raw });
             _addMsg(m.role, _md(raw));
@@ -29005,26 +29014,73 @@ window.TutorIA = (function(){
     el.textContent = '· ' + Math.max(0, _vozMaxMin - Math.floor(sec / 60)) + ' min';
   }
 
-  function _vozCallChip(kind, secs){
+  async function _vozResumo(convId, btn){
+    if(!convId) return;
+    if(btn){ btn.disabled = true; btn.textContent = 'Gerando…'; }
+    try {
+      const { data, error } = await window._sb.functions.invoke('voice-resumo', { body: { conversation_id: convId } });
+      if(error || !data || !data.ok || !data.resumo){
+        if(btn){ btn.disabled = false; btn.textContent = 'Gerar resumo'; }
+        if(window.ueToast) ueToast((data && data.error === 'sem_transcricao') ? 'O resumo ainda está sendo processado — tente de novo em alguns segundos.' : 'Não consegui gerar o resumo agora.', 'error');
+        return;
+      }
+      const md = '**Resumo da conversa por voz**\n\n' + data.resumo;
+      const el = _addMsg('assistant', _md(md));
+      if(el) _msgFooter(el, md);
+      if(btn){ btn.textContent = 'Resumo gerado'; btn.disabled = true; }
+    } catch(e){
+      if(btn){ btn.disabled = false; btn.textContent = 'Gerar resumo'; }
+      if(window.ueToast) ueToast('Erro ao gerar o resumo.', 'error');
+    }
+  }
+
+  async function _vozPersistChip(kind, secs, convId){
+    try {
+      const C = window._sb.schema('ia');
+      const { data: ud } = await window._sb.auth.getUser();
+      const uid = ud && ud.user ? ud.user.id : null;
+      if(!uid || !_ctx.unitId) return;
+      if(!_ctx.conversaId){
+        const ins = await C.from('tutor_conversas').insert({
+          user_id: uid, unit_id: _ctx.unitId, unit_title: _ctx.unitTitle || null,
+          titulo: 'Conversa por voz', modelo: 'equilibrado'
+        }).select('id').single();
+        if(ins.error){ console.warn('[voz] cria conversa', ins.error.message); return; }
+        _ctx.conversaId = ins.data && ins.data.id;
+      }
+      if(!_ctx.conversaId) return;
+      const r = await C.from('tutor_mensagens').insert({
+        conversa_id: _ctx.conversaId, user_id: uid, role: 'voice',
+        conteudo: JSON.stringify({ kind: kind, secs: secs, convId: convId || null })
+      });
+      if(r.error) console.warn('[voz] persist chip', r.error.message);
+    } catch(e){ console.warn('[voz] persist chip ex', e && e.message); }
+  }
+
+  function _vozCallChip(kind, secs, convId){
     const msgs = document.getElementById('tutorMsgs');
     if(!msgs) return;
     const dur = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
     const label = (kind === 'end') ? 'Sessão de voz encerrada' : 'Chamada de voz com o Manfredo';
     const chip = document.createElement('div');
     chip.className = 'tutor-call-chip';
-    chip.innerHTML = '<svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.81.36 1.6.7 2.34a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.74-1.27a2 2 0 0 1 2.11-.45c.74.34 1.53.57 2.34.7A2 2 0 0 1 22 16.92z"/></svg> ' + label + ' · ' + dur;
+    chip.innerHTML = '<svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.81.36 1.6.7 2.34a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.74-1.27a2 2 0 0 1 2.11-.45c.74.34 1.53.57 2.34.7A2 2 0 0 1 22 16.92z"/></svg> ' + label + ' · ' + dur
+      + (convId ? ' <button type="button" class="tutor-call-resumo">Gerar resumo</button>' : '');
     msgs.appendChild(chip);
+    const rb = chip.querySelector('.tutor-call-resumo');
+    if(rb) rb.addEventListener('click', function(){ _vozResumo(convId, rb); });
     msgs.scrollTop = msgs.scrollHeight;
   }
 
   function _vozFinish(kind, msg){
     const was = _vozLive;
     const dur = _vozStartMs ? Math.floor((Date.now() - _vozStartMs) / 1000) : 0;
+    const convId = _vozConvId;
     _vozLive = false;
     if(_vozTimer){ clearInterval(_vozTimer); _vozTimer = null; }
     if(was){ try { if(_vozConv && _vozConv.endSession) _vozConv.endSession(); } catch(_){} }
     _vozConv = null; _vozStartMs = 0; _vozToken = null; _vozConvId = null;
-    if(was) _vozCallChip(kind, dur);
+    if(was){ _vozCallChip(kind, dur, convId); _vozPersistChip(kind, dur, convId); }
     if(msg && _vozEl){
       const body = _vozEl.querySelector('#vozBody');
       if(body){
