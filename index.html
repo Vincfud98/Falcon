@@ -14977,23 +14977,25 @@ function _essayBrainstorm(itemEl, item, ctx, block){
   const colsBox = bs.querySelector('.essay-bs-cols');
   const fbBox = bs.querySelector('.essay-bs-feedback');
 
-  // Persistência local — sobrevive a trocar de aba/página/recarregar.
-  const _key = 'falcon_bs:' + ((ctx && ctx.unitId) || '') + ':' + ((block && block.id) || '') + ':' + (itemEl.getAttribute('data-item-id') || '');
-  function _load(){ try { return JSON.parse(localStorage.getItem(_key) || '{}') || {}; } catch(_){ return {}; } }
+  // Persistência no BANCO (aluno.brainstorm_state) — atrelada à conta, acessível
+  // de QUALQUER máquina/navegador. (localStorage foi descontinuado de propósito.)
+  const _ref = { unit_id: String((ctx && ctx.unitId) || ''), block_id: String((block && block.id) || ''), item_id: String(itemEl.getAttribute('data-item-id') || '') };
+  const _useDb = !!(window._sb && window.UBIQUE_USE_SUPABASE);
+  let _uid = null;
   function _readCols(){ return Array.prototype.map.call(colsBox.querySelectorAll('.essay-bs-col'), function(c){ return { label: c.querySelector('.essay-bs-label').value, text: c.querySelector('.essay-bs-text').value }; }); }
-  function _save(result){
+  async function _dbUpsert(patch){
+    if(!_useDb || !_uid) return;
     try {
-      const cur = _load();
-      localStorage.setItem(_key, JSON.stringify({ cols: _readCols(), result: (result !== undefined ? result : cur.result), gerado: cur.gerado }));
-    } catch(_){}
+      const row = Object.assign({ user_id: _uid, unit_id: _ref.unit_id, block_id: _ref.block_id, item_id: _ref.item_id, updated_at: new Date().toISOString() }, patch);
+      const { error } = await window._sb.schema('aluno').from('brainstorm_state').upsert(row, { onConflict: 'user_id,unit_id,block_id,item_id' });
+      if(error) console.warn('[brainstorm save]', error);
+    } catch(e){ console.warn('[brainstorm save ex]', e); }
   }
-  // Persiste o "texto ideal" gerado (o aluno pagou por ele — não pode sumir ao recarregar/trocar de aba).
-  function _saveGerado(gerado){
-    try {
-      const cur = _load();
-      localStorage.setItem(_key, JSON.stringify({ cols: _readCols(), result: cur.result, gerado: (gerado !== undefined ? gerado : cur.gerado) }));
-    } catch(_){}
-  }
+  // Colunas salvam com debounce (~1s) pra não bater no banco a cada tecla.
+  let _colsTimer = null;
+  function _saveCols(){ if(_colsTimer) clearTimeout(_colsTimer); _colsTimer = setTimeout(function(){ _dbUpsert({ cols: _readCols() }); }, 1000); }
+  function _saveResult(result){ return _dbUpsert({ result: (result === undefined ? null : result) }); }
+  function _saveGerado(gerado){ return _dbUpsert({ gerado: (gerado === undefined ? null : gerado) }); }
 
   function addCol(label, text){
     const col = document.createElement('div');
@@ -15001,14 +15003,10 @@ function _essayBrainstorm(itemEl, item, ctx, block){
     col.innerHTML = '<div class="essay-bs-col-head"><input class="essay-bs-label" value="'+Util.attr(label||'')+'" placeholder="Item"><button type="button" class="essay-bs-delcol" aria-label="Remover">&#10005;</button></div>'+
       '<textarea class="essay-bs-text" placeholder="Liste os pontos deste item — um por linha, na ordem em que vai escrever no texto"></textarea>';
     if(text) col.querySelector('.essay-bs-text').value = text;
-    col.querySelector('.essay-bs-delcol').addEventListener('click', function(){ col.remove(); _save(); });
+    col.querySelector('.essay-bs-delcol').addEventListener('click', function(){ col.remove(); _saveCols(); });
     colsBox.appendChild(col);
   }
-  // Semeia: do salvo se houver; senão a partir dos itens do enunciado (a) b)… ou 1) 2)…).
-  const _saved = _load();
-  if(Array.isArray(_saved.cols) && _saved.cols.length){
-    _saved.cols.forEach(function(c){ addCol(c.label, c.text); });
-  } else {
+  function _seedFromCommand(){
     const cmd = String(item.command || item.statement || '').replace(/<[^>]+>/g, ' ');
     let labels = Array.from(new Set((cmd.match(/\b[a-eA-E]\)/g) || []).map(function(s){ return s.toLowerCase(); })));
     if(labels.length < 2){
@@ -15018,8 +15016,8 @@ function _essayBrainstorm(itemEl, item, ctx, block){
     if(labels.length < 2) labels = ['Tema 1', 'Tema 2'];
     labels.slice(0, 6).forEach(function(l){ addCol(l); });
   }
-  bs.querySelector('.essay-bs-addcol').addEventListener('click', function(){ addCol('', ''); _save(); });
-  colsBox.addEventListener('input', function(){ _save(); });
+  bs.querySelector('.essay-bs-addcol').addEventListener('click', function(){ addCol('', ''); _saveCols(); });
+  colsBox.addEventListener('input', function(){ _saveCols(); });
 
   function assemble(){
     const parts = [];
@@ -15058,13 +15056,31 @@ function _essayBrainstorm(itemEl, item, ctx, block){
         console.warn('[brainstorm avaliar]', data || error);
         if(window.ueToast) window.ueToast('Não consegui avaliar (' + _c + _d + ').', 'error');
       }
-      else { _save(data.resultado); _saveGerado(null); _bsRenderFeedback(fbBox, itemEl, data.resultado, brainstorm, callEF, (item.maxLines || 0), _saveGerado, null); }
+      else { _saveResult(data.resultado); _saveGerado(null); _bsRenderFeedback(fbBox, itemEl, data.resultado, brainstorm, callEF, (item.maxLines || 0), _saveGerado, null); }
     } catch(e){ if(window.ueToast) window.ueToast('Erro ao avaliar.', 'error'); }
     avBtn.disabled = false; avBtn.textContent = 'Avaliar brainstorm';
   });
 
-  // Restaura a avaliação salva e o texto ideal já gerado (sem cobrar de novo).
-  if(_saved && _saved.result){ try { _bsRenderFeedback(fbBox, itemEl, _saved.result, assemble(), callEF, (item.maxLines || 0), _saveGerado, _saved.gerado); } catch(_){} }
+  // Carrega do BANCO: repõe colunas + avaliação + texto ideal já gerado (de
+  // qualquer máquina, sem cobrar de novo). Se não houver salvo, semeia do enunciado.
+  (async function _initFromDb(){
+    if(_useDb){
+      try { const r = await window._sb.auth.getUser(); _uid = (r && r.data && r.data.user) ? r.data.user.id : null; } catch(_){ _uid = null; }
+    }
+    let saved = null;
+    if(_useDb && _uid){
+      try {
+        const { data, error } = await window._sb.schema('aluno').from('brainstorm_state')
+          .select('cols, result, gerado')
+          .eq('user_id', _uid).eq('unit_id', _ref.unit_id).eq('block_id', _ref.block_id).eq('item_id', _ref.item_id)
+          .maybeSingle();
+        if(!error && data) saved = data;
+      } catch(e){ console.warn('[brainstorm load ex]', e); }
+    }
+    if(saved && Array.isArray(saved.cols) && saved.cols.length){ saved.cols.forEach(function(c){ addCol(c.label, c.text); }); }
+    else _seedFromCommand();
+    if(saved && saved.result){ try { _bsRenderFeedback(fbBox, itemEl, saved.result, assemble(), callEF, (item.maxLines || 0), _saveGerado, saved.gerado); } catch(_){} }
+  })();
 }
 
 function _bsClean(s){ return String(s == null ? '' : s).replace(/\*\*/g, '').replace(/\*/g, '').replace(/__/g, '').replace(/^#+\s*/gm, '').trim(); }
