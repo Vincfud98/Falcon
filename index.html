@@ -6096,6 +6096,24 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
 .wallet-pos{color:#3a9d5a}
 .wallet-cost{grid-template-columns:1fr auto}
 .wallet-cost-desc{font-size:.72rem;color:var(--text-mute);margin-top:.15rem}
+.wallet-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem;margin:0 0 1.3rem}
+.wallet-card{display:flex;flex-direction:column;gap:.6rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:1.1rem 1.2rem}
+.wallet-card-title{font-family:var(--sans);font-weight:500;font-size:.9rem;color:var(--text);margin:0}
+.wallet-card-sub{font-family:var(--sans);font-weight:300;font-size:.74rem;line-height:1.5;color:var(--text-dim);margin:0}
+.wallet-card-fb{font-family:var(--sans);font-size:.74rem;color:var(--text-dim);min-height:1em}
+.wallet-buy-row{display:flex;align-items:center;gap:.9rem;margin-top:.2rem}
+.wallet-step{width:32px;height:32px;flex-shrink:0;border:1px solid var(--border);background:var(--bg-card);border-radius:6px;color:var(--text);font-size:1.1rem;line-height:1;cursor:pointer;transition:all .2s var(--ease)}
+.wallet-step:hover{border-color:var(--accent);color:var(--accent)}
+.wallet-buy-qty{font-family:var(--serif);font-size:1.3rem;color:var(--text)}
+.wallet-buy-price{font-family:var(--sans);font-size:.82rem;color:var(--text-dim)}
+.wallet-buy-price strong{color:var(--text);font-weight:500}
+.wallet-auto-toggle{display:flex;align-items:center;gap:.5rem;font-family:var(--sans);font-size:.82rem;color:var(--text-dim);cursor:pointer}
+.wallet-auto-toggle input{accent-color:var(--accent);cursor:pointer}
+.wallet-auto-fields{display:flex;flex-direction:column;gap:.5rem;font-family:var(--sans);font-size:.78rem;color:var(--text-dim)}
+.wallet-auto-fields label{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap}
+.wallet-auto-fields input{width:64px;background:var(--bg-card);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:var(--sans);font-size:.82rem;padding:.3rem .4rem}
+.wallet-auto-fields input:focus{outline:none;border-color:var(--accent)}
+.wallet-card .btn-primary,.wallet-card .btn-ghost{align-self:flex-start;margin-top:.2rem}
 /* pílula de custo ao lado dos botões de IA */
 .ubt-cost{display:inline-flex;align-items:center;gap:.25rem;font-size:.72rem;color:var(--accent);background:var(--accent-lo);border:1px solid var(--accent-border);border-radius:999px;padding:.12rem .55rem;font-variant-numeric:tabular-nums;white-space:nowrap;vertical-align:middle}
 /* ─── Editor de crop circular (usado em /conta — UserAvatarCrop) ───
@@ -18665,6 +18683,70 @@ function _ubtFmt(n){ const v = Number(n); return (isFinite(v) ? v : 0).toFixed(2
 const UBT_TO_BRL = 6.20;
 function _ubtBrl(n){ const v = Number(n) * UBT_TO_BRL; return 'R$ ' + (isFinite(v) ? v : 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
+// Relê a conta e atualiza saldo + ≈R$ na aba Carteira. Devolve a conta.
+async function _refreshWalletSaldo(stageEl, user){
+  const { data } = await window._sb.schema('carteira').from('contas')
+    .select('saldo, ilimitado, auto_recarga, auto_limite, auto_valor').eq('user_id', user.id).maybeSingle();
+  const el = stageEl.querySelector('#walletSaldo');
+  const brlEl = stageEl.querySelector('#walletSaldoBrl');
+  if(el){
+    if(data && data.ilimitado){ el.textContent = 'Ilimitado'; el.style.fontSize = '1.3rem'; if(brlEl) brlEl.textContent = ''; }
+    else { el.textContent = _ubtFmt(data ? data.saldo : 0); if(brlEl) brlEl.textContent = '≈ ' + _ubtBrl(data ? data.saldo : 0); }
+  }
+  return data;
+}
+
+// Comprar créditos (beta credita na hora via carteira.comprar_ubitokens).
+function _wireWalletBuy(stageEl, user){
+  const qtyEl = stageEl.querySelector('#walletBuyQty');
+  const priceEl = stageEl.querySelector('#walletBuyPrice');
+  const minus = stageEl.querySelector('#walletBuyMinus');
+  const plus = stageEl.querySelector('#walletBuyPlus');
+  const btn = stageEl.querySelector('#walletBuyBtn');
+  const fb = stageEl.querySelector('#walletBuyFb');
+  if(!qtyEl || !btn) return;
+  let qty = 10;
+  function render(){ qtyEl.textContent = qty; if(priceEl) priceEl.textContent = _ubtBrl(qty); }
+  render();
+  if(minus) minus.addEventListener('click', function(){ qty = Math.max(5, qty - 5); render(); });
+  if(plus) plus.addEventListener('click', function(){ qty = Math.min(1000, qty + 5); render(); });
+  btn.addEventListener('click', async function(){
+    btn.disabled = true; if(fb) fb.textContent = 'Processando…';
+    try {
+      const { data, error } = await window._sb.schema('carteira').rpc('comprar_ubitokens', { p_qtd: qty });
+      if(error || !data || data.ok === false){ if(fb) fb.textContent = '✗ Não consegui adicionar' + (data && data.error ? ' (' + data.error + ')' : ''); }
+      else { if(fb) fb.textContent = '✓ Adicionado! Novo saldo: ⓤ ' + _ubtFmt(data.saldo); await _refreshWalletSaldo(stageEl, user); if(window.UbtWallet) UbtWallet.load(); }
+    } catch(e){ if(fb) fb.textContent = '✗ Erro ao processar.'; }
+    btn.disabled = false;
+  });
+}
+
+// Adição automática: salva a preferência (carteira.set_auto_recarga).
+function _wireWalletAuto(stageEl, user, conta){
+  const onEl = stageEl.querySelector('#walletAutoOn');
+  const limEl = stageEl.querySelector('#walletAutoLimite');
+  const valEl = stageEl.querySelector('#walletAutoValor');
+  const saveBtn = stageEl.querySelector('#walletAutoSave');
+  const fb = stageEl.querySelector('#walletAutoFb');
+  if(!onEl || !saveBtn) return;
+  if(conta){
+    onEl.checked = !!conta.auto_recarga;
+    if(conta.auto_limite != null && limEl) limEl.value = String(Number(conta.auto_limite));
+    if(conta.auto_valor != null && valEl) valEl.value = String(Number(conta.auto_valor));
+  }
+  saveBtn.addEventListener('click', async function(){
+    saveBtn.disabled = true; if(fb) fb.textContent = 'Salvando…';
+    try {
+      const { data, error } = await window._sb.schema('carteira').rpc('set_auto_recarga', {
+        p_on: !!onEl.checked, p_limite: Number(limEl.value) || 0, p_valor: Math.max(1, Number(valEl.value) || 10),
+      });
+      if(error || !data || data.ok === false){ if(fb) fb.textContent = '✗ Não consegui salvar.'; }
+      else { if(fb) fb.textContent = '✓ Salvo'; setTimeout(function(){ if(fb) fb.textContent = ''; }, 2000); }
+    } catch(e){ if(fb) fb.textContent = '✗ Erro ao salvar.'; }
+    saveBtn.disabled = false;
+  });
+}
+
 // Carrega saldo + extrato + tabela de custos na aba Carteira e liga as sub-abas.
 // Lê direto do schema carteira (RLS garante que o aluno só vê a própria conta).
 async function _loadWalletPane(stageEl, user){
@@ -18674,16 +18756,18 @@ async function _loadWalletPane(stageEl, user){
   if(showCb) showCb.addEventListener('change', function(){ if(window.UbtWallet && UbtWallet.setShowPref) UbtWallet.setShowPref(showCb.checked); });
   const C = window._sb.schema('carteira');
   const fmtDt = function(s){ try { return new Date(s).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }); } catch(_){ return s || ''; } };
-  // Saldo
+  // Saldo + dados da conta, e liga Comprar créditos / Adição automática (beta).
+  let _conta = null;
+  try { _conta = await _refreshWalletSaldo(stageEl, user); } catch(e){ console.warn('[carteira saldo]', e); }
+  _wireWalletBuy(stageEl, user);
+  _wireWalletAuto(stageEl, user, _conta);
+  // Beta: se a auto-recarga está ligada e o saldo caiu abaixo do limite, recarrega agora.
   try {
-    const { data } = await C.from('contas').select('saldo, ilimitado').eq('user_id', user.id).maybeSingle();
-    const el = stageEl.querySelector('#walletSaldo');
-    const brlEl = stageEl.querySelector('#walletSaldoBrl');
-    if(el){
-      if(data && data.ilimitado){ el.textContent = 'Ilimitado'; el.style.fontSize = '1.3rem'; if(brlEl) brlEl.textContent = ''; }
-      else { el.textContent = _ubtFmt(data ? data.saldo : 0); if(brlEl) brlEl.textContent = '≈ ' + _ubtBrl(data ? data.saldo : 0); }
+    if(_conta && !_conta.ilimitado && _conta.auto_recarga && Number(_conta.saldo) < Number(_conta.auto_limite)){
+      const { data: rc } = await window._sb.schema('carteira').rpc('comprar_ubitokens', { p_qtd: Number(_conta.auto_valor) || 10 });
+      if(rc && rc.ok){ await _refreshWalletSaldo(stageEl, user); if(window.UbtWallet) UbtWallet.load(); }
     }
-  } catch(e){ console.warn('[carteira saldo]', e); }
+  } catch(_){}
   // Extrato
   try {
     const { data } = await C.from('lancamentos')
@@ -18968,12 +19052,39 @@ Renderers.account = function(route){
           <div class="wallet-balance-val"><span class="ubt-sym">ⓤ</span> <strong id="walletSaldo">—</strong></div>
           <span class="wallet-balance-brl" id="walletSaldoBrl"></span>
         </div>
-        <button class="btn-ghost" id="walletBuyBtn" type="button" disabled title="Em breve você poderá comprar UbiTokens por aqui.">Comprar UbiTokens (em breve)</button>
       </div>
       <label class="wallet-showtopbar">
         <input type="checkbox" id="walletShowTopbar"${(window.UbtWallet && UbtWallet.showPref && UbtWallet.showPref()) ? ' checked' : ''}>
         <span>Mostrar o saldo na barra do topo (por padrão fica só o ícone ⓤ; clique nele para ver)</span>
       </label>
+      <div class="wallet-cards">
+        <section class="wallet-card">
+          <h3 class="wallet-card-title">Comprar créditos</h3>
+          <p class="wallet-card-sub">UbiTokens avulsos que não expiram. <strong>Durante o beta, entram na hora.</strong></p>
+          <div class="wallet-buy-row">
+            <button class="wallet-step" id="walletBuyMinus" type="button" aria-label="Menos">−</button>
+            <span class="wallet-buy-qty"><span class="ubt-sym">ⓤ</span> <strong id="walletBuyQty">10</strong></span>
+            <button class="wallet-step" id="walletBuyPlus" type="button" aria-label="Mais">+</button>
+          </div>
+          <div class="wallet-buy-price">≈ <strong id="walletBuyPrice">—</strong></div>
+          <button class="btn-primary" id="walletBuyBtn" type="button">Comprar</button>
+          <span class="wallet-card-fb" id="walletBuyFb"></span>
+        </section>
+        <section class="wallet-card">
+          <h3 class="wallet-card-title">Adição automática</h3>
+          <p class="wallet-card-sub">Quando o saldo cair abaixo do limite, adicionamos UbiTokens automaticamente.</p>
+          <label class="wallet-auto-toggle">
+            <input type="checkbox" id="walletAutoOn">
+            <span>Ativar adição automática</span>
+          </label>
+          <div class="wallet-auto-fields">
+            <label>Quando cair abaixo de <span class="ubt-sym">ⓤ</span> <input type="number" id="walletAutoLimite" min="0" step="1" value="2"></label>
+            <label>Adicionar <span class="ubt-sym">ⓤ</span> <input type="number" id="walletAutoValor" min="1" step="1" value="10"></label>
+          </div>
+          <button class="btn-ghost" id="walletAutoSave" type="button">Salvar</button>
+          <span class="wallet-card-fb" id="walletAutoFb"></span>
+        </section>
+      </div>
       <div class="wallet-subnav" role="tablist">
         <button class="wallet-subtab is-active" data-wallet-sub="extrato" type="button">Extrato</button>
         <button class="wallet-subtab" data-wallet-sub="custos" type="button">Tabela de custos</button>
