@@ -28332,6 +28332,23 @@ window.TutorIA = (function(){
     .tutor-x:hover{ color:var(--accent); border-color:var(--accent-border); }
     #tutorClear:hover{ color:#d47973; border-color:#d47973; }
     .tutor-msgs{ flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:.7rem; padding:.4rem .1rem .6rem; }
+    .tutor-msgs[hidden]{ display:none; }
+    .tutor-composer[hidden]{ display:none; }
+    /* Abas do drawer (Tutor | Caderno) */
+    .tutor-tabs{ display:flex; gap:.35rem; margin-bottom:.6rem; }
+    .tutor-tab{ background:transparent; border:1px solid var(--accent-border-soft); border-radius:var(--radius); padding:.3rem .85rem; font-family:var(--sans); font-size:.76rem; color:var(--text-dim); cursor:pointer; }
+    .tutor-tab:hover{ color:var(--accent); border-color:var(--accent-border); }
+    .tutor-tab.is-active{ color:var(--accent); border-color:var(--accent-border); background:var(--accent-lo); font-weight:500; }
+    /* Painel do Caderno (anotação livre por unidade) */
+    .tutor-caderno{ flex:1; min-height:0; display:flex; flex-direction:column; padding:.1rem 0; }
+    .tutor-caderno[hidden]{ display:none; }
+    .tutor-caderno-ed{ flex:1; min-height:0; overflow-y:auto; background:var(--bg-elevated); border:1px solid var(--border); border-radius:12px; padding:.75rem .9rem; color:var(--text); font-family:var(--sans); font-size:.86rem; line-height:1.6; white-space:pre-wrap; word-break:break-word; }
+    .tutor-caderno-ed:focus{ outline:none; border-color:var(--accent-border); }
+    .tutor-caderno-ed.is-empty:before{ content:attr(data-ph); color:var(--text-mute); pointer-events:none; }
+    .tutor-caderno-foot{ display:flex; justify-content:space-between; align-items:center; gap:.6rem; margin-top:.5rem; font-family:var(--sans); font-size:.66rem; color:var(--text-mute); }
+    .tutor-caderno-status{ color:var(--text-dim); }
+    .tutor-caderno-ed .tutor-ref{ cursor:pointer; }
+    .tutor-caderno-ed .tutor-ref:hover{ text-decoration:underline; }
     .tutor-msg{ display:flex; flex-direction:column; max-width:92%; }
     .tutor-msg.user{ align-self:flex-end; align-items:flex-end; }
     .tutor-msg.assistant{ align-self:flex-start; align-items:flex-start; }
@@ -28857,8 +28874,10 @@ window.TutorIA = (function(){
   }
 
   // ── 5B.2: campo rico (contenteditable) + [[ referência de unidade ]] ──
-  function _inpEl(){ return document.getElementById('tutorInput'); }
-  function _inpEmptyToggle(){ const i = _inpEl(); if(i) i.classList.toggle('is-empty', !i.textContent.trim()); }
+  let _activeEd = null; // editor com foco: #tutorInput ou #cadernoInput (pro picker [[ )
+  function _inpEl(){ return _activeEd || document.getElementById('tutorInput'); }
+  function _emptyToggle(el){ if(el) el.classList.toggle('is-empty', !el.textContent.trim()); }
+  function _inpEmptyToggle(){ _emptyToggle(_inpEl()); }
   function _inpClear(){ const i = _inpEl(); if(i){ i.innerHTML = ''; _inpEmptyToggle(); } }
   function _inpSet(text){ const i = _inpEl(); if(!i) return; i.textContent = text; _inpEmptyToggle(); i.focus(); const r = document.createRange(); r.selectNodeContents(i); r.collapse(false); const s = window.getSelection(); s.removeAllRanges(); s.addRange(r); }
   function _inpSetPh(text){ const i = _inpEl(); if(i) i.setAttribute('data-ph', text); }
@@ -28989,6 +29008,7 @@ window.TutorIA = (function(){
     const nr = document.createRange(); nr.setStartAfter(space); nr.collapse(true);
     const s = window.getSelection(); s.removeAllRanges(); s.addRange(nr);
     _inpEl().focus(); _inpEmptyToggle(); _hideRefPicker();
+    if(_activeEd && _activeEd.id === 'cadernoInput') _cadSchedule();
   }
   function _onInpInput(){ _inpEmptyToggle(); const ci = _caretInfo(); if(ci) _showRefPicker(ci); else _hideRefPicker(); }
   function _onInpKey(e){
@@ -28998,6 +29018,108 @@ window.TutorIA = (function(){
       e.preventDefault();
       if(open){ const first = _refPickerEl.querySelector('.tutor-refopt'); if(first){ _pickRef(first.getAttribute('data-uid'), first.getAttribute('data-ut')); return; } }
       _send();
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // CADERNO da unidade — anotação livre por unidade, persistida no banco
+  // (aluno.caderno: 1 doc por user+unit), acessível de qualquer máquina.
+  // O corpo é serializado como texto com tokens [[uid|título]] pros links,
+  // o que deixa o grafo/backlinks (fases 2 e 3) triviais de extrair depois.
+  // ───────────────────────────────────────────────────────────────────────
+  let _cadUid = null, _cadUnit = null, _cadTimer = null;
+  function _cadEl(){ return document.getElementById('cadernoInput'); }
+  function _cadStatus(t){ const s = document.getElementById('cadernoStatus'); if(s) s.textContent = t || ''; }
+  async function _cadUserId(){
+    if(_cadUid) return _cadUid;
+    try { const r = await window._sb.auth.getUser(); _cadUid = (r && r.data && r.data.user) ? r.data.user.id : null; } catch(_){ _cadUid = null; }
+    return _cadUid;
+  }
+  function _cadChip(uid, title){
+    const chip = document.createElement('span');
+    chip.className = 'tutor-ref'; chip.contentEditable = 'false';
+    chip.setAttribute('data-unit-id', uid); chip.setAttribute('data-unit-title', title || uid);
+    chip.textContent = title || uid;
+    return chip;
+  }
+  // editor (DOM) → texto com tokens [[uid|título]] + quebras de linha
+  function _cadSerialize(el){
+    let out = '';
+    (function walk(node){
+      node.childNodes.forEach(function(n){
+        if(n.nodeType === 3){ out += n.textContent; return; }
+        if(n.nodeType !== 1) return;
+        if(n.classList && n.classList.contains('tutor-ref')){
+          out += '[[' + (n.getAttribute('data-unit-id') || '') + '|' + (n.getAttribute('data-unit-title') || '') + ']]';
+          return;
+        }
+        const tag = n.tagName.toLowerCase();
+        if(tag === 'br'){ out += '\n'; return; }
+        if(tag === 'div' || tag === 'p'){ if(out && !/\n$/.test(out)) out += '\n'; walk(n); if(!/\n$/.test(out)) out += '\n'; return; }
+        walk(n);
+      });
+    })(el);
+    return out.replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
+  }
+  // texto com tokens → editor (chips + texto)
+  function _cadRender(el, body){
+    el.innerHTML = '';
+    const s = String(body || ''), re = /\[\[([^\]|]+)\|([^\]]*)\]\]/g;
+    let last = 0, m;
+    function appendText(txt){
+      txt.split('\n').forEach(function(line, i){
+        if(i) el.appendChild(document.createElement('br'));
+        if(line) el.appendChild(document.createTextNode(line));
+      });
+    }
+    while((m = re.exec(s))){
+      if(m.index > last) appendText(s.slice(last, m.index));
+      el.appendChild(_cadChip(m[1], m[2]));
+      last = re.lastIndex;
+    }
+    if(last < s.length) appendText(s.slice(last));
+  }
+  async function _cadLoad(unitId){
+    const el = _cadEl(); if(!el) return;
+    _cadUnit = unitId; el.innerHTML = ''; _emptyToggle(el); _cadStatus('carregando…');
+    const uid = await _cadUserId();
+    if(!uid || !window._sb || !unitId){ _cadStatus(''); _emptyToggle(el); return; }
+    try {
+      const { data, error } = await window._sb.schema('aluno').from('caderno')
+        .select('body').eq('user_id', uid).eq('unit_id', String(unitId)).maybeSingle();
+      if(!error && data && data.body) _cadRender(el, data.body);
+    } catch(e){ console.warn('[caderno load]', e); }
+    _emptyToggle(el); _cadStatus('');
+  }
+  async function _cadSave(){
+    const el = _cadEl(); if(!el || !_cadUnit) return;
+    const uid = await _cadUserId(); if(!uid || !window._sb) return;
+    const body = _cadSerialize(el);
+    _cadStatus('salvando…');
+    try {
+      const { error } = await window._sb.schema('aluno').from('caderno')
+        .upsert({ user_id: uid, unit_id: String(_cadUnit), body: body, updated_at: new Date().toISOString() }, { onConflict: 'user_id,unit_id' });
+      _cadStatus(error ? 'erro ao salvar' : 'salvo'); if(error) console.warn('[caderno save]', error);
+    } catch(e){ _cadStatus('erro ao salvar'); console.warn('[caderno save ex]', e); }
+  }
+  function _cadSchedule(){ _cadStatus('digitando…'); if(_cadTimer) clearTimeout(_cadTimer); _cadTimer = setTimeout(function(){ _cadTimer = null; _cadSave(); }, 1000); }
+  function _onCadInput(){ _emptyToggle(_cadEl()); const ci = _caretInfo(); if(ci) _showRefPicker(ci); else _hideRefPicker(); _cadSchedule(); }
+  function _onCadKey(e){
+    const open = _refPickerEl && !_refPickerEl.hidden;
+    if(e.key === 'Escape'){ if(open){ e.preventDefault(); _hideRefPicker(); } return; }
+    if(e.key === 'Enter' && open){ e.preventDefault(); const first = _refPickerEl.querySelector('.tutor-refopt'); if(first) _pickRef(first.getAttribute('data-uid'), first.getAttribute('data-ut')); }
+    // sem picker aberto, Enter quebra linha normalmente (caderno não "envia")
+  }
+  function _setTab(tab){
+    const d = document.getElementById('tutorDrawer'); if(!d) return;
+    const cad = tab === 'caderno';
+    d.querySelectorAll('.tutor-tab').forEach(function(b){ b.classList.toggle('is-active', b.getAttribute('data-ttab') === tab); });
+    const msgs = d.querySelector('#tutorMsgs'); if(msgs) msgs.hidden = cad;
+    const comp = d.querySelector('.tutor-composer'); if(comp) comp.hidden = cad;
+    const cadp = d.querySelector('#tutorCaderno'); if(cadp) cadp.hidden = !cad;
+    if(cad){
+      if(_cadUnit !== _ctx.unitId) _cadLoad(_ctx.unitId);
+      const el = _cadEl(); if(el) setTimeout(function(){ el.focus(); }, 30);
     }
   }
 
@@ -29013,11 +29135,13 @@ window.TutorIA = (function(){
       + '<header class="tutor-head"><div class="tutor-head-l"><span class="tutor-spark">' + SPARK + '</span> <span class="tutor-title">Tutor</span> <span class="tutor-unit" id="tutorUnit"></span></div>'
       + '<div class="tutor-head-actions"><button class="tutor-x" id="tutorClear" aria-label="Limpar conversa" data-tip="Limpar conversa (apaga do banco)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>'
       + '<button class="tutor-x" id="tutorClose" aria-label="Fechar" data-tip="Fechar">&#10005;</button></div></header>'
+      + '<div class="tutor-tabs"><button type="button" class="tutor-tab is-active" data-ttab="chat">Tutor</button><button type="button" class="tutor-tab" data-ttab="caderno">Caderno</button></div>'
       + '<div class="tutor-msgs" id="tutorMsgs"></div>'
       + '<div class="tutor-composer"><div class="tutor-composer-top"><div class="tutor-ct-left"><button type="button" class="tutor-mode-btn" id="tutorModeBtn" data-tip="Alternar modo: Dúvida ou Aprendizado guiado">Dúvida</button><div class="tutor-model" id="tutorModelWrap"></div><button type="button" class="tutor-mode-btn tutor-banco-btn" id="tutorBancoBtn" data-tip="Trazer questões reais do banco sobre o tema (Ubique e provas passadas)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg> Questões</button><button type="button" class="tutor-mode-btn tutor-gerar-btn" id="tutorGerarBtn" data-tip="Gerar questões de Certo/Errado sobre o tema e responder aqui"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Gerar</button><button type="button" class="tutor-mode-btn tutor-voz-btn" id="tutorVozBtn" data-tip="Conversar por voz com o tutor (Manfredo)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> Falar</button></div>'
       + '<span class="ubt-cost tutor-cost" id="tutorCost" data-tip="Custo aproximado por resposta, debitado da sua carteira"><span class="ubt-sym">ⓤ</span> <span id="tutorCostVal">~</span></span></div>'
       + '<div class="tutor-input-row"><div id="tutorInput" class="tutor-input is-empty" contenteditable="true" role="textbox" aria-multiline="true" data-ph="Pergunte ao tutor sobre esta unidade…  (use [[ para citar uma unidade)"></div>'
-      + '<button class="tutor-send" id="tutorSend" aria-label="Enviar" data-tip="Enviar (Enter)"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div></div></div>';
+      + '<button class="tutor-send" id="tutorSend" aria-label="Enviar" data-tip="Enviar (Enter)"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div></div></div>'
+      + '<div class="tutor-caderno" id="tutorCaderno" hidden><div class="tutor-caderno-ed is-empty" id="cadernoInput" contenteditable="true" role="textbox" aria-multiline="true" data-ph="Escreva suas anotações desta unidade…  (use [[ para linkar outra unidade)"></div><div class="tutor-caderno-foot"><span class="tutor-caderno-status" id="cadernoStatus"></span><span class="tutor-caderno-hint">[[ para linkar outra unidade · salva sozinho</span></div></div>';
     document.body.appendChild(d);
     // Largura salva + alça de redimensionar (igual ao drawer das salas)
     try { const sw = parseInt(localStorage.getItem('falcon_tutor_w'), 10); if(sw >= 320) d.style.width = sw + 'px'; } catch(_){}
@@ -29041,6 +29165,23 @@ window.TutorIA = (function(){
     const _mb = d.querySelector('#tutorModeBtn');
     if(_mb){ _mb.textContent = (_modo === 'aprendizado_guiado' ? 'Guiado' : 'Dúvida'); _mb.addEventListener('click', function(){ _setModo(_modo === 'aprendizado_guiado' ? 'duvida' : 'aprendizado_guiado', true); }); }
     _renderModelSelector(d);
+    // ── Abas (Tutor | Caderno) + editor do Caderno ──
+    d.querySelectorAll('.tutor-tab').forEach(function(b){ b.addEventListener('click', function(){ _setTab(b.getAttribute('data-ttab')); }); });
+    const _ti = d.querySelector('#tutorInput'); if(_ti) _ti.addEventListener('focus', function(){ _activeEd = _ti; });
+    const _ci = d.querySelector('#cadernoInput');
+    if(_ci){
+      _ci.addEventListener('focus', function(){ _activeEd = _ci; });
+      _ci.addEventListener('input', _onCadInput);
+      _ci.addEventListener('keydown', _onCadKey);
+      _ci.addEventListener('blur', function(){ setTimeout(_hideRefPicker, 150); if(_cadTimer){ clearTimeout(_cadTimer); _cadTimer = null; } _cadSave(); });
+      // Clicar num chip [[ ]] navega pra unidade linkada.
+      _ci.addEventListener('click', function(e){
+        const chip = e.target && e.target.closest ? e.target.closest('.tutor-ref') : null;
+        if(!chip) return;
+        const href = _unitHref(chip.getAttribute('data-unit-id'));
+        if(href){ if(_cadTimer){ clearTimeout(_cadTimer); _cadTimer = null; } _cadSave(); close(); location.hash = href; }
+      });
+    }
     if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(d);
     return d;
   }
@@ -29264,6 +29405,7 @@ window.TutorIA = (function(){
 
   function open(ctx){
     const d = _drawer();
+    _setTab('chat');
     const uid = (ctx && ctx.unitId) || null;
     // Mesma unidade já aberta antes → só reexibe (mantém a conversa viva). O X
     // apenas esconde; nada se perde. Atualiza o texto de contexto (pode ter
@@ -29284,6 +29426,8 @@ window.TutorIA = (function(){
     _updateCostHint();
     return _loadHistory().then(() => { const inp = document.getElementById('tutorInput'); if(inp) inp.focus(); });
   }
+  // Abre o drawer direto na aba CADERNO (usado pelo botão "Caderno" do cabeçalho).
+  function openCaderno(ctx){ return open(ctx).then(function(){ _setTab('caderno'); }); }
   // Abre o tutor (na unidade) e já manda uma pergunta — usado pelo ✨ do texto.
   function ask(ctx, message, displayText){
     return open(ctx).then(function(){ _send(message, { displayText: displayText }); });
@@ -29301,10 +29445,10 @@ window.TutorIA = (function(){
   function close(){ const d = document.getElementById('tutorDrawer'); if(d) d.hidden = true; }   // só esconde (mantém a conversa)
   // Sai da unidade → limpa a VISÃO (o dado continua no banco e recarrega ao voltar).
   function _resetForLeave(){
-    _openedUnit = null;
+    _openedUnit = null; _cadUnit = null;
     _ctx = { unitId:null, unitTitle:'', unitText:'', conversaId:null, msgs:[] };
     const d = document.getElementById('tutorDrawer');
-    if(d){ d.hidden = true; const m = d.querySelector('#tutorMsgs'); if(m) m.innerHTML = ''; }
+    if(d){ d.hidden = true; const m = d.querySelector('#tutorMsgs'); if(m) m.innerHTML = ''; const ce = d.querySelector('#cadernoInput'); if(ce) ce.innerHTML = ''; _setTab('chat'); }
   }
 
   // ── 5B: ✨ no texto sublinhado → "Perguntar ao tutor" com frases prontas ──
@@ -29780,7 +29924,7 @@ window.TutorIA = (function(){
       if(uid !== _openedUnit) _resetForLeave();
     });
   }
-  return { open: open, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, renderComment: renderComment, ensureStyles: _ensureStyles };
+  return { open: open, openCaderno: openCaderno, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, renderComment: renderComment, ensureStyles: _ensureStyles };
 })();
 
 Renderers.unit = function(route){
@@ -29907,7 +30051,7 @@ Renderers.unit = function(route){
     <p class="s-body" data-a="5">${Util.esc(unit.description||'')}</p>
     <div class="unit-actions" data-a="6">
       <button class="icon-btn ${prog.state==='completed'?'on':''}" id="markCompleteBtn">${Icons.check} ${prog.state==='completed'?'Unidade concluída':'Marcar unidade como concluída'}</button>
-      <button class="icon-btn" id="addNoteBtn">${Icons.note} Adicionar nota <span class="note-count-badge" id="noteCountBadge"${_unitNoteCount>0?'':' style="display:none"'}>${_unitNoteCount}</span></button>
+      <button class="icon-btn" id="addNoteBtn" data-tip="Caderno desta unidade (anotação livre, com [[ para linkar)">${Icons.note} Caderno</button>
       <button class="icon-btn" id="unitStatsBtn"${getUnitQuizStats(unit).hasVerified?'':' hidden'}>${Icons.statistics||''} Estatísticas</button>
       <button class="icon-btn" id="tutorLaunchBtn" type="button"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8z"/></svg> Tutor</button>
     </div>
@@ -30223,21 +30367,13 @@ Renderers.unit.mount = function(stageEl, route){
     } catch(_){}
   });
   stageEl.querySelector('#addNoteBtn').addEventListener('click', () => {
-    const selection = NoteModal.captureSelection();
-    // Contexto do bloco: o bloco ONDE a seleção foi feita (se houver);
-    // senão, o 1º bloco da seção ativa.
-    let ctxBlock = groupBlocks[0] || null;
-    if(selection && selection.blockId){
-      const found = groupBlocks.find(b => String(b.id) === String(selection.blockId));
-      if(found) ctxBlock = found;
+    // Repurpose: abre o Caderno da unidade (anotação geral, com [[ pra linkar).
+    // As notas por TRECHO grifado continuam no menu de seleção, intactas.
+    let stageTxt = '';
+    try { const bs = stageEl.querySelector('#blockStage'); stageTxt = bs ? (bs.innerText || '').trim().slice(0, 14000) : ''; } catch(_){}
+    if(window.TutorIA && typeof TutorIA.openCaderno === 'function'){
+      TutorIA.openCaderno({ unitId: unit.id, unitTitle: (unit.number ? unit.number + ' · ' : '') + unit.title, unitText: stageTxt });
     }
-    NoteModal.open({
-      moduleId: m.id,
-      chapterId: chapter ? chapter.id : null,
-      unit,
-      block: ctxBlock,
-      selection: selection || ''
-    });
   });
 
   // Focus mode — sidebar collapses to a thin strip; clicking it expands back.
