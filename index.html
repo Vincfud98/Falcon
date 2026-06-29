@@ -28414,6 +28414,16 @@ window.TutorIA = (function(){
     .tutor-caderno-bl-list[hidden]{ display:none; }
     .tutor-caderno-bl-filter{ width:100%; background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:.32rem .5rem; color:var(--text); font-family:var(--sans); font-size:.74rem; }
     .tutor-caderno-bl-items{ display:flex; flex-direction:column; gap:.55rem; }
+    /* Aba "Conexões" — grafo */
+    .tutor-grafo{ flex:1; min-height:0; display:flex; flex-direction:column; }
+    .tutor-grafo[hidden]{ display:none; }
+    .tutor-grafo-canvas{ flex:1; min-height:0; position:relative; background:#0c0c0f; border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+    .tutor-grafo-canvas canvas{ display:block; }
+    .tutor-grafo-empty{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:1.5rem; font-family:var(--sans); font-size:.8rem; line-height:1.5; color:var(--text-mute); }
+    .tutor-grafo-foot{ display:flex; justify-content:space-between; align-items:center; gap:.6rem; margin-top:.5rem; font-family:var(--sans); font-size:.66rem; color:var(--text-mute); flex-wrap:wrap; }
+    .tutor-grafo-legend{ display:flex; gap:.55rem; flex-wrap:wrap; }
+    .tutor-grafo-legend .lg{ display:inline-flex; align-items:center; gap:.28rem; color:var(--text-dim); }
+    .tutor-grafo-legend .lg i{ width:9px; height:9px; border-radius:50%; display:inline-block; flex-shrink:0; }
     .tutor-caderno-bl-item{ border-left:2px solid var(--accent-border-soft); padding-left:.6rem; }
     .tutor-caderno-bl-unit{ display:block; font-family:var(--sans); font-size:.74rem; font-weight:500; color:var(--accent); cursor:pointer; margin-bottom:.15rem; }
     .tutor-caderno-bl-unit:hover{ text-decoration:underline; }
@@ -29171,16 +29181,19 @@ window.TutorIA = (function(){
   }
   function _setTab(tab){
     const d = document.getElementById('tutorDrawer'); if(!d) return;
-    const cad = tab === 'caderno';
+    const cad = tab === 'caderno', grf = tab === 'grafo';
     d.querySelectorAll('.tutor-tab').forEach(function(b){ b.classList.toggle('is-active', b.getAttribute('data-ttab') === tab); });
-    const ttl = d.querySelector('.tutor-title'); if(ttl) ttl.textContent = cad ? 'Caderno' : 'Tutor';
-    const msgs = d.querySelector('#tutorMsgs'); if(msgs) msgs.hidden = cad;
-    const comp = d.querySelector('.tutor-composer'); if(comp) comp.hidden = cad;
+    const ttl = d.querySelector('.tutor-title'); if(ttl) ttl.textContent = grf ? 'Conexões' : (cad ? 'Caderno' : 'Tutor');
+    const msgs = d.querySelector('#tutorMsgs'); if(msgs) msgs.hidden = cad || grf;
+    const comp = d.querySelector('.tutor-composer'); if(comp) comp.hidden = cad || grf;
     const cadp = d.querySelector('#tutorCaderno'); if(cadp) cadp.hidden = !cad;
+    const grfp = d.querySelector('#tutorGrafo'); if(grfp) grfp.hidden = !grf;
     if(cad){
       if(_cadUnit !== _ctx.unitId) _cadLoad(_ctx.unitId);
       const el = _cadEl(); if(el) setTimeout(function(){ el.focus(); }, 30);
     }
+    if(grf){ _grafoOpen(); }
+    else if(_fg){ try { _fg.pauseAnimation(); } catch(_){} }
   }
 
   // ── APELIDOS (aliases) dos links [[ ]] — persistem em aluno.unit_alias ──
@@ -29313,6 +29326,120 @@ window.TutorIA = (function(){
     sec.hidden = false;
   }
 
+  // ── ABA "CONEXÕES" — grafo (force-graph vanilla, Canvas) — FASE 3A ──
+  const _GRAFO_PALETTE = ['#c8a97e','#7ea9c8','#86c88a','#c87e9e','#b59ad6','#d6b85a','#69b9a8','#d68a6a','#9aa0d6','#c86a6a','#7ec8c0'];
+  let _fg = null, _fgRO = null, _fgScriptP = null;
+  function _loadForceGraph(){
+    if(window.ForceGraph) return Promise.resolve();
+    if(_fgScriptP) return _fgScriptP;
+    _fgScriptP = new Promise(function(resolve, reject){
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/force-graph';
+      s.onload = function(){ resolve(); };
+      s.onerror = function(){ _fgScriptP = null; reject(new Error('force-graph load failed')); };
+      document.head.appendChild(s);
+    });
+    return _fgScriptP;
+  }
+  function _grafoShort(s){ return (s && s.length > 24) ? (s.slice(0, 23) + '…') : (s || ''); }
+  function _grafoLegend(subjects){
+    const el = document.getElementById('grafoLegend'); if(!el) return;
+    el.innerHTML = (subjects || []).map(function(s){ return '<span class="lg"><i style="background:' + s.color + '"></i>' + _esc(s.sigla) + '</span>'; }).join('');
+  }
+  // Monta {nodes, links} a partir dos cadernos do aluno: unidades = nós (cor por
+  // matéria), [[ ]] = arestas (com a frase), + um "sol" por matéria + arestas de
+  // pertencimento (sol↔unidade) que formam os clusters/sistemas solares.
+  async function _grafoBuildData(){
+    const uid = await _cadUserId(); if(!uid || !window._sb) return null;
+    let rows = [];
+    try { const { data, error } = await window._sb.schema('aluno').from('caderno').select('unit_id, body').eq('user_id', uid); if(error){ console.warn('[grafo]', error); return null; } rows = data || []; }
+    catch(e){ console.warn('[grafo ex]', e); return null; }
+    const idx = _buildUnitIndex(); const byId = {}; idx.flat.forEach(function(u){ byId[String(u.id)] = u; });
+    const tmp = document.createElement('div'), refEdges = [], unitSet = new Set();
+    rows.forEach(function(row){
+      const src = String(row.unit_id); if(!row.body) return;
+      tmp.innerHTML = _cadSanitize(row.body);
+      Array.prototype.forEach.call(tmp.querySelectorAll('.tutor-ref'), function(c){
+        const tgt = String(c.getAttribute('data-unit-id') || ''); if(!tgt || tgt === src) return;
+        unitSet.add(src); unitSet.add(tgt);
+        const host = (c.closest && c.closest('div,p,li,h1,h2,h3')) || tmp;
+        const sentence = (host.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+        const ex = refEdges.find(function(e){ return e.source === src && e.target === tgt; });
+        if(ex){ if(sentence && ex.sentences.indexOf(sentence) < 0) ex.sentences.push(sentence); }
+        else refEdges.push({ source: src, target: tgt, sentences: sentence ? [sentence] : [] });
+      });
+    });
+    if(!unitSet.size) return { nodes: [], links: [], subjects: [] };
+    const degree = {}; refEdges.forEach(function(e){ degree[e.source] = (degree[e.source] || 0) + 1; degree[e.target] = (degree[e.target] || 0) + 1; });
+    const subjIds = [...new Set([...unitSet].map(function(u){ const info = byId[u]; return info ? String(info.subjectId) : '?'; }))].sort();
+    const colorOf = {}; subjIds.forEach(function(s, i){ colorOf[s] = _GRAFO_PALETTE[i % _GRAFO_PALETTE.length]; });
+    const nodes = [], links = [], subjMeta = {};
+    subjIds.forEach(function(s){
+      const sample = [...unitSet].map(function(u){ return byId[u]; }).find(function(info){ return info && String(info.subjectId) === s; });
+      const sigla = sample ? (sample.sigla || s) : s;
+      subjMeta[s] = { sigla: sigla, color: colorOf[s] };
+      nodes.push({ id: 'subj:' + s, kind: 'sun', name: sigla, subjectId: s, color: colorOf[s], val: 9 });
+    });
+    unitSet.forEach(function(u){
+      const info = byId[u]; const s = info ? String(info.subjectId) : '?';
+      const label = info ? [info.sigla, info.number, info.title].filter(Boolean).join(' · ') : ('Unidade ' + u);
+      nodes.push({ id: u, kind: 'unit', name: label, unitId: u, subjectId: s, color: colorOf[s] || '#888', val: 2 + (degree[u] || 0) });
+      if(subjMeta[s]) links.push({ source: 'subj:' + s, target: u, kind: 'member' });
+    });
+    refEdges.forEach(function(e){ links.push({ source: e.source, target: e.target, kind: 'ref', sentence: e.sentences.join('  •  ') }); });
+    return { nodes: nodes, links: links, subjects: subjIds.map(function(s){ return { id: s, sigla: subjMeta[s].sigla, color: subjMeta[s].color }; }) };
+  }
+  async function _grafoOpen(){
+    const host = document.getElementById('grafoCanvas'), statusEl = document.getElementById('grafoStatus');
+    if(!host) return;
+    if(statusEl) statusEl.textContent = 'Carregando…';
+    try { await _loadForceGraph(); } catch(_){ if(statusEl) statusEl.textContent = 'Não consegui carregar o mapa (sem conexão?).'; return; }
+    const data = await _grafoBuildData();
+    if(!data){ if(statusEl) statusEl.textContent = 'Erro ao montar o mapa.'; return; }
+    let emptyEl = host.querySelector('.tutor-grafo-empty');
+    if(!data.nodes.length){
+      if(_fg){ try { _fg.graphData({ nodes: [], links: [] }); } catch(_){} }
+      if(!emptyEl){ emptyEl = document.createElement('div'); emptyEl.className = 'tutor-grafo-empty'; host.appendChild(emptyEl); }
+      emptyEl.textContent = 'Ainda não há conexões. Use [[ ]] no Caderno pra ligar unidades — elas aparecem aqui como um mapa.';
+      if(statusEl) statusEl.textContent = ''; _grafoLegend([]); return;
+    }
+    if(emptyEl) emptyEl.remove();
+    if(!_fg){
+      _fg = ForceGraph()(host)
+        .backgroundColor('#0c0c0f')
+        .nodeRelSize(4)
+        .nodeVal(function(n){ return n.val || 1; })
+        .nodeColor(function(n){ return n.color || '#888'; })
+        .nodeLabel(function(n){ return n.name; })
+        .linkColor(function(l){ return l.kind === 'member' ? 'rgba(255,255,255,0.05)' : 'rgba(200,169,126,0.4)'; })
+        .linkWidth(function(l){ return l.kind === 'member' ? 0.4 : 1.3; })
+        .linkLabel(function(l){ return l.sentence ? ('“' + _esc(l.sentence) + '”') : ''; })
+        .linkDirectionalArrowLength(function(l){ return l.kind === 'ref' ? 3 : 0; })
+        .linkDirectionalArrowRelPos(1)
+        .nodeCanvasObjectMode(function(){ return 'after'; })
+        .nodeCanvasObject(function(node, ctx, scale){
+          if(node.kind !== 'sun' && scale < 1.2) return; // rótulos das unidades só com zoom
+          const fontSize = (node.kind === 'sun' ? 12 : 9.5) / scale;
+          ctx.font = (node.kind === 'sun' ? '600 ' : '') + fontSize + 'px ' + (node.kind === 'sun' ? 'Georgia, serif' : 'sans-serif');
+          ctx.fillStyle = node.kind === 'sun' ? node.color : 'rgba(240,236,228,0.82)';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+          const r = Math.sqrt(node.val || 1) * 4;
+          ctx.fillText(node.kind === 'sun' ? node.name : _grafoShort(node.name), node.x, node.y + r + 2 / scale);
+        })
+        .onNodeClick(function(node){ if(node && node.kind === 'unit'){ const href = _unitHref(node.unitId); if(href){ close(); location.hash = href; } } })
+        .onNodeHover(function(node){ host.style.cursor = (node && node.kind === 'unit') ? 'pointer' : 'default'; });
+      try { _fg.d3Force('charge').strength(-95); } catch(_){}
+      try { _fg.d3Force('link').distance(function(l){ return l.kind === 'member' ? 34 : 72; }).strength(function(l){ return l.kind === 'member' ? 0.55 : 0.16; }); } catch(_){}
+      _fgRO = new ResizeObserver(function(){ const r = host.getBoundingClientRect(); if(r.width && r.height && _fg){ _fg.width(r.width).height(r.height); } });
+      _fgRO.observe(host);
+    }
+    try { _fg.resumeAnimation(); } catch(_){}
+    const r = host.getBoundingClientRect();
+    _fg.width(r.width || 360).height(r.height || 360).graphData(data);
+    if(statusEl) statusEl.textContent = data.subjects.length + ' matéria(s) · ' + data.nodes.filter(function(n){ return n.kind === 'unit'; }).length + ' unidades · passe o mouse nas linhas';
+    _grafoLegend(data.subjects);
+  }
+
   function _drawer(){
     let d = document.getElementById('tutorDrawer');
     if(d) return d;
@@ -29325,7 +29452,7 @@ window.TutorIA = (function(){
       + '<header class="tutor-head"><div class="tutor-head-l"><span class="tutor-spark">' + SPARK + '</span> <span class="tutor-title">Tutor</span> <span class="tutor-unit" id="tutorUnit"></span></div>'
       + '<div class="tutor-head-actions"><button class="tutor-x" id="tutorClear" aria-label="Limpar conversa" data-tip="Limpar conversa (apaga do banco)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>'
       + '<button class="tutor-x" id="tutorClose" aria-label="Fechar" data-tip="Fechar">&#10005;</button></div></header>'
-      + '<div class="tutor-tabs"><button type="button" class="tutor-tab is-active" data-ttab="chat">Tutor</button><button type="button" class="tutor-tab" data-ttab="caderno">Caderno</button></div>'
+      + '<div class="tutor-tabs"><button type="button" class="tutor-tab is-active" data-ttab="chat">Tutor</button><button type="button" class="tutor-tab" data-ttab="caderno">Caderno</button><button type="button" class="tutor-tab" data-ttab="grafo">Conexões</button></div>'
       + '<div class="tutor-msgs" id="tutorMsgs"></div>'
       + '<div class="tutor-composer"><div class="tutor-composer-top"><div class="tutor-ct-left"><button type="button" class="tutor-mode-btn" id="tutorModeBtn" data-tip="Alternar modo: Dúvida ou Aprendizado guiado">Dúvida</button><div class="tutor-model" id="tutorModelWrap"></div><button type="button" class="tutor-mode-btn tutor-banco-btn" id="tutorBancoBtn" data-tip="Trazer questões reais do banco sobre o tema (Ubique e provas passadas)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg> Questões</button><button type="button" class="tutor-mode-btn tutor-gerar-btn" id="tutorGerarBtn" data-tip="Gerar questões de Certo/Errado sobre o tema e responder aqui"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Gerar</button><button type="button" class="tutor-mode-btn tutor-voz-btn" id="tutorVozBtn" data-tip="Conversar por voz com o tutor (Manfredo)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> Falar</button></div>'
       + '<span class="ubt-cost tutor-cost" id="tutorCost" data-tip="Custo aproximado por resposta, debitado da sua carteira"><span class="ubt-sym">ⓤ</span> <span id="tutorCostVal">~</span></span></div>'
@@ -29345,6 +29472,7 @@ window.TutorIA = (function(){
         + '<div class="tutor-caderno-foot"><span class="tutor-caderno-status" id="cadernoStatus"></span><span class="tutor-caderno-hint">[[ para linkar · salva sozinho</span></div>'
         + '<div class="tutor-caderno-bl" id="cadernoBacklinks" hidden><button type="button" class="tutor-caderno-bl-h" id="cadernoBlToggle" aria-expanded="false"><span class="tutor-caderno-bl-chev">&#9656;</span> Mencionada em <span class="tutor-caderno-bl-count" id="cadernoBlCount">0</span></button><div class="tutor-caderno-bl-list" id="cadernoBlList" hidden></div></div>'
       + '</div>'
+      + '<div class="tutor-grafo" id="tutorGrafo" hidden><div class="tutor-grafo-canvas" id="grafoCanvas"></div><div class="tutor-grafo-foot"><span class="tutor-grafo-status" id="grafoStatus">Carregando…</span><span class="tutor-grafo-legend" id="grafoLegend"></span></div></div>'
       + '</div>';
     document.body.appendChild(d);
     // Largura salva + alça de redimensionar (igual ao drawer das salas)
