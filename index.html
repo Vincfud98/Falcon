@@ -28424,6 +28424,24 @@ window.TutorIA = (function(){
     .tutor-grafo-legend{ display:flex; gap:.55rem; flex-wrap:wrap; }
     .tutor-grafo-legend .lg{ display:inline-flex; align-items:center; gap:.28rem; color:var(--text-dim); }
     .tutor-grafo-legend .lg i{ width:9px; height:9px; border-radius:50%; display:inline-block; flex-shrink:0; }
+    /* Painel de ajustes do grafo (3B) */
+    .tutor-grafo-panel{ margin-top:.5rem; border-top:1px solid var(--accent-border-soft); padding-top:.45rem; }
+    .tutor-grafo-panel-h{ display:flex; align-items:center; gap:.4rem; width:100%; background:transparent; border:none; cursor:pointer; padding:.2rem 0; font-family:var(--sans); font-size:.7rem; letter-spacing:.04em; text-transform:uppercase; color:var(--text-mute); }
+    .tutor-grafo-panel-h:hover{ color:var(--accent); }
+    .tutor-grafo-panel-chev{ display:inline-block; transition:transform .15s ease; font-size:.7rem; }
+    .tutor-grafo-panel.is-open .tutor-grafo-panel-chev{ transform:rotate(90deg); }
+    .tutor-grafo-panel-sub{ text-transform:none; letter-spacing:0; color:var(--text-mute); opacity:.7; font-size:.66rem; }
+    .tutor-grafo-panel-body{ max-height:40vh; overflow-y:auto; margin-top:.5rem; display:flex; flex-direction:column; gap:.75rem; }
+    .tutor-grafo-panel-body[hidden]{ display:none; }
+    .gp-sec{ display:flex; flex-direction:column; gap:.32rem; }
+    .gp-h{ font-family:var(--sans); font-size:.62rem; letter-spacing:.1em; text-transform:uppercase; color:var(--accent); }
+    .gp-row{ display:flex; align-items:center; gap:.45rem; font-family:var(--sans); font-size:.76rem; color:var(--text-dim); cursor:pointer; }
+    .gp-row input[type=checkbox]{ accent-color:var(--accent); }
+    .gp-row-l{ flex:1; min-width:0; }
+    .gp-color{ width:24px; height:18px; padding:0; border:1px solid var(--border); border-radius:4px; background:transparent; cursor:pointer; }
+    .gp-sld{ display:flex; flex-direction:column; gap:.18rem; }
+    .gp-sld-l{ font-family:var(--sans); font-size:.72rem; color:var(--text-dim); }
+    .gp-sld input[type=range]{ width:100%; accent-color:var(--accent); }
     .tutor-caderno-bl-item{ border-left:2px solid var(--accent-border-soft); padding-left:.6rem; }
     .tutor-caderno-bl-unit{ display:block; font-family:var(--sans); font-size:.74rem; font-weight:500; color:var(--accent); cursor:pointer; margin-bottom:.15rem; }
     .tutor-caderno-bl-unit:hover{ text-decoration:underline; }
@@ -29346,109 +29364,208 @@ window.TutorIA = (function(){
     const el = document.getElementById('grafoLegend'); if(!el) return;
     el.innerHTML = (subjects || []).map(function(s){ return '<span class="lg"><i style="background:' + s.color + '"></i>' + _esc(s.sigla) + '</span>'; }).join('');
   }
-  // Monta {nodes, links} a partir dos cadernos do aluno: unidades = nós (cor por
-  // matéria), [[ ]] = arestas (com a frase), + um "sol" por matéria + arestas de
-  // pertencimento (sol↔unidade) que formam os clusters/sistemas solares.
-  async function _grafoBuildData(){
+  // ── Estado do grafo (3B) ──
+  let _grafoModel = null, _grafoNodeObj = {}, _grafoCollapsed = {}, _grafoActive = null, _grafoPrefsTimer = null;
+  const _grafoPrefs = { colors: {}, forces: { charge: -95, linkDist: 72, linkStr: 0.16, center: 0.06 }, display: { sizeByDegree: true, linkWidth: 1.3, arrows: true, labels: true } };
+  function _grafoColor(s){ return (_grafoPrefs.colors && _grafoPrefs.colors[s]) || (_grafoModel && _grafoModel.colorBase[s]) || '#888'; }
+  async function _grafoPrefsLoad(){
+    const uid = await _cadUserId(); if(!uid || !window._sb) return;
+    try {
+      const { data, error } = await window._sb.schema('aluno').from('graph_prefs').select('prefs').eq('user_id', uid).maybeSingle();
+      if(!error && data && data.prefs){
+        const p = data.prefs;
+        if(p.colors) _grafoPrefs.colors = p.colors;
+        if(p.forces) Object.assign(_grafoPrefs.forces, p.forces);
+        if(p.display) Object.assign(_grafoPrefs.display, p.display);
+      }
+    } catch(e){ console.warn('[grafo prefs load]', e); }
+  }
+  function _grafoPrefsSave(){
+    if(_grafoPrefsTimer) clearTimeout(_grafoPrefsTimer);
+    _grafoPrefsTimer = setTimeout(async function(){
+      _grafoPrefsTimer = null;
+      const uid = await _cadUserId(); if(!uid || !window._sb) return;
+      try { await window._sb.schema('aluno').from('graph_prefs').upsert({ user_id: uid, prefs: _grafoPrefs, updated_at: new Date().toISOString() }, { onConflict: 'user_id' }); }
+      catch(e){ console.warn('[grafo prefs save]', e); }
+    }, 800);
+  }
+  // Monta o MODELO puro (strings) a partir dos cadernos: unidades das matérias do
+  // aluno (todas) + [[ ]] = refs (com frase). O render é separado (filtros/cores).
+  async function _grafoBuildModel(){
     const uid = await _cadUserId(); if(!uid || !window._sb) return null;
     let rows = [];
     try { const { data, error } = await window._sb.schema('aluno').from('caderno').select('unit_id, body').eq('user_id', uid); if(error){ console.warn('[grafo]', error); return null; } rows = data || []; }
     catch(e){ console.warn('[grafo ex]', e); return null; }
-    const idx = _buildUnitIndex(); const byId = {}; idx.flat.forEach(function(u){ byId[String(u.id)] = u; });
-    const tmp = document.createElement('div'), refEdges = [], unitSet = new Set();
+    const idx = _buildUnitIndex();
+    const tmp = document.createElement('div'), refMap = {}, linkedUnits = new Set();
     rows.forEach(function(row){
       const src = String(row.unit_id); if(!row.body) return;
       tmp.innerHTML = _cadSanitize(row.body);
       Array.prototype.forEach.call(tmp.querySelectorAll('.tutor-ref'), function(c){
         const tgt = String(c.getAttribute('data-unit-id') || ''); if(!tgt || tgt === src) return;
-        unitSet.add(src); unitSet.add(tgt);
+        linkedUnits.add(src); linkedUnits.add(tgt);
         const host = (c.closest && c.closest('div,p,li,h1,h2,h3')) || tmp;
         const sentence = (host.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 280);
-        const ex = refEdges.find(function(e){ return e.source === src && e.target === tgt; });
-        if(ex){ if(sentence && ex.sentences.indexOf(sentence) < 0) ex.sentences.push(sentence); }
-        else refEdges.push({ source: src, target: tgt, sentences: sentence ? [sentence] : [] });
+        const k = src + '' + tgt;
+        if(refMap[k]){ if(sentence && refMap[k].sentences.indexOf(sentence) < 0) refMap[k].sentences.push(sentence); }
+        else refMap[k] = { source: src, target: tgt, sentences: sentence ? [sentence] : [] };
       });
     });
-    const degree = {}; refEdges.forEach(function(e){ degree[e.source] = (degree[e.source] || 0) + 1; degree[e.target] = (degree[e.target] || 0) + 1; });
-    // Mostra TODAS as unidades das matérias do aluno (mesmo sem anotação) +
-    // qualquer unidade que ele tenha linkado (mesmo de outra matéria). Unidade
-    // sem [[ ]] fica só ligada ao "sol" da matéria; as conexões entre unidades
-    // o aluno cria no Caderno.
+    const refs = Object.keys(refMap).map(function(k){ return { source: refMap[k].source, target: refMap[k].target, sentence: refMap[k].sentences.join('  •  ') }; });
+    const degree = {}; refs.forEach(function(e){ degree[e.source] = (degree[e.source] || 0) + 1; degree[e.target] = (degree[e.target] || 0) + 1; });
     const studentSubj = new Set((window.COURSES || []).map(function(c){ return String(c._subjectId); }));
-    const showUnits = idx.flat.filter(function(u){ return studentSubj.has(String(u.subjectId)) || unitSet.has(String(u.id)); });
-    if(!showUnits.length) return { nodes: [], links: [], subjects: [] };
-    const unitsById = {}; showUnits.forEach(function(u){ unitsById[String(u.id)] = u; });
-    const subjIds = [...new Set(showUnits.map(function(u){ return String(u.subjectId); }))].sort();
-    const colorOf = {}; subjIds.forEach(function(s, i){ colorOf[s] = _GRAFO_PALETTE[i % _GRAFO_PALETTE.length]; });
-    const nodes = [], links = [], subjMeta = {};
-    subjIds.forEach(function(s){
-      const sample = showUnits.find(function(u){ return String(u.subjectId) === s; });
-      const sigla = sample ? (sample.sigla || s) : s;
-      subjMeta[s] = { sigla: sigla, color: colorOf[s] };
-      nodes.push({ id: 'subj:' + s, kind: 'sun', name: sigla, subjectId: s, color: colorOf[s], val: 9 });
+    const showUnits = idx.flat.filter(function(u){ return studentSubj.has(String(u.subjectId)) || linkedUnits.has(String(u.id)); });
+    if(!showUnits.length) return { units: [], subjects: [], refs: [], colorBase: {}, degree: {} };
+    const units = showUnits.map(function(u){ return { id: String(u.id), subjectId: String(u.subjectId), label: [u.sigla, u.number, u.title].filter(Boolean).join(' · '), degree: degree[String(u.id)] || 0 }; });
+    const subjIds = [...new Set(units.map(function(u){ return u.subjectId; }))].sort();
+    const colorBase = {}; subjIds.forEach(function(s, i){ colorBase[s] = _GRAFO_PALETTE[i % _GRAFO_PALETTE.length]; });
+    const subjects = subjIds.map(function(s){ const sample = showUnits.find(function(u){ return String(u.subjectId) === s; }); return { id: s, sigla: sample ? (sample.sigla || s) : s }; });
+    return { units: units, subjects: subjects, refs: refs, colorBase: colorBase, degree: degree };
+  }
+  // Conjunto de unidades VISÍVEIS dado o filtro (vizinhança) + recolhimento.
+  function _grafoVisibleUnitIds(){
+    const m = _grafoModel; if(!m) return new Set();
+    const subjById = {}; m.units.forEach(function(u){ subjById[u.id] = u.subjectId; });
+    let base;
+    if(!_grafoActive){ base = new Set(m.units.map(function(u){ return u.id; })); }
+    else {
+      base = new Set();
+      m.units.forEach(function(u){ if(_grafoActive.has(u.subjectId)) base.add(u.id); });        // matérias ativas
+      m.refs.forEach(function(e){                                                                  // + vizinhos ligados a elas
+        if(_grafoActive.has(subjById[e.source])) base.add(e.target);
+        if(_grafoActive.has(subjById[e.target])) base.add(e.source);
+      });
+    }
+    const vis = new Set();
+    base.forEach(function(id){ const s = subjById[id]; if(_grafoCollapsed[s] && (m.degree[id] || 0) === 0) return; vis.add(id); }); // recolhe sem conexão
+    return vis;
+  }
+  // Reaplica o modelo no grafo (reaproveita objetos-nó p/ preservar posição).
+  function _grafoApply(){
+    if(!_fg || !_grafoModel) return;
+    const m = _grafoModel, vis = _grafoVisibleUnitIds();
+    const subjById = {}; m.units.forEach(function(u){ subjById[u.id] = u.subjectId; });
+    const presentSubj = new Set(); vis.forEach(function(id){ presentSubj.add(subjById[id]); });
+    const nodes = [];
+    function nodeFor(id, props){ let o = _grafoNodeObj[id]; if(!o){ o = { id: id }; _grafoNodeObj[id] = o; } Object.assign(o, props); nodes.push(o); return o; }
+    m.subjects.forEach(function(s){ if(presentSubj.has(s.id)) nodeFor('subj:' + s.id, { kind: 'sun', name: s.sigla, subjectId: s.id, color: _grafoColor(s.id), val: 9 }); });
+    m.units.forEach(function(u){ if(!vis.has(u.id)) return; nodeFor(u.id, { kind: 'unit', name: u.label, unitId: u.id, subjectId: u.subjectId, color: _grafoColor(u.subjectId), val: _grafoPrefs.display.sizeByDegree ? (2 + u.degree) : 3 }); });
+    const links = [];
+    m.units.forEach(function(u){ if(vis.has(u.id) && presentSubj.has(u.subjectId)) links.push({ source: 'subj:' + u.subjectId, target: u.id, kind: 'member' }); });
+    m.refs.forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: 'ref', sentence: e.sentence }); });
+    _fg.graphData({ nodes: nodes, links: links });
+    const statusEl = document.getElementById('grafoStatus'); if(statusEl) statusEl.textContent = presentSubj.size + ' matéria(s) · ' + vis.size + ' unidades · passe o mouse nas linhas';
+    _grafoLegend(m.subjects.filter(function(s){ return presentSubj.has(s.id); }).map(function(s){ return { sigla: s.sigla, color: _grafoColor(s.id) }; }));
+  }
+  function _grafoGravity(){
+    let nodes;
+    function force(alpha){ const s = _grafoPrefs.forces.center; if(!s || !nodes) return; for(let i = 0; i < nodes.length; i++){ const n = nodes[i]; n.vx -= n.x * s * alpha; n.vy -= n.y * s * alpha; } }
+    force.initialize = function(n){ nodes = n; };
+    return force;
+  }
+  function _grafoApplyForces(){
+    if(!_fg) return; const f = _grafoPrefs.forces;
+    try { _fg.d3Force('charge').strength(f.charge); } catch(_){}
+    try { _fg.d3Force('link').distance(function(l){ return l.kind === 'member' ? 34 : f.linkDist; }).strength(function(l){ return l.kind === 'member' ? 0.55 : f.linkStr; }); } catch(_){}
+    try { _fg.d3ReheatSimulation(); } catch(_){}
+  }
+  function _grafoPoke(){ if(_fg){ try { _fg.nodeRelSize(_fg.nodeRelSize()); } catch(_){} } }
+  function _grafoRenderPanel(){
+    const body = document.getElementById('grafoPanelBody'); const m = _grafoModel; if(!body || !m) return;
+    body.innerHTML = '';
+    const sec = function(title){ const d = document.createElement('div'); d.className = 'gp-sec'; const h = document.createElement('div'); h.className = 'gp-h'; h.textContent = title; d.appendChild(h); body.appendChild(d); return d; };
+    const row = function(parent){ const r = document.createElement('label'); r.className = 'gp-row'; parent.appendChild(r); return r; };
+    // Matérias (filtro + cor)
+    const sM = sec('Matérias');
+    m.subjects.forEach(function(s){
+      const r = row(sM);
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !_grafoActive || _grafoActive.has(s.id);
+      const col = document.createElement('input'); col.type = 'color'; col.className = 'gp-color'; col.value = _grafoColor(s.id);
+      const sp = document.createElement('span'); sp.className = 'gp-row-l'; sp.textContent = s.sigla;
+      r.appendChild(cb); r.appendChild(col); r.appendChild(sp);
+      cb.addEventListener('change', function(){
+        const checks = sM.querySelectorAll('input[type=checkbox]'); const ids = m.subjects.map(function(x){ return x.id; });
+        const on = []; checks.forEach(function(c, i){ if(c.checked) on.push(ids[i]); });
+        _grafoActive = (on.length === ids.length) ? null : new Set(on);
+        _grafoApply();
+      });
+      col.addEventListener('input', function(){ _grafoPrefs.colors[s.id] = col.value; _grafoApply(); _grafoPrefsSave(); });
     });
-    showUnits.forEach(function(u){
-      const id = String(u.id), s = String(u.subjectId);
-      const label = [u.sigla, u.number, u.title].filter(Boolean).join(' · ');
-      nodes.push({ id: id, kind: 'unit', name: label, unitId: id, subjectId: s, color: colorOf[s] || '#888', val: 2 + (degree[id] || 0) });
-      links.push({ source: 'subj:' + s, target: id, kind: 'member' });
-    });
-    refEdges.forEach(function(e){ if(unitsById[e.source] && unitsById[e.target]) links.push({ source: e.source, target: e.target, kind: 'ref', sentence: e.sentences.join('  •  ') }); });
-    return { nodes: nodes, links: links, subjects: subjIds.map(function(s){ return { id: s, sigla: subjMeta[s].sigla, color: subjMeta[s].color }; }) };
+    // Exibição
+    const sD = sec('Exibição');
+    const mkChk = function(label, val, on){ const r = row(sD); const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = val; const sp = document.createElement('span'); sp.className = 'gp-row-l'; sp.textContent = label; r.appendChild(cb); r.appendChild(sp); cb.addEventListener('change', function(){ on(cb.checked); }); };
+    const mkSld = function(parent, label, min, max, step, val, on){ const r = document.createElement('div'); r.className = 'gp-sld'; const sp = document.createElement('div'); sp.className = 'gp-sld-l'; sp.textContent = label; const inp = document.createElement('input'); inp.type = 'range'; inp.min = min; inp.max = max; inp.step = step; inp.value = val; r.appendChild(sp); r.appendChild(inp); parent.appendChild(r); inp.addEventListener('input', function(){ on(parseFloat(inp.value)); }); return inp; };
+    mkChk('Tamanho por conexões', _grafoPrefs.display.sizeByDegree, function(v){ _grafoPrefs.display.sizeByDegree = v; _grafoApply(); _grafoPrefsSave(); });
+    mkChk('Setas', _grafoPrefs.display.arrows, function(v){ _grafoPrefs.display.arrows = v; _grafoPoke(); _grafoPrefsSave(); });
+    mkChk('Rótulos', _grafoPrefs.display.labels, function(v){ _grafoPrefs.display.labels = v; _grafoPoke(); _grafoPrefsSave(); });
+    mkSld(sD, 'Espessura das linhas', 0.5, 4, 0.1, _grafoPrefs.display.linkWidth, function(v){ _grafoPrefs.display.linkWidth = v; _grafoPoke(); _grafoPrefsSave(); });
+    // Forças
+    const sF = sec('Forças');
+    mkSld(sF, 'Repulsão', 10, 320, 5, -_grafoPrefs.forces.charge, function(v){ _grafoPrefs.forces.charge = -v; _grafoApplyForces(); _grafoPrefsSave(); });
+    mkSld(sF, 'Distância do link', 20, 200, 2, _grafoPrefs.forces.linkDist, function(v){ _grafoPrefs.forces.linkDist = v; _grafoApplyForces(); _grafoPrefsSave(); });
+    mkSld(sF, 'Força do link', 0, 0.6, 0.02, _grafoPrefs.forces.linkStr, function(v){ _grafoPrefs.forces.linkStr = v; _grafoApplyForces(); _grafoPrefsSave(); });
+    mkSld(sF, 'Gravidade (central)', 0, 0.3, 0.01, _grafoPrefs.forces.center, function(v){ _grafoPrefs.forces.center = v; _grafoApplyForces(); _grafoPrefsSave(); });
   }
   async function _grafoOpen(){
     const host = document.getElementById('grafoCanvas'), statusEl = document.getElementById('grafoStatus');
     if(!host) return;
     if(statusEl) statusEl.textContent = 'Carregando…';
     try { await _loadForceGraph(); } catch(_){ if(statusEl) statusEl.textContent = 'Não consegui carregar o mapa (sem conexão?).'; return; }
-    const data = await _grafoBuildData();
-    if(!data){ if(statusEl) statusEl.textContent = 'Erro ao montar o mapa.'; return; }
+    _grafoModel = await _grafoBuildModel();
+    if(!_grafoModel){ if(statusEl) statusEl.textContent = 'Erro ao montar o mapa.'; return; }
     let emptyEl = host.querySelector('.tutor-grafo-empty');
-    if(!data.nodes.length){
+    if(!_grafoModel.units.length){
       if(_fg){ try { _fg.graphData({ nodes: [], links: [] }); } catch(_){} }
       if(!emptyEl){ emptyEl = document.createElement('div'); emptyEl.className = 'tutor-grafo-empty'; host.appendChild(emptyEl); }
-      emptyEl.textContent = 'Ainda não há conexões. Use [[ ]] no Caderno pra ligar unidades — elas aparecem aqui como um mapa.';
-      if(statusEl) statusEl.textContent = ''; _grafoLegend([]); return;
+      emptyEl.textContent = 'Ainda não há unidades pra mostrar.';
+      if(statusEl) statusEl.textContent = ''; _grafoLegend([]);
+      const pb = document.getElementById('grafoPanelBody'); if(pb) pb.innerHTML = ''; return;
     }
     if(emptyEl) emptyEl.remove();
+    await _grafoPrefsLoad();
     if(!_fg){
       _fg = ForceGraph()(host)
         .backgroundColor('#0c0c0f')
         .nodeRelSize(4)
         .nodeVal(function(n){ return n.val || 1; })
-        .nodeColor(function(n){ return n.color || '#888'; })
+        .nodeColor(function(n){ return _grafoColor(n.subjectId); })
         .nodeLabel(function(n){ return n.name; })
         .linkColor(function(l){
           if(l.kind === 'member') return 'rgba(255,255,255,0.05)';
-          const src = (l.source && typeof l.source === 'object') ? l.source.color : null; // cor da matéria de ORIGEM
-          return (src && /^#/.test(src)) ? (src + '9c') : 'rgba(200,169,126,0.5)';
+          const sid = (l.source && typeof l.source === 'object') ? l.source.subjectId : null; // cor da matéria de ORIGEM
+          const c = sid ? _grafoColor(sid) : null;
+          return (c && /^#/.test(c)) ? (c + '9c') : 'rgba(200,169,126,0.5)';
         })
-        .linkWidth(function(l){ return l.kind === 'member' ? 0.4 : 1.3; })
+        .linkWidth(function(l){ return l.kind === 'member' ? 0.4 : _grafoPrefs.display.linkWidth; })
         .linkLabel(function(l){ return l.sentence ? ('“' + _esc(l.sentence) + '”') : ''; })
-        .linkDirectionalArrowLength(function(l){ return l.kind === 'ref' ? 3 : 0; })
+        .linkDirectionalArrowLength(function(l){ return (_grafoPrefs.display.arrows && l.kind === 'ref') ? 3 : 0; })
         .linkDirectionalArrowRelPos(1)
         .nodeCanvasObjectMode(function(){ return 'after'; })
         .nodeCanvasObject(function(node, ctx, scale){
-          if(node.kind !== 'sun' && scale < 1.2) return; // rótulos das unidades só com zoom
+          if(node.kind !== 'sun'){ if(!_grafoPrefs.display.labels || scale < 1.2) return; }
           const fontSize = (node.kind === 'sun' ? 12 : 9.5) / scale;
           ctx.font = (node.kind === 'sun' ? '600 ' : '') + fontSize + 'px ' + (node.kind === 'sun' ? 'Georgia, serif' : 'sans-serif');
-          ctx.fillStyle = node.kind === 'sun' ? node.color : 'rgba(240,236,228,0.82)';
+          ctx.fillStyle = node.kind === 'sun' ? _grafoColor(node.subjectId) : 'rgba(240,236,228,0.82)';
           ctx.textAlign = 'center'; ctx.textBaseline = 'top';
           const r = Math.sqrt(node.val || 1) * 4;
           ctx.fillText(node.kind === 'sun' ? node.name : _grafoShort(node.name), node.x, node.y + r + 2 / scale);
         })
-        .onNodeClick(function(node){ if(node && node.kind === 'unit'){ const href = _unitHref(node.unitId); if(href){ close(); location.hash = href; } } })
-        .onNodeHover(function(node){ host.style.cursor = (node && node.kind === 'unit') ? 'pointer' : 'default'; });
-      try { _fg.d3Force('charge').strength(-95); } catch(_){}
-      try { _fg.d3Force('link').distance(function(l){ return l.kind === 'member' ? 34 : 72; }).strength(function(l){ return l.kind === 'member' ? 0.55 : 0.16; }); } catch(_){}
+        .onNodeClick(function(node){
+          if(!node) return;
+          if(node.kind === 'unit'){ const href = _unitHref(node.unitId); if(href){ close(); location.hash = href; } }
+          else if(node.kind === 'sun'){ _grafoCollapsed[node.subjectId] = !_grafoCollapsed[node.subjectId]; _grafoApply(); }
+        })
+        .onNodeHover(function(node){ host.style.cursor = node ? 'pointer' : 'default'; });
+      try { _fg.d3Force('gravity', _grafoGravity()); } catch(_){}
       _fgRO = new ResizeObserver(function(){ const r = host.getBoundingClientRect(); if(r.width && r.height && _fg){ _fg.width(r.width).height(r.height); } });
       _fgRO.observe(host);
     }
     try { _fg.resumeAnimation(); } catch(_){}
     const r = host.getBoundingClientRect();
-    _fg.width(r.width || 360).height(r.height || 360).graphData(data);
-    if(statusEl) statusEl.textContent = data.subjects.length + ' matéria(s) · ' + data.nodes.filter(function(n){ return n.kind === 'unit'; }).length + ' unidades · passe o mouse nas linhas';
-    _grafoLegend(data.subjects);
+    _fg.width(r.width || 360).height(r.height || 360);
+    _grafoApply();
+    _grafoApplyForces();
+    _grafoRenderPanel();
   }
 
   function _drawer(){
@@ -29483,7 +29600,7 @@ window.TutorIA = (function(){
         + '<div class="tutor-caderno-foot"><span class="tutor-caderno-status" id="cadernoStatus"></span><span class="tutor-caderno-hint">[[ para linkar · salva sozinho</span></div>'
         + '<div class="tutor-caderno-bl" id="cadernoBacklinks" hidden><button type="button" class="tutor-caderno-bl-h" id="cadernoBlToggle" aria-expanded="false"><span class="tutor-caderno-bl-chev">&#9656;</span> Mencionada em <span class="tutor-caderno-bl-count" id="cadernoBlCount">0</span></button><div class="tutor-caderno-bl-list" id="cadernoBlList" hidden></div></div>'
       + '</div>'
-      + '<div class="tutor-grafo" id="tutorGrafo" hidden><div class="tutor-grafo-canvas" id="grafoCanvas"></div><div class="tutor-grafo-foot"><span class="tutor-grafo-status" id="grafoStatus">Carregando…</span><span class="tutor-grafo-legend" id="grafoLegend"></span></div></div>'
+      + '<div class="tutor-grafo" id="tutorGrafo" hidden><div class="tutor-grafo-canvas" id="grafoCanvas"></div><div class="tutor-grafo-foot"><span class="tutor-grafo-status" id="grafoStatus">Carregando…</span><span class="tutor-grafo-legend" id="grafoLegend"></span></div><div class="tutor-grafo-panel" id="grafoPanel"><button type="button" class="tutor-grafo-panel-h" id="grafoPanelToggle" aria-expanded="false"><span class="tutor-grafo-panel-chev">&#9656;</span> Ajustes <span class="tutor-grafo-panel-sub">filtros · cores · forças</span></button><div class="tutor-grafo-panel-body" id="grafoPanelBody" hidden></div></div></div>'
       + '</div>';
     document.body.appendChild(d);
     // Largura salva + alça de redimensionar (igual ao drawer das salas)
@@ -29540,6 +29657,13 @@ window.TutorIA = (function(){
       const sec = d.querySelector('#cadernoBacklinks'), list = d.querySelector('#cadernoBlList');
       const open = sec.classList.toggle('is-open'); if(list) list.hidden = !open;
       _blT.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    const _gpT = d.querySelector('#grafoPanelToggle');
+    if(_gpT) _gpT.addEventListener('click', function(){
+      const sec = d.querySelector('#grafoPanel'), body = d.querySelector('#grafoPanelBody');
+      const open = sec.classList.toggle('is-open'); if(body) body.hidden = !open;
+      _gpT.setAttribute('aria-expanded', open ? 'true' : 'false');
+      if(open && _fg){ setTimeout(function(){ const h = document.getElementById('grafoCanvas'); const r = h && h.getBoundingClientRect(); if(r && r.width && r.height) _fg.width(r.width).height(r.height); }, 60); }
     });
     if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(d);
     return d;
