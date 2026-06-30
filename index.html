@@ -524,8 +524,9 @@ img{display:block;max-width:100%}
   background:transparent;
   letter-spacing:.04em;
   transition:all .25s ease;line-height:1.3;
+  cursor:pointer;
 }
-.tg:hover{border-color:rgba(200,169,126,.35);color:var(--text-dim)}
+.tg:hover{border-color:rgba(200,169,126,.5);color:var(--accent);background:var(--accent-lo)}
 /* Tag privada do usuário — cinza (vs. caramelo da plataforma) */
 .tg.tg-user{border-color:rgba(255,255,255,.16);border-style:solid}
 .tg.tg-user:hover{border-color:rgba(255,255,255,.32);color:var(--text-dim)}
@@ -9803,6 +9804,22 @@ window.MOCK_INITIAL_PROGRESS = {};
 (function(){
 'use strict';
 
+/* ───────── Console: limpo em produção + aviso anti-golpe (self-XSS) ─────────
+   Os console.log de debug ficam SILENCIADOS pro aluno (console profissional);
+   warn/error continuam aparecendo. Admin (e ?debug=1 / localStorage.falcon_debug=1)
+   veem tudo — pra não atrapalhar o suporte. */
+(function(){
+  try {
+    var real = { log: console.log.bind(console), info: console.info.bind(console), debug: console.debug.bind(console) };
+    window.__falconDebug = false;
+    try { if(/[?&]debug=1/.test(location.search) || localStorage.getItem('falcon_debug') === '1') window.__falconDebug = true; } catch(_){}
+    real.log('%cPare!', 'color:#c0392b;font-size:40px;font-weight:700;');
+    real.log('%cEste é um recurso do navegador para programadores. Se alguém pediu para você colar ou digitar algo aqui, é golpe — não faça: pode dar acesso à sua conta na Ubique.', 'font-size:13px;color:#555;line-height:1.5;');
+    var gate = function(fn){ return function(){ if(window.__falconDebug) fn.apply(console, arguments); }; };
+    console.log = gate(real.log); console.info = gate(real.info); console.debug = gate(real.debug);
+  } catch(_){ /* nunca quebra o app por causa de log */ }
+})();
+
 /* ───────── Util ───────── */
 const Util = {
   esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); },
@@ -10169,6 +10186,8 @@ const Auth = (function(){
       _authSource:  'supabase',
       _rawRole:     rawRole
     };
+    // Admin → liga o debug do console (pra o suporte continuar enxergando os logs).
+    if(role === 'admin'){ try { window.__falconDebug = true; } catch(_){} }
     // Espelha pro UbiqueStore.user_profiles local pra que Profile.get/
     // Profile.needsOnboarding funcionem sem mudanças. Idempotente.
     _mirrorProfileToLocal(userObj);
@@ -35171,8 +35190,101 @@ Renderers.reading.mount = function(stageEl, route){
 };
 
 /* ═══════════ GLOBAL SEARCH ═══════════ */
+/* ───────── Tags clicáveis → Pesquisa por tag ───────── */
+// Clique em qualquer chip de tag (.tg), onde quer que apareça, leva pra busca
+// por aquela tag. Capture-phase + stopPropagation pra NÃO disparar a navegação
+// do card que contém a tag. Chips de edição (chip-picker/inputs) ficam de fora.
+document.addEventListener('click', function(e){
+  var tg = (e.target && e.target.closest) ? e.target.closest('.tg') : null;
+  if(!tg) return;
+  if(tg.closest('.chip-picker') || tg.closest('[contenteditable="true"]') || tg.closest('input, textarea, select')) return;
+  e.preventDefault(); e.stopPropagation();
+  var name = (tg.textContent || '').trim(); if(name.charAt(0) === '#') name = name.slice(1).trim();
+  if(name) location.hash = '#/search?tag=' + encodeURIComponent(name);
+}, true);
+
+// Normaliza id OU nome de tag pro NOME canônico em minúsculas (pra casar tags
+// guardadas ora por id, ora por nome, em qualquer maiúscula/minúscula).
+function _tagCanon(idOrName){
+  if(idOrName == null) return '';
+  var s = String(idOrName).trim(); if(!s) return '';
+  if(window.UbiqueStore && UbiqueStore.tags && typeof UbiqueStore.tags.list === 'function'){
+    var all = UbiqueStore.tags.list() || [];
+    var hit = all.find(function(x){ return x && (String(x.id) === s || String(x.tag||'').toLowerCase() === s.toLowerCase()); });
+    if(hit) return String(hit.tag).toLowerCase();
+  }
+  var legacy = Util.getTag(s);
+  if(legacy) return String(legacy.name).toLowerCase();
+  return s.toLowerCase();
+}
+
+// Modo "busca por tag": lista TUDO marcado com a tag (blocos/questões + notas).
+function _searchByTag(tagFilter){
+  var target = _tagCanon(tagFilter);
+  var label = tagFilter;
+  if(window.UbiqueStore && UbiqueStore.tags && typeof UbiqueStore.tags.list === 'function'){
+    var h = (UbiqueStore.tags.list()||[]).find(function(x){ return x && String(x.tag||'').toLowerCase() === target; });
+    if(h) label = h.tag;
+  }
+  var hasTag = function(arr){ return Array.isArray(arr) && arr.some(function(t){ return _tagCanon(t) === target; }); };
+  var MAX = 80, blockHits = [], noteHits = [];
+  for(const c of (window.COURSES || [])){
+    for(const m of (c.modules || [])){
+      for(const entry of Util.unitsOfModule(m)){
+        const rawUnit = entry.unit, chapter = entry.chapter;
+        const unit = (typeof _unitWithStoreOverride === 'function') ? _unitWithStoreOverride(rawUnit) : rawUnit;
+        const chapterPart = chapter ? `/c/${chapter.id}` : '';
+        const hrefBase = `#/m/${m.id}${chapterPart}/u/${unit.id}`;
+        const crumb = `${c.title ? c.title + ' › ' : ''}${m.label||''} · ${m.title}${chapter?` › Cap. ${chapter.number}`:''} › Unid. ${unit.number} · ${unit.title}`;
+        for(const g of (unit.groups || [])){
+          for(const b of (g.blocks || [])){
+            if(blockHits.length >= MAX) break;
+            const matched = hasTag(b.tags) || (Array.isArray(b.items) && b.items.some(function(it){ return hasTag(it.tags); }));
+            if(matched){
+              const typeLabel = ({text:'Leitura',textgallery:'Leitura + galeria',gallery:'Galeria',video:'Vídeo',quiz:'Questões',essay:'Discursivas',flashcards:'Flashcards',sources:'Fontes',keypoints:'Pontos-chave',bio:'Biografia',quote:'Citação',table:'Tabela',timeline:'Linha do tempo',glossary:'Glossário',compound:'Composto',comments:'Discussão',discussion:'Discussão'})[b.type] || b.type;
+              blockHits.push({ href: `${hrefBase}?g=${g.id}&b=${b.id}`, crumb: `${crumb} · ${typeLabel}`, title: b.title || typeLabel });
+            }
+          }
+        }
+      }
+    }
+  }
+  (Store.listNotes({}) || []).forEach(function(n){
+    if(noteHits.length >= MAX || !hasTag(n.tags)) return;
+    const found = (n.moduleId && n.unitId) ? Util.findUnit(n.moduleId, n.unitId) : null;
+    const crumb = found
+      ? `${found.module.label||''} · ${found.module.title}${found.chapter?` › Cap. ${found.chapter.number}`:''} › Unid. ${found.unit.number} · ${found.unit.title}`
+      : 'Minhas notas';
+    const href = found
+      ? `#/m/${found.module.id}${found.chapter?`/c/${found.chapter.id}`:''}/u/${found.unit.id}${n.blockId?`?b=${n.blockId}`:''}`
+      : '#/notes';
+    noteHits.push({ href, crumb, title: n.title || '(nota)', excerpt: Util.esc((n.body||'').slice(0,160)) });
+  });
+  const header = `<div class="hero">
+    <span class="s-label" data-a="1">Busca por tag</span>
+    <h1 class="s-title hero" data-a="2">Conteúdos com #${Util.esc(label)}</h1>
+    <div class="s-divider" data-a="3"></div>
+    <form class="search-form" id="searchForm" data-a="4" onsubmit="return false">
+      <input class="search-input-xl" id="searchInput" type="search" placeholder="Procure por termos, personagens, conceitos…" value="" autocomplete="off">
+      <button type="submit" class="btn-primary search-submit" id="searchSubmit">Buscar</button>
+    </form>
+    <p class="search-hint" data-a="5">Mostrando tudo marcado com <strong>#${Util.esc(label)}</strong>. <a href="#/search">Limpar filtro</a></p>
+  </div>`;
+  const renderGroup = (lbl, hits) => hits.length ? `<div class="search-group">
+    <div class="search-group-head">${Util.esc(lbl)} <span class="search-group-count">${hits.length}${hits.length>=MAX?'+':''}</span></div>
+    ${hits.map(h => `<a class="search-hit" href="${h.href}"><div class="search-hit-crumb">${Util.esc(h.crumb)}</div><div class="search-hit-title">${Util.esc(h.title)}</div>${h.excerpt?`<div class="search-hit-excerpt">${h.excerpt}</div>`:''}</a>`).join('')}
+  </div>` : '';
+  const total = blockHits.length + noteHits.length;
+  const body = total === 0
+    ? `<div class="search-empty">Nada marcado com #${Util.esc(label)} ainda.</div>`
+    : `${renderGroup('Conteúdos do curso', blockHits)}${renderGroup('Minhas notas', noteHits)}`;
+  return `<div class="search-page">${header}<p class="search-summary">${total} resultado${total===1?'':'s'} · #${Util.esc(label)}</p>${body}</div>`;
+}
+
 Renderers.search = function(route){
   const q = (route.query && route.query.q ? String(route.query.q) : '').trim();
+  const tagFilter = (route.query && route.query.tag ? String(route.query.tag) : '').trim();
+  if(tagFilter) return _searchByTag(tagFilter);
   const suggestions = ['volta do mar', 'capitanias hereditárias', 'ciclo do ouro', 'D. João III', 'Tupinambá'];
   const header = `<div class="hero">
     <span class="s-label" data-a="1">Buscar no curso</span>
