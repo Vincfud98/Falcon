@@ -28516,7 +28516,7 @@ window.TutorIA = (function(){
     .tutor-grafo[hidden]{ display:none; }
     .grafo-node-pop{ width:212px; }
     .grafo-node-pop .grafo-pop-last{ margin-bottom:0; }
-    .tutor-grafo-canvas{ flex:1; min-height:0; position:relative; background:radial-gradient(ellipse 78% 72% at 50% 42%, #221d29 0%, #15111c 46%, #0a090e 100%); border:1px solid var(--border); border-radius:12px; overflow:hidden; box-shadow:inset 0 0 70px rgba(0,0,0,.55); }
+    .tutor-grafo-canvas{ flex:1; min-height:0; position:relative; background:radial-gradient(ellipse 78% 72% at 50% 42%, #0f1d38 0%, #0a1322 46%, #05080f 100%); border:1px solid var(--border); border-radius:12px; overflow:hidden; box-shadow:inset 0 0 70px rgba(0,0,0,.6); }
     .tutor-grafo-canvas canvas{ display:block; }
     .tutor-grafo-empty{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:1.5rem; font-family:var(--sans); font-size:.8rem; line-height:1.5; color:var(--text-mute); }
     .tutor-grafo-foot{ display:flex; justify-content:space-between; align-items:center; gap:.6rem; margin-top:.5rem; font-family:var(--sans); font-size:.66rem; color:var(--text-mute); flex-wrap:wrap; }
@@ -29478,15 +29478,20 @@ window.TutorIA = (function(){
   let _grafoModel = null, _grafoNodeObj = {}, _grafoCollapsed = {}, _grafoActive = null, _grafoPrefsTimer = null;
   const _grafoPrefs = { colors: {}, forces: { charge: -95, linkDist: 72, linkStr: 0.16, center: 0.06 }, display: { sizeByDegree: true, linkWidth: 1.3, arrows: true, labels: true } };
   function _grafoColor(s){ return (_grafoPrefs.colors && _grafoPrefs.colors[s]) || (_grafoModel && _grafoModel.colorBase[s]) || '#888'; }
+  let _grafoPrefsLoaded = false;
   async function _grafoPrefsLoad(){
+    if(_grafoPrefsLoaded) return; // já carregou nesta sessão → não rebusca
     const uid = await _cadUserId(); if(!uid || !window._sb) return;
     try {
       const { data, error } = await window._sb.schema('aluno').from('graph_prefs').select('prefs').eq('user_id', uid).maybeSingle();
-      if(!error && data && data.prefs){
-        const p = data.prefs;
-        if(p.colors) _grafoPrefs.colors = p.colors;
-        if(p.forces) Object.assign(_grafoPrefs.forces, p.forces);
-        if(p.display) Object.assign(_grafoPrefs.display, p.display);
+      if(!error){
+        if(data && data.prefs){
+          const p = data.prefs;
+          if(p.colors) _grafoPrefs.colors = p.colors;
+          if(p.forces) Object.assign(_grafoPrefs.forces, p.forces);
+          if(p.display) Object.assign(_grafoPrefs.display, p.display);
+        }
+        _grafoPrefsLoaded = true;
       }
     } catch(e){ console.warn('[grafo prefs load]', e); }
   }
@@ -29502,10 +29507,17 @@ window.TutorIA = (function(){
   // Monta o MODELO puro (strings) a partir dos cadernos: unidades das matérias do
   // aluno (todas) + [[ ]] = refs (com frase). O render é separado (filtros/cores).
   async function _grafoBuildModel(){
-    const uid = await _cadUserId(); if(!uid || !window._sb) return null;
     let rows = [];
-    try { const { data, error } = await window._sb.schema('aluno').from('caderno').select('unit_id, body').eq('user_id', uid); if(error){ console.warn('[grafo]', error); return null; } rows = data || []; }
-    catch(e){ console.warn('[grafo ex]', e); return null; }
+    // Usa o cache de cadernos hidratado no login (instantâneo, SEM rede). Só cai
+    // pro banco se o cache estiver vazio (ex.: hidratação ainda não terminou).
+    const cached = (window.Store && Store.listCadernos) ? Store.listCadernos() : [];
+    if(cached && cached.length){
+      rows = cached.map(function(c){ return { unit_id: c.unitId, body: c.body }; });
+    } else {
+      const uid = await _cadUserId(); if(!uid || !window._sb) return null;
+      try { const { data, error } = await window._sb.schema('aluno').from('caderno').select('unit_id, body').eq('user_id', uid); if(error){ console.warn('[grafo]', error); return null; } rows = data || []; }
+      catch(e){ console.warn('[grafo ex]', e); return null; }
+    }
     const idx = _buildUnitIndex();
     const tmp = document.createElement('div'), refMap = {}, linkedUnits = new Set();
     rows.forEach(function(row){
@@ -29695,17 +29707,26 @@ window.TutorIA = (function(){
         const isSun = node.kind === 'sun';
         const r = Math.sqrt(node.val || 1) * 4;
         const col = _grafoColor(node.subjectId);
-        // HALO (estrela)
+        // "BOIAR" delicado: micro-deriva senoidal por nó (puramente visual, não
+        // mexe na física; cada nó com fase própria = flutuação orgânica; pinado
+        // não boia). As linhas ligam no centro real — a deriva é pequena demais
+        // pra descolar. Anima porque as partículas mantêm o loop de render vivo.
+        let x = node.x, y = node.y;
+        if(!node.pinned){
+          if(node.__ph == null) node.__ph = ((node.index || 0) * 1.7) % 6.283;
+          const t = (typeof performance !== 'undefined' ? performance.now() : Date.now()) * 0.001;
+          x += Math.sin(t * 0.5 + node.__ph) * 1.2;
+          y += Math.cos(t * 0.42 + node.__ph * 1.3) * 1.2;
+        }
+        // HALO (bem sutil — ~80% mais fraco que antes)
         const glowR = r * (isSun ? 3.2 : 2.4);
-        const grd = ctx.createRadialGradient(node.x, node.y, r * 0.25, node.x, node.y, glowR);
-        grd.addColorStop(0, _grafoHexA(col, isSun ? 0.55 : 0.42));
-        grd.addColorStop(0.5, _grafoHexA(col, isSun ? 0.16 : 0.11));
+        const grd = ctx.createRadialGradient(x, y, r * 0.25, x, y, glowR);
+        grd.addColorStop(0, _grafoHexA(col, isSun ? 0.11 : 0.085));
+        grd.addColorStop(0.5, _grafoHexA(col, isSun ? 0.03 : 0.022));
         grd.addColorStop(1, _grafoHexA(col, 0));
-        ctx.beginPath(); ctx.arc(node.x, node.y, glowR, 0, 2 * Math.PI); ctx.fillStyle = grd; ctx.fill();
-        // NÚCLEO
-        ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill();
-        // brilho de volume (canto superior-esquerdo)
-        ctx.beginPath(); ctx.arc(node.x - r * 0.28, node.y - r * 0.28, r * 0.5, 0, 2 * Math.PI); ctx.fillStyle = 'rgba(255,255,255,0.16)'; ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, glowR, 0, 2 * Math.PI); ctx.fillStyle = grd; ctx.fill();
+        // NÚCLEO (chapado, sem o "brilho de volume" que ficava bola-dentro-de-bola)
+        ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill();
         // anel de fixado
         if(node.pinned){ ctx.beginPath(); ctx.arc(node.x, node.y, r + 2.5 / scale, 0, 2 * Math.PI); ctx.strokeStyle = 'rgba(255,255,255,0.92)'; ctx.lineWidth = 1.5 / scale; ctx.stroke(); }
         // rótulo
@@ -29714,7 +29735,7 @@ window.TutorIA = (function(){
         ctx.font = (isSun ? '600 ' : '') + fontSize + 'px ' + (isSun ? 'Georgia, serif' : 'sans-serif');
         ctx.fillStyle = isSun ? col : 'rgba(240,236,228,0.82)';
         ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        ctx.fillText(isSun ? node.name : _grafoShort(node.name), node.x, node.y + r + 2 / scale);
+        ctx.fillText(isSun ? node.name : _grafoShort(node.name), x, y + r + 2 / scale);
       })
       // Área de clique/hover = só o NÚCLEO (o halo não captura o ponteiro).
       .nodePointerAreaPaint(function(node, color, ctx){
