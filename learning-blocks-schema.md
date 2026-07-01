@@ -51,10 +51,18 @@ Os outros (`video`, `quiz`, `essay`, `flashcards`, `timeline`, `glossary`, `gall
 
 Texto rico com parágrafos, **fragmentos** (termos-chave vinculados a verbetes com tooltip + galeria de imagens) e narração opcional. É o bloco mais expressivo do schema — cada parágrafo pode definir uma rede de termos que renderizam tooltips, galeria flutuante sincronizada com scroll e cross-links via `relatedTerms`.
 
+// SUBTÍTULO (opcional): um item da lista `paragraphs` pode ser um DIVISOR DE
+// SEÇÃO em vez de um parágrafo. Ele agrupa os parágrafos que vêm ABAIXO dele
+// (até o próximo subtítulo). Formato mínimo — SÓ inclua se o texto original tiver:
+//   { "id": "s1", "kind": "subtitle", "title": "2.1 Os Tudors" }
+// (só cabeçalho: sem `content`, `description` nem `fragments`.) No app vira um
+// <h3.tb-section-title> no texto e um item de seção na sidebar (os títulos de
+// parágrafo daquela seção ficam indentados sob ele). Sem nenhum subtítulo no
+// bloco, os parágrafos aparecem exatamente como antes.
 ```ts
 content: {
   audio_url?: string                    // Áudio narrado opcional do bloco inteiro (futuro Y2)
-  paragraphs: Array<{                   // Lista ordenada de parágrafos
+  paragraphs: Array<{                   // Lista ordenada de parágrafos (e subtítulos, ver acima)
     id: string                          // ID único do parágrafo (usado pra anchors da sidebar)
     title?: string | null               // OPCIONAL. Quando preenchido, vira anchor na sidebar
                                         // interna da unidade — clicar leva o aluno até esse
