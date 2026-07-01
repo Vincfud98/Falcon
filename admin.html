@@ -48374,7 +48374,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     ueRenderSidebar();
     ueRenderBlockTypeButtons();
     document.getElementById('ueBlocksList').innerHTML = '<div class="loading">Carregando blocos…</div>';
-    await Promise.all([ ueLoadSections(), ueLoadBlocks(), ueLoadDownloads() ]);
+    await Promise.all([ ueLoadSections(), ueLoadBlocks(), ueLoadDownloads(), loadSources(), loadAuthors(), loadSourceAuthors() ]);
+    // Referências: re-sincroniza o snapshot (autor etc.) com o banco de obras
+    // (ex.: autor linkado DEPOIS de a obra ser adicionada ao bloco). Aqui só
+    // atualiza o que o editor mostra; a gravação no banco acontece ao "salvar".
+    try { ueAllBlocksCache.forEach(function(b){ if(b.type === 'sources' || b.type === 'references') _ueRefSyncFromBank(b); }); } catch(_){}
     // garante seção atual
     if(!ueSectionsCache.length){
       // cria automaticamente uma seção inicial caso a unidade não tenha nenhuma
@@ -49278,6 +49282,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // visível na textarea, e atualiza o preview ao vivo.
     const b = _ueGetBlock(bid);
     if(!b || !window.UbiqueStore) return;
+    _ueRefSyncFromBank(b); // referências: mantém autor/campos em dia com o banco
     UbiqueStore.unit_blocks.update(bid, { content: b.content });
     // Espelha o estado em ueAllBlocksCache (usado por ueLoadBlocks/reabertura)
     const allIdx = ueAllBlocksCache.findIndex(function(x){ return x.id === bid; });
@@ -50313,6 +50318,33 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }).filter(Boolean);
       return names.join('; ');
     }catch(_){ return ''; }
+  }
+
+  // Re-sincroniza os itens de um bloco de referências com o BANCO de obras.
+  // O item guarda um SNAPSHOT (autor, título, ano…) tirado quando a obra foi
+  // adicionada; se o autor foi linkado à obra DEPOIS, o snapshot fica velho.
+  // Aqui atualizamos os campos derivados do banco (via sourceId). Guarda: só
+  // mexe se a obra existir no cache (senão preservamos o snapshot atual).
+  // Retorna true se algo mudou.
+  function _ueRefSyncFromBank(block){
+    if(!block || (block.type !== 'sources' && block.type !== 'references')) return false;
+    var items = (block.content && Array.isArray(block.content.items)) ? block.content.items : [];
+    var changed = false;
+    items.forEach(function(it){
+      if(!it || it.sourceId == null) return;
+      var obra = (typeof sourcesCache !== 'undefined' ? sourcesCache : []).find(function(x){ return x.id === it.sourceId; });
+      if(!obra) return; // banco não carregado ou obra apagada → não mexe
+      var fresh = {
+        kind: obra.source_kind || it.kind || 'livro',
+        title: obra.title || '',
+        author: _ueRefObraAuthors(obra.id),
+        year: obra.year ? String(obra.year) : '',
+        publisher: obra.publisher || '',
+        image: obra.image_url || ''
+      };
+      Object.keys(fresh).forEach(function(k){ if(it[k] !== fresh[k]){ it[k] = fresh[k]; changed = true; } });
+    });
+    return changed;
   }
 
   // Mapeia uma obra do banco (sourcesCache) para o snapshot do LB.
@@ -54900,6 +54932,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   async function ueSaveBlock(bid){
     const b = ueBlocksCache.find(function(x){ return x.id === bid; });
     if(!b) return;
+    _ueRefSyncFromBank(b); // referências: grava o autor/campos atuais do banco de obras
     const titleEl  = document.getElementById('ue-bf-title-'  + bid);
     const statusEl = document.getElementById('ue-bf-status-' + bid);
     const title  = titleEl  ? titleEl.value.trim() : (b.title || '');
