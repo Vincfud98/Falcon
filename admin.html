@@ -49356,6 +49356,103 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     _ueRerenderBlockBody(bid);
   };
 
+  // ── IMPORTADOR DE MARKDOWN (fascículo em tabela) → parágrafos/subtítulos ──
+  // Converte inline markdown pra HTML (mantém o texto como o admin colou: não
+  // remove notas de rodapé nem os (§N); só desescapa \. \) etc.).
+  function _ueMdInline(s){
+    s = String(s == null ? '' : s);
+    s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); // HTML-safe
+    s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong>$1</strong>');                 // **negrito**
+    s = s.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');                           // *itálico*
+    s = s.replace(/\\([().,\-])/g, '$1');                                      // desescapa \. \) \( \, \-
+    return s.trim();
+  }
+  // Texto simples (título/subtítulo): tira #, negrito/itálico e desescapa.
+  function _ueMdPlain(s){
+    s = String(s == null ? '' : s);
+    s = s.replace(/^\s*#{1,6}\s*/, '');    // tira ### do começo
+    s = s.replace(/\*+/g, '');             // tira marcadores ** e *
+    s = s.replace(/\\([().,\-])/g, '$1');  // desescapa
+    return s.trim();
+  }
+  // Parseia o fascículo: H2 = título do bloco; linhas de tabela = parágrafos
+  // (| título | conteúdo |); linha ### com 2ª coluna vazia = subtítulo.
+  function _ueParseFascicle(md){
+    const lines = String(md || '').split(/\r?\n/);
+    let title = '';
+    const items = [];
+    let sIdx = 0, pIdx = 0;
+    for(const raw of lines){
+      const line = raw.trim();
+      if(!line) continue;
+      if(!title){
+        const h2 = line.match(/^##\s+(.+)$/);
+        if(h2){ title = _ueMdPlain(h2[1]); continue; }
+      }
+      if(line.charAt(0) !== '|') continue;                       // só linhas de tabela
+      if(/^\|[\s:\-|]+\|?$/.test(line) && line.indexOf('-') >= 0) continue; // separador
+      const cells = line.replace(/\\\|/g, "@@P@@").slice(1).replace(/\|\s*$/, "")
+        .split("|").map(function(c){ return c.split("@@P@@").join("|").trim(); });
+      const left = cells[0] || '';
+      const right = cells.length > 1 ? cells.slice(1).join(' | ').trim() : '';
+      if(/^#{1,6}\s/.test(left) && !right){                      // subtítulo (### + direita vazia)
+        items.push({ id: 's' + (++sIdx), kind: 'subtitle', title: _ueMdPlain(left) });
+        continue;
+      }
+      items.push({                                               // parágrafo
+        id: 'p' + (++pIdx),
+        title: _ueMdPlain(left) || null,
+        content: '<p>' + _ueMdInline(right) + '</p>',
+        description: '',
+        fragments: []
+      });
+    }
+    return { title: title, items: items };
+  }
+
+  window.ueImportMarkdown = function(bid){
+    const back = document.createElement('div');
+    back.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:1.5rem';
+    back.innerHTML =
+      '<div style="width:min(780px,96vw);max-height:88vh;display:flex;flex-direction:column;background:var(--bg-card);border:1px solid var(--accent-border);border-radius:12px;padding:1rem 1.1rem">'
+      + '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.5rem"><strong style="font-size:1rem">Importar do markdown</strong><button class="btn btn-ghost btn-sm" data-imp-x style="padding:.2rem .55rem">✕</button></div>'
+      + '<p class="s-body" style="font-size:.76rem;color:var(--text-mute);margin:0 0 .5rem">H2 (<code>## …</code>) = título do bloco · tabela <code>| título | conteúdo |</code> = parágrafos · linha <code>### …</code> com a 2ª coluna vazia = subtítulo. O texto é mantido como você colar.</p>'
+      + '<textarea data-imp-ta rows="15" placeholder="## **1. Título…**&#10;&#10;| Título do parágrafo | Conteúdo… |&#10;| :---- | :---- |&#10;| ### **2.1 Subtítulo** | |" style="width:100%;flex:1;min-height:220px;font-family:var(--mono);font-size:.76rem;line-height:1.5;background:var(--bg-elev);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:.6rem;resize:vertical"></textarea>'
+      + '<div data-imp-info style="font-size:.72rem;color:var(--text-mute);margin:.45rem 0 0;min-height:1em"></div>'
+      + '<div style="display:flex;justify-content:flex-end;gap:.5rem;margin-top:.6rem"><button class="btn btn-ghost btn-sm" data-imp-x>Cancelar</button><button class="btn btn-sm" data-imp-go style="background:var(--accent);color:#1a1a1a;padding:.3rem .9rem">Importar</button></div>'
+      + '</div>';
+    document.body.appendChild(back);
+    const ta = back.querySelector('[data-imp-ta]');
+    const info = back.querySelector('[data-imp-info]');
+    const close = function(){ if(back.parentNode) back.parentNode.removeChild(back); };
+    back.addEventListener('mousedown', function(e){ if(e.target === back) close(); });
+    back.querySelectorAll('[data-imp-x]').forEach(function(x){ x.addEventListener('click', close); });
+    const counts = function(items){
+      const p = items.filter(function(i){ return i.kind !== 'subtitle'; }).length;
+      const s = items.filter(function(i){ return i.kind === 'subtitle'; }).length;
+      return p + ' parágrafo(s), ' + s + ' subtítulo(s)';
+    };
+    ta.addEventListener('input', function(){
+      try { const r = _ueParseFascicle(ta.value); info.textContent = r.items.length ? ('Detectado: ' + counts(r.items) + (r.title ? ' · título: "' + r.title.slice(0, 60) + '"' : '')) : 'Nada detectado ainda.'; }
+      catch(_){ info.textContent = ''; }
+    });
+    back.querySelector('[data-imp-go]').addEventListener('click', function(){
+      const parsed = _ueParseFascicle(ta.value);
+      if(!parsed.items.length){ if(window.ueToast) window.ueToast('Não encontrei parágrafos na tabela. Confira o formato do markdown.', 'error'); return; }
+      const b = _ueGetBlock(bid); if(!b){ close(); return; }
+      if(!b.content) b.content = {};
+      const existing = (b.content.paragraphs || []).length;
+      if(existing && !confirm('Este bloco já tem ' + existing + ' item(ns). Importar vai SUBSTITUIR tudo. Continuar?')) return;
+      b.content.paragraphs = parsed.items;
+      if(parsed.title) b.title = parsed.title;
+      _ueSaveStructured(bid);
+      _ueRerenderBlockBody(bid);
+      close();
+      if(window.ueToast) window.ueToast('Importado: ' + counts(parsed.items) + '. Revise, ajuste a ordem (↑/↓) e clique em "salvar" no bloco.', 'success');
+    });
+    setTimeout(function(){ try { ta.focus(); } catch(_){} }, 30);
+  };
+
   window.ueRemoveParagraph = function(bid, pIdx){
     if(!confirm('Apagar este parágrafo?')) return;
     const b = _ueGetBlock(bid); if(!b || !b.content || !Array.isArray(b.content.paragraphs)) return;
@@ -53312,6 +53409,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
                 '<button class="btn btn-ghost btn-sm" onclick="ueAutoDetectAllParagraphs(' + bid + ')" style="padding:.25rem .6rem" title="Procura os verbetes (nome + apelidos) em TODOS os parágrafos e conecta automaticamente">🔎 Reconhecer verbetes</button>',
                 '<button class="btn btn-ghost btn-sm" onclick="ueAddParagraph(' + bid + ')" style="padding:.25rem .6rem">+ Parágrafo</button>',
                 '<button class="btn btn-ghost btn-sm" onclick="ueAddSubtitle(' + bid + ')" style="padding:.25rem .6rem" title="Adiciona um subtítulo (divisor de seção). Reposicione com as setas ↑/↓">+ Subtítulo</button>',
+                '<button class="btn btn-ghost btn-sm" onclick="ueImportMarkdown(' + bid + ')" style="padding:.25rem .6rem" title="Cole o fascículo em markdown (tabela) e preenche os parágrafos/subtítulos automaticamente">📥 Importar do markdown</button>',
               '</div>',
             '</div>',
             '<div id="ue-text-paragraphs-' + bid + '">',
