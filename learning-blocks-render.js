@@ -1244,7 +1244,7 @@
         if(!images.length) return '<p class="s-body" style="font-style:italic;color:var(--text-mute)">Sem imagens.</p>';
         return '<div class="cards-grid" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.8rem">' +
           images.map(function(img){
-            return '<button type="button" style="position:relative;aspect-ratio:1;background-image:url(\'' + attrHtml(img.url||'') + '\');background-size:cover;background-position:center;border:1px solid var(--accent-border-soft);border-radius:var(--radius);overflow:hidden;cursor:pointer;padding:0" onmouseover="this.querySelector(\'[data-overlay]\').style.opacity=1" onmouseout="this.querySelector(\'[data-overlay]\').style.opacity=0">' +
+            return '<button type="button" style="position:relative;aspect-ratio:1;background-image:url(\'' + attrHtml(_lbDriveImageUrl(img.url||'')) + '\');background-size:cover;background-position:center;border:1px solid var(--accent-border-soft);border-radius:var(--radius);overflow:hidden;cursor:pointer;padding:0" onmouseover="this.querySelector(\'[data-overlay]\').style.opacity=1" onmouseout="this.querySelector(\'[data-overlay]\').style.opacity=0">' +
               '<div data-overlay style="position:absolute;inset:0;background:linear-gradient(to top,rgba(0,0,0,.85),transparent 50%);display:flex;align-items:flex-end;padding:.7rem;opacity:0;transition:opacity .2s;text-align:left">' +
                 '<div style="color:#fff">' +
                   (img.title ? '<div style="font-family:var(--serif);font-size:.9rem">' + e(img.title) + '</div>' : '') +
