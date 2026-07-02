@@ -567,7 +567,7 @@
                 ? '<span style="width:34px;height:34px;border-radius:50%;background:url(\'' + attrHtml(_lbDriveImageUrl(ph)) + '\') center/cover;flex-shrink:0;display:inline-block"></span>'
                 : '<span style="width:34px;height:34px;border-radius:50%;background:var(--accent-lo);flex-shrink:0;display:inline-block"></span>';
               return '<button type="button" class="lb-presenter" ' +
-                'data-prof-name="' + attrHtml(nm) + '" data-prof-role="' + attrHtml((pr && pr.role) || '') + '" data-prof-photo="' + attrHtml(ph) + '" data-prof-quote="' + attrHtml((pr && pr.quote) || '') + '" data-prof-bio="' + attrHtml((pr && pr.bio) || '') + '" ' +
+                'data-prof-id="' + attrHtml((pr && pr.id != null) ? pr.id : '') + '" data-prof-name="' + attrHtml(nm) + '" data-prof-role="' + attrHtml((pr && pr.role) || '') + '" data-prof-photo="' + attrHtml(ph) + '" data-prof-quote="' + attrHtml((pr && pr.quote) || '') + '" data-prof-bio="' + attrHtml((pr && pr.bio) || '') + '" ' +
                 'style="display:inline-flex;align-items:center;gap:.5rem;background:none;border:none;padding:0;cursor:pointer;font-family:inherit;text-align:left">' +
                 photoHtml +
                 '<span style="font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--text);text-decoration:underline;text-decoration-color:var(--accent-border)">' + e(nm) + '</span>' +

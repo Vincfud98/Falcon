@@ -11,7 +11,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin -->
 <script src="ubique-shared.js?v=134"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=66"></script>
+<script src="learning-blocks-render.js?v=67"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -8984,6 +8984,7 @@ window.TAG_REGISTRY = {
       concurso_ids: Array.isArray(subject.concurso_ids) ? subject.concurso_ids : [],
       show_when_locked: subject.show_when_locked !== false, // default: mostra
       _subjectId: subject.id,
+      _professorId: subject.professor_id != null ? subject.professor_id : null, // vínculo com o catálogo de professores
       _position: (subject.position != null ? subject.position : null), // ordem manual do admin
       _createdAt: subject.created_at || null,                          // "lançamento" (p/ grupo Obter)
     };
@@ -9230,6 +9231,19 @@ window.TAG_REGISTRY = {
       sb.from('platform_config').select('amazon_tag').eq('id', 'default').maybeSingle()
         .then(r => { window.__amazonTag = (r && r.data && r.data.amazon_tag) || ''; })
         .catch(() => {});
+      // Catálogo pra vincular professor↔autor↔obras (bio do professor + autor
+      // clicável no modal do livro) — fire-and-forget.
+      Promise.all([
+        sb.from('professors').select('id,name,role,photo_url,quote,bio,author_id'),
+        sb.from('authors').select('id,name'),
+        sb.from('source_authors').select('source_id,author_id'),
+        sb.from('sources').select('*'),
+      ]).then(([pr, au, sa, so]) => {
+        window.__PROFESSORS = (pr && pr.data) || [];
+        window.__AUTHORS = (au && au.data) || [];
+        window.__SOURCE_AUTHORS = (sa && sa.data) || [];
+        window.__SOURCES = (so && so.data) || [];
+      }).catch(() => {});
       const [subjR, modR, chR, unR, secR, blkR, dlR] = await Promise.all([
         sb.from('subjects').select('*').order('position', { nullsFirst:false }).order('id'),
         sb.from('modules').select('*').order('position').order('id'),
@@ -13559,7 +13573,7 @@ Blocks.video = {
         const photo = ph
           ? `<span style="width:30px;height:30px;border-radius:50%;background:url('${Util.attr(ph)}') center/cover;flex-shrink:0;display:inline-block"></span>`
           : `<span style="width:30px;height:30px;border-radius:50%;background:var(--accent-lo);flex-shrink:0;display:inline-block"></span>`;
-        return `<button type="button" class="lb-presenter" data-prof-name="${Util.attr(nm)}" data-prof-role="${Util.attr((pr&&pr.role)||'')}" data-prof-photo="${Util.attr((pr&&pr.photo)||'')}" data-prof-quote="${Util.attr((pr&&pr.quote)||'')}" data-prof-bio="${Util.attr((pr&&pr.bio)||'')}" style="display:inline-flex;align-items:center;gap:.4rem;background:none;border:none;padding:0;cursor:pointer">${photo}<span style="font-family:var(--serif);font-style:italic;color:var(--text);text-decoration:underline;text-decoration-color:var(--accent-border)">${Util.esc(nm)}</span></button>`;
+        return `<button type="button" class="lb-presenter" data-prof-id="${Util.attr((pr&&pr.id!=null)?pr.id:'')}" data-prof-name="${Util.attr(nm)}" data-prof-role="${Util.attr((pr&&pr.role)||'')}" data-prof-photo="${Util.attr((pr&&pr.photo)||'')}" data-prof-quote="${Util.attr((pr&&pr.quote)||'')}" data-prof-bio="${Util.attr((pr&&pr.bio)||'')}" style="display:inline-flex;align-items:center;gap:.4rem;background:none;border:none;padding:0;cursor:pointer">${photo}<span style="font-family:var(--serif);font-style:italic;color:var(--text);text-decoration:underline;text-decoration-color:var(--accent-border)">${Util.esc(nm)}</span></button>`;
       }).join('');
       presenterMeta = `<div class="vb-meta-item"><span class="vb-meta-label">Apresentado por</span><span class="vb-meta-value" style="display:flex;flex-wrap:wrap;gap:.7rem;align-items:center">${btns}</span></div>`;
     } else if(block.presenter){
@@ -14965,7 +14979,22 @@ const SourceModals = (function(){
       : '';
     const buyHtml = buyDirectHtml + buy.map(b => `<a href="${escapeAttr(b.url)}" target="_blank" rel="noopener" class="src-detail-buy-btn">${escapeHtml(b.label)} <span>→</span></a>`).join('');
     const meta = [];
-    if(author) meta.push(`<span class="src-detail-meta-item"><em>${escapeHtml(author)}</em></span>`);
+    // Autor(es): se a obra tem sourceId, resolve os autores reais e deixa o
+    // NOME clicável quando o autor também é professor com bio na plataforma.
+    let _authorHtml = '';
+    if(item.sourceId != null && typeof _authorsOfSource === 'function'){
+      const _as = _authorsOfSource(item.sourceId);
+      if(_as.length){
+        _authorHtml = _as.map(a => {
+          const _p = (typeof _profByAuthorId === 'function') ? _profByAuthorId(a.id) : null;
+          return _p
+            ? `<a href="#" onclick="event.preventDefault();SourceModals.close();openProfessorBioById('${escapeAttr(String(_p.id))}')" style="color:var(--accent);text-decoration:underline;text-decoration-color:var(--accent-border);cursor:pointer" title="Ver bio do professor">${escapeHtml(a.name)}</a>`
+            : escapeHtml(a.name);
+        }).join('; ');
+      }
+    }
+    if(!_authorHtml && author) _authorHtml = escapeHtml(author);
+    if(_authorHtml) meta.push(`<span class="src-detail-meta-item"><em>${_authorHtml}</em></span>`);
     if(publisher) meta.push(`<span class="src-detail-meta-item">${escapeHtml(publisher)}</span>`);
     if(year) meta.push(`<span class="src-detail-meta-item">${escapeHtml(year)}</span>`);
 
@@ -26710,6 +26739,7 @@ function renderCourseBioModal(course){
       ${course.bioSummary ? `<div class="bio-pullquote"><span class="bio-pullquote-mark">&ldquo;</span><div class="bio-pullquote-text">${Util.esc(course.bioSummary)}</div></div>` : ''}
       ${bioBody ? `<p class="bio-modal-body" style="margin-top:1.6rem">${Util.esc(bioBody)}</p>` : ''}
     </div>
+    ${_professorWorksSection(_profById(course._professorId))}
   </article>`;
 }
 // Bio do professor (bloco de vídeo) — mesmo visual do modal de professor da matéria.
@@ -26731,13 +26761,71 @@ function renderPresenterBioModal(prof){
       ${prof.quote ? `<div class="bio-pullquote"><span class="bio-pullquote-mark">&ldquo;</span><div class="bio-pullquote-text">${Util.esc(prof.quote)}</div></div>` : ''}
       ${bioBody ? `<p class="bio-modal-body" style="margin-top:1.6rem">${Util.esc(bioBody)}</p>` : ''}
     </div>
+    ${_professorWorksSection(_profById(prof.id))}
   </article>`;
+}
+
+// ── Catálogo professor↔autor↔obras (lido no hydrate) ──
+function _profById(id){ if(id == null) return null; return (window.__PROFESSORS||[]).find(p => String(p.id)===String(id)) || null; }
+function _profByAuthorId(aid){ if(aid == null) return null; return (window.__PROFESSORS||[]).find(p => String(p.author_id)===String(aid)) || null; }
+function _sourcesByAuthorId(aid){
+  const ids = new Set((window.__SOURCE_AUTHORS||[]).filter(x => String(x.author_id)===String(aid)).map(x => String(x.source_id)));
+  return (window.__SOURCES||[]).filter(s => ids.has(String(s.id)));
+}
+function _authorsOfSource(sid){
+  const ids = new Set((window.__SOURCE_AUTHORS||[]).filter(x => String(x.source_id)===String(sid)).map(x => String(x.author_id)));
+  return (window.__AUTHORS||[]).filter(a => ids.has(String(a.id)));
+}
+// Registro de source → "item" que o SourceModals.openDetail espera.
+function _sourceToItem(s){
+  return {
+    title: s.title || '', subtitle: s.subtitle || '',
+    author: _authorsOfSource(s.id).map(a => a.name).join('; '),
+    year: s.year || '', publisher: s.publisher || '',
+    image: s.image_url || '', kind: s.source_kind || 'livro',
+    sourceId: s.id, buy_url: s.buy_url || '', url: s.url || '',
+    bankDescription: s.notes || ''
+  };
+}
+window.openBookBySourceId = function(sourceId){
+  const s = (window.__SOURCES||[]).find(x => String(x.id)===String(sourceId));
+  if(!s || !window.SourceModals) return;
+  if(window.FSModal && FSModal.close) FSModal.close(); // fecha a bio antes de abrir o livro
+  SourceModals.openDetail(_sourceToItem(s), null, null);
+};
+window.openProfessorBioById = function(profId){
+  const p = _profById(profId);
+  if(p && window.FSModal) FSModal.open([{ id:p.id, name:p.name, role:p.role, photo:p.photo_url, quote:p.quote, bio:p.bio }], 0, renderPresenterBioModal);
+};
+// Seção "Obras" da bio (mesmo estilo do bloco de Fontes/Referências).
+function _professorWorksSection(prof){
+  if(!prof || prof.author_id == null) return '';
+  const books = _sourcesByAuthorId(prof.author_id);
+  if(!books.length) return '';
+  const cards = books.map(s => {
+    const cover = s.image_url
+      ? `<div class="srcs-thumb" style="cursor:pointer" title="Ver detalhes" onclick="openBookBySourceId('${Util.attr(String(s.id))}')"><img src="${Util.attr(_dImg(s.image_url))}" alt="" loading="lazy"></div>`
+      : `<div class="srcs-icon">${Util.esc((s.title||'?').charAt(0))}</div>`;
+    const meta = [s.year, s.publisher].filter(Boolean).map(v => `<span class="srcs-meta-chip">${Util.esc(String(v))}</span>`).join('');
+    const authorName = _authorsOfSource(s.id).map(a => a.name).join('; ');
+    return `<article class="srcs-item${s.image_url?' has-thumb':''}">
+      ${cover}
+      <div class="srcs-body">
+        <span class="srcs-label">${Util.esc((s.source_kind||'livro').toUpperCase())}</span>
+        <h4 class="srcs-title" style="cursor:pointer" title="Ver detalhes da obra" onclick="openBookBySourceId('${Util.attr(String(s.id))}')">${Util.esc(s.title||'(sem título)')}</h4>
+        ${authorName ? `<div class="srcs-author">${Util.esc(authorName)}</div>` : ''}
+        ${meta ? `<div class="srcs-meta">${meta}</div>` : ''}
+      </div>
+    </article>`;
+  }).join('');
+  return `<section style="grid-column:1/-1;margin-top:1.8rem"><h3 class="src-detail-section-title">Obras</h3><div class="srcs-grid">${cards}</div></section>`;
 }
 // Clique na foto/nome do professor no bloco de vídeo → abre a bio.
 document.addEventListener('click', function(e){
   const btn = e.target.closest && e.target.closest('.lb-presenter');
   if(!btn) return;
   const prof = {
+    id:    btn.getAttribute('data-prof-id')    || '',
     name:  btn.getAttribute('data-prof-name')  || '',
     role:  btn.getAttribute('data-prof-role')  || '',
     photo: btn.getAttribute('data-prof-photo') || '',
