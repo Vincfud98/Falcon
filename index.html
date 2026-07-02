@@ -14285,16 +14285,29 @@ Blocks.quiz = {
     // Modo ADIADO: ao marcar "Errado" numa C/E, aparece um campo OPCIONAL
     // "por que acha que está errada?". O comentário da IA (inline, no bloco) só
     // roda no "Verificar respostas" E só se o aluno escreveu algo — o gabarito
-    // detalhado do satélite continua igual e gratuito. _deferWhyField só mostra/
+    // detalhado do satélite continua igual e gratuito. _deferWhyRender só mostra/
     // some o campo; _deferWhySpec (no verify) junta as specs p/ 1 chamada da IA.
     const _deferWhyClear = (itemEl) => { const w = itemEl.querySelector('.q-why-wrap'); if(w) w.remove(); const c = itemEl.querySelector('.q-ai-comment'); if(c) c.remove(); };
-    const _deferWhyField = (itemEl, show) => {
-      if(!show){ _deferWhyClear(itemEl); return; }
-      if(itemEl.querySelector('.q-why-wrap')) return;   // já existe
-      const w = document.createElement('div'); w.className = 'q-why-wrap';
-      w.innerHTML = '<div class="q-why-hint">Marcou errado? Se quiser, escreva <strong>por que você acha que está errada</strong>. Ao verificar, comentaremos em cima do seu raciocínio (gasta UbiTokens). <em>Em branco, aparece só o gabarito normal.</em></div>'
-        + '<textarea class="q-why-input" rows="2" placeholder="Por que você acha que está errada?"></textarea>';
-      itemEl.appendChild(w);
+    // Frases do box (modo prova). Aparece quando o aluno marca ERRADO (sem dúvida)
+    // ou quando marca DÚVIDA (C+? ou E+?). NÃO aparece no "Certo" puro.
+    const _WHY_HINT = {
+      errada: 'Se quiser, escreva <strong>por que você acha que está errada</strong> e comentaremos em cima do seu raciocínio. Se deixar em branco, aparecerá apenas o gabarito normal no painel lateral.',
+      duvida: '<strong>Explique sua dúvida</strong> que comentaremos a questão levando-a em consideração. Se deixar em branco, aparecerá apenas o gabarito normal no painel lateral.'
+    };
+    const _WHY_PLACEHOLDER = { errada: 'Por que você acha que está errada?', duvida: 'Explique sua dúvida…' };
+    // mode: null → esconde; 'errada' | 'duvida' → mostra com a frase certa.
+    // Preserva o texto já digitado ao alternar a frase.
+    const _deferWhyRender = (itemEl, mode) => {
+      if(!mode){ _deferWhyClear(itemEl); return; }
+      let w = itemEl.querySelector('.q-why-wrap');
+      if(!w){
+        w = document.createElement('div'); w.className = 'q-why-wrap';
+        w.innerHTML = '<div class="q-why-hint"></div><textarea class="q-why-input" rows="2"></textarea>';
+        itemEl.appendChild(w);
+      }
+      w.dataset.mode = mode;
+      const hintEl = w.querySelector('.q-why-hint'); if(hintEl) hintEl.innerHTML = _WHY_HINT[mode] || _WHY_HINT.errada;
+      const ta = w.querySelector('.q-why-input'); if(ta && !ta.disabled) ta.placeholder = _WHY_PLACEHOLDER[mode] || '';
     };
     // Devolve a "spec" do comentário (ou null se em branco). NÃO chama a IA aqui
     // — o verify junta todas e faz UMA chamada (TutorIA.commentBatch).
@@ -14305,19 +14318,27 @@ Blocks.quiz = {
       if(!reason || !norm || !norm.tf) return null;          // sem motivo → sem IA, sem custo
       ta.disabled = true;
       const gabLabel = (norm.display && norm.display[keyIdx] === 'C') ? 'Certo' : 'Errado';
+      // Rótulo do que o ALUNO marcou (Certo/Errado) — antes era fixo "Errado",
+      // o que quebrava os casos de dúvida marcada como "Certo".
+      const _selBtn = itemEl.querySelector('.q-option.selected');
+      const _selIdx = _selBtn ? parseInt(_selBtn.getAttribute('data-idx'), 10) : -1;
+      const studentLabel = (norm.display && _selIdx >= 0 && norm.display[_selIdx] === 'C') ? 'Certo' : 'Errado';
+      const kind = (wrap.dataset.mode === 'duvida') ? 'duvida' : 'errada';
       const stmt = String(item.assertion || (itemEl.querySelector('.q-assertion') ? itemEl.querySelector('.q-assertion').textContent : '') || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
       const just = String(item.comments || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
       const head = String(item.origin || '').trim() || 'questão desta unidade';
       let box = itemEl.querySelector('.q-ai-comment');
       if(!box){ box = document.createElement('div'); box.className = 'q-ai-comment'; wrap.appendChild(box); }
-      return { head, stmt, gabLabel, studentLabel:'Errado', correct, just, reason, box };
+      return { head, stmt, gabLabel, studentLabel, correct, just, reason, box, kind };
     };
     // Recarregou a unidade: re-mostra o motivo (travado) + o comentário da IA já
     // salvos na resposta, sem chamar a IA de novo. Some no "Tentar novamente".
-    const _deferWhyRestore = (itemEl, reason, aiMd) => {
+    const _deferWhyRestore = (itemEl, reason, aiMd, kind) => {
       _deferWhyClear(itemEl);
       const w = document.createElement('div'); w.className = 'q-why-wrap';
-      w.innerHTML = '<div class="q-why-hint">Seu raciocínio ao marcar <strong>Errado</strong>:</div>'
+      w.dataset.mode = (kind === 'duvida') ? 'duvida' : 'errada';
+      const label = (kind === 'duvida') ? 'Sua dúvida:' : 'Seu raciocínio ao marcar <strong>Errado</strong>:';
+      w.innerHTML = '<div class="q-why-hint">' + label + '</div>'
         + '<textarea class="q-why-input" rows="2" disabled></textarea>'
         + '<div class="q-ai-comment"></div>';
       w.querySelector('.q-why-input').value = reason || '';
@@ -14329,6 +14350,14 @@ Blocks.quiz = {
       const item = allItems.find(x => String(x.id) === String(itemId));
       if(!item) return;
       const norm = normalizeOptions(item.options);
+      // Decide o box: só em C/E (norm.tf). Dúvida → 'duvida'; Errado sem dúvida →
+      // 'errada'; Certo puro (sem dúvida) → null (esconde). dispLetter = 'C'/'E'/null.
+      const _whyMode = (dispLetter, doubt) => {
+        if(!(norm && norm.tf)) return null;
+        if(doubt) return 'duvida';
+        if(dispLetter === 'E') return 'errada';
+        return null;
+      };
       itemEl.querySelectorAll('.q-option').forEach(btn => {
         btn.addEventListener('click', () => {
           const value = btn.getAttribute('data-value');
@@ -14348,7 +14377,8 @@ Blocks.quiz = {
               ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id,
                 { selected:null, correct:null, verified:false, doubt:existingDoubt }, { sync:false });
               itemEl.querySelectorAll('.q-option').forEach(b => b.classList.remove('selected','correct','wrong'));
-              _deferWhyField(itemEl, false);    // desmarcou → some o campo
+              // Desmarcou a opção: box some, MAS se ainda há dúvida, continua (dúvida).
+              _deferWhyRender(itemEl, _whyMode(null, existingDoubt));
             } else {
               // Salva a seleção LOCALMENTE (sem sincronizar/contar nas stats) e
               // SEM revelar nada: só destaca a opção de forma neutra.
@@ -14358,8 +14388,8 @@ Blocks.quiz = {
                 b.classList.remove('selected','correct','wrong');
                 if(j === idx) b.classList.add('selected');
               });
-              // Campo do "por quê" só quando marca ERRADO numa C/E.
-              _deferWhyField(itemEl, !!(norm && norm.tf && norm.display[idx] === 'E'));
+              // Box: 'errada' se marcou E sem dúvida; 'duvida' se tem dúvida.
+              _deferWhyRender(itemEl, _whyMode(norm && norm.display ? norm.display[idx] : null, existingDoubt));
             }
             // Atualiza progresso (respondidas/total) e o botão "Verificar".
             if(stageEl.__quizSyncVerifyBar) stageEl.__quizSyncVerifyBar();
@@ -14403,6 +14433,14 @@ Blocks.quiz = {
             // Save doubt even before answering
             ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { doubt:isActive });
           }
+          // Modo prova: a dúvida faz o box aparecer/sumir e trocar de frase na
+          // hora, sem perder o texto já digitado. Congela se já verificada.
+          if(defer && !(prior && prior.verified)){
+            let disp = null;
+            const sel = (prior || {}).selected;
+            if(sel != null){ const si = norm.values.findIndex(v => String(v) === String(sel)); if(si >= 0) disp = norm.display[si]; }
+            _deferWhyRender(itemEl, _whyMode(disp, isActive));
+          }
         });
       }
     });
@@ -14412,7 +14450,7 @@ Blocks.quiz = {
         const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
         if(!p || !p.verified || !p.why) return;
         const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
-        if(itemEl) _deferWhyRestore(itemEl, p.why, p.ai || '');
+        if(itemEl) _deferWhyRestore(itemEl, p.why, p.ai || '', p.doubt ? 'duvida' : 'errada');
       });
     }
     // Quiz satellite — update progress counter + detail on answer
@@ -28880,7 +28918,7 @@ window.TutorIA = (function(){
       return '[[Q' + (i + 1) + ']] Assertiva: "' + s.stmt + '" | Gabarito oficial: ' + s.gabLabel
         + ' | O aluno marcou: ' + s.studentLabel + (s.correct ? ' (acertou)' : ' (errou)')
         + (s.just ? ' | Comentário oficial (apoio): ' + s.just : '')
-        + (s.reason ? ' | Justificativa do aluno (avalie): "' + s.reason + '"' : '');
+        + (s.reason ? ' | ' + (s.kind === 'duvida' ? 'Dúvida do aluno (esclareça levando em conta)' : 'Justificativa do aluno (avalie)') + ': "' + s.reason + '"' : '');
     }).join('\n');
     const render = function(acc, finalize){
       const parts = _splitBatch(acc, specs.length);
