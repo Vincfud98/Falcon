@@ -9231,18 +9231,18 @@ window.TAG_REGISTRY = {
       sb.from('platform_config').select('amazon_tag').eq('id', 'default').maybeSingle()
         .then(r => { window.__amazonTag = (r && r.data && r.data.amazon_tag) || ''; })
         .catch(() => {});
-      // Catálogo pra vincular professor↔autor↔obras (bio do professor + autor
-      // clicável no modal do livro) — fire-and-forget.
+      // Catálogo pra bio do professor (Obras) + autor clicável no modal do livro.
+      // Usa VIEWS seguras (só colunas públicas; sem download_url). Fire-and-forget.
       Promise.all([
         sb.from('professors').select('id,name,role,photo_url,quote,bio,author_id'),
-        sb.from('authors').select('id,name'),
-        sb.from('source_authors').select('source_id,author_id'),
-        sb.from('sources').select('*'),
-      ]).then(([pr, au, sa, so]) => {
+        sb.from('professor_works').select('*'),
+        sb.from('source_author_links').select('*'),
+      ]).then(([pr, pw, sal]) => {
         window.__PROFESSORS = (pr && pr.data) || [];
-        window.__AUTHORS = (au && au.data) || [];
-        window.__SOURCE_AUTHORS = (sa && sa.data) || [];
-        window.__SOURCES = (so && so.data) || [];
+        window.__PROF_WORKS = (pw && pw.data) || [];               // {professor_id, source_id, title, ...}
+        window.__SOURCE_AUTHOR_LINKS = (sal && sal.data) || [];    // {source_id, author_id, author_name, professor_id}
+        const bm = {}; (window.__PROF_WORKS).forEach(r => { if(!bm[r.source_id]) bm[r.source_id] = r; });
+        window.__BOOKS = bm;                                        // source_id → dados do livro
       }).catch(() => {});
       const [subjR, modR, chR, unR, secR, blkR, dlR] = await Promise.all([
         sb.from('subjects').select('*').order('position', { nullsFirst:false }).order('id'),
@@ -14982,15 +14982,13 @@ const SourceModals = (function(){
     // Autor(es): se a obra tem sourceId, resolve os autores reais e deixa o
     // NOME clicável quando o autor também é professor com bio na plataforma.
     let _authorHtml = '';
-    if(item.sourceId != null && typeof _authorsOfSource === 'function'){
-      const _as = _authorsOfSource(item.sourceId);
-      if(_as.length){
-        _authorHtml = _as.map(a => {
-          const _p = (typeof _profByAuthorId === 'function') ? _profByAuthorId(a.id) : null;
-          return _p
-            ? `<a href="#" onclick="event.preventDefault();SourceModals.close();openProfessorBioById('${escapeAttr(String(_p.id))}')" style="color:var(--accent);text-decoration:underline;text-decoration-color:var(--accent-border);cursor:pointer" title="Ver bio do professor">${escapeHtml(a.name)}</a>`
-            : escapeHtml(a.name);
-        }).join('; ');
+    if(item.sourceId != null && typeof _authorLinksOfSource === 'function'){
+      const _links = _authorLinksOfSource(item.sourceId);
+      if(_links.length){
+        _authorHtml = _links.map(l => l.professor_id != null
+          ? `<a href="#" onclick="event.preventDefault();SourceModals.close();openProfessorBioById('${escapeAttr(String(l.professor_id))}')" style="color:var(--accent);text-decoration:underline;text-decoration-color:var(--accent-border);cursor:pointer" title="Ver bio do professor">${escapeHtml(l.author_name)}</a>`
+          : escapeHtml(l.author_name)
+        ).join('; ');
       }
     }
     if(!_authorHtml && author) _authorHtml = escapeHtml(author);
@@ -26765,33 +26763,28 @@ function renderPresenterBioModal(prof){
   </article>`;
 }
 
-// ── Catálogo professor↔autor↔obras (lido no hydrate) ──
-function _profById(id){ if(id == null) return null; return (window.__PROFESSORS||[]).find(p => String(p.id)===String(id)) || null; }
-function _profByAuthorId(aid){ if(aid == null) return null; return (window.__PROFESSORS||[]).find(p => String(p.author_id)===String(aid)) || null; }
-function _sourcesByAuthorId(aid){
-  const ids = new Set((window.__SOURCE_AUTHORS||[]).filter(x => String(x.author_id)===String(aid)).map(x => String(x.source_id)));
-  return (window.__SOURCES||[]).filter(s => ids.has(String(s.id)));
+// ── Catálogo professor↔obras (via views seguras, lidas no hydrate) ──
+function _profById(id){ if(id == null || id === '') return null; return (window.__PROFESSORS||[]).find(p => String(p.id)===String(id)) || null; }
+// Autores de uma obra (nome + se é professor) via view source_author_links.
+function _authorLinksOfSource(sid){
+  return (window.__SOURCE_AUTHOR_LINKS||[]).filter(x => String(x.source_id)===String(sid));
 }
-function _authorsOfSource(sid){
-  const ids = new Set((window.__SOURCE_AUTHORS||[]).filter(x => String(x.source_id)===String(sid)).map(x => String(x.author_id)));
-  return (window.__AUTHORS||[]).filter(a => ids.has(String(a.id)));
-}
-// Registro de source → "item" que o SourceModals.openDetail espera.
-function _sourceToItem(s){
+// Registro de livro (da view) → "item" que o SourceModals.openDetail espera.
+function _bookRowToItem(s){
   return {
     title: s.title || '', subtitle: s.subtitle || '',
-    author: _authorsOfSource(s.id).map(a => a.name).join('; '),
+    author: _authorLinksOfSource(s.source_id).map(a => a.author_name).join('; '),
     year: s.year || '', publisher: s.publisher || '',
     image: s.image_url || '', kind: s.source_kind || 'livro',
-    sourceId: s.id, buy_url: s.buy_url || '', url: s.url || '',
+    sourceId: s.source_id, buy_url: s.buy_url || '', url: s.url || '',
     bankDescription: s.notes || ''
   };
 }
 window.openBookBySourceId = function(sourceId){
-  const s = (window.__SOURCES||[]).find(x => String(x.id)===String(sourceId));
+  const s = (window.__BOOKS||{})[sourceId];
   if(!s || !window.SourceModals) return;
   if(window.FSModal && FSModal.close) FSModal.close(); // fecha a bio antes de abrir o livro
-  SourceModals.openDetail(_sourceToItem(s), null, null);
+  SourceModals.openDetail(_bookRowToItem(s), null, null);
 };
 window.openProfessorBioById = function(profId){
   const p = _profById(profId);
@@ -26799,20 +26792,20 @@ window.openProfessorBioById = function(profId){
 };
 // Seção "Obras" da bio (mesmo estilo do bloco de Fontes/Referências).
 function _professorWorksSection(prof){
-  if(!prof || prof.author_id == null) return '';
-  const books = _sourcesByAuthorId(prof.author_id);
+  if(!prof) return '';
+  const books = (window.__PROF_WORKS||[]).filter(w => String(w.professor_id)===String(prof.id));
   if(!books.length) return '';
   const cards = books.map(s => {
     const cover = s.image_url
-      ? `<div class="srcs-thumb" style="cursor:pointer" title="Ver detalhes" onclick="openBookBySourceId('${Util.attr(String(s.id))}')"><img src="${Util.attr(_dImg(s.image_url))}" alt="" loading="lazy"></div>`
+      ? `<div class="srcs-thumb" style="cursor:pointer" title="Ver detalhes" onclick="openBookBySourceId('${Util.attr(String(s.source_id))}')"><img src="${Util.attr(_dImg(s.image_url))}" alt="" loading="lazy"></div>`
       : `<div class="srcs-icon">${Util.esc((s.title||'?').charAt(0))}</div>`;
     const meta = [s.year, s.publisher].filter(Boolean).map(v => `<span class="srcs-meta-chip">${Util.esc(String(v))}</span>`).join('');
-    const authorName = _authorsOfSource(s.id).map(a => a.name).join('; ');
+    const authorName = _authorLinksOfSource(s.source_id).map(a => a.author_name).join('; ');
     return `<article class="srcs-item${s.image_url?' has-thumb':''}">
       ${cover}
       <div class="srcs-body">
         <span class="srcs-label">${Util.esc((s.source_kind||'livro').toUpperCase())}</span>
-        <h4 class="srcs-title" style="cursor:pointer" title="Ver detalhes da obra" onclick="openBookBySourceId('${Util.attr(String(s.id))}')">${Util.esc(s.title||'(sem título)')}</h4>
+        <h4 class="srcs-title" style="cursor:pointer" title="Ver detalhes da obra" onclick="openBookBySourceId('${Util.attr(String(s.source_id))}')">${Util.esc(s.title||'(sem título)')}</h4>
         ${authorName ? `<div class="srcs-author">${Util.esc(authorName)}</div>` : ''}
         ${meta ? `<div class="srcs-meta">${meta}</div>` : ''}
       </div>
