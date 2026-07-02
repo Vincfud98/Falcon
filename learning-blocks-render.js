@@ -553,10 +553,31 @@
         const descHtml  = c.description
           ? '<p style="font-family:var(--sans);font-size:.85rem;color:var(--text-dim);line-height:1.65;margin:0">' + e(c.description) + '</p>'
           : '<p style="color:var(--text-mute);font-style:italic;font-size:.78rem;margin:0">Sem descrição.</p>';
-        const presenter = c.presenter
-          ? '<div style="margin-top:.7rem;font-family:var(--mono);font-size:.65rem;letter-spacing:.06em;color:var(--text-mute);text-transform:uppercase">apresentado por</div>' +
-            '<div style="font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--text)">' + e(c.presenter) + '</div>'
-          : '';
+        // Professores do catálogo (content.presenters[] = snapshots) → foto + nome
+        // clicável (abre a bio). Fallback: c.presenter (texto livre legado).
+        const presList = Array.isArray(c.presenters) ? c.presenters : [];
+        let presenter = '';
+        if(presList.length){
+          presenter = '<div style="margin-top:.7rem;font-family:var(--mono);font-size:.65rem;letter-spacing:.06em;color:var(--text-mute);text-transform:uppercase">apresentado por</div>' +
+            '<div style="display:flex;flex-wrap:wrap;gap:.7rem;margin-top:.45rem">' +
+            presList.map(function(pr){
+              const nm = (pr && pr.name) || '';
+              const ph = (pr && pr.photo) || '';
+              const photoHtml = ph
+                ? '<span style="width:34px;height:34px;border-radius:50%;background:url(\'' + attrHtml(_lbDriveImageUrl(ph)) + '\') center/cover;flex-shrink:0;display:inline-block"></span>'
+                : '<span style="width:34px;height:34px;border-radius:50%;background:var(--accent-lo);flex-shrink:0;display:inline-block"></span>';
+              return '<button type="button" class="lb-presenter" ' +
+                'data-prof-name="' + attrHtml(nm) + '" data-prof-role="' + attrHtml((pr && pr.role) || '') + '" data-prof-photo="' + attrHtml(ph) + '" data-prof-quote="' + attrHtml((pr && pr.quote) || '') + '" data-prof-bio="' + attrHtml((pr && pr.bio) || '') + '" ' +
+                'style="display:inline-flex;align-items:center;gap:.5rem;background:none;border:none;padding:0;cursor:pointer;font-family:inherit;text-align:left">' +
+                photoHtml +
+                '<span style="font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--text);text-decoration:underline;text-decoration-color:var(--accent-border)">' + e(nm) + '</span>' +
+              '</button>';
+            }).join('') +
+            '</div>';
+        } else if(c.presenter){
+          presenter = '<div style="margin-top:.7rem;font-family:var(--mono);font-size:.65rem;letter-spacing:.06em;color:var(--text-mute);text-transform:uppercase">apresentado por</div>' +
+            '<div style="font-family:var(--serif);font-style:italic;font-size:.9rem;color:var(--text)">' + e(c.presenter) + '</div>';
+        }
         const transHtml = transUrl
           ? '<a href="' + attrHtml(transUrl) + '" target="_blank" rel="noopener" download style="display:inline-flex;align-items:center;gap:.4rem;margin-top:.7rem;font-family:var(--serif);font-style:italic;color:var(--accent);text-decoration:none;font-size:.82rem">⬇ Baixar transcrição</a>'
           : '';

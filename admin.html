@@ -13438,7 +13438,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
 <script src="ubique-shared.js?v=134"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<script src="learning-blocks-render.js?v=65"></script>
+<script src="learning-blocks-render.js?v=66"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      MODAL: CORTESIA (matrícula manual sem pedido)
@@ -26596,6 +26596,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }
       await Promise.all([loadProfessors(), loadProfessorSubjects()]);
       renderProfessors();
+      // Se veio do "+ novo professor" de um bloco de vídeo, já anexa ao bloco.
+      const pend = window.__ueProfPickPending; window.__ueProfPickPending = null;
+      if(pend && profId && typeof window.ueVideoProfToggle === 'function'){
+        const bb = (typeof _ueGetBlock === 'function') ? _ueGetBlock(pend.bid) : null;
+        const has = bb && bb.content && Array.isArray(bb.content.presenters) && bb.content.presenters.some(function(p){ return String(p.id) === String(profId); });
+        if(!has) window.ueVideoProfToggle(pend.bid, profId);
+        else window.ueVideoProfRender(pend.bid, '');
+      }
       _closeProfessorModal();
       if(window.ueToast) window.ueToast('Professor salvo.', 'success');
     }catch(e){ showMsg('professorModalMessage', 'Erro: ' + (e.message || e)); }
@@ -26643,6 +26651,54 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         : '<p class="s-body" style="font-style:italic;color:var(--text-mute);margin:0">Ainda não aparece em nenhum vídeo.</p>';
       whereBox.innerHTML = sec('Onde aparece em vídeos (' + uids.length + ')', rowsH);
     }catch(e){ /* silencioso */ }
+  };
+
+  // ── Picker de professores no bloco de VÍDEO (content.presenters[]) ──
+  window.ueVideoProfRender = function(bid, filter){
+    const box = document.getElementById('ue-prof-chips-' + bid);
+    if(!box) return;
+    const b = (typeof _ueGetBlock === 'function') ? _ueGetBlock(bid) : null;
+    const pres = (b && b.content && Array.isArray(b.content.presenters)) ? b.content.presenters : [];
+    const sel = new Set(pres.map(function(p){ return String(p && (p.id != null ? p.id : p)); }));
+    const f = (filter || '').trim().toLowerCase();
+    let list = professorsCache || [];
+    if(f) list = list.filter(function(p){ return String(p.name || '').toLowerCase().includes(f); });
+    if(!list.length){ box.innerHTML = '<p class="modal-panel-hint" style="padding:.7rem 0;font-size:.8rem">' + ((professorsCache && professorsCache.length) ? 'Nenhum professor encontrado.' : 'Nenhum professor no catálogo.') + '</p>'; return; }
+    box.innerHTML = list.map(function(p){
+      return '<button type="button" class="classif-chip ' + (sel.has(String(p.id)) ? 'active' : '') + '" onclick="ueVideoProfToggle(' + bid + ',' + p.id + ')">' + esc(p.name || ('#' + p.id)) + '</button>';
+    }).join('');
+  };
+  window.ueVideoProfToggle = function(bid, profId){
+    const b = (typeof _ueGetBlock === 'function') ? _ueGetBlock(bid) : null;
+    if(!b) return;
+    if(!b.content) b.content = {};
+    if(!Array.isArray(b.content.presenters)) b.content.presenters = [];
+    const idx = b.content.presenters.findIndex(function(p){ return String(p && (p.id != null ? p.id : p)) === String(profId); });
+    if(idx >= 0){ b.content.presenters.splice(idx, 1); }
+    else {
+      const p = (professorsCache || []).find(function(x){ return String(x.id) === String(profId); });
+      if(p) b.content.presenters.push({ id: p.id, name: p.name || '', role: p.role || '', photo: p.photo_url || '', quote: p.quote || '', bio: p.bio || '' });
+    }
+    if(typeof _ueSaveStructured === 'function') _ueSaveStructured(bid);
+    const se = document.getElementById('ue-prof-search-' + bid);
+    window.ueVideoProfRender(bid, se ? se.value : '');
+    if(typeof uePreviewRefresh === 'function') uePreviewRefresh(bid);
+  };
+  window.ueVideoProfNew = function(bid){
+    window.__ueProfPickPending = { bid: bid };
+    const se = document.getElementById('ue-prof-search-' + bid);
+    openProfessorModal(null, se ? se.value.trim() : '');
+  };
+  // Mantém o snapshot dos presenters em dia com o catálogo (nome/foto/bio) ao
+  // abrir o editor. Chamado pra cada bloco de vídeo em openUnitEditor.
+  window._ueSyncPresentersFromCatalog = function(block){
+    if(!block || !block.content || !Array.isArray(block.content.presenters)) return;
+    block.content.presenters = block.content.presenters.map(function(pr){
+      const id = pr && (pr.id != null ? pr.id : pr);
+      const p = (professorsCache || []).find(function(x){ return String(x.id) === String(id); });
+      if(!p) return pr; // professor apagado → mantém snapshot
+      return { id: p.id, name: p.name || '', role: p.role || '', photo: p.photo_url || '', quote: p.quote || '', bio: p.bio || '' };
+    });
   };
 
   function editAuthorRow(tr, id){
@@ -49629,6 +49685,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // (ex.: autor linkado DEPOIS de a obra ser adicionada ao bloco). Aqui só
     // atualiza o que o editor mostra; a gravação no banco acontece ao "salvar".
     try { ueAllBlocksCache.forEach(function(b){ if(b.type === 'sources' || b.type === 'references') _ueRefSyncFromBank(b); }); } catch(_){}
+    try { ueAllBlocksCache.forEach(function(b){ if(b.type === 'video' && typeof window._ueSyncPresentersFromCatalog === 'function') window._ueSyncPresentersFromCatalog(b); }); } catch(_){}
     // garante seção atual
     if(!ueSectionsCache.length){
       // cria automaticamente uma seção inicial caso a unidade não tenha nenhuma
@@ -54877,8 +54934,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             '<span class="s-body" style="font-size:.65rem;color:var(--text-mute);display:block;margin-top:.2rem">Aceita: YouTube, Vimeo, Google Drive, Loom, MP4 direto, ou <code>&lt;iframe&gt;</code> de qualquer player.</span>' +
           '</div>',
 
-          // Apresentador (professor)
-          row('Professor / Apresentador (opcional)', v('presenter','Nome de quem apresenta'), 'ue-bf-presenter-'+bid),
+          // Professores do catálogo (seleção múltipla, buscável, com "+ novo")
+          (function(){
+            const pres = (b && b.content && Array.isArray(b.content.presenters)) ? b.content.presenters : [];
+            const selIds = new Set(pres.map(function(p){ return String(p && (p.id != null ? p.id : p)); }));
+            const chips = (professorsCache || []).length
+              ? (professorsCache || []).map(function(p){ return '<button type="button" class="classif-chip ' + (selIds.has(String(p.id)) ? 'active' : '') + '" onclick="ueVideoProfToggle(' + bid + ',' + p.id + ')">' + esc(p.name || ('#' + p.id)) + '</button>'; }).join('')
+              : '<p class="modal-panel-hint" style="padding:.7rem 0;font-size:.8rem">Nenhum professor no catálogo. Use "+ novo professor" ou cadastre em Gerenciar Conteúdo → Professores.</p>';
+            return '<div class="field" style="margin:0"><label>Professores (do catálogo) <span style="text-transform:none;letter-spacing:0;color:var(--text-dim);font-size:.7rem">— foto + bio clicável na unidade</span></label>' +
+              '<div class="classif-search"><input type="text" id="ue-prof-search-' + bid + '" placeholder="buscar professor" oninput="ueVideoProfRender(' + bid + ', this.value)"><button type="button" class="btn btn-ghost btn-sm" onclick="ueVideoProfNew(' + bid + ')">+ novo professor</button></div>' +
+              '<div class="classif-list" id="ue-prof-chips-' + bid + '">' + chips + '</div>' +
+            '</div>';
+          })(),
+
+          // Apresentador em texto livre (fallback, se não usar o catálogo)
+          row('Ou apresentador em texto livre (opcional)', v('presenter','Nome de quem apresenta — usado se nenhum professor do catálogo for escolhido'), 'ue-bf-presenter-'+bid),
 
           // Descrição (opcional)
           row('Descrição (opcional)', t('description','Resumo curto do vídeo, contexto, objetivos…'), 'ue-bf-description-'+bid),
