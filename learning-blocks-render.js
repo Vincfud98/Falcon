@@ -551,7 +551,7 @@
 
         const titleHtml = block.title ? '<h4 style="font-family:var(--serif);font-size:1.1rem;color:var(--text);margin:0 0 .4rem">' + e(block.title) + '</h4>' : '';
         const descHtml  = c.description
-          ? '<p style="font-family:var(--sans);font-size:.85rem;color:var(--text-dim);line-height:1.65;margin:0">' + e(c.description) + '</p>'
+          ? '<div style="font-family:var(--sans);font-size:.85rem;color:var(--text-dim);line-height:1.65">' + c.description + '</div>'
           : '<p style="color:var(--text-mute);font-style:italic;font-size:.78rem;margin:0">Sem descrição.</p>';
         // Professores do catálogo (content.presenters[] = snapshots) → foto + nome
         // clicável (abre a bio). Fallback: c.presenter (texto livre legado).
