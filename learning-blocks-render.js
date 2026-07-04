@@ -485,10 +485,15 @@
   }
   // Link do Drive → URL de MÍDIA tocável (áudio/vídeo direto). Outros links
   // (ou vazio) passam direto. Use no src de <audio>/new Audio().
+  // NÃO usar drive.google.com/uc?export=download: com User-Agent de navegador o
+  // Google responde 403 (HTML) — dá "erro" no player. O endpoint usercontent
+  // devolve o binário direto com CORS liberado (access-control-allow-origin:*)
+  // e Accept-Ranges (permite arrastar a linha do tempo). confirm=t evita a
+  // página de aviso de vírus em arquivos grandes.
   function _lbDriveMediaUrl(input){
     const id = _lbDriveId(input);
     if(!id) return input || '';
-    return 'https://drive.google.com/uc?export=download&id=' + id;
+    return 'https://drive.usercontent.google.com/download?id=' + id + '&export=download&confirm=t';
   }
 
   /* ─────────── carrossel reutilizável ─────────── */
