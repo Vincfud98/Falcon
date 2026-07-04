@@ -9286,6 +9286,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     .ct-unread-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0}
     .ct-thread-subject{font-family:var(--serif);font-size:.92rem;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .ct-thread-meta{font-family:var(--mono);font-size:.6rem;color:var(--text-mute)}
+    .ct-thread-tag{display:inline-block;font-family:var(--mono);font-size:.58rem;letter-spacing:.06em;text-transform:uppercase;padding:.12rem .4rem;border-radius:var(--radius-sm,4px);border:1px solid var(--accent-border,var(--border-soft));background:var(--accent-lo,var(--surface-sunken));color:var(--accent);white-space:nowrap;flex-shrink:0}
+    .ct-thread-tag.is-geral{border-color:var(--border-soft);background:var(--surface-sunken);color:var(--text-mute)}
     /* Chat — moldura, topbar, mensagens estilo WhatsApp */
     .ct-chat{border:1px solid var(--border-med);border-radius:var(--radius-lg);background:var(--bg-card);display:flex;flex-direction:column;height:min(74vh,820px);min-height:520px;overflow:hidden}
     .ct-chat-head{flex-shrink:0;display:flex;align-items:center;gap:.7rem;padding:.6rem 1rem;border-bottom:1px solid var(--border-soft);background:var(--bg-elev);flex-wrap:wrap}
@@ -9378,7 +9380,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         <div class="section-head">
           <h2>Mensagens diretas</h2>
           <span class="count" id="contato-dms-count">—</span>
-          <button class="btn btn-ghost btn-sm" id="contatoDmsRefresh" style="margin-left:auto">Atualizar</button>
+          <select id="ctMateriaFilter" class="fmod-filter" style="margin-left:auto" title="Filtrar conversas por matéria">
+            <option value="all">Todas as matérias</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" id="contatoDmsRefresh">Atualizar</button>
         </div>
         <p class="client-panel-hint" style="margin-bottom:.8rem">
           Conversas abertas pelos alunos na página "Suporte". Responda aqui — o aluno recebe notificação na hora.
@@ -43368,6 +43373,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   let contatoThreads = [];
   let _contatoUnreadByThread = {};
   let contatoActiveThreadId = null;
+  let _ctMateriaFilter = 'all';  // 'all' | 'geral' | <subject_id>
   let _contatoUid = null;
   let _ctPendingFile = null; // anexo selecionado no composer (zera ao trocar de conversa)
   const _contatoProfiles = {};
@@ -43586,19 +43592,65 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       updateContatoBadges();
     }catch(e){ console.warn('[contato threads]', e); }
   }
+  // Rótulo da matéria (tag) de uma conversa. Prefere o snapshot subject_label;
+  // se faltar mas houver subject_id, tenta o catálogo; senão é "Geral".
+  function _ctThreadMateria(t){
+    if(t.subject_label && String(t.subject_label).trim()) return String(t.subject_label).trim();
+    if(t.subject_id != null){
+      const s = (subjectsCache || []).find(x => String(x.id) === String(t.subject_id));
+      if(s) return s.sigla || s.subject || 'Matéria';
+    }
+    return 'Geral';
+  }
+  function _ctThreadMatchesFilter(t){
+    if(_ctMateriaFilter === 'all') return true;
+    if(_ctMateriaFilter === 'geral') return t.subject_id == null;
+    return String(t.subject_id) === String(_ctMateriaFilter);
+  }
+  // Monta o dropdown de filtro só com as matérias presentes nas conversas
+  // (+ "Todas" e "Geral" quando houver conversa sem matéria). Preserva a
+  // seleção atual se ela ainda existir.
+  function _ctRebuildMateriaFilter(){
+    const sel = document.getElementById('ctMateriaFilter');
+    if(!sel) return;
+    const seen = new Map(); // subject_id -> label
+    let hasGeral = false;
+    (contatoThreads || []).forEach(t => {
+      if(t.subject_id == null) hasGeral = true;
+      else if(!seen.has(String(t.subject_id))) seen.set(String(t.subject_id), _ctThreadMateria(t));
+    });
+    const opts = ['<option value="all">Todas as matérias</option>'];
+    [...seen.entries()].sort((a,b) => a[1].localeCompare(b[1], 'pt'))
+      .forEach(([id, label]) => { opts.push(`<option value="${esc(id)}">${esc(label)}</option>`); });
+    if(hasGeral) opts.push('<option value="geral">Geral (sem matéria)</option>');
+    sel.innerHTML = opts.join('');
+    const stillThere = [...sel.options].some(o => o.value === _ctMateriaFilter);
+    sel.value = stillThere ? _ctMateriaFilter : 'all';
+    _ctMateriaFilter = sel.value;
+  }
   function renderContatoThreads(){
     const el = document.getElementById('ctThreadList');
     if(!el) return;
+    _ctRebuildMateriaFilter();
+    const list = (contatoThreads || []).filter(_ctThreadMatchesFilter);
     const cnt = document.getElementById('contato-dms-count');
-    if(cnt) cnt.textContent = contatoThreads.length + ' conversa(s)';
+    if(cnt) cnt.textContent = (_ctMateriaFilter === 'all')
+      ? contatoThreads.length + ' conversa(s)'
+      : list.length + ' de ' + contatoThreads.length;
     if(!contatoThreads.length){
       el.innerHTML = '<p class="client-panel-hint">Nenhuma conversa de suporte ainda.</p>';
       return;
     }
-    el.innerHTML = contatoThreads.map(t => {
+    if(!list.length){
+      el.innerHTML = '<p class="client-panel-hint">Nenhuma conversa nesta matéria.</p>';
+      return;
+    }
+    el.innerHTML = list.map(t => {
       const unread = _contatoUnreadByThread[t.id] || 0;
       const p = _contatoProfiles[t.user_id] || {};
       const nome = p.display_name || _contatoLabel(t.user_id);
+      const mat = _ctThreadMateria(t);
+      const isGeral = (t.subject_id == null);
       return `<div class="ct-thread${t.id === contatoActiveThreadId ? ' is-active' : ''}" data-ct-thread="${esc(t.id)}">
         <div style="display:flex;gap:.65rem;align-items:flex-start">
           <div class="ct-av" data-ct-av-uid="${esc(t.user_id)}"></div>
@@ -43606,10 +43658,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             <div class="ct-thread-top">
               ${unread ? '<span class="ct-unread-dot"></span>' : ''}
               <strong style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(nome)}</strong>
-              <span class="ct-thread-meta" style="margin-left:auto;flex-shrink:0">${t.status === 'encerrada' ? 'encerrada' : ''}</span>
+              <span class="ct-thread-tag${isGeral ? ' is-geral' : ''}" style="margin-left:auto">${esc(mat)}</span>
             </div>
             <div class="ct-thread-subject">${esc(t.subject || '(sem assunto)')}</div>
-            <div class="ct-thread-meta">${esc(_ctTimeAgo(t.last_message_at))}${unread ? ' · ' + unread + ' nova(s)' : ''}</div>
+            <div class="ct-thread-meta">${esc(_ctTimeAgo(t.last_message_at))}${t.status === 'encerrada' ? ' · encerrada' : ''}${unread ? ' · ' + unread + ' nova(s)' : ''}</div>
           </div>
         </div>
       </div>`;
@@ -43822,6 +43874,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(r1) r1.addEventListener('click', loadContatoMencoes);
     const r2 = document.getElementById('contatoDmsRefresh');
     if(r2) r2.addEventListener('click', loadContatoThreads);
+    const fm = document.getElementById('ctMateriaFilter');
+    if(fm) fm.addEventListener('change', () => { _ctMateriaFilter = fm.value; renderContatoThreads(); });
     const f1 = document.getElementById('cm-flt-status');
     const f2 = document.getElementById('cm-flt-dest');
     if(f1) f1.addEventListener('change', renderContatoMencoes);

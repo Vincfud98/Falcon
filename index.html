@@ -2655,6 +2655,8 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 /* display:flex acima venceria o atributo hidden do navegador — reforça */
 .sup-new-form[hidden]{display:none !important}
 .sup-new-actions{display:flex;gap:.6rem;justify-content:flex-end}
+.sup-new-err{margin:.2rem 0 0;font-family:var(--mono);font-size:.72rem;color:var(--red);letter-spacing:.02em}
+.sup-new-err[hidden]{display:none}
 .sup-thread{
   display:block;padding:.9rem 1.1rem;margin-bottom:.6rem;cursor:pointer;
   border:1px solid var(--border);border-radius:var(--radius);
@@ -20629,6 +20631,13 @@ Renderers.support = function(){
            (mesma técnica do login) — sem ela os campos ficam com estilo cru -->
       <div class="account-fields-section">
         <div class="field">
+          <label for="supNewMateria">Matéria</label>
+          <select class="field-input" id="supNewMateria">
+            <option value="" disabled selected>Selecione a matéria…</option>
+            <option value="geral">Contato Geral (dúvida sem matéria)</option>
+          </select>
+        </div>
+        <div class="field">
           <label for="supNewSubject">Assunto</label>
           <input class="field-input" id="supNewSubject" maxlength="120" placeholder="Ex.: Dúvida sobre o material da unidade 3" autocomplete="off">
         </div>
@@ -20637,6 +20646,7 @@ Renderers.support = function(){
           <textarea class="field-input" id="supNewText" rows="4" maxlength="4000" placeholder="Escreva sua dúvida…" style="resize:vertical"></textarea>
         </div>
       </div>
+      <p class="sup-new-err" id="supNewErr" hidden></p>
       <div class="sup-new-actions">
         <button class="btn-ghost" type="button" id="supNewCancel">Cancelar</button>
         <button class="btn-primary" type="submit" id="supNewSend">Enviar</button>
@@ -20664,16 +20674,53 @@ Renderers.support.mount = async function(stageEl, route){
   });
   const cancelBtn = stageEl.querySelector('#supNewCancel');
   if(cancelBtn) cancelBtn.addEventListener('click', () => { form.hidden = true; });
+
+  // ── Seletor de matéria: preenche com as matérias que o aluno vê ──
+  // A tag NÃO vem pré-selecionada (fica em "Selecione…"); "Contato Geral" é
+  // uma opção válida (dúvida sem matéria). Label guardado = sigla (ex.: HB).
+  const matEl = stageEl.querySelector('#supNewMateria');
+  const errEl = stageEl.querySelector('#supNewErr');
+  if(matEl){
+    let mats = [];
+    try{ mats = (window.UbiqueStore && UbiqueStore.subjects && UbiqueStore.subjects.list()) || []; }catch(_){}
+    mats = mats.slice().sort((a,b) =>
+      ((a.position ?? 999) - (b.position ?? 999)) || String(a.subject||'').localeCompare(String(b.subject||''), 'pt'));
+    mats.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = String(m.id);
+      opt.dataset.label = m.sigla || m.subject || '';
+      opt.textContent = m.sigla ? (m.sigla + ' — ' + (m.subject || '')) : (m.subject || 'Matéria');
+      matEl.appendChild(opt);
+    });
+    matEl.addEventListener('change', () => { if(errEl) errEl.hidden = true; });
+  }
+
   if(form) form.addEventListener('submit', async e => {
     e.preventDefault();
     const subject = (stageEl.querySelector('#supNewSubject').value || '').trim();
     const text = (stageEl.querySelector('#supNewText').value || '').trim();
-    if(!subject || !text) return;
+    // Matéria é obrigatória (mas "Contato Geral" conta). Sem escolha → erro.
+    const matVal = matEl ? matEl.value : 'geral';
+    if(!matVal){
+      if(errEl){ errEl.textContent = 'Escolha uma matéria (ou "Contato Geral") antes de enviar.'; errEl.hidden = false; }
+      if(matEl) matEl.focus();
+      return;
+    }
+    if(!subject || !text){
+      if(errEl){ errEl.textContent = 'Preencha o assunto e a mensagem.'; errEl.hidden = false; }
+      return;
+    }
+    let subjectId = null, subjectLabel = 'Geral';
+    if(matVal !== 'geral'){
+      subjectId = Number(matVal) || null;
+      const opt = matEl.options[matEl.selectedIndex];
+      subjectLabel = (opt && opt.dataset.label) || 'Matéria';
+    }
     const sendBtn = stageEl.querySelector('#supNewSend');
     sendBtn.disabled = true; sendBtn.textContent = 'Enviando…';
     try{
       const { data: th, error } = await window._sb.schema('aluno').from('support_threads')
-        .insert({ user_id: user.id, subject }).select().single();
+        .insert({ user_id: user.id, subject, subject_id: subjectId, subject_label: subjectLabel }).select().single();
       if(error){ console.warn('[suporte] criar conversa:', error); return; }
       const { error: mErr } = await window._sb.schema('aluno').from('support_messages')
         .insert({ thread_id: th.id, sender_id: user.id, sender_is_admin: false, text });
@@ -20681,6 +20728,8 @@ Renderers.support.mount = async function(stageEl, route){
       form.hidden = true;
       stageEl.querySelector('#supNewSubject').value = '';
       stageEl.querySelector('#supNewText').value = '';
+      if(matEl) matEl.selectedIndex = 0;
+      if(errEl) errEl.hidden = true;
       await loadList();
       openThread(th.id);
     } finally {
