@@ -54595,6 +54595,34 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     };
   }
 
+  // BUG 1 — vincula as questões recém-criadas aos tópicos do edital DA UNIDADE
+  // atual (edital_topic_units.unit_id === ueCurrentUnitId → edital_topic_id).
+  // Filtra vínculos já existentes (não duplica) e retorna quantos tópicos foram
+  // aplicados. Retorna 0 se a unidade não tem tópico do edital ligado.
+  async function _ueLinkQuestionsToUnitTopics(refs){
+    if(!refs || !refs.length || !ueCurrentUnitId) return 0;
+    const etu = (window.UbiqueStore && UbiqueStore.edital_topic_units && UbiqueStore.edital_topic_units.list()) || [];
+    const topicIds = [...new Set(
+      etu.filter(function(r){ return String(r.unit_id) === String(ueCurrentUnitId); })
+         .map(function(r){ return r.topic_id; })
+         .filter(Boolean)
+    )];
+    if(!topicIds.length) return 0;
+    const existing = new Set((questionEditalTopicsCache || []).map(function(r){ return String(r.question_id) + '|' + String(r.edital_topic_id); }));
+    const rows = [];
+    refs.forEach(function(ref){
+      topicIds.forEach(function(tid){
+        const k = String(ref.id) + '|' + String(tid);
+        if(!existing.has(k)){ rows.push({ question_id: ref.id, edital_topic_id: tid }); existing.add(k); }
+      });
+    });
+    if(rows.length){
+      const { error } = await questoes().from('question_edital_topics').insert(rows);
+      if(error){ console.warn('[import topics]', error.message); }
+    }
+    return topicIds.length;
+  }
+
   async function _ueBankCreateGroupFromInline(g, subjectId, examId){
     const code = (g.origin || '').trim();
     const ym = code.match(/\/(\d{4})\]/);
@@ -54882,6 +54910,17 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       destLabel = ' <strong>' + addedToSim + '</strong> questão(ões) adicionada(s) ao simulado.';
     }
 
+    // BUG 1 — questões adicionadas ao banco A PARTIR DE UMA UNIDADE herdam os
+    // tópicos do edital ligados à unidade (via edital_topic_units). Adicionadas
+    // por fora da unidade NÃO herdam (target != 'unit').
+    let topicsMsg = '';
+    if(target === 'unit' && ueCurrentUnitId){
+      try{
+        const nLinks = await _ueLinkQuestionsToUnitTopics(allRefs);
+        if(nLinks > 0) topicsMsg = ' <span style="color:var(--accent)">Tópico(s) do edital da unidade aplicado(s) às questões.</span>';
+      }catch(e){ console.warn('[import] vínculo de tópicos falhou:', e); }
+    }
+
     // Refresh dos caches AFETADOS — incluindo essay_criteria e essay_answer_models,
     // que estavam fora do Promise.all anterior e deixavam o admin com cache stale
     // (questão recém-criada não aparecia na listagem).
@@ -54894,6 +54933,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         (typeof loadReferenceTexts    === 'function') ? loadReferenceTexts()    : null,
         (typeof loadEssayCriteria     === 'function') ? loadEssayCriteria()    : null,
         (typeof loadEssayAnswerModels === 'function') ? loadEssayAnswerModels() : null,
+        (typeof loadQuestionEditalTopics === 'function') ? loadQuestionEditalTopics() : null,
       ].filter(Boolean));
     }catch(e){ console.warn('[import] reload caches falhou:', e); }
 
@@ -54901,6 +54941,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(dupes) msg += ' <strong>' + dupes + '</strong> repetido(s) (referenciado sem recriar): <span style="font-family:var(--mono);font-size:.72rem">' + esc(dupeCodes.filter(Boolean).join(', ')) + '</span>.';
     if(gabAdded) msg += ' <strong>' + gabAdded + '</strong> gabarito(s) comentado(s) adicionado(s) às questões repetidas.';
     if(destLabel) msg += destLabel;
+    if(topicsMsg) msg += topicsMsg;
     if(mismatchWarn) msg += '<br>' + mismatchWarn;
     if(allChildErrors.length){
       msg += '<br><span style="color:var(--red)">⚠ ' + allChildErrors.length + ' erro(s) ao salvar critérios/modelos:</span><ul style="margin:.3rem 0 0;padding-left:1.2rem;font-size:.72rem;color:var(--red)">' +
