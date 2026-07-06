@@ -2819,6 +2819,27 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .sup-att-img{display:block;margin:.15rem 0 .3rem}
 .sup-att-img img{max-width:280px;max-height:220px;border-radius:var(--radius);border:1px solid var(--border);display:block}
 .sup-att-media{display:block;max-width:300px;margin:.15rem 0 .3rem;border-radius:var(--radius)}
+/* Mensagem de voz — player inline (play + linha do tempo arrastável) */
+.sup-voice{
+  display:inline-flex;align-items:center;gap:.55rem;margin:.15rem 0 .3rem;
+  padding:.35rem .7rem .35rem .4rem;min-width:210px;max-width:300px;
+  background:var(--bg-card);border:1px solid var(--border);border-radius:999px;
+}
+.sv-play{
+  flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;
+  width:34px;height:34px;border-radius:50%;padding:0;cursor:pointer;
+  background:var(--accent-lo);border:1px solid var(--accent-border);color:var(--accent);
+  transition:all .18s var(--ease);
+}
+.sv-play:hover{border-color:var(--accent);color:var(--accent)}
+.sv-play svg{width:13px;height:13px;fill:currentColor;stroke:none}
+.sv-seek{
+  flex:1;min-width:0;-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;
+  background:var(--bg-elevated);border:1px solid var(--border);outline:none;cursor:pointer;
+}
+.sv-seek::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:13px;height:13px;border-radius:50%;background:var(--accent);border:2px solid var(--bg-card);cursor:grab}
+.sv-seek::-moz-range-thumb{width:13px;height:13px;border-radius:50%;background:var(--accent);border:2px solid var(--bg-card);cursor:grab}
+.sv-time{flex-shrink:0;font-family:var(--mono);font-size:.6rem;color:var(--text-mute);min-width:2.1rem;text-align:right}
 .sup-att-file{
   display:flex;align-items:center;gap:.6rem;margin:.15rem 0 .3rem;padding:.5rem .7rem;
   border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);
@@ -20810,7 +20831,10 @@ function _supAttachmentHtml(att){
   if(mime.indexOf('image/') === 0){
     return `<a class="sup-att-img" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${Util.attr(att.name || 'imagem')}" loading="lazy"></a>`;
   }
-  if(mime.indexOf('audio/') === 0) return `<audio class="sup-att-media" controls preload="none" src="${url}"></audio>`;
+  if(mime.indexOf('audio/') === 0) return `<div class="sup-voice" data-voice-src="${url}">`
+    + `<button class="sv-play" aria-label="Reproduzir"><svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg></button>`
+    + `<input type="range" class="sv-seek" min="0" max="1000" value="0" step="1" aria-label="Linha do tempo">`
+    + `<span class="sv-time">0:00</span></div>`;
   if(mime.indexOf('video/') === 0) return `<video class="sup-att-media" controls preload="none" src="${url}"></video>`;
   const size = (typeof _fmtBytes === 'function' && att.size) ? _fmtBytes(att.size) : '';
   return `<a class="sup-att-file" href="${url}" target="_blank" rel="noopener" download>
@@ -20819,6 +20843,52 @@ function _supAttachmentHtml(att){
     <span class="sup-att-dl">Baixar</span>
   </a>`;
 }
+
+// SupVoice — controla os players de mensagem de voz (.sup-voice) do suporte via
+// delegação no document (funciona mesmo com o chat re-renderizando). Play/pause +
+// linha do tempo arrastável + tempo; só um áudio toca por vez.
+(function SupVoice(){
+  const ICON_PLAY = '<svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg>';
+  const ICON_PAUSE = '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>';
+  let current = null;
+  function fmt(s){ if(!isFinite(s) || s < 0) s = 0; return Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
+  function audioFor(el){
+    if(el._audio) return el._audio;
+    const a = new Audio(el.getAttribute('data-voice-src'));
+    a.preload = 'metadata';
+    el._audio = a;
+    const seek = el.querySelector('.sv-seek'), time = el.querySelector('.sv-time'), play = el.querySelector('.sv-play');
+    const upd = () => {
+      const d = isFinite(a.duration) ? a.duration : 0;
+      if(seek && document.activeElement !== seek) seek.value = d ? Math.round(a.currentTime/d*1000) : 0;
+      if(time) time.textContent = fmt(a.currentTime) + (d ? ' / ' + fmt(d) : '');
+    };
+    ['timeupdate','durationchange','loadedmetadata'].forEach(ev => a.addEventListener(ev, upd));
+    a.addEventListener('play', () => { if(play) play.innerHTML = ICON_PAUSE; });
+    a.addEventListener('pause', () => { if(play) play.innerHTML = ICON_PLAY; });
+    a.addEventListener('ended', () => { if(play) play.innerHTML = ICON_PLAY; });
+    upd();
+    return a;
+  }
+  document.addEventListener('click', e => {
+    const play = e.target.closest && e.target.closest('.sv-play');
+    if(!play) return;
+    const el = play.closest('.sup-voice'); if(!el) return;
+    const a = audioFor(el);
+    if(a.paused){
+      if(current && current !== el && current._audio) current._audio.pause();
+      current = el;
+      a.play().catch(() => {});
+    } else { a.pause(); }
+  });
+  document.addEventListener('input', e => {
+    const seek = e.target.closest && e.target.closest('.sv-seek');
+    if(!seek) return;
+    const el = seek.closest('.sup-voice'); if(!el || !el._audio) return;
+    const a = el._audio;
+    if(isFinite(a.duration)) a.currentTime = seek.value/1000 * a.duration;
+  });
+})();
 
 Renderers.support = function(){
   const user = Auth.getUser();

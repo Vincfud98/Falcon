@@ -9303,6 +9303,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     .ct-composer{flex-shrink:0;display:flex;gap:.6rem;padding:.8rem 1rem;border-top:1px solid var(--border-soft);background:var(--bg-elev)}
     .ct-composer textarea{flex:1;min-height:48px;padding:.55rem .7rem;background:var(--bg);border:1px solid var(--border-soft);border-radius:var(--radius);color:var(--text);font-family:var(--sans);font-size:.85rem;resize:vertical}
     .ct-composer textarea:focus{outline:none;border-color:var(--accent-border)}
+    .ct-mic-btn:hover{color:var(--accent);border-color:var(--accent-border)}
+    /* Barra de gravação de voz (estilo WhatsApp) */
+    .ct-rec-bar{flex-shrink:0;display:flex;align-items:center;gap:.7rem;padding:.7rem 1rem;border-top:1px solid var(--border-soft);background:var(--bg-elev)}
+    .ct-rec-bar[hidden]{display:none}
+    .ct-rec-dot{width:10px;height:10px;border-radius:50%;background:var(--error,#e87878);flex-shrink:0;animation:ctRecPulse 1.2s ease-in-out infinite}
+    @keyframes ctRecPulse{0%,100%{opacity:1}50%{opacity:.25}}
+    .ct-rec-time{font-family:var(--mono);font-size:.72rem;color:var(--text-dim);min-width:2.6rem;flex-shrink:0}
+    .ct-rec-wave{flex:1;height:34px;min-width:0}
+    .ct-rec-btn{flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:50%;padding:0;cursor:pointer;background:transparent;border:1px solid var(--border-soft);color:var(--text-dim);transition:all .18s ease}
+    .ct-rec-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+    .ct-rec-cancel:hover{color:var(--error,#e87878);border-color:var(--error,#e87878)}
+    .ct-rec-pause:hover{color:var(--accent);border-color:var(--accent-border)}
+    .ct-rec-send{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+    .ct-rec-send svg{fill:currentColor;stroke:currentColor}
+    .ct-rec-send:hover{filter:brightness(1.08)}
     .ct-empty{padding:2rem;text-align:center;font-family:var(--sans);font-size:.8rem;color:var(--text-mute)}
     /* Topbar da conversa (estilo WhatsApp): avatar + nome + visto por último */
     .ct-chat-user{display:flex;align-items:center;gap:.7rem;background:none;border:0;padding:.25rem .5rem;cursor:pointer;border-radius:var(--radius);text-align:left}
@@ -43490,6 +43505,106 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     </a>`;
   }
 
+  // CtVoice — gravação de mensagem de voz (estilo WhatsApp) no chat de contato.
+  // Grava com MediaRecorder, mostra ondas reagindo à voz (Web Audio), permite
+  // pausar/continuar, descartar e enviar. Ao enviar, vira um File e reusa o
+  // fluxo de anexo (_ctPendingFile + _contatoSendReply → sobe pro Storage).
+  const CtVoice = (function(){
+    let rec = null, chunks = [], stream = null, audioCtx = null, analyser = null, rafId = null;
+    let baseMs = 0, startTs = 0, timerId = null, paused = false, mime = '', threadId = null;
+    const ICON_PAUSE = '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>';
+    const ICON_MIC   = '<svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
+    function el(id){ return document.getElementById(id); }
+    function fmt(ms){ const s = Math.floor(ms/1000); return Math.floor(s/60) + ':' + String(s%60).padStart(2,'0'); }
+    function _curMs(){ return baseMs + (paused ? 0 : (Date.now() - startTs)); }
+    function _showBar(on){
+      const bar = el('ctRecBar'), comp = document.querySelector('.ct-composer');
+      if(bar) bar.hidden = !on;
+      if(comp) comp.style.display = on ? 'none' : '';
+    }
+    function _pickMime(){
+      const cands = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg'];
+      for(let i=0;i<cands.length;i++){ try{ if(window.MediaRecorder && MediaRecorder.isTypeSupported(cands[i])) return cands[i]; }catch(_){} }
+      return '';
+    }
+    async function start(tid){
+      if(rec) return;
+      threadId = tid;
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder){ alert('Seu navegador não suporta gravação de áudio.'); return; }
+      try{ stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+      catch(e){ alert('Não foi possível acessar o microfone. Permita o acesso no navegador e tente de novo.'); return; }
+      mime = _pickMime();
+      chunks = [];
+      try{ rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+      catch(e){ try{ rec = new MediaRecorder(stream); }catch(e2){ alert('Falha ao iniciar a gravação.'); _stopStream(); return; } }
+      rec.ondataavailable = ev => { if(ev.data && ev.data.size) chunks.push(ev.data); };
+      rec.start();
+      baseMs = 0; startTs = Date.now(); paused = false;
+      const pauseBtn = el('ctRecPause'); if(pauseBtn) pauseBtn.innerHTML = ICON_PAUSE;
+      _showBar(true);
+      _tick(); timerId = setInterval(_tick, 200);
+      _wave();
+    }
+    function _tick(){ const t = el('ctRecTime'); if(t) t.textContent = fmt(_curMs()); }
+    function _wave(){
+      const wave = el('ctRecWave'); if(!wave || !stream) return;
+      try{
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const src = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser(); analyser.fftSize = 128;
+        src.connect(analyser);
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const ctx = wave.getContext('2d');
+        const accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#c8a97e').trim() || '#c8a97e';
+        (function draw(){
+          rafId = requestAnimationFrame(draw);
+          const dpr = window.devicePixelRatio || 1;
+          const w = wave.width = wave.offsetWidth * dpr, h = wave.height = wave.offsetHeight * dpr;
+          ctx.clearRect(0,0,w,h);
+          analyser.getByteFrequencyData(data);
+          const bars = 28, step = Math.max(1, Math.floor(data.length / bars)), bw = w / bars;
+          ctx.fillStyle = accent;
+          for(let i=0;i<bars;i++){
+            const v = paused ? 0.04 : (data[i*step]/255);
+            const bh = Math.max(2*dpr, v * h);
+            ctx.fillRect(i*bw + bw*0.25, (h-bh)/2, bw*0.5, bh);
+          }
+        })();
+      }catch(e){ console.warn('[ctvoice wave]', e); }
+    }
+    function togglePause(){
+      if(!rec) return;
+      if(paused){ try{ rec.resume(); }catch(_){} startTs = Date.now(); paused = false; }
+      else { try{ rec.pause(); }catch(_){} baseMs += Date.now() - startTs; paused = true; }
+      const pauseBtn = el('ctRecPause'); if(pauseBtn) pauseBtn.innerHTML = paused ? ICON_MIC : ICON_PAUSE;
+    }
+    function _stopStream(){ if(stream){ stream.getTracks().forEach(t => { try{ t.stop(); }catch(_){} }); stream = null; } }
+    function _cleanup(){
+      if(timerId){ clearInterval(timerId); timerId = null; }
+      if(rafId){ cancelAnimationFrame(rafId); rafId = null; }
+      if(audioCtx){ try{ audioCtx.close(); }catch(_){} audioCtx = null; }
+      analyser = null; rec = null; paused = false;
+      _stopStream();
+    }
+    function cancel(){ if(rec){ try{ rec.stop(); }catch(_){} } _cleanup(); chunks = []; _showBar(false); }
+    async function send(){
+      if(!rec) return;
+      const r = rec;
+      const done = new Promise(res => { r.onstop = res; });
+      try{ r.stop(); }catch(_){}
+      await done;
+      const type = (mime || (chunks[0] && chunks[0].type) || 'audio/webm').split(';')[0];
+      const blob = new Blob(chunks, { type });
+      _cleanup(); _showBar(false);
+      if(!blob.size) return;
+      const ext = type.indexOf('mp4') >= 0 ? 'm4a' : (type.indexOf('ogg') >= 0 ? 'ogg' : 'webm');
+      const file = new File([blob], 'audio-' + Date.now() + '.' + ext, { type });
+      _ctPendingFile = file;
+      await _contatoSendReply(threadId);
+    }
+    return { start, togglePause, cancel, send, isRecording: function(){ return !!rec; } };
+  })();
+
   // Modal com os dados do aluno (admin vê tudo: foto, nome, apelido, @)
   function _ctOpenUserModal(uid){
     const p = _contatoProfiles[uid] || {};
@@ -43732,8 +43847,25 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         <button type="button" class="ct-attach-btn" id="ctAttachBtn" title="Anexar arquivo (PDF, imagem, vídeo ou áudio — até 25 MB)">
           <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
+        <button type="button" class="ct-attach-btn ct-mic-btn" id="ctMicBtn" title="Gravar mensagem de voz">
+          <svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+        </button>
         <textarea id="ctReplyText" placeholder="Escreva sua resposta…"></textarea>
         <button class="btn" id="ctReplySend" style="align-self:flex-end">Enviar</button>
+      </div>
+      <div class="ct-rec-bar" id="ctRecBar" hidden>
+        <button type="button" class="ct-rec-btn ct-rec-cancel" id="ctRecCancel" title="Descartar gravação">
+          <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+        </button>
+        <span class="ct-rec-dot"></span>
+        <span class="ct-rec-time" id="ctRecTime">0:00</span>
+        <canvas class="ct-rec-wave" id="ctRecWave"></canvas>
+        <button type="button" class="ct-rec-btn ct-rec-pause" id="ctRecPause" title="Pausar / continuar">
+          <svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>
+        </button>
+        <button type="button" class="ct-rec-btn ct-rec-send" id="ctRecSend" title="Enviar áudio ao aluno">
+          <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </button>
       </div>
     </div>`;
     const msgsEl = document.getElementById('ctChatMsgs');
@@ -43784,6 +43916,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(ctAttachInput) ctAttachInput.value = '';
       _ctSetPendingFile(null);
     });
+    // Gravação de voz (mic + barra estilo WhatsApp)
+    const ctMicBtn = document.getElementById('ctMicBtn');
+    if(ctMicBtn) ctMicBtn.addEventListener('click', () => CtVoice.start(threadId));
+    const ctRecPause = document.getElementById('ctRecPause');
+    if(ctRecPause) ctRecPause.addEventListener('click', () => CtVoice.togglePause());
+    const ctRecCancel = document.getElementById('ctRecCancel');
+    if(ctRecCancel) ctRecCancel.addEventListener('click', () => CtVoice.cancel());
+    const ctRecSend = document.getElementById('ctRecSend');
+    if(ctRecSend) ctRecSend.addEventListener('click', () => CtVoice.send());
     // Handlers do chat
     document.getElementById('ctReplySend').addEventListener('click', () => _contatoSendReply(threadId));
     document.getElementById('ctReplyText').addEventListener('keydown', e => {
@@ -43897,7 +44038,19 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(document.getElementById('fmod-styles')) return;
     const st = document.createElement('style'); st.id = 'fmod-styles';
     st.textContent = `
-    .fmod-filter{ padding:.4rem .6rem; background:var(--bg); border:1px solid var(--border-soft); border-radius:var(--radius); color:var(--text-dim); font-family:var(--sans); font-size:.78rem; margin-left:.6rem; }
+    .fmod-filter{
+      -webkit-appearance:none; appearance:none;
+      padding:.42rem 1.9rem .42rem .7rem; margin-left:.6rem;
+      background-color:var(--surface-sunken, var(--bg)); color:var(--text-dim);
+      border:1px solid var(--border-soft); border-radius:var(--radius);
+      font-family:var(--sans); font-size:.78rem; cursor:pointer;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23c8a97e' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+      background-repeat:no-repeat; background-position:right .6rem center;
+      transition:border-color .18s ease;
+    }
+    .fmod-filter:hover{ border-color:var(--accent-border); }
+    .fmod-filter:focus{ outline:none; border-color:var(--accent); }
+    .fmod-filter option{ background:var(--surface, #1a1a1a); color:var(--text); }
     #forumPostsList{ display:flex; flex-direction:column; gap:1rem; }
     .fmod-card{ background:var(--bg-card); border:1px solid var(--border-soft); border-radius:6px; padding:1.1rem 1.3rem; }
     .fmod-card.is-restricted{ border-color:rgba(179,82,76,.4); background:rgba(179,82,76,.05); }
