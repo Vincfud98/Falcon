@@ -43509,9 +43509,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // Grava com MediaRecorder, mostra ondas reagindo à voz (Web Audio), permite
   // pausar/continuar, descartar e enviar. Ao enviar, vira um File e reusa o
   // fluxo de anexo (_ctPendingFile + _contatoSendReply → sobe pro Storage).
+  // Grava capturando PCM cru pelo Web Audio (ScriptProcessor) e monta um **WAV**
+  // no fim — WAV toca em TODO navegador (Safari/iPhone incluídos), ao contrário do
+  // webm do MediaRecorder (que o Safari não toca). Downsample p/ 16 kHz mono
+  // (voz) mantém o arquivo pequeno. Ao enviar, vira File e reusa o fluxo de anexo.
   const CtVoice = (function(){
-    let rec = null, chunks = [], stream = null, audioCtx = null, analyser = null, rafId = null;
-    let baseMs = 0, startTs = 0, timerId = null, paused = false, mime = '', threadId = null;
+    const OUT_RATE = 16000;
+    let stream = null, audioCtx = null, source = null, processor = null, analyser = null, rafId = null;
+    let pcm = [], inRate = 44100, capturing = false;
+    let baseMs = 0, startTs = 0, timerId = null, paused = false, threadId = null, active = false;
     const ICON_PAUSE = '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>';
     const ICON_MIC   = '<svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="19" x2="12" y2="22"/></svg>';
     function el(id){ return document.getElementById(id); }
@@ -43522,24 +43528,31 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(bar) bar.hidden = !on;
       if(comp) comp.style.display = on ? 'none' : '';
     }
-    function _pickMime(){
-      const cands = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg'];
-      for(let i=0;i<cands.length;i++){ try{ if(window.MediaRecorder && MediaRecorder.isTypeSupported(cands[i])) return cands[i]; }catch(_){} }
-      return '';
-    }
     async function start(tid){
-      if(rec) return;
+      if(active) return;
       threadId = tid;
-      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder){ alert('Seu navegador não suporta gravação de áudio.'); return; }
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ alert('Seu navegador não suporta gravação de áudio.'); return; }
       try{ stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
       catch(e){ alert('Não foi possível acessar o microfone. Permita o acesso no navegador e tente de novo.'); return; }
-      mime = _pickMime();
-      chunks = [];
-      try{ rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
-      catch(e){ try{ rec = new MediaRecorder(stream); }catch(e2){ alert('Falha ao iniciar a gravação.'); _stopStream(); return; } }
-      rec.ondataavailable = ev => { if(ev.data && ev.data.size) chunks.push(ev.data); };
-      rec.start();
-      baseMs = 0; startTs = Date.now(); paused = false;
+      try{
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if(audioCtx.state === 'suspended'){ try{ await audioCtx.resume(); }catch(_){} }
+        inRate = audioCtx.sampleRate || 44100;
+        source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser(); analyser.fftSize = 128;
+        source.connect(analyser);
+        processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        pcm = []; capturing = true;
+        processor.onaudioprocess = function(ev){
+          if(!capturing || paused) return;
+          pcm.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+        };
+        // ScriptProcessor só roda se conectado ao destino → passa por um ganho 0
+        // (silencia o retorno do mic no alto-falante, sem eco).
+        const mute = audioCtx.createGain(); mute.gain.value = 0;
+        source.connect(processor); processor.connect(mute); mute.connect(audioCtx.destination);
+      }catch(e){ console.warn('[ctvoice start]', e); alert('Falha ao iniciar a gravação.'); _cleanup(); return; }
+      active = true; baseMs = 0; startTs = Date.now(); paused = false;
       const pauseBtn = el('ctRecPause'); if(pauseBtn) pauseBtn.innerHTML = ICON_PAUSE;
       _showBar(true);
       _tick(); timerId = setInterval(_tick, 200);
@@ -43547,62 +43560,80 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }
     function _tick(){ const t = el('ctRecTime'); if(t) t.textContent = fmt(_curMs()); }
     function _wave(){
-      const wave = el('ctRecWave'); if(!wave || !stream) return;
-      try{
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const src = audioCtx.createMediaStreamSource(stream);
-        analyser = audioCtx.createAnalyser(); analyser.fftSize = 128;
-        src.connect(analyser);
-        const data = new Uint8Array(analyser.frequencyBinCount);
-        const ctx = wave.getContext('2d');
-        const accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#c8a97e').trim() || '#c8a97e';
-        (function draw(){
-          rafId = requestAnimationFrame(draw);
-          const dpr = window.devicePixelRatio || 1;
-          const w = wave.width = wave.offsetWidth * dpr, h = wave.height = wave.offsetHeight * dpr;
-          ctx.clearRect(0,0,w,h);
-          analyser.getByteFrequencyData(data);
-          const bars = 28, step = Math.max(1, Math.floor(data.length / bars)), bw = w / bars;
-          ctx.fillStyle = accent;
-          for(let i=0;i<bars;i++){
-            const v = paused ? 0.04 : (data[i*step]/255);
-            const bh = Math.max(2*dpr, v * h);
-            ctx.fillRect(i*bw + bw*0.25, (h-bh)/2, bw*0.5, bh);
-          }
-        })();
-      }catch(e){ console.warn('[ctvoice wave]', e); }
+      const wave = el('ctRecWave'); if(!wave || !analyser) return;
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      const ctx = wave.getContext('2d');
+      const accent = (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#c8a97e').trim() || '#c8a97e';
+      (function draw(){
+        rafId = requestAnimationFrame(draw);
+        const dpr = window.devicePixelRatio || 1;
+        const w = wave.width = wave.offsetWidth * dpr, h = wave.height = wave.offsetHeight * dpr;
+        ctx.clearRect(0,0,w,h);
+        analyser.getByteFrequencyData(data);
+        const bars = 28, step = Math.max(1, Math.floor(data.length / bars)), bw = w / bars;
+        ctx.fillStyle = accent;
+        for(let i=0;i<bars;i++){
+          const v = paused ? 0.04 : (data[i*step]/255);
+          const bh = Math.max(2*dpr, v * h);
+          ctx.fillRect(i*bw + bw*0.25, (h-bh)/2, bw*0.5, bh);
+        }
+      })();
     }
     function togglePause(){
-      if(!rec) return;
-      if(paused){ try{ rec.resume(); }catch(_){} startTs = Date.now(); paused = false; }
-      else { try{ rec.pause(); }catch(_){} baseMs += Date.now() - startTs; paused = true; }
+      if(!active) return;
+      if(paused){ startTs = Date.now(); paused = false; }
+      else { baseMs += Date.now() - startTs; paused = true; }
       const pauseBtn = el('ctRecPause'); if(pauseBtn) pauseBtn.innerHTML = paused ? ICON_MIC : ICON_PAUSE;
     }
     function _stopStream(){ if(stream){ stream.getTracks().forEach(t => { try{ t.stop(); }catch(_){} }); stream = null; } }
     function _cleanup(){
+      capturing = false; active = false; paused = false;
       if(timerId){ clearInterval(timerId); timerId = null; }
       if(rafId){ cancelAnimationFrame(rafId); rafId = null; }
+      try{ if(processor){ processor.disconnect(); processor.onaudioprocess = null; } }catch(_){}
+      try{ if(source) source.disconnect(); }catch(_){}
+      processor = null; source = null; analyser = null;
       if(audioCtx){ try{ audioCtx.close(); }catch(_){} audioCtx = null; }
-      analyser = null; rec = null; paused = false;
       _stopStream();
     }
-    function cancel(){ if(rec){ try{ rec.stop(); }catch(_){} } _cleanup(); chunks = []; _showBar(false); }
+    function cancel(){ _cleanup(); pcm = []; _showBar(false); }
+    // Junta os pedaços, faz downsample p/ OUT_RATE e monta o WAV 16-bit mono.
+    function _flatten(chunks){ let n=0; for(let i=0;i<chunks.length;i++) n+=chunks[i].length; const o=new Float32Array(n); let p=0; for(let i=0;i<chunks.length;i++){ o.set(chunks[i], p); p+=chunks[i].length; } return o; }
+    function _downsample(buf, from, to){
+      if(to >= from) return buf;
+      const ratio = from/to, len = Math.round(buf.length/ratio), out = new Float32Array(len);
+      let oi=0, ii=0;
+      while(oi < len){
+        const next = Math.round((oi+1)*ratio); let sum=0, c=0;
+        for(let i=ii; i<next && i<buf.length; i++){ sum+=buf[i]; c++; }
+        out[oi++] = c ? sum/c : 0; ii = next;
+      }
+      return out;
+    }
+    function _encodeWav(samples, rate){
+      const buf = new ArrayBuffer(44 + samples.length*2), view = new DataView(buf);
+      const wstr = (off,s) => { for(let i=0;i<s.length;i++) view.setUint8(off+i, s.charCodeAt(i)); };
+      wstr(0,'RIFF'); view.setUint32(4, 36+samples.length*2, true); wstr(8,'WAVE');
+      wstr(12,'fmt '); view.setUint32(16,16,true); view.setUint16(20,1,true); view.setUint16(22,1,true);
+      view.setUint32(24,rate,true); view.setUint32(28,rate*2,true); view.setUint16(32,2,true); view.setUint16(34,16,true);
+      wstr(36,'data'); view.setUint32(40, samples.length*2, true);
+      let off=44;
+      for(let i=0;i<samples.length;i++){ let s=Math.max(-1,Math.min(1,samples[i])); view.setInt16(off, s<0 ? s*0x8000 : s*0x7FFF, true); off+=2; }
+      return new Blob([view], { type:'audio/wav' });
+    }
     async function send(){
-      if(!rec) return;
-      const r = rec;
-      const done = new Promise(res => { r.onstop = res; });
-      try{ r.stop(); }catch(_){}
-      await done;
-      const type = (mime || (chunks[0] && chunks[0].type) || 'audio/webm').split(';')[0];
-      const blob = new Blob(chunks, { type });
-      _cleanup(); _showBar(false);
-      if(!blob.size) return;
-      const ext = type.indexOf('mp4') >= 0 ? 'm4a' : (type.indexOf('ogg') >= 0 ? 'ogg' : 'webm');
-      const file = new File([blob], 'audio-' + Date.now() + '.' + ext, { type });
+      if(!active) return;
+      capturing = false;
+      const from = inRate, data = _flatten(pcm);
+      _cleanup(); _showBar(false); pcm = [];
+      if(!data.length) return;
+      const ds = _downsample(data, from, OUT_RATE);
+      const blob = _encodeWav(ds, OUT_RATE);
+      const file = new File([blob], 'audio-' + Date.now() + '.wav', { type: 'audio/wav' });
       _ctPendingFile = file;
       await _contatoSendReply(threadId);
     }
-    return { start, togglePause, cancel, send, isRecording: function(){ return !!rec; } };
+    return { start, togglePause, cancel, send, isRecording: function(){ return active; } };
   })();
 
   // Modal com os dados do aluno (admin vê tudo: foto, nome, apelido, @)
