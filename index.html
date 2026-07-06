@@ -19175,14 +19175,17 @@ async function initUserSession(user){
       if(typeof Notifications.unsubscribeRealtime === 'function') Notifications.unsubscribeRealtime();
       Notifications.subscribeRealtime(user.id, () => {
         console.log('%c[notif] chegou notificação ao vivo →', 'color:#7bbf7b');
-        Notifications.hydrate(user.id).then(window._refreshNotifsUI).catch(()=>{});
+        // Re-hidrata notificações E follows: toda ação de seguir (pedido/aceite)
+        // gera uma notificação, então a tabela follows precisa vir junto pra os
+        // botões de aceitar/seguir e o modal do colega ficarem em dia SEM F5.
+        _refreshNotifsAndFollows(user.id);
       });
     }
     // Fallback "quase ao vivo": re-hidrata a cada 30s (caso o realtime falhe).
     if(window._notifPoll){ clearInterval(window._notifPoll); }
     window._notifPoll = setInterval(() => {
       const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-      if(u && u.id) Notifications.hydrate(u.id).then(window._refreshNotifsUI).catch(()=>{});
+      if(u && u.id) _refreshNotifsAndFollows(u.id);
     }, 30000);
   }
   // 4) Follows
@@ -19191,6 +19194,16 @@ async function initUserSession(user){
   try{ _recordPlatformAccess(user.id); }catch(_){}
 }
 window.initUserSession = initUserSession;
+
+// Re-hidrata notificações + follows juntos e re-renderiza. Usado pelo realtime e
+// pelo poll — mantém pedidos de seguir / aceite / lista de amigos ao vivo sem F5.
+function _refreshNotifsAndFollows(userId){
+  const tasks = [];
+  if(window.Notifications && Notifications.hydrate) tasks.push(Notifications.hydrate(userId).catch(()=>{}));
+  if(window.Follows && Follows.hydrate) tasks.push(Follows.hydrate(userId).catch(()=>{}));
+  Promise.all(tasks).then(() => { if(window._refreshNotifsUI) window._refreshNotifsUI(); }).catch(()=>{});
+}
+window._refreshNotifsAndFollows = _refreshNotifsAndFollows;
 
 function teardownUserSession(){
   try{ if(window.Notifications && Notifications.unsubscribeRealtime) Notifications.unsubscribeRealtime(); }catch(_){}
@@ -19255,7 +19268,7 @@ const Follows = (function(){
   function findEdge(followerId, followingId){
     return _all().find(f => f && f.follower_id === followerId && f.following_id === followingId) || null;
   }
-  function request(fromId, toId){
+  async function request(fromId, toId){
     if(!_t() || !fromId || !toId || fromId === toId) return null;
     const existing = findEdge(fromId, toId);
     if(existing && existing.status !== 'declined') return existing;
@@ -19265,23 +19278,26 @@ const Follows = (function(){
       const patch = { status: 'pending', created_at: Date.now() };
       UbiqueStore.follows.update(existing.id, patch);
       row = Object.assign({}, existing, patch);
-      _syncUpdate(existing.id, patch).catch(()=>{});
+      try{ await _syncUpdate(existing.id, patch); }catch(_){}
     } else {
       const id = _genId();
       row = { id, follower_id: fromId, following_id: toId, status:'pending', created_at: Date.now() };
       UbiqueStore.follows.add(row);
-      _syncInsert(row).catch(()=>{});
+      try{ await _syncInsert(row); }catch(_){}
     }
-    // Notifica o destinatário
+    // Notifica o destinatário SÓ depois de gravar o follows — garante que, ao
+    // receber a notificação em realtime, ele já ache a linha e veja "Aceitar".
     Notifications.create(toId, 'follow_request', { from_user_id: fromId, follow_id: row.id });
     return row;
   }
-  function accept(followId){
+  async function accept(followId){
     if(!_t()) return;
     const f = UbiqueStore.follows.get(followId); if(!f) return;
     const patch = { status:'accepted', responded_at: Date.now() };
     UbiqueStore.follows.update(followId, patch);
-    _syncUpdate(followId, patch).catch(()=>{});
+    try{ await _syncUpdate(followId, patch); }catch(_){}
+    // Notifica quem pediu SÓ depois de gravar — assim, sem F5, o store dele é
+    // re-hidratado como 'accepted' e o modal do colega mostra "Deixar de seguir".
     Notifications.create(f.follower_id, 'follow_accepted', { from_user_id: f.following_id, follow_id: followId });
   }
   function decline(followId){
@@ -20675,18 +20691,26 @@ function _notifRenderItem(n){
     }
   } else if(n.type === 'follow_request'){
     line = `<strong>${Util.esc(fromName)}</strong> quer te seguir.`;
-    // Verifica se o pedido ainda está pendente
     const follow = p.follow_id && window.UbiqueStore ? UbiqueStore.follows.get(p.follow_id) : null;
+    const meId = (window.Auth && Auth.getUser && Auth.getUser()) ? Auth.getUser().id : null;
+    const themId = p.from_user_id;
+    // Você já segue (ou já pediu pra seguir) essa pessoa?
+    const rel = (meId && themId && window.Follows) ? Follows.relationshipWith(meId, themId) : null;
+    const iFollowThem = !!(rel && (rel.iFollow || rel.iSentRequest));
+    let btns = '';
     if(follow && follow.status === 'pending'){
-      actions = `<div class="notif-actions">
-        <button class="btn-primary" data-notif-accept="${Util.attr(p.follow_id)}" data-notif-id="${Util.attr(n.id)}">Aceitar</button>
-        <button class="btn-ghost" data-notif-decline="${Util.attr(p.follow_id)}" data-notif-id="${Util.attr(n.id)}">Recusar</button>
-      </div>`;
+      btns += `<button class="btn-primary" data-notif-accept="${Util.attr(p.follow_id)}" data-notif-id="${Util.attr(n.id)}">Aceitar</button>`
+            + `<button class="btn-ghost" data-notif-decline="${Util.attr(p.follow_id)}" data-notif-id="${Util.attr(n.id)}">Recusar</button>`;
     } else if(follow && follow.status === 'accepted'){
-      actions = `<span class="notif-status-tag">Você aceitou</span>`;
+      btns += `<span class="notif-status-tag">Você aceitou</span>`;
     } else if(follow && follow.status === 'declined'){
-      actions = `<span class="notif-status-tag is-muted">Recusado</span>`;
+      btns += `<span class="notif-status-tag is-muted">Recusado</span>`;
     }
+    // "Seguir de volta" — só quando você ainda NÃO segue nem pediu pra seguir.
+    if(meId && themId && !iFollowThem){
+      btns += `<button class="btn-ghost" data-notif-followback="${Util.attr(themId)}" data-notif-id="${Util.attr(n.id)}">Seguir de volta</button>`;
+    }
+    if(btns) actions = `<div class="notif-actions">${btns}</div>`;
   } else if(n.type === 'follow_accepted'){
     line = `<strong>${Util.esc(fromName)}</strong> aceitou seu pedido para seguir.`;
   } else if(n.type === 'essay_corrected'){
@@ -21364,6 +21388,17 @@ Renderers.notifications.mount = function(stageEl){
     if(dec){
       Follows.decline(dec.getAttribute('data-notif-decline'));
       Notifications.markRead(dec.getAttribute('data-notif-id'));
+      App.render();
+      return;
+    }
+    const fb = e.target.closest('[data-notif-followback]');
+    if(fb){
+      const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+      const themId = fb.getAttribute('data-notif-followback');
+      if(me && themId && window.Follows){
+        Follows.request(me.id, themId);
+        if(window.ueToast) window.ueToast('Pedido de seguir enviado.', 'info');
+      }
       App.render();
       return;
     }
