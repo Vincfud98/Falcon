@@ -54856,7 +54856,93 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return topicIds.length;
   }
 
-  async function _ueBankCreateGroupFromInline(g, subjectId, examId){
+  // Identidade de um item C/E pra dedup: usa o origin ([#15-2/2006]) quando houver;
+  // senão o texto do enunciado. Evita duplicar item já existente no grupo.
+  function _ueTfIdent(origin, stmt){
+    const o = String(origin || '').trim().toLowerCase();
+    if(o) return 'o:' + o;
+    return 's:' + String(stmt || '').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+  }
+  // Completa um grupo C/E: adiciona SÓ os itens que faltam (dedup por identidade),
+  // reusando os já existentes. Retorna { itemIds (os DESTA importação), gabAdded }.
+  async function _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId){
+    const existing = (tfItemsCache || []).filter(function(t){ return String(t.question_id) === String(bankQuestionId); });
+    const byIdent = {};
+    existing.forEach(function(t){ byIdent[_ueTfIdent(t.origin, t.assertiva)] = t; });
+    let maxNum = existing.reduce(function(m, t){ return Math.max(m, Number(t.numero) || 0); }, 0);
+    const itemIds = []; let gabAdded = 0;
+    for(let i = 0; i < objQs.length; i++){
+      const q = objQs[i];
+      const posN = i + 1;
+      const itOrigin = q.origin || ((code && numero) ? ('[#' + numero + '-' + posN + '/' + year + ']') : null);
+      const ident = _ueTfIdent(itOrigin, q.statement || q.assertion);
+      const hit = byIdent[ident];
+      if(hit){
+        // Já existe → REUSA (não duplica). Comentário novo vira gabarito extra.
+        itemIds.push(String(hit.id));
+        const cmt = (q.comment ? String(q.comment) : '').trim();
+        if(cmt){
+          const pos = (tfItemCommentsCache || []).filter(function(c){ return String(c.tf_item_id) === String(hit.id); }).length + 1;
+          const insC = await questoes().from('tf_item_comments').insert({ tf_item_id: hit.id, text: cmt, label: (code || null), position: pos });
+          if(!insC.error) gabAdded++;
+        }
+        continue;
+      }
+      // Número real do item pelo origin (#G-N); senão sequencial.
+      let itNum = maxNum + 1;
+      const mN = String(itOrigin || '').match(/-(\d+)\/\d{3,4}\]/) || String(itOrigin || '').match(/-(\d+)\b/);
+      if(mN){ const n = parseInt(mN[1], 10); if(n) itNum = n; }
+      const tf = await questoes().from('tf_items').insert({
+        question_id: bankQuestionId, numero: itNum, assertiva: q.statement || q.assertion || '',
+        key: _ueTfKeyFormat(q.correct === true), comment: q.comment || null, origin: itOrigin,
+        subject_id: subjectId, difficulty: 'media', anulada: false, desatualizada: false
+      }).select().single();
+      if(tf.error || !tf.data){ throw new Error('tf_items: ' + (tf.error && tf.error.message)); }
+      const rec = { id: tf.data.id, question_id: bankQuestionId, numero: itNum, assertiva: tf.data.assertiva, origin: itOrigin };
+      byIdent[ident] = rec;
+      if(tfItemsCache) tfItemsCache.push(rec);
+      if(itNum > maxNum) maxNum = itNum;
+      itemIds.push(String(tf.data.id));
+    }
+    return { itemIds: itemIds, gabAdded: gabAdded };
+  }
+  // FIXA as unidades antigas (decisão do usuário): antes de adicionar itens novos
+  // a um grupo já existente, "congela" cada bloco objetivo de OUTRAS unidades que
+  // referencia o grupo SEM bank_item_ids — pinando nos itens atuais. Sem mudança
+  // visível nelas; só impede que as questões novas vazem pra essas unidades.
+  async function _ueFreezeGroupInOtherBlocks(bankQuestionId, currentItemIds, exceptBid){
+    if(!currentItemIds || !currentItemIds.length) return 0;
+    let blocks = [];
+    try{
+      const { data, error } = await conteudo().from('unit_blocks')
+        .select('id, type, content').in('type', ['objective_questions','quiz']);
+      if(error){ console.warn('[freeze] load', error.message); return 0; }
+      blocks = data || [];
+    }catch(e){ console.warn('[freeze] ex', e); return 0; }
+    let frozen = 0;
+    for(const blk of blocks){
+      if(exceptBid != null && String(blk.id) === String(exceptBid)) continue;
+      const content = blk.content || {};
+      const grps = Array.isArray(content.groups) ? content.groups : [];
+      let changed = false;
+      grps.forEach(function(gr){
+        if(gr && String(gr.bank_question_id) === String(bankQuestionId)
+           && !(Array.isArray(gr.bank_item_ids) && gr.bank_item_ids.length)){
+          gr.bank_item_ids = currentItemIds.slice();
+          changed = true;
+        }
+      });
+      if(changed){
+        try{
+          const { error } = await conteudo().from('unit_blocks').update({ content: content }).eq('id', blk.id);
+          if(!error){ frozen++; if(window.UbiqueStore && UbiqueStore.unit_blocks) UbiqueStore.unit_blocks.update(blk.id, { content: content }); }
+        }catch(e){ console.warn('[freeze] update', e); }
+      }
+    }
+    return frozen;
+  }
+
+  async function _ueBankCreateGroupFromInline(g, subjectId, examId, exceptBid){
     const code = (g.origin || '').trim();
     const ym = code.match(/\/(\d{4})\]/);
     const year = ym ? parseInt(ym[1], 10) : null;
@@ -54896,85 +54982,88 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         kind:           'essay',
         refs:           allRefs,
         childErrors:    allChildErrors,
+        wasExisting:    false,
+        createdObjective: false,
+        essayCount:     essayQs.length,
+        gabAdded:       0,
       };
     }
 
     const qType = objQs.some(function(q){ return q.type === 'multiple_choice'; }) ? 'multiple_choice' : 'true_false';
-    // Bug 2 — q.enunciado recebe o comando/enunciado do GRUPO (não o
-    // title interno, não a description). Aliases legacy aceitos:
-    // enunciado > title se title parece comando (heurística no normalize).
+    // enunciado recebe o comando/enunciado do GRUPO (não o title interno).
     const enunciado = g.enunciado || g.description || '';
+    // Dedup por CÓDIGO: se o grupo já existe, COMPLETA (não recria, não duplica).
+    const existingGroup = code ? _ueBankFindGroupByOrigin(code) : null;
+    let bankQuestionId, wasExisting = false, gabAdded = 0, importedItemIds = [];
 
-    const ins = await questoes().from('questions').insert({
-      type:             qType,
-      enunciado:        enunciado || null,
-      origin:           code || null,
-      year:             year,
-      numero:           numero,
-      subject_id:       subjectId,
-      exam_id:          examId,
-      ativo:            true,
-      anulada:          false,
-      desatualizada:    false,
-      phase_numero:     1,
-      // difficulty: 'media' é DEFAULT TÉCNICO (coluna NOT NULL no schema
-      // atual). Não é input do admin nem do JSON. Vai ser sobrescrito
-      // pelo cálculo flutuante baseado em student_responses (esteira #10).
-      difficulty:       'media',
-      questao_simulada: isUbique,
-      image_url:        g.image_url || g.reference_image || null,
-    }).select().single();
-    if(ins.error || !ins.data){ throw new Error('questions: ' + (ins.error && ins.error.message)); }
-    const bankQuestionId = ins.data.id;
-
-    // Pacote D/E — reference_texts[] ricos (vencem o legacy single).
-    if(Array.isArray(g.reference_texts) && g.reference_texts.length){
-      await _ueBankPersistReferenceTexts(bankQuestionId, g.reference_texts, examId, year);
-    } else if(g.reference_text){
-      // Legacy: single text body sem campos ricos.
-      const rt = await questoes().from('reference_texts').insert({ text: g.reference_text, exam_id: examId, year: year }).select().single();
-      if(rt.data) await questoes().from('question_reference_texts').insert({ question_id: bankQuestionId, reference_text_id: rt.data.id, ordem: 1 });
-    }
-
-    let nQuestoes = 0;
-    if(qType === 'true_false'){
-      let numItem = 0;
-      for(const q of objQs){
-        numItem++;
-        const itOrigin = q.origin || ((code && numero) ? ('[#' + numero + '-' + numItem + '/' + year + ']') : null);
-        const tf = await questoes().from('tf_items').insert({
-          question_id: bankQuestionId, numero: numItem, assertiva: q.statement || q.assertion || '',
-          key: _ueTfKeyFormat(q.correct === true), comment: q.comment || null, origin: itOrigin,
-          subject_id: subjectId,
-          // difficulty: 'media' default técnico (tf_item.difficulty NOT NULL
-          // no schema atual). Não é input nem do admin nem do JSON. Cálculo
-          // automático por uso na esteira #10.
-          difficulty: 'media',
-          anulada: false, desatualizada: false
-        }).select().single();
-        if(tf.error || !tf.data){ throw new Error('tf_items: ' + (tf.error && tf.error.message)); }
-        nQuestoes++;
+    if(existingGroup){
+      bankQuestionId = existingGroup.id;
+      wasExisting = true;
+      if(qType === 'true_false'){
+        // Fixa as OUTRAS unidades no que têm hoje, antes de adicionar os novos itens.
+        const currentIds = (tfItemsCache || [])
+          .filter(function(t){ return String(t.question_id) === String(bankQuestionId); })
+          .map(function(t){ return String(t.id); });
+        await _ueFreezeGroupInOtherBlocks(bankQuestionId, currentIds, exceptBid);
+        const merged = await _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId);
+        importedItemIds = merged.itemIds; gabAdded = merged.gabAdded;
       }
+      // MC já existente = 1 questão; reusa como está (sem duplicar opções).
     } else {
-      const q = objQs[0] || {};
-      const opts = Array.isArray(q.options) ? q.options : [];
-      for(let i = 0; i < opts.length; i++){
-        const o = opts[i];
-        await questoes().from('mc_options').insert({ question_id: bankQuestionId, letra: o.label || String.fromCharCode(65 + i), opcao: o.text || '', correct: !!o.correct, comment: o.comment || null });
+      const ins = await questoes().from('questions').insert({
+        type:             qType,
+        enunciado:        enunciado || null,
+        origin:           code || null,
+        year:             year,
+        numero:           numero,
+        subject_id:       subjectId,
+        exam_id:          examId,
+        ativo:            true,
+        anulada:          false,
+        desatualizada:    false,
+        phase_numero:     1,
+        difficulty:       'media',
+        questao_simulada: isUbique,
+        image_url:        g.image_url || g.reference_image || null,
+      }).select().single();
+      if(ins.error || !ins.data){ throw new Error('questions: ' + (ins.error && ins.error.message)); }
+      bankQuestionId = ins.data.id;
+
+      // Pacote D/E — reference_texts[] ricos (vencem o legacy single).
+      if(Array.isArray(g.reference_texts) && g.reference_texts.length){
+        await _ueBankPersistReferenceTexts(bankQuestionId, g.reference_texts, examId, year);
+      } else if(g.reference_text){
+        const rt = await questoes().from('reference_texts').insert({ text: g.reference_text, exam_id: examId, year: year }).select().single();
+        if(rt.data) await questoes().from('question_reference_texts').insert({ question_id: bankQuestionId, reference_text_id: rt.data.id, ordem: 1 });
       }
-      nQuestoes++;
+
+      if(qType === 'true_false'){
+        const merged = await _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId);
+        importedItemIds = merged.itemIds; gabAdded = merged.gabAdded;
+      } else {
+        const q = objQs[0] || {};
+        const opts = Array.isArray(q.options) ? q.options : [];
+        for(let i = 0; i < opts.length; i++){
+          const o = opts[i];
+          await questoes().from('mc_options').insert({ question_id: bankQuestionId, letra: o.label || String.fromCharCode(65 + i), opcao: o.text || '', correct: !!o.correct, comment: o.comment || null });
+        }
+      }
     }
 
-    console.log('[import] grupo objetivo criado:', bankQuestionId, '| tipo:', qType, '| items:', nQuestoes);
+    console.log('[import] grupo objetivo', wasExisting ? 'completado' : 'criado', ':', bankQuestionId, '| itens desta importação:', importedItemIds.length);
 
-    // Adiciona ref do grupo objetivo às refs (essays já foram empurradas antes).
-    allRefs.push({ id: String(bankQuestionId), type: 'objective', sourceType: isUbique ? 'ubique' : 'past_exam' });
+    const srcType = existingGroup ? (existingGroup.questao_simulada ? 'ubique' : 'past_exam') : (isUbique ? 'ubique' : 'past_exam');
+    // itemIds = os itens DESTA importação → o bloco da unidade fixa só neles.
+    allRefs.push({ id: String(bankQuestionId), type: 'objective', sourceType: srcType, itemIds: importedItemIds });
 
     return {
       bankQuestionId: bankQuestionId,
-      nQuestoes:      nQuestoes + essayQs.length,
       refs:           allRefs,
       childErrors:    allChildErrors,
+      wasExisting:    wasExisting,
+      createdObjective: !wasExisting,
+      essayCount:     essayQs.length,
+      gabAdded:       gabAdded,
     };
   }
   function _ueBankFindGroupByOrigin(code){
@@ -55027,6 +55116,17 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     (parsed.ungrouped || []).forEach(function(q){ groups.push({ title: '', description: '', origin: '', reference_text: '', reference_image: '', questions: [q] }); });
     if(!groups.length){ show('Nenhum grupo/questão encontrado no JSON.', false); return; }
 
+    // Caches frescos ANTES do import — o dedup por código do grupo e por item
+    // (completar grupo existente sem duplicar) depende de questionsCache/tfItemsCache
+    // estarem em dia. Sem isso, um grupo criado antes poderia ser recriado.
+    try{
+      await Promise.all([
+        (typeof loadQuestions === 'function') ? loadQuestions() : null,
+        (typeof loadTfItems === 'function') ? loadTfItems() : null,
+        (typeof loadTfItemComments === 'function') ? loadTfItemComments() : null,
+      ].filter(Boolean));
+    }catch(e){ console.warn('[import] refresh inicial falhou:', e); }
+
     // Pré-requisito do destino simulado: deve haver pelo menos uma seção criada.
     if(target === 'mock_exam'){
       const secs = (typeof getActiveSections === 'function') ? getActiveSections() : [];
@@ -55051,22 +55151,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const allRefs = [];           // [{ id, type: 'essay'|'objective', sourceType }]
     const allChildErrors = [];
     try{
+      // Bloco de destino (quando é unidade) — não "congelar" ele no freeze.
+      const exceptBid = (target === 'unit' && ret) ? ret.bid : null;
       for(const g of groups){
-        const existing = _ueBankFindGroupByOrigin(g.origin);
-        if(existing){
-          dupes++;
-          if(g.origin) dupeCodes.push(g.origin);
-          // Grupo duplicado é SEMPRE objetivo (essays não compartilham origin).
-          allRefs.push({ id: String(existing.id), type: 'objective', sourceType: existing.questao_simulada ? 'ubique' : 'past_exam' });
-          // E3.5 — adiciona os gabaritos do JSON como extras (sem substituir).
-          gabAdded += await _ueAddImportedGabaritos(existing, g);
-        }
-        else {
-          const r = await _ueBankCreateGroupFromInline(g, subjectId, examId);
-          created++;
-          if(r && Array.isArray(r.refs)) Array.prototype.push.apply(allRefs, r.refs);
-          if(r && Array.isArray(r.childErrors)) Array.prototype.push.apply(allChildErrors, r.childErrors);
-        }
+        // find-or-create + merge de itens acontece DENTRO da função (grupo já
+        // existente é COMPLETADO com as questões que faltam, sem duplicar).
+        const r = await _ueBankCreateGroupFromInline(g, subjectId, examId, exceptBid);
+        if(!r) continue;
+        if(Array.isArray(r.refs)) Array.prototype.push.apply(allRefs, r.refs);
+        if(Array.isArray(r.childErrors)) Array.prototype.push.apply(allChildErrors, r.childErrors);
+        if(typeof r.gabAdded === 'number') gabAdded += r.gabAdded;
+        if(r.wasExisting){ dupes++; if(g.origin) dupeCodes.push(g.origin); }
+        else created++;
       }
     }catch(e){
       console.error('[import] erro fatal:', e);
@@ -55116,9 +55212,20 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           if(!Array.isArray(blk.content.groups)) blk.content.groups = [];
           let addedToGroups = 0;
           objRefs.forEach(function(ref){
-            if(!blk.content.groups.some(function(x){ return String(x.bank_question_id) === String(ref.id); })){
+            const existingG = blk.content.groups.find(function(x){ return String(x.bank_question_id) === String(ref.id); });
+            if(existingG){
+              // Grupo já está no bloco → funde os itens desta importação nos pins.
+              if(ref.itemIds && ref.itemIds.length){
+                const set = new Set((Array.isArray(existingG.bank_item_ids) ? existingG.bank_item_ids : []).map(String));
+                ref.itemIds.forEach(function(id){ set.add(String(id)); });
+                existingG.bank_item_ids = Array.from(set);
+              }
+            } else {
               const n = blk.content.groups.length + 1;
-              blk.content.groups.push({ id: 'g' + n, bank_question_id: String(ref.id) });
+              const grp = { id: 'g' + n, bank_question_id: String(ref.id) };
+              // Fixa a unidade SÓ nas questões que ela importou (não vaza o resto do grupo).
+              if(ref.itemIds && ref.itemIds.length) grp.bank_item_ids = ref.itemIds.slice();
+              blk.content.groups.push(grp);
               addedToGroups++;
             }
           });
@@ -55171,7 +55278,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }catch(e){ console.warn('[import] reload caches falhou:', e); }
 
     let msg = '<strong>' + created + '</strong> grupo(s) criados no banco.';
-    if(dupes) msg += ' <strong>' + dupes + '</strong> repetido(s) (referenciado sem recriar): <span style="font-family:var(--mono);font-size:.72rem">' + esc(dupeCodes.filter(Boolean).join(', ')) + '</span>.';
+    if(dupes) msg += ' <strong>' + dupes + '</strong> grupo(s) já existente(s) COMPLETADO(s) com as questões que faltavam (sem duplicar): <span style="font-family:var(--mono);font-size:.72rem">' + esc(dupeCodes.filter(Boolean).join(', ')) + '</span>.';
     if(gabAdded) msg += ' <strong>' + gabAdded + '</strong> gabarito(s) comentado(s) adicionado(s) às questões repetidas.';
     if(destLabel) msg += destLabel;
     if(topicsMsg) msg += topicsMsg;
