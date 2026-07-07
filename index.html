@@ -21247,7 +21247,14 @@ Renderers.tutor.mount = function(stageEl, route){
     page.classList.toggle('mode-ajuda', mode==='ajuda');
     stageEl.querySelectorAll('.tutor-mode-btn').forEach(function(b){ b.classList.toggle('is-active', b.getAttribute('data-mode')===mode); });
     if(subjWrap) subjWrap.style.display = (mode==='materia') ? '' : 'none';
+    // No modo Ajuda não há escolha de modelo (é grátis e usa o modelo rápido).
+    const _mdl = stageEl.querySelector('#tutorModel');
+    if(_mdl) _mdl.style.display = (mode==='materia') ? '' : 'none';
     if(inputEl) inputEl.placeholder = (mode==='materia') ? 'Pergunte ao tutor sobre a matéria…  (use [[ para citar outra)' : 'Pergunte como usar a plataforma…';
+    const _sub = stageEl.querySelector('.tutor-sub');
+    if(_sub) _sub.textContent = (mode==='materia')
+      ? 'Escolha a matéria e pergunte o que quiser — eu busco no conteúdo e cito de onde veio.'
+      : 'Pergunte como usar a plataforma — criar sala, enviar questão, usar o tutor, o caderno e mais.';
     if(hintEl) hintEl.textContent = '';
   }
 
@@ -21255,8 +21262,44 @@ Renderers.tutor.mount = function(stageEl, route){
     const text = (inputEl.value||'').trim();
     if(!text) return;
     if(_mode==='ajuda'){
+      // Modo AJUDA: responde só com base no guia de uso (platform_config.help_guide,
+      // injetado pela EF quando modo==='ajuda'). Sem matéria, sem card de questão,
+      // sem fontes. Grátis → modelo fixo 'rapido'.
       _appendUser(text); inputEl.value=''; _autosize();
-      _appendAssistant('<em>O modo "Ajuda com a plataforma" está em construção — em breve vou responder como usar cada função. Por ora, use o "Tutor de matéria".</em>');
+      const box = _appendAssistant('<span class="tutor-typing"><span></span><span></span><span></span></span>');
+      try{
+        const { data: sess } = await window._sb.auth.getSession();
+        const token = sess && sess.session && sess.session.access_token;
+        const resp = await fetch((window._sbUrl||'') + '/functions/v1/tutor-chat', {
+          method:'POST',
+          headers:{ 'Authorization':'Bearer '+token, 'apikey': window._sbKey||'', 'content-type':'application/json' },
+          body: JSON.stringify({
+            conversa_id: _conversaId, unit_id: null, unit_title: null, unit_text: '',
+            mensagem: text, historico: _msgs.slice(-10), modelo: 'rapido', apelido: _apelido, modo:'ajuda'
+          })
+        });
+        const ct = resp.headers.get('content-type')||'';
+        if(ct.indexOf('application/json')>=0){
+          const j = await resp.json().catch(function(){ return {}; });
+          box.innerHTML = (j&&j.ubt_error) ? '<span class="tutor-err">Saldo de UbiTokens insuficiente.</span>' : '<span class="tutor-err">Não consegui responder agora.</span>';
+          return;
+        }
+        const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf='', acc='';
+        while(true){
+          const { done, value } = await reader.read(); if(done) break;
+          buf += dec.decode(value,{stream:true});
+          const parts = buf.split('\n\n'); buf = parts.pop()||'';
+          for(const p of parts){
+            const line = p.trim(); if(line.indexOf('data:')!==0) continue;
+            let ev; try{ ev=JSON.parse(line.slice(5).trim()); }catch(_){ continue; }
+            if(ev.type==='delta'){ acc+=ev.text; box.innerHTML=_md(_cleanLive(acc)); _scroll(); }
+            else if(ev.type==='done'){ if(ev.conversa_id) _conversaId=ev.conversa_id; if(window.UbtWallet) UbtWallet.load(); }
+          }
+        }
+        box.innerHTML = _md(_clean(acc));
+        _msgs.push({ role:'user', content:text }); _msgs.push({ role:'assistant', content:_clean(acc) });
+        _scroll(); _loadHistory();
+      }catch(e){ box.innerHTML = '<span class="tutor-err">Erro de conexão.</span>'; }
       return;
     }
     // modo matéria — matéria obrigatória
