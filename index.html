@@ -8733,6 +8733,16 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
   #tutorPage .tutor-ce-verdict.no{ color:#d47973; }
   #tutorPage .tutor-ce-aicomment{ margin-top:.45rem; }
 
+  /* Card "Suas anotações" (Caderno do aluno) abaixo da resposta do tutor. */
+  #tutorPage .tutor-caderno{ margin-top:.7rem; border:1px solid var(--tutor-accent, var(--accent)); border-radius:10px; background:var(--tutor-soft, var(--accent-lo)); padding:.6rem .75rem; }
+  #tutorPage .tutor-caderno-h{ font-family:var(--mono); font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; color:var(--tutor-accent, var(--accent)); margin-bottom:.5rem; }
+  #tutorPage .tutor-caderno-item{ display:block; text-decoration:none; color:inherit; padding:.4rem .5rem; border-radius:7px; border:1px solid transparent; }
+  #tutorPage a.tutor-caderno-item:hover{ background:var(--bg-elevated); border-color:var(--accent-border-soft); }
+  #tutorPage .tutor-caderno-item + .tutor-caderno-item{ margin-top:.2rem; }
+  #tutorPage .tutor-caderno-unit{ font-family:var(--sans); font-size:.8rem; font-weight:500; color:var(--text); }
+  #tutorPage .tutor-caderno-go{ font-family:var(--mono); font-size:.62rem; color:var(--tutor-accent, var(--accent)); font-weight:400; }
+  #tutorPage .tutor-caderno-snip{ font-family:var(--sans); font-size:.76rem; line-height:1.45; color:var(--text-dim); margin-top:.15rem; }
+
 </style>
 </head>
 
@@ -21258,6 +21268,57 @@ Renderers.tutor.mount = function(stageEl, route){
     if(hintEl) hintEl.textContent = '';
   }
 
+  // ── Busca no CADERNO do aluno (anotações próprias). As anotações já estão em
+  //    memória (UbiqueStore.listCadernos → HTML por unidade). Casa palavras-chave
+  //    da pergunta e devolve as unidades onde ele anotou + um trecho. Sem custo:
+  //    se nada casar, não injeta nada. Serve pro "onde foi que eu escrevi X?". ──
+  const _CAD_STOP = { para:1, como:1, mais:1, sobre:1, quando:1, porque:1, isso:1, essa:1, esse:1, aqui:1, seja:1, pelo:1, pela:1, tudo:1, cada:1, meus:1, minha:1, minhas:1, escrevi:1, anotei:1, caderno:1, anotacao:1, anotacoes:1, nota:1, notas:1, lembro:1, mesmo:1, tinha:1, qual:1, quais:1, aquele:1, aquela:1, ainda:1, onde:1, sera:1, coisa:1 };
+  function _cadNorm(s){ return String(s==null?'':s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''); }
+  function _cadKw(q){
+    return _cadNorm(q).replace(/[^a-z0-9\s]/g,' ').split(/\s+/)
+      .filter(function(w){ return w.length >= 4 && !_CAD_STOP[w]; })
+      .filter(function(w, i, a){ return a.indexOf(w) === i; });
+  }
+  function _searchCaderno(query){
+    try{
+      if(!window.UbiqueStore || !UbiqueStore.listCadernos) return [];
+      const kws = _cadKw(query); if(!kws.length) return [];
+      const notes = UbiqueStore.listCadernos() || [];
+      const units = (UbiqueStore.units && UbiqueStore.units.list) ? (UbiqueStore.units.list() || []) : [];
+      const uById = {}; units.forEach(function(u){ if(u) uById[String(u.id)] = u; });
+      const scored = [];
+      notes.forEach(function(n){
+        const tmp = document.createElement('div'); tmp.innerHTML = (n && n.body) || '';
+        const txt = (tmp.textContent || '').replace(/\s+/g, ' ').trim();
+        if(!txt) return;
+        const nt = _cadNorm(txt);
+        let score = 0, first = -1;
+        kws.forEach(function(k){ const at = nt.indexOf(k); if(at >= 0){ score++; if(first < 0 || at < first) first = at; } });
+        if(!score) return;
+        const start = Math.max(0, first - 70);
+        let snip = txt.slice(start, first + 150).trim();
+        if(start > 0) snip = '…' + snip;
+        if(first + 150 < txt.length) snip = snip + '…';
+        const u = uById[String(n.unitId)];
+        scored.push({ unitId: String(n.unitId), unitTitle: (u && u.title) || 'Unidade', snippet: snip, score: score });
+      });
+      scored.sort(function(a, b){ return b.score - a.score; });
+      return scored.slice(0, 3);
+    }catch(_){ return []; }
+  }
+  function _renderCaderno(msgBody, matches){
+    if(!msgBody || !matches || !matches.length) return;
+    const wrap = document.createElement('div'); wrap.className = 'tutor-caderno';
+    let html = '<div class="tutor-caderno-h">Suas anotações</div>';
+    matches.forEach(function(m){
+      const href = (window._unitHashById ? _unitHashById(m.unitId) : '') || '';
+      const inner = '<div class="tutor-caderno-unit">' + _esc(m.unitTitle) + (href ? ' <span class="tutor-caderno-go">abrir →</span>' : '') + '</div><div class="tutor-caderno-snip">' + _esc(m.snippet) + '</div>';
+      html += href ? '<a class="tutor-caderno-item" href="' + Util.attr(href) + '">' + inner + '</a>' : '<div class="tutor-caderno-item">' + inner + '</div>';
+    });
+    wrap.innerHTML = html;
+    msgBody.appendChild(wrap); _scroll();
+  }
+
   async function _send(){
     const text = (inputEl.value||'').trim();
     if(!text) return;
@@ -21322,6 +21383,11 @@ Renderers.tutor.mount = function(stageEl, route){
     if(text.length >= 10 && window.TutorQuestions && window.TutorQuestions.autoQuestoes){
       try{ const aq = await window.TutorQuestions.autoQuestoes(text, { shownQ: _shownQ }); _autoQids = (aq && aq.ids) || []; _qctx = (aq && aq.ctx) || ''; }catch(_){}
     }
+    // Anotações do próprio aluno (Caderno) que casam com a pergunta — "onde escrevi X?".
+    const _cadMatches = _searchCaderno(text);
+    const _cadCtx = _cadMatches.length
+      ? _cadMatches.map(function(m, i){ return '[' + (i + 1) + '] (anotação do aluno, na unidade "' + m.unitTitle + '") ' + m.snippet; }).join('\n')
+      : '';
     try{
       const { data: sess } = await window._sb.auth.getSession();
       const token = sess && sess.session && sess.session.access_token;
@@ -21331,7 +21397,7 @@ Renderers.tutor.mount = function(stageEl, route){
         body: JSON.stringify({
           conversa_id: _conversaId, unit_id: null, unit_title: null, unit_text: '',
           mensagem: text, historico: _msgs.slice(-10), modelo: _modelo, apelido: _apelido, modo:'duvida',
-          questoes_contexto: _qctx,
+          questoes_contexto: _qctx, caderno_contexto: _cadCtx,
           subject_id: String(subjEl.value), subjects: subjects
         })
       });
@@ -21372,6 +21438,8 @@ Renderers.tutor.mount = function(stageEl, route){
           });
         }catch(_){}
       }
+      // Card "Suas anotações" — onde o aluno já escreveu sobre o tema (link p/ a unidade).
+      if(_cadMatches.length) _renderCaderno(box.parentNode, _cadMatches);
       _msgs.push({ role:'user', content:text }); _msgs.push({ role:'assistant', content:_clean(acc) });
       _scroll(); _loadHistory();
     }catch(e){ box.innerHTML = '<span class="tutor-err">Erro de conexão.</span>'; }
