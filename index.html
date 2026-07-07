@@ -30533,51 +30533,74 @@ window.TutorIA = (function(){
     }
     return null;
   }
+  // Converte um HTML em texto VERBATIM preservando quebras de parágrafo (não
+  // "cola" tudo, como textContent puro faria). É o navegador que parseia → texto
+  // idêntico ao que o aluno lê (inclui os marcadores tipo (§25) que estão no
+  // conteúdo, entidades, etc.). Detached (não entra no documento) → sem duplicar
+  // ids nem efeito na página.
+  function _htmlToPlain(html){
+    const d = document.createElement('div');
+    d.innerHTML = String(html == null ? '' : html);
+    d.querySelectorAll('script,style').forEach(function(el){ el.remove(); });
+    d.querySelectorAll('br').forEach(function(br){ br.replaceWith('\n'); });
+    d.querySelectorAll('p,div,li,h1,h2,h3,h4,h5,tr,section,hr,blockquote').forEach(function(el){ el.appendChild(document.createTextNode('\n')); });
+    return (d.textContent || '').replace(/ /g, ' ').replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
   function _unitTextById(unitId, maxChars){
     const u = _unitById(unitId); if(!u) return '';
-    const parts = [];
-    // FONTE DA VERDADE: os blocos CRUS do store (unit_id = _storeId da unidade),
-    // comparando como STRING — a mesma base que a renderização usa (unitFromStore).
-    // O caminho _unitWithStoreOverride/_groupsFromStore às vezes resolve a unidade
-    // errado e devolve 0 blocos (por isso o tutor via só a seção do DOM). Aqui
-    // montamos o texto de TODAS as seções/blocos, na ordem.
+    // Resolve o id da unidade no STORE (o diagnóstico provou que os blocos vivem
+    // sob u._storeId; _unitWithStoreOverride/_groupsFromStore às vezes falha).
     let sid = (u._storeId != null) ? u._storeId : null;
     if(sid == null && typeof _findStoreUnitForMock === 'function'){ try { const su = _findStoreUnitForMock(u.id); if(su) sid = su.id; } catch(_){} }
-    if(sid != null && window.UbiqueStore && UbiqueStore.unit_blocks){
-      const sidS = String(sid);
-      const secs = ((UbiqueStore.unit_sections && UbiqueStore.unit_sections.list()) || [])
-        .filter(function(s){ return s && String(s.unit_id) === sidS; })
-        .sort(function(a, b){ return (a.position || 0) - (b.position || 0); });
-      const secOrder = {}; secs.forEach(function(s, i){ secOrder[String(s.id)] = i; });
-      const blocks = (UbiqueStore.unit_blocks.list() || [])
-        .filter(function(b){ return b && String(b.unit_id) === sidS; })
-        .sort(function(a, b){
-          const sa = (secOrder[String(a.section_id)] != null) ? secOrder[String(a.section_id)] : 999;
-          const sbb = (secOrder[String(b.section_id)] != null) ? secOrder[String(b.section_id)] : 999;
-          if(sa !== sbb) return sa - sbb;
-          return (a.position || 0) - (b.position || 0);
+    let text = '';
+    // FONTE DA VERDADE (verbatim): renderiza TODOS os blocos de TODAS as seções
+    // com o MESMO renderer da página (renderLearningBlock, o que o DOM usava) e
+    // lê o texto. Assim o tutor "vê" a unidade inteira, ipsis litteris — não só a
+    // seção visível nem o dado cru (que perde formatação e o campo p.content).
+    if(sid != null && window.UbiqueStore && UbiqueStore.unit_blocks && typeof renderLearningBlock === 'function'){
+      try {
+        const sidS = String(sid);
+        const secs = ((UbiqueStore.unit_sections && UbiqueStore.unit_sections.list()) || [])
+          .filter(function(s){ return s && String(s.unit_id) === sidS; })
+          .sort(function(a, b){ return (a.position || 0) - (b.position || 0); });
+        const secOrder = {}; secs.forEach(function(s, i){ secOrder[String(s.id)] = i; });
+        const blocks = (UbiqueStore.unit_blocks.list() || [])
+          .filter(function(b){ return b && String(b.unit_id) === sidS; })
+          .sort(function(a, b){
+            const sa = (secOrder[String(a.section_id)] != null) ? secOrder[String(a.section_id)] : 999;
+            const sbb = (secOrder[String(b.section_id)] != null) ? secOrder[String(b.section_id)] : 999;
+            if(sa !== sbb) return sa - sbb;
+            return (a.position || 0) - (b.position || 0);
+          });
+        const chunks = [];
+        blocks.forEach(function(b){
+          const secIdx = secOrder[String(b.section_id)];
+          const sec = (secIdx != null) ? secs[secIdx] : null;
+          let html = '';
+          try { html = renderLearningBlock(b) || ''; } catch(_){ html = ''; }
+          const t = _htmlToPlain(html);
+          if(t) chunks.push((sec && sec.title ? ('## ' + sec.title + '\n') : '') + t);
         });
-      blocks.forEach(function(b){
-        let hb; try { hb = _hydrateStoreBlock(b, null); } catch(_){ hb = b; }
-        if(hb.title) parts.push('### ' + hb.title);
-        if(Array.isArray(hb.paragraphs)) hb.paragraphs.forEach(function(p){ const t = p.text || p.body || p.html || ''; if(t) parts.push(String(t).replace(/<[^>]+>/g, ' ')); });
-        else if(hb.text || hb.body) parts.push(String(hb.text || hb.body).replace(/<[^>]+>/g, ' '));
-      });
+        text = chunks.join('\n\n').trim();
+      } catch(_){ text = ''; }
     }
-    // Fallback: caminho antigo (grupos do override) se o store não deu texto.
-    if(!parts.length){
+    // Fallback: caminho antigo (grupos do override) se nada veio do render.
+    if(!text){
       let uu = u;
       if(window._unitWithStoreOverride){ try { uu = _unitWithStoreOverride(u); } catch(_){} }
+      const parts = [];
       (uu.groups || []).forEach(function(g){
         if(g.title) parts.push('## ' + g.title);
         (g.blocks || []).forEach(function(b){
           if(b.title) parts.push('### ' + b.title);
-          if(Array.isArray(b.paragraphs)) b.paragraphs.forEach(function(p){ const t = p.text || p.body || p.html || ''; if(t) parts.push(String(t).replace(/<[^>]+>/g, ' ')); });
-          else if(b.text || b.body) parts.push(String(b.text || b.body).replace(/<[^>]+>/g, ' '));
+          if(Array.isArray(b.paragraphs)) b.paragraphs.forEach(function(p){ const t = p.content || p.text || p.body || p.html || ''; if(t) parts.push(_htmlToPlain(t)); });
+          else if(b.content && b.content.html) parts.push(_htmlToPlain(b.content.html));
+          else if(b.text || b.body) parts.push(_htmlToPlain(b.text || b.body));
         });
       });
+      text = parts.join('\n').trim();
     }
-    return parts.join('\n').replace(/[ \t]+/g, ' ').trim().slice(0, maxChars || 8000);
+    return text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, maxChars || 8000);
   }
   // Seletor que abre ao digitar [[
   let _refPickerEl = null, _refPickerCI = null;
@@ -31529,7 +31552,7 @@ window.TutorIA = (function(){
     if(_openedUnit && _openedUnit === uid && msgsEl && msgsEl.childNodes.length){
       // Texto da unidade INTEIRA (todas as seções, do store) — não só a seção
       // visível que o chamador capturou do DOM. Fallback pro que veio no ctx.
-      _ctx.unitText = (uid && _unitTextById(uid, 30000)) || (ctx && ctx.unitText) || _ctx.unitText;
+      _ctx.unitText = (uid && _unitTextById(uid, 50000)) || (ctx && ctx.unitText) || _ctx.unitText;
       d.hidden = false; _scroll();
       const inp = document.getElementById('tutorInput'); if(inp) inp.focus();
       return Promise.resolve();
@@ -31539,7 +31562,7 @@ window.TutorIA = (function(){
     _ctx.unitTitle = (ctx && ctx.unitTitle) || '';
     // Unidade INTEIRA do store (corrige o tutor "ver" só o bloco inicial); o
     // texto do DOM que o botão captura é só fallback.
-    _ctx.unitText = (uid && _unitTextById(uid, 30000)) || (ctx && ctx.unitText) || '';
+    _ctx.unitText = (uid && _unitTextById(uid, 50000)) || (ctx && ctx.unitText) || '';
     const u = d.querySelector('#tutorUnit'); if(u) u.textContent = _ctx.unitTitle || '';
     d.hidden = false;
     _updateCostHint();
@@ -31674,7 +31697,7 @@ window.TutorIA = (function(){
     // unidade renderiza UMA seção por vez, então o DOM (#blockStage) só tem a
     // seção visível. Ler do store dá o conteúdo completo e atual, não só o bloco
     // inicial. Fallback pro DOM se o store não resolver a unidade.
-    let text = uid ? _unitTextById(uid, 30000) : '';
+    let text = uid ? _unitTextById(uid, 50000) : '';
     if(!text){ const bs = document.getElementById('blockStage'); text = bs ? (bs.innerText || '').trim().slice(0, 30000) : ''; }
     return { unitId: uid, unitTitle: title, unitText: text };
   }
