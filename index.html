@@ -10493,6 +10493,17 @@ const Auth = (function(){
     };
     // Admin → liga o debug do console (pra o suporte continuar enxergando os logs).
     if(role === 'admin'){ try { window.__falconDebug = true; } catch(_){} }
+    // CPF: dado SENSÍVEL (LGPD) — carregado SÓ do próprio usuário (nunca entra no
+    // diretório público de perfis, que é lido por todos p/ @menções). Usado na
+    // marca d'água das provas compiladas.
+    userObj.cpf = (row && row.cpf) || '';
+    if(!userObj.cpf && window._sb){
+      try {
+        const rc = await window._sb.schema('crm').from('user_profiles')
+          .select('cpf').eq('user_id', authUser.id).maybeSingle();
+        if(rc && rc.data && rc.data.cpf) userObj.cpf = rc.data.cpf;
+      } catch(_){}
+    }
     // Espelha pro UbiqueStore.user_profiles local pra que Profile.get/
     // Profile.needsOnboarding funcionem sem mudanças. Idempotente.
     _mirrorProfileToLocal(userObj);
@@ -10514,6 +10525,7 @@ const Auth = (function(){
         nickname:    user.nickname || '',
         handle:      user.handle || '',
         bio:         user.bio || '',
+        cpf:         user.cpf || '',
         photoUrl:    user.photoUrl || '',
         photoTransform: user.photoTransform || { x:0, y:0, scale:1 },
         role:        user.role || 'student',
@@ -19671,6 +19683,7 @@ const Profile = (function(){
       display_name: profile.display_name || profile.displayName || null,
       nickname: profile.nickname || null,
       genero: profile.genero || null,
+      cpf: profile.cpf || null,
       full_name_public: profile.namePublic !== false,
       handle: profile.handle || null,
       bio: profile.bio || null,
@@ -20034,6 +20047,11 @@ Renderers.account = function(route){
             <span class="field-help">O tutor e os cenários de voz usam isso pra te tratar certinho (senhor / senhora / neutro).</span>
           </div>
           <div class="field">
+            <label for="accCpf">CPF</label>
+            <input class="field-input" id="accCpf" type="text" inputmode="numeric" maxlength="14" placeholder="000.000.000-00" value="${Util.attr(profile.cpf || '')}">
+            <span class="field-help">Aparece na marca d'água das provas que você compila (identifica suas cópias). Só você e a equipe veem.</span>
+          </div>
+          <div class="field">
             <label for="accHandle">@ID único <span class="account-field-required">*</span></label>
             <div class="account-handle-row">
               <span class="account-handle-prefix">@</span>
@@ -20351,6 +20369,24 @@ Renderers.account.mount = function(stageEl){
   const displayName = stageEl.querySelector('#accDisplayName');
   const nickname    = stageEl.querySelector('#accNickname');
   const genero      = stageEl.querySelector('#accGenero');
+  const cpfEl       = stageEl.querySelector('#accCpf');
+  // CPF: máscara ao digitar + validação de dígitos verificadores (marca d'água).
+  function _fmtCpf(v){
+    const c = String(v == null ? '' : v).replace(/\D/g, '').slice(0, 11);
+    if(c.length > 9) return c.slice(0,3) + '.' + c.slice(3,6) + '.' + c.slice(6,9) + '-' + c.slice(9);
+    if(c.length > 6) return c.slice(0,3) + '.' + c.slice(3,6) + '.' + c.slice(6);
+    if(c.length > 3) return c.slice(0,3) + '.' + c.slice(3);
+    return c;
+  }
+  function _validaCpf(v){
+    const c = String(v == null ? '' : v).replace(/\D/g, '');
+    if(c.length !== 11 || /^(\d)\1{10}$/.test(c)) return false;
+    let s = 0; for(let i = 0; i < 9; i++) s += parseInt(c[i], 10) * (10 - i);
+    let d1 = (s * 10) % 11; if(d1 === 10) d1 = 0; if(d1 !== parseInt(c[9], 10)) return false;
+    s = 0; for(let i = 0; i < 10; i++) s += parseInt(c[i], 10) * (11 - i);
+    let d2 = (s * 10) % 11; if(d2 === 10) d2 = 0; return d2 === parseInt(c[10], 10);
+  }
+  if(cpfEl) cpfEl.addEventListener('input', function(){ cpfEl.value = _fmtCpf(cpfEl.value); });
   const handleEl    = stageEl.querySelector('#accHandle');
   const handleStat  = stageEl.querySelector('#accHandleStatus');
   const bio         = stageEl.querySelector('#accBio');
@@ -20637,6 +20673,14 @@ Renderers.account.mount = function(stageEl){
         if(handleEl) handleEl.focus();
         return;
       }
+      // CPF é opcional; se preenchido, precisa ser válido (vai na marca d'água).
+      const cpfDigits = (cpfEl && cpfEl.value || '').replace(/\D/g, '');
+      if(cpfDigits && !_validaCpf(cpfDigits)){
+        if(saveFB){ saveFB.textContent = 'CPF inválido. Confira os números.'; saveFB.className = 'account-save-feedback is-error'; }
+        if(cpfEl) cpfEl.focus();
+        return;
+      }
+      const cpfMasked = cpfDigits ? _fmtCpf(cpfDigits) : '';
       // Loading feedback
       if(saveFB){ saveFB.textContent = 'Salvando…'; saveFB.className = 'account-save-feedback'; }
       saveBtn.disabled = true;
@@ -20659,6 +20703,7 @@ Renderers.account.mount = function(stageEl){
           displayName: dispName,
           nickname: nick,
           genero: (genero && genero.value) || '',
+          cpf: cpfMasked,
           handle: h,
           bio: bioTxt,
           namePublic: namePublicEl ? !!namePublicEl.checked : true
@@ -34707,6 +34752,13 @@ const QuestionsCompiler = (function(){
 })();
 window.QuestionsCompiler = QuestionsCompiler;
 
+// CPF do usuário atual pra marca d'água das provas compiladas. Prioriza o
+// Profile (reflete edições da sessão na Conta) e cai no MOCK_USER (valor do
+// login). Privado — é sempre o CPF do próprio usuário logado.
+function _userCpf(){
+  try{ const u = window.MOCK_USER || {}; const p = (window.Profile && Profile.get) ? (Profile.get(u.id) || {}) : {}; return p.cpf || u.cpf || ''; }catch(e){ return ''; }
+}
+
 // Junta tudo e dispara o download da prova a partir do estado atual de filtros.
 function _bankCompileProva(route){
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
@@ -34732,7 +34784,7 @@ function _bankCompileProva(route){
   QuestionsCompiler.download(sections, itemById, {
     candidato:    (window.MOCK_USER && window.MOCK_USER.name) || '',
     email:        (window.MOCK_USER && window.MOCK_USER.email) || '',
-    cpf:          (window.MOCK_USER && window.MOCK_USER.cpf) || '',  // ainda não temos CPF; campo pronto p/ o futuro
+    cpf:          _userCpf(),
     copiaId:      copiaId,
     concursoSigla: concursoSigla,
     concursoName: examObj ? examObj.name : concursoSigla,
@@ -35005,7 +35057,7 @@ function _bankCompileEssayProva(route){
   EssaysCompiler.download(sections, {
     candidato:    (window.MOCK_USER && window.MOCK_USER.name) || '',
     email:        (window.MOCK_USER && window.MOCK_USER.email) || '',
-    cpf:          (window.MOCK_USER && window.MOCK_USER.cpf) || '',
+    cpf:          _userCpf(),
     copiaId:      copiaId,
     concursoSigla: concursoSigla,
     concursoName: examObj ? examObj.name : concursoSigla,
