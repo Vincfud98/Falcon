@@ -7802,6 +7802,14 @@
   #unitEditorModal [data-block-card].dragging{ opacity:.4; }
   #unitEditorModal [data-block-card].drag-over{ border-color:var(--accent); }
 
+  /* Selinho de autosave no topo do editor de unidade */
+  .ue-autosave-status{ font-family:var(--mono); font-size:.64rem; letter-spacing:.04em; padding:.25rem .6rem; border-radius:999px; border:1px solid transparent; white-space:nowrap; transition:color .2s ease,background .2s ease; }
+  .ue-autosave-status[hidden]{ display:none; }
+  .ue-autosave-status.is-dirty{ color:var(--amber,#e9b65a); border-color:var(--amber-border,rgba(233,182,90,.35)); background:var(--amber-lo,rgba(233,182,90,.12)); }
+  .ue-autosave-status.is-saving{ color:var(--text-mute); border-color:var(--border-soft); }
+  .ue-autosave-status.is-saved{ color:var(--accent); border-color:var(--accent-border); background:var(--accent-lo); }
+  .ue-autosave-status.is-error{ color:var(--error,#e87878); border-color:rgba(232,120,120,.4); background:rgba(232,120,120,.1); }
+
   /* Tags-field reutilizável (chips + autocomplete) */
   .ue-tag-chip{
     display:inline-flex;align-items:center;gap:.3rem;
@@ -50156,6 +50164,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     ueAllBlocksCache = [];
     ueDownloadsCache = [];
     document.getElementById('unitEditorModal').classList.add('active');
+    if(typeof _ueSetAutosaveStatus === 'function') _ueSetAutosaveStatus('');  // selinho limpo ao abrir
     ueRenderSidebar();
     ueRenderBlockTypeButtons();
     document.getElementById('ueBlocksList').innerHTML = '<div class="loading">Carregando blocos…</div>';
@@ -50181,9 +50190,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
 
   function closeUnitEditor(){
+    // Flush de qualquer autosave pendente ANTES de fechar (não perde a última
+    // edição feita dentro da janela de debounce). ueSaveBlock lê o DOM de forma
+    // síncrona no início, então funciona mesmo fechando logo em seguida.
+    try{
+      if(typeof _ueAutosaveTimers !== 'undefined'){
+        Object.keys(_ueAutosaveTimers).forEach(function(key){
+          clearTimeout(_ueAutosaveTimers[key]); delete _ueAutosaveTimers[key];
+          try{ ueSaveBlock(key, { silent: true }).catch(function(){}); }catch(_){}
+        });
+      }
+    }catch(_){}
     document.getElementById('unitEditorModal').classList.remove('active');
     ueCurrentUnitId = null;
     _ueCurrentSectionId = null;
+    if(typeof _ueSetAutosaveStatus === 'function') _ueSetAutosaveStatus('');
   }
 
   // Matérias do CONCURSO da unidade em edição (pra filtrar pickers do banco).
@@ -51098,6 +51119,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(typeof uePreviewRefresh === 'function') uePreviewRefresh(bid);
     // Sincroniza com banco de biografias quando o bloco é biography
     if(typeof window._bioBankSyncFromBlock === 'function') window._bioBankSyncFromBlock(b);
+    // Autosave: grava no banco (debounced) + re-vetoriza — não perde mais conteúdo.
+    if(typeof window._ueScheduleAutosave === 'function') window._ueScheduleAutosave(bid);
   }
 
   function _ueRerenderBlockBody(bid){
@@ -57061,8 +57084,59 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }, 4000);
   }
 
-  async function ueSaveBlock(bid){
-    const b = ueBlocksCache.find(function(x){ return x.id === bid; });
+  // ── Autosave dos blocos do editor de unidade ──────────────────────────────
+  // O store é in-memory; antes, edições só iam pro banco pelo botão "Salvar" (daí
+  // perder conteúdo). Agora toda edição agenda (debounced 1,2s) um ueSaveBlock
+  // SILENCIOSO → grava no banco E agenda a re-vetorização (embed-unidades). Selinho
+  // "Salvando…/Salvo" no topo do editor. Os botões manuais continuam como reforço.
+  const _ueAutosaveTimers = {};
+  function _ueSetAutosaveStatus(state){
+    const el = document.getElementById('ueAutosaveStatus');
+    if(!el) return;
+    el.hidden = false;
+    el.classList.remove('is-dirty','is-saving','is-saved','is-error');
+    if(state === 'dirty'){ el.classList.add('is-dirty'); el.textContent = 'Alterações não salvas'; }
+    else if(state === 'saving'){ el.classList.add('is-saving'); el.textContent = 'Salvando…'; }
+    else if(state === 'saved'){ el.classList.add('is-saved'); el.textContent = 'Salvo'; }
+    else if(state === 'error'){ el.classList.add('is-error'); el.textContent = 'Erro ao salvar — use o botão Salvar'; }
+    else { el.hidden = true; el.textContent = ''; }
+  }
+  function _ueScheduleAutosave(bid){
+    if(bid == null || !ueCurrentUnitId) return;
+    const key = String(bid);
+    _ueSetAutosaveStatus('dirty');
+    if(_ueAutosaveTimers[key]) clearTimeout(_ueAutosaveTimers[key]);
+    _ueAutosaveTimers[key] = setTimeout(function(){
+      delete _ueAutosaveTimers[key];
+      _ueAutosavePersist(bid);
+    }, 1200);
+  }
+  async function _ueAutosavePersist(bid){
+    _ueSetAutosaveStatus('saving');
+    try{
+      await ueSaveBlock(bid, { silent: true });
+      if(!Object.keys(_ueAutosaveTimers).length) _ueSetAutosaveStatus('saved');
+    }catch(e){ console.warn('[autosave]', e); _ueSetAutosaveStatus('error'); }
+  }
+  window._ueScheduleAutosave = _ueScheduleAutosave;
+
+  // Autosave também nos inputs SIMPLES (ue-bf-{key}-{bid}) — URL de imagem/vídeo,
+  // legenda, título etc. — que não passam pelo _ueSaveStructured. Delegação única.
+  if(!window.__ueAutosaveWired){
+    window.__ueAutosaveWired = true;
+    const _ueFieldBid = function(t){
+      if(!t || !t.id) return null;
+      const m = /^ue-bf-.+-(\d+)$/.exec(t.id);
+      return m ? m[1] : null;
+    };
+    const _onEdit = function(e){ const bid = _ueFieldBid(e.target); if(bid != null) _ueScheduleAutosave(bid); };
+    document.addEventListener('input', _onEdit);
+    document.addEventListener('change', _onEdit);
+  }
+
+  async function ueSaveBlock(bid, opts){
+    opts = opts || {};
+    const b = ueBlocksCache.find(function(x){ return String(x.id) === String(bid); });
     if(!b) return;
     _ueRefSyncFromBank(b); // referências: grava o autor/campos atuais do banco de obras
     const titleEl  = document.getElementById('ue-bf-title-'  + bid);
@@ -57107,11 +57181,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         const { error } = await conteudo().from('unit_blocks').update(supaUpdates).eq('id', bid);
         if(error){
           console.error('[Supabase] unit_blocks.update falhou:', error);
+          if(opts.silent) throw error;
           alert('Erro ao salvar bloco no Supabase: ' + error.message);
           return;
         }
       }catch(e){
         console.error('[Supabase] unit_blocks.update exception:', e);
+        if(opts.silent) throw e;
         alert('Erro de rede ao salvar bloco: ' + e.message);
         return;
       }
@@ -57130,10 +57206,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(rawTa) rawTa.value = JSON.stringify(content, null, 2);
     ueRenderSectionsNav();
     _scheduleUnitReembed(b.unit_id);   // texto mudou → re-vetoriza a unidade
-    // Banner de confirmação
-    const blockTitle = title || ('Bloco ' + b.type);
-    if(typeof window.ueToast === 'function'){
-      window.ueToast('"' + blockTitle + '" salvo com sucesso', 'success');
+    // Banner de confirmação (autosave é silencioso — usa o selinho no topo)
+    if(!opts.silent){
+      const blockTitle = title || ('Bloco ' + b.type);
+      if(typeof window.ueToast === 'function'){
+        window.ueToast('"' + blockTitle + '" salvo com sucesso', 'success');
+      }
     }
   }
 
@@ -58153,6 +58231,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     <header class="modal-header" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:1rem 1.5rem;flex-shrink:0">
       <div id="ueBreadcrumb" class="s-subtitle" style="font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;color:var(--text-mute);margin:0">…</div>
       <div style="display:flex;align-items:center;gap:.5rem">
+        <span id="ueAutosaveStatus" class="ue-autosave-status" hidden></span>
         <button class="btn btn-ghost btn-sm" id="ueDepublishBtn" onclick="ueDepublish()">Despublicar</button>
         <button class="btn btn-ghost btn-sm" id="ueScheduleBtn" onclick="ueScheduleOpen()">Agendar</button>
         <button class="btn btn-sm" id="uePublishBtn" onclick="uePublish()">Publicar</button>
