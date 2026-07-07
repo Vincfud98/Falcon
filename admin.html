@@ -9654,7 +9654,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           <div class="section-head">
             <h2>Clientes</h2>
             <span class="count" id="clients-count">— registros</span>
-            <button class="btn" id="newClientBtn" style="margin-left:auto">+ Novo cliente</button>
+            <button class="btn btn-ghost" id="syncPortariaClientsBtn" style="margin-left:auto" title="Cria/atualiza clientes a partir de quem tem acesso na Portaria">Sincronizar da Portaria</button>
+            <button class="btn" id="newClientBtn">+ Novo cliente</button>
           </div>
 
           <!-- Barra de busca -->
@@ -34064,6 +34065,85 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
     // Botão novo cliente
     document.getElementById('newClientBtn').addEventListener('click', () => openClientModal(null));
+    // Botão "Sincronizar da Portaria" → cria/vincula clientes a partir do acesso.
+    document.getElementById('syncPortariaClientsBtn')?.addEventListener('click', _onSyncPortariaClients);
+  }
+
+  // ── Sincronização Portaria → CRM (Passo 2 e 3) ──────────────────────────
+  // Cria/atualiza clientes do CRM a partir de quem tem acesso (platform_access
+  // + app_users, já mesclados em platformAccessCache). Idempotente: novo →
+  // INSERT (status mapeado, source 'portaria', vínculo app_user_id); existente
+  // (por app_user_id ou email) → só VINCULA app_user_id e completa o nome vazio,
+  // SEM sobrescrever status/edições manuais do CRM. Ignora admin/superadmin.
+  function _portariaStatusToClient(st){
+    if(st === 'suspended') return 'former_customer';
+    if(st === 'pending')   return 'lead';
+    return 'customer';   // active — tem conta e não está suspenso
+  }
+  function _defaultBrandIdForImport(){
+    const list = (typeof brandsCache !== 'undefined' && Array.isArray(brandsCache)) ? brandsCache.slice() : [];
+    list.sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
+    return list.length ? list[0].id : null;
+  }
+  async function _syncClientsFromPortaria(people, brandId){
+    await loadClients();   // clientsCache fresco → evita duplicar
+    const byAppUser = new Map(), byEmail = new Map();
+    (clientsCache || []).forEach(c => {
+      if(c.app_user_id) byAppUser.set(String(c.app_user_id), c);
+      if(c.email) byEmail.set(String(c.email).toLowerCase(), c);
+    });
+    const inserts = [], linkUpdates = [];
+    (people || []).forEach(p => {
+      const role = p.role || 'student';
+      if(role === 'admin' || role === 'superadmin') return;
+      const email = (p.email || '').trim().toLowerCase();
+      if(!email) return;
+      const appUserId = p._app_user_id || null;
+      const existing = (appUserId && byAppUser.get(String(appUserId))) || byEmail.get(email) || null;
+      if(!existing){
+        inserts.push({
+          brand_id: brandId,
+          full_name: p.full_name || email.split('@')[0],
+          email: p.email,
+          app_user_id: appUserId,
+          status: _portariaStatusToClient(p.status),
+          source: 'portaria',
+          first_contact_at: new Date().toISOString(),
+        });
+      } else {
+        const patch = {};
+        if(!existing.app_user_id && appUserId) patch.app_user_id = appUserId;
+        if((!existing.full_name || !String(existing.full_name).trim()) && p.full_name) patch.full_name = p.full_name;
+        if(Object.keys(patch).length) linkUpdates.push({ id: existing.id, patch });
+      }
+    });
+    let created = 0, linked = 0, errors = 0;
+    if(inserts.length){
+      const { error } = await crm().from('clients').insert(inserts);
+      if(error){ console.warn('[sync portaria insert]', error); errors++; }
+      else created = inserts.length;
+    }
+    for(const u of linkUpdates){
+      const { error } = await crm().from('clients').update(u.patch).eq('id', u.id);
+      if(error){ console.warn('[sync portaria link]', error); errors++; } else linked++;
+    }
+    return { created, linked, errors };
+  }
+  async function _onSyncPortariaClients(){
+    const btn = document.getElementById('syncPortariaClientsBtn');
+    const brandId = _defaultBrandIdForImport();
+    if(!brandId){ alert('Cadastre uma marca antes de sincronizar (Comercial → Configurações → Marcas).'); return; }
+    if(!confirm('Criar/atualizar os clientes do CRM a partir de quem tem acesso na Portaria?\n\nQuem já é cliente é apenas VINCULADO (não sobrescreve dados).')) return;
+    const orig = btn ? btn.textContent : '';
+    if(btn){ btn.disabled = true; btn.textContent = 'Sincronizando…'; }
+    try{
+      if(!platformAccessCache || !platformAccessCache.length) await loadPlatformAccess();
+      const res = await _syncClientsFromPortaria(platformAccessCache || [], brandId);
+      await loadClients(); renderClientsList();
+      const brandName = ((brandsCache || []).find(b => b.id === brandId) || {}).name || 'marca padrão';
+      alert('Sincronização concluída.\n\nNovos clientes: ' + res.created + '\nVinculados: ' + res.linked + '\nMarca usada: ' + brandName + (res.errors ? ('\nErros: ' + res.errors + ' (ver console)') : ''));
+    }catch(e){ console.warn('[sync portaria ex]', e); alert('Erro ao sincronizar: ' + (e && e.message || e)); }
+    if(btn){ btn.disabled = false; btn.textContent = orig; }
   }
 
   /**
@@ -50085,6 +50165,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             .update(auPatch).eq('id', existing._app_user_id);
           if(error) console.warn('[app_users update]', error);
         }
+        // 4. Passo 3 — mantém o CRM em dia: cria/vincula o cliente deste acesso.
+        //    (best-effort; nunca atrapalha o grant de acesso).
+        try{
+          const _brandId = _defaultBrandIdForImport();
+          if(_brandId){
+            const _person = {
+              email,
+              full_name: fullName || null,
+              _app_user_id: (existing && existing._app_user_id) || null,
+              status: status === 'suspended' ? 'suspended' : ((existing && existing._app_user_id) ? 'active' : 'pending'),
+              role,
+            };
+            await _syncClientsFromPortaria([_person], _brandId);
+          }
+        }catch(e){ console.warn('[portaria→cliente sync ex]', e); }
       }catch(e){ console.warn('[portaria save ex]', e); }
     }
 
