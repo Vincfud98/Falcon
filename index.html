@@ -28099,10 +28099,18 @@ async function _iniLoadFeed(examId){
   const cards = [];
   try{
     const pr = await window._sb.schema('aluno').from('forum_posts')
-      .select('id, title, created_at, exam_id, deleted_at')
-      .eq('exam_id', String(examId)).is('deleted_at', null)
-      .order('created_at', { ascending: false }).limit(40);
-    const posts = (pr.data || []).filter(function(p){ return p && p.title; });
+      .select('id, title, created_at, exam_id, subject_id')
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false }).limit(80);
+    // MESMO critério do Fórum (~24054): post novo carrega exam_id; post ANTIGO
+    // (exam_id null) pertence ao concurso da sua MATÉRIA (via exam_subjects).
+    // Filtrar só por exam_id no SQL escondia todos os posts antigos.
+    const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list) ? (UbiqueStore.exam_subjects.list() || []) : [];
+    const concSubj = new Set(rel.filter(function(es){ return String(es.exam_id) === String(examId); }).map(function(es){ return String(es.subject_id); }));
+    const posts = (pr.data || []).filter(function(p){
+      if(!p || !p.title) return false;
+      return p.exam_id ? String(p.exam_id) === String(examId) : (p.subject_id ? concSubj.has(String(p.subject_id)) : false);
+    });
     if(posts.length){
       const ids = posts.map(function(p){ return p.id; });
       const lc = {}, cc = {};
@@ -28310,18 +28318,31 @@ Renderers.inicio = function(){
         + li('Unidades concluídas', (un.done || 0), un.total ? ('/ ' + un.total) : '')
         + li('Discursivas corrigidas', (es.submitted || 0), nota != null ? ('média ' + nota.toFixed(1).replace('.', ',')) : '')
         + '</div>';
-      const all = (perf.topics || [])
+      // Candidatos: TÓPICOS do edital quando os itens são etiquetados; sem
+      // tópicos, cai pro RANKING DE UNIDADES (o mesmo do Desempenho), rankeado
+      // pelos piores — nunca esconde o bloco de quem já respondeu questões.
+      const sigOf = {};
+      cursos.forEach(function(c){ if(c && c._subjectId != null) sigOf[String(c._subjectId)] = c.sigla || ''; });
+      let cand = (perf.topics || [])
         .map(function(t){ const a = (t.quiz && t.quiz.answered) || 0; return { name: t.name, a: a, pct: a ? Math.round(((t.quiz.correct || 0) / a) * 100) : null }; })
         .filter(function(t){ return t.pct != null; });
-      // Limiar ADAPTATIVO: prefere tópicos com amostra decente (3+ respostas);
-      // se o aluno ainda espalhou pouco, mostra com o que há (1+), em vez de
-      // esconder o bloco de quem já respondeu bastante em muitos tópicos.
-      let tps = all.filter(function(t){ return t.a >= 3; });
-      if(!tps.length) tps = all;
+      if(!cand.length){
+        cand = (perf.unitRows || [])
+          .map(function(u){
+            const a = (u.quiz && u.quiz.answered) || 0;
+            const sg = sigOf[String(u.subjectId)] || '';
+            return { name: (sg ? sg + ' · ' : '') + String(u.name || '').replace(/^Unid\.\s*/, ''), a: a, pct: a ? Math.round(((u.quiz.correct || 0) / a) * 100) : null };
+          })
+          .filter(function(t){ return t.pct != null; });
+      }
+      // Limiar ADAPTATIVO: prefere amostra decente (3+ respostas); se o aluno
+      // ainda espalhou pouco, mostra com o que há (1+).
+      let tps = cand.filter(function(t){ return t.a >= 3; });
+      if(!tps.length) tps = cand;
       tps = tps.sort(function(x, y){ return x.pct - y.pct; }).slice(0, 5);
       if(tps.length){
         temasHtml = '<div class="ini-tp">' + tps.map(function(t){
-          return '<div class="ini-tp-row"><div class="l"><span class="n">' + Util.esc(t.name) + '</span><span class="p">' + t.pct + '%</span></div><div class="tr"><div class="fl" style="width:' + t.pct + '%"></div></div></div>';
+          return '<div class="ini-tp-row"><div class="l"><span class="n">' + Util.esc(t.name) + '</span><span class="p">' + t.pct + '%<small style="color:var(--text-mute)"> · ' + t.a + 'q</small></span></div><div class="tr"><div class="fl" style="width:' + t.pct + '%"></div></div></div>';
         }).join('') + '<a class="ini-tp-cta" href="#/performance">Ver desempenho completo &#8594;</a></div>';
       }
     }
