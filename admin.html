@@ -9647,7 +9647,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
               <span class="estat-sec-num">05 · Tokens</span>
               <h2 class="estat-sec-title">Uso de IA (UbiTokens)</h2>
             </div>
-            <p class="estat-sec-note">Consumo de IA pelos alunos no período. Em R$ = valor cobrado (1 ⓤ = R$ 6,20), não o custo real de API — esse vem na próxima fase.</p>
+            <p class="estat-sec-note">Consumo de IA pelos alunos no período. Em R$ = valor cobrado (1 ⓤ = R$ 6,20) — o que o aluno pagou. O custo real de API e o lucro estão na linha de baixo.</p>
           </div>
 
           <div class="estat-cards-grid">
@@ -9660,7 +9660,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             </article>
             <article class="estat-card">
               <span class="estat-card-label">Equivalente</span>
-              <h3 class="estat-card-title">Cobrado (R$)</h3>
+              <h3 class="estat-card-title">Cobrado no período (R$)</h3>
               <div class="estat-card-foot">
                 <span class="estat-card-metric" id="kpi-tokens-brl">—</span>
               </div>
@@ -9685,8 +9685,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
               </div>
             </article>
             <article class="estat-card">
-              <span class="estat-card-label">Margem</span>
-              <h3 class="estat-card-title">Cobrado − custo (R$)</h3>
+              <span class="estat-card-label">Lucro real</span>
+              <h3 class="estat-card-title">Cobrado − custo · desde a medição</h3>
               <div class="estat-card-foot">
                 <span class="estat-card-metric" id="kpi-tokens-margin">—</span>
                 <span class="estat-card-delta" id="kpi-tokens-margin-sub"></span>
@@ -41147,33 +41147,56 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         custoUsdByLabel[lbl] = (custoUsdByLabel[lbl] || 0) + c;
       });
       const custoBrl = custoUsd * usdBrl;
-      const cobradoBrl = totalUbt * 6.20;
+      const cobradoBrl = totalUbt * 6.20;   // cobrado do período INTEIRO (só consumo)
 
-      // ── LUCRO DOS UBITOKENS (por tipo) = cobrado (ⓤ×6,20) − custo real (US$×câmbio).
-      //    Compõe a Receita e alimenta o extrato. Um tipo pode ter custo sem
-      //    cobrança (ex.: modo Ajuda é grátis pro aluno mas custa API) → lucro
-      //    negativo naquele tipo; é correto e transparente. ──
+      // ── ALINHAMENTO CRONOLÓGICO (corrige o viés) ──────────────────────────
+      //    O "cobrado" existe no histórico todo; o "custo real" só a partir de
+      //    quando a instrumentação foi ligada (1º registro em ia.uso_ia).
+      //    Comparar 30 dias de cobrança com 1 dia de custo dá lucro FALSO.
+      //    Então o LUCRO/MARGEM só conta da data do 1º custo pra frente, com o
+      //    cobrado da MESMA janela. Antes disso não dá pra falar de lucro. ──
+      let custoDesde = null;
+      uso.forEach(r => { if(r.criado_em && (!custoDesde || r.criado_em < custoDesde)) custoDesde = r.criado_em; });
+      let cobradoAlinhadoUbt = 0; const cobradoAlinhadoByLabel = {};
+      if(custoDesde){
+        rows.forEach(r => {
+          if(r.criado_em && r.criado_em >= custoDesde){
+            const v = Math.abs(Number(r.delta) || 0);
+            cobradoAlinhadoUbt += v;
+            const lbl = _tokAcaoLabel(r.acao);
+            cobradoAlinhadoByLabel[lbl] = (cobradoAlinhadoByLabel[lbl] || 0) + v;
+          }
+        });
+      }
+      const cobradoAlinhadoBrl = cobradoAlinhadoUbt * 6.20;
+      const lucroAlinhadoBrl = cobradoAlinhadoBrl - custoBrl;   // custo = custoBrl (todo uso_ia é ≥ custoDesde)
+      const desdeTxt = custoDesde ? new Date(custoDesde).toLocaleDateString('pt-BR') : null;
+      const temCusto = uso.length > 0 && !!custoDesde;
+
+      // Lucro POR TIPO (alinhado): cobrado da janela − custo real da janela.
+      // Um tipo pode ter custo sem cobrança (ex.: Ajuda é grátis pro aluno mas
+      // custa API) → lucro negativo naquele tipo; é correto e transparente.
       const profitByLabel = {};
-      const _allLabels = new Set(Object.keys(byAcao).concat(Object.keys(custoUsdByLabel)));
+      const _allLabels = new Set(Object.keys(cobradoAlinhadoByLabel).concat(Object.keys(custoUsdByLabel)));
       _allLabels.forEach(lbl => {
-        const cobradoL = (byAcao[lbl] || 0) * 6.20;
+        const cobradoL = (cobradoAlinhadoByLabel[lbl] || 0) * 6.20;
         const custoL = (custoUsdByLabel[lbl] || 0) * usdBrl;
         profitByLabel[lbl] = { cobrado: cobradoL, custo: custoL, profit: cobradoL - custoL };
       });
-      const tokenProfitBrl = cobradoBrl - custoBrl;
+      const tokenProfitBrl = temCusto ? lucroAlinhadoBrl : 0;
 
-      // Receita = pedidos pagos + lucro dos UbiTokens (valor final; renderKPIs
-      // já pôs o provisório só-pedidos).
+      // Receita = pedidos pagos + lucro dos UbiTokens (alinhado). renderKPIs já
+      // pôs o provisório só-pedidos.
       const _revEl = document.getElementById('kpi-revenue');
       if(_revEl) _revEl.textContent = fmtBRL((_dashOrdersRevenue || 0) + tokenProfitBrl);
       const _bdEl = document.getElementById('kpi-revenue-breakdown');
-      if(_bdEl) _bdEl.textContent = fmtBRL(_dashOrdersRevenue || 0) + ' pedidos · ' + fmtBRL(tokenProfitBrl) + ' UbiTokens';
+      if(_bdEl) _bdEl.textContent = fmtBRL(_dashOrdersRevenue || 0) + ' pedidos · ' + fmtBRL(tokenProfitBrl) + ' UbiTokens' + (desdeTxt ? ' (desde ' + desdeTxt + ')' : '');
 
       // Card "Lucro UbiTokens" (topo — pra não se perder dentro da Receita).
       const _profEl = document.getElementById('kpi-ubt-profit');
-      if(_profEl) _profEl.textContent = (uso.length || totalUbt > 0) ? fmtBRL(tokenProfitBrl) : '—';
+      if(_profEl) _profEl.textContent = temCusto ? fmtBRL(lucroAlinhadoBrl) : '—';
       const _profSub = document.getElementById('kpi-ubt-profit-sub');
-      if(_profSub) _profSub.textContent = (uso.length || totalUbt > 0) ? ('cobrado ' + fmtBRL(cobradoBrl) + ' − custo ' + fmtBRL(custoBrl)) : 'ligue a instrumentação';
+      if(_profSub) _profSub.textContent = temCusto ? ('cobrado ' + fmtBRL(cobradoAlinhadoBrl) + ' − custo ' + fmtBRL(custoBrl) + ' · desde ' + desdeTxt) : 'ligue a instrumentação';
 
       // Snapshot p/ o extrato (modal ao clicar na Receita).
       _receitaExtratoData = {
@@ -41182,20 +41205,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         ordersRevenue: _dashOrdersRevenue || 0,
         orders: _dashOrdersList || [],
         tokenProfit: tokenProfitBrl,
-        cobradoBrl: cobradoBrl,
+        cobradoBrl: cobradoAlinhadoBrl,
         custoBrl: custoBrl,
+        desdeTxt: desdeTxt,
         profitByLabel: profitByLabel,
       };
 
-      costBrlEl.textContent = uso.length ? fmtBRL(custoBrl) : '—';
+      costBrlEl.textContent = temCusto ? fmtBRL(custoBrl) : '—';
       const costUsdEl = document.getElementById('kpi-tokens-cost-usd');
-      if(costUsdEl) costUsdEl.textContent = uso.length ? ('US$ ' + custoUsd.toFixed(2) + ' · câmbio ' + usdBrl.toFixed(2)) : 'sem registro ainda';
+      if(costUsdEl) costUsdEl.textContent = temCusto ? ('US$ ' + custoUsd.toFixed(2) + ' · câmbio ' + usdBrl.toFixed(2) + ' · desde ' + desdeTxt) : 'sem registro ainda';
       const marginEl = document.getElementById('kpi-tokens-margin');
       const marginSub = document.getElementById('kpi-tokens-margin-sub');
-      if(marginEl) marginEl.textContent = uso.length ? fmtBRL(cobradoBrl - custoBrl) : '—';
+      if(marginEl) marginEl.textContent = temCusto ? fmtBRL(lucroAlinhadoBrl) : '—';
       if(marginSub){
-        const pct = cobradoBrl > 0 ? Math.round(((cobradoBrl - custoBrl) / cobradoBrl) * 100) : 0;
-        marginSub.textContent = uso.length ? (pct + '% do cobrado') : 'ligue a instrumentação';
+        const pct = cobradoAlinhadoBrl > 0 ? Math.round((lucroAlinhadoBrl / cobradoAlinhadoBrl) * 100) : 0;
+        marginSub.textContent = temCusto ? (pct + '% do cobrado · desde ' + desdeTxt) : 'ligue a instrumentação';
       }
       const bmEl = document.getElementById('dash-tokens-cost-bymodel');
       if(bmEl){
@@ -41294,7 +41318,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       + '</div>'
       + '<div style="font-size:.72rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.06em;margin:.2rem 0 .5rem;display:flex;justify-content:space-between"><span>Pedidos pagos</span><span style="font-family:var(--mono)">' + fmtBRL(ordersSubtotal) + '</span></div>'
       + (ordersRows.length ? ordersRows.join('') : '<div style="color:var(--text-mute);font-size:.8rem;padding:.3rem 0;font-style:italic">Nenhum pedido no período' + (productId ? ' para este produto' : '') + '.</div>')
-      + '<div style="font-size:.72rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.06em;margin:1.2rem 0 .5rem;display:flex;justify-content:space-between"><span>Lucro UbiTokens (consumo)</span><span style="font-family:var(--mono)">' + (tokenLinkable ? fmtBRL(tokenSubtotal) : '—') + '</span></div>'
+      + '<div style="font-size:.72rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.06em;margin:1.2rem 0 .5rem;display:flex;justify-content:space-between"><span>Lucro UbiTokens (consumo' + (d.desdeTxt ? ' desde ' + esc(d.desdeTxt) : '') + ')</span><span style="font-family:var(--mono)">' + (tokenLinkable ? fmtBRL(tokenSubtotal) : '—') + '</span></div>'
       + (tokenLinkable
           ? (tokenRows.length ? tokenRows.join('') : '<div style="color:var(--text-mute);font-size:.8rem;padding:.3rem 0;font-style:italic">Sem consumo de IA no período.</div>')
           : '<div style="color:var(--text-mute);font-size:.8rem;padding:.3rem 0;font-style:italic">Os UbiTokens ainda não são vinculados a um produto — o vínculo produto↔matéria será definido no Catálogo. Por ora o lucro de tokens aparece só em “Todos os produtos”.</div>')
