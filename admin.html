@@ -9526,13 +9526,22 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           </div>
 
           <div class="estat-cards-grid">
-            <article class="estat-card">
-              <span class="estat-card-label">Receita</span>
+            <article class="estat-card" id="kpi-revenue-card" title="Ver extrato da receita">
+              <span class="estat-card-label">Receita <span style="color:var(--accent);font-size:.62rem;letter-spacing:.03em">· ver extrato</span></span>
               <h3 class="estat-card-title">No período</h3>
               <div class="estat-card-foot">
                 <span class="estat-card-metric" id="kpi-revenue">—</span>
                 <span class="estat-card-delta" id="kpi-revenue-delta"></span>
               </div>
+              <span id="kpi-revenue-breakdown" style="display:block;margin-top:.4rem;font-family:var(--mono);font-size:.66rem;color:var(--text-mute)"></span>
+            </article>
+            <article class="estat-card">
+              <span class="estat-card-label">Lucro UbiTokens</span>
+              <h3 class="estat-card-title">Cobrado − custo real</h3>
+              <div class="estat-card-foot">
+                <span class="estat-card-metric" id="kpi-ubt-profit">—</span>
+              </div>
+              <span id="kpi-ubt-profit-sub" style="display:block;margin-top:.4rem;font-family:var(--mono);font-size:.66rem;color:var(--text-mute)"></span>
             </article>
             <article class="estat-card">
               <span class="estat-card-label">Pedidos pagos</span>
@@ -16131,6 +16140,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   let ordersCache = [];
   let orderItemsCache = [];
   let paymentsCache = [];
+  // Receita = pedidos pagos + lucro dos UbiTokens (consumo). Estes guardam o
+  // recorte do período p/ compor a Receita e alimentar o extrato (modal).
+  let _dashOrdersRevenue = 0;      // receita de pedidos pagos no período (R$)
+  let _dashOrdersList = [];        // pedidos do período (p/ o extrato)
+  let _receitaExtratoData = null;  // snapshot p/ o modal de extrato da Receita
   let enrollmentsCache = [];
 
   // Pedidos
@@ -40627,7 +40641,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       return true;
     });
 
-    // Renderizar
+    // Guarda p/ compor a Receita com o lucro dos UbiTokens (feito em
+    // renderDashboardTokens, que roda depois e tem o custo real) + p/ o extrato.
+    _dashOrdersRevenue = revenue;
+    _dashOrdersList = current;
+    // Card da Receita clicável → abre o extrato (pedidos + lucro UbiTokens).
+    const _rcard = document.getElementById('kpi-revenue-card');
+    if(_rcard && !_rcard._extWired){ _rcard._extWired = true; _rcard.style.cursor = 'pointer'; _rcard.addEventListener('click', _openReceitaExtrato); }
+
+    // Renderizar (valor provisório = só pedidos; renderDashboardTokens soma os UbiTokens)
     document.getElementById('kpi-revenue').textContent = fmtBRL(revenue);
     document.getElementById('kpi-orders').textContent = ordersCount;
     document.getElementById('kpi-ticket').textContent = fmtBRL(ticket);
@@ -41107,12 +41129,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       let uso = [];
       try{
         const { data, error } = await supabase.schema('ia').from('uso_ia')
-          .select('modelo, provider, tokens_in, tokens_out, unidades, criado_em')
+          .select('modelo, provider, acao, tokens_in, tokens_out, unidades, meta, criado_em')
           .gte('criado_em', cutoffISO).limit(50000);
         if(error) console.warn('[dashboard uso_ia]', error.message);
         uso = data || [];
       }catch(e){ console.warn('[dashboard uso_ia ex]', e); }
-      let custoUsd = 0; const byModelUsd = {};
+      let custoUsd = 0; const byModelUsd = {}; const custoUsdByLabel = {};
       uso.forEach(r => {
         let c = 0;
         const p = PRECOS[r.modelo];
@@ -41121,9 +41143,50 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         custoUsd += c;
         const k = r.modelo || (r.provider || '?');
         byModelUsd[k] = (byModelUsd[k] || 0) + c;
+        const lbl = _tokAcaoLabel(r.acao);
+        custoUsdByLabel[lbl] = (custoUsdByLabel[lbl] || 0) + c;
       });
       const custoBrl = custoUsd * usdBrl;
       const cobradoBrl = totalUbt * 6.20;
+
+      // ── LUCRO DOS UBITOKENS (por tipo) = cobrado (ⓤ×6,20) − custo real (US$×câmbio).
+      //    Compõe a Receita e alimenta o extrato. Um tipo pode ter custo sem
+      //    cobrança (ex.: modo Ajuda é grátis pro aluno mas custa API) → lucro
+      //    negativo naquele tipo; é correto e transparente. ──
+      const profitByLabel = {};
+      const _allLabels = new Set(Object.keys(byAcao).concat(Object.keys(custoUsdByLabel)));
+      _allLabels.forEach(lbl => {
+        const cobradoL = (byAcao[lbl] || 0) * 6.20;
+        const custoL = (custoUsdByLabel[lbl] || 0) * usdBrl;
+        profitByLabel[lbl] = { cobrado: cobradoL, custo: custoL, profit: cobradoL - custoL };
+      });
+      const tokenProfitBrl = cobradoBrl - custoBrl;
+
+      // Receita = pedidos pagos + lucro dos UbiTokens (valor final; renderKPIs
+      // já pôs o provisório só-pedidos).
+      const _revEl = document.getElementById('kpi-revenue');
+      if(_revEl) _revEl.textContent = fmtBRL((_dashOrdersRevenue || 0) + tokenProfitBrl);
+      const _bdEl = document.getElementById('kpi-revenue-breakdown');
+      if(_bdEl) _bdEl.textContent = fmtBRL(_dashOrdersRevenue || 0) + ' pedidos · ' + fmtBRL(tokenProfitBrl) + ' UbiTokens';
+
+      // Card "Lucro UbiTokens" (topo — pra não se perder dentro da Receita).
+      const _profEl = document.getElementById('kpi-ubt-profit');
+      if(_profEl) _profEl.textContent = (uso.length || totalUbt > 0) ? fmtBRL(tokenProfitBrl) : '—';
+      const _profSub = document.getElementById('kpi-ubt-profit-sub');
+      if(_profSub) _profSub.textContent = (uso.length || totalUbt > 0) ? ('cobrado ' + fmtBRL(cobradoBrl) + ' − custo ' + fmtBRL(custoBrl)) : 'ligue a instrumentação';
+
+      // Snapshot p/ o extrato (modal ao clicar na Receita).
+      _receitaExtratoData = {
+        period_days: dashFilters.period_days,
+        usdBrl: usdBrl,
+        ordersRevenue: _dashOrdersRevenue || 0,
+        orders: _dashOrdersList || [],
+        tokenProfit: tokenProfitBrl,
+        cobradoBrl: cobradoBrl,
+        custoBrl: custoBrl,
+        profitByLabel: profitByLabel,
+      };
+
       costBrlEl.textContent = uso.length ? fmtBRL(custoBrl) : '—';
       const costUsdEl = document.getElementById('kpi-tokens-cost-usd');
       if(costUsdEl) costUsdEl.textContent = uso.length ? ('US$ ' + custoUsd.toFixed(2) + ' · câmbio ' + usdBrl.toFixed(2)) : 'sem registro ainda';
@@ -41142,6 +41205,103 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         ).join('') : '<span style="color:var(--text-mute)">sem registro ainda</span>';
       }
     }
+  }
+
+  // ── EXTRATO DA RECEITA (modal ao clicar no card Receita) ──────────────────
+  // Mostra a composição: pedidos pagos + lucro dos UbiTokens (cobrado − custo
+  // real), com filtro por PRODUTO. Os produtos ainda serão cadastrados no
+  // Catálogo; enquanto isso o select traz só "Todos os produtos". Pedidos já
+  // filtram por produto (order_items.product_id); UbiTokens ainda não têm
+  // vínculo a produto (será definido no Catálogo — produto↔matéria).
+  function _openReceitaExtrato(){
+    let ov = document.getElementById('receitaExtratoModal');
+    if(!ov){
+      ov = document.createElement('div');
+      ov.className = 'modal-backdrop';
+      ov.id = 'receitaExtratoModal';
+      ov.innerHTML =
+        '<div class="modal" style="max-width:640px">'
+        + '<div class="modal-header">'
+        +   '<h3 style="margin:0;font-family:var(--serif);font-weight:400" id="receitaExtratoTitle">Composição da Receita</h3>'
+        +   '<button class="modal-close" id="receitaExtratoClose" type="button">×</button>'
+        + '</div>'
+        + '<div class="modal-body" id="receitaExtratoBody" style="max-height:70vh;overflow-y:auto"></div>'
+        + '</div>';
+      document.body.appendChild(ov);
+      ov.addEventListener('click', function(e){ if(e.target === ov) ov.classList.remove('active'); });
+      const cb = ov.querySelector('#receitaExtratoClose');
+      if(cb) cb.addEventListener('click', function(){ ov.classList.remove('active'); });
+    }
+    const d = _receitaExtratoData;
+    const titleEl = ov.querySelector('#receitaExtratoTitle');
+    if(titleEl) titleEl.textContent = 'Composição da Receita — últimos ' + ((d && d.period_days) || dashFilters.period_days) + ' dias';
+    _renderReceitaExtratoBody('');
+    ov.classList.add('active');
+  }
+
+  function _renderReceitaExtratoBody(productId){
+    const body = document.getElementById('receitaExtratoBody');
+    if(!body) return;
+    const d = _receitaExtratoData;
+    if(!d){ body.innerHTML = '<div style="color:var(--text-mute);padding:1rem 0">Sem dados ainda — aguarde o painel carregar e tente de novo.</div>'; return; }
+    const _dt = function(v){ try { return new Date(v).toLocaleDateString('pt-BR'); } catch(_){ return ''; } };
+    const prods = (typeof productsCache !== 'undefined' ? productsCache : []);
+    const opts = ['<option value="">Todos os produtos</option>'].concat(
+      prods.map(p => '<option value="' + esc(String(p.id)) + '"' + (String(p.id) === String(productId) ? ' selected' : '') + '>' + esc(p.name || ('#' + p.id)) + '</option>')
+    ).join('');
+
+    // PEDIDOS (filtra por produto via order_items.product_id)
+    const orders = d.orders || [];
+    const oItems = (typeof orderItemsCache !== 'undefined' ? orderItemsCache : []);
+    const clients = (typeof clientsCache !== 'undefined' ? clientsCache : []);
+    let ordersRows = [], ordersSubtotal = 0;
+    orders.forEach(o => {
+      let val;
+      if(!productId){ val = parseFloat(o.total || 0); }
+      else {
+        const its = oItems.filter(oi => String(oi.order_id) === String(o.id) && String(oi.product_id) === String(productId));
+        if(!its.length) return;
+        val = its.reduce((s, oi) => s + parseFloat(oi.subtotal != null ? oi.subtotal : ((oi.unit_price || 0) * (oi.quantity || 1))), 0);
+      }
+      ordersSubtotal += val;
+      const cli = clients.find(c => String(c.id) === String(o.client_id));
+      const nome = cli ? (cli.full_name || cli.email || 'cliente') : 'cliente';
+      const dt = o.paid_at || o.placed_at || '';
+      ordersRows.push('<div style="display:flex;justify-content:space-between;gap:.6rem;padding:.3rem 0;border-bottom:1px solid var(--border-soft);font-size:.82rem"><span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Pedido ' + esc(String(o.order_number || ('#' + o.id))) + ' · ' + esc(nome) + (dt ? (' · ' + _dt(dt)) : '') + '</span><span style="font-family:var(--mono);white-space:nowrap">' + fmtBRL(val) + '</span></div>');
+    });
+
+    // UBITOKENS (sem vínculo a produto ainda → só em "Todos os produtos")
+    const tokenLinkable = !productId;
+    let tokenRows = [], tokenSubtotal = 0;
+    if(tokenLinkable){
+      const pbl = d.profitByLabel || {};
+      Object.keys(pbl).sort((a, b) => pbl[b].profit - pbl[a].profit).forEach(lbl => {
+        const it = pbl[lbl];
+        tokenSubtotal += it.profit;
+        tokenRows.push('<div style="display:flex;justify-content:space-between;gap:.6rem;padding:.3rem 0;border-bottom:1px solid var(--border-soft);font-size:.82rem"><span style="color:var(--text)">' + esc(lbl) + '</span><span style="font-family:var(--mono);white-space:nowrap" title="cobrado ' + fmtBRL(it.cobrado) + ' − custo real ' + fmtBRL(it.custo) + '">' + fmtBRL(it.profit) + '</span></div>');
+      });
+    }
+
+    const totalFiltrado = ordersSubtotal + (tokenLinkable ? tokenSubtotal : 0);
+    body.innerHTML =
+      '<div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1.1rem">'
+      +   '<label for="receitaExtratoProduto" style="font-size:.78rem;color:var(--text-mute)">Produto</label>'
+      +   '<select id="receitaExtratoProduto" style="flex:1;background:var(--bg-elev);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:.4rem .6rem;font-size:.82rem;font-family:var(--sans)">' + opts + '</select>'
+      + '</div>'
+      + '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:1.1rem;padding-bottom:.7rem;border-bottom:1px solid var(--border)">'
+      +   '<span style="font-size:.74rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.06em">Total</span>'
+      +   '<span style="font-family:var(--mono);font-size:1.35rem;color:var(--text)">' + fmtBRL(totalFiltrado) + '</span>'
+      + '</div>'
+      + '<div style="font-size:.72rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.06em;margin:.2rem 0 .5rem;display:flex;justify-content:space-between"><span>Pedidos pagos</span><span style="font-family:var(--mono)">' + fmtBRL(ordersSubtotal) + '</span></div>'
+      + (ordersRows.length ? ordersRows.join('') : '<div style="color:var(--text-mute);font-size:.8rem;padding:.3rem 0;font-style:italic">Nenhum pedido no período' + (productId ? ' para este produto' : '') + '.</div>')
+      + '<div style="font-size:.72rem;color:var(--text-mute);text-transform:uppercase;letter-spacing:.06em;margin:1.2rem 0 .5rem;display:flex;justify-content:space-between"><span>Lucro UbiTokens (consumo)</span><span style="font-family:var(--mono)">' + (tokenLinkable ? fmtBRL(tokenSubtotal) : '—') + '</span></div>'
+      + (tokenLinkable
+          ? (tokenRows.length ? tokenRows.join('') : '<div style="color:var(--text-mute);font-size:.8rem;padding:.3rem 0;font-style:italic">Sem consumo de IA no período.</div>')
+          : '<div style="color:var(--text-mute);font-size:.8rem;padding:.3rem 0;font-style:italic">Os UbiTokens ainda não são vinculados a um produto — o vínculo produto↔matéria será definido no Catálogo. Por ora o lucro de tokens aparece só em “Todos os produtos”.</div>')
+      + '<div style="margin-top:1.3rem;padding-top:.9rem;border-top:1px solid var(--border-soft);font-size:.72rem;color:var(--text-mute);line-height:1.55">Lucro UbiTokens = o que os alunos pagaram pelos tokens que <strong>usaram</strong> (ⓤ × R$&nbsp;6,20) − o custo real de API no período. Passe o mouse em cada tipo para ver “cobrado − custo”.</div>';
+
+    const sel = document.getElementById('receitaExtratoProduto');
+    if(sel) sel.addEventListener('change', function(){ _renderReceitaExtratoBody(this.value); });
   }
 
   function renderDashboardPedagogical(){
