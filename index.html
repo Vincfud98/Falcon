@@ -2462,6 +2462,9 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .ini-ftag{font-family:var(--mono);font-size:.53rem;letter-spacing:.16em;text-transform:uppercase;border-radius:999px;padding:.14rem .55rem;border:1px solid}
 .ini-ftag.forum{color:#7aa6d1;border-color:rgba(122,166,209,.35);background:rgba(122,166,209,.12)}
 .ini-ftag.sim{color:#5dd49f;border-color:rgba(93,212,159,.35);background:rgba(93,212,159,.10)}
+.ini-ftag.aula{color:#e9b65a;border-color:rgba(233,182,90,.35);background:rgba(233,182,90,.12)}
+.ini-fchg{margin-top:.55rem;border-left:2px solid rgba(233,182,90,.35);padding:.35rem .7rem;background:rgba(233,182,90,.12);border-radius:0 3px 3px 0;font-size:.78rem;color:var(--text-dim);line-height:1.5}
+.ini-fchg b{display:block;color:#e9b65a;font-weight:400;font-family:var(--mono);font-size:.56rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.15rem}
 .ini-fcard .when{font-family:var(--mono);font-size:.55rem;color:var(--text-mute);margin-left:auto;white-space:nowrap}
 .ini-fcard .tt{font-family:var(--serif);font-size:1.08rem;font-weight:400;line-height:1.3}
 .ini-fcard .meta{display:flex;gap:1rem;margin-top:.45rem;font-family:var(--mono);font-size:.56rem;color:var(--text-mute)}
@@ -28166,9 +28169,54 @@ async function _iniLoadFeed(examId){
         + '<div class="tt">' + Util.esc(s.title) + '</div></a>' });
     });
   }catch(_){}
+  try{
+    // Aulas atualizadas (Fase 2): o admin registra "o que mudou" no editor da
+    // unidade (conteudo.unit_changelog) e a atualização vira card no feed —
+    // só de unidades do CONCURSO ativo; 1 card por unidade (o mais recente).
+    const cr = await window._sb.schema('conteudo').from('unit_changelog')
+      .select('id, unit_id, note, criado_em')
+      .order('criado_em', { ascending: false }).limit(10);
+    const chg = (cr.data || []).filter(function(g){ return g && g.note; });
+    if(chg.length){
+      let cursosEx = (window.COURSES || []).filter(Boolean);
+      if(examId && typeof window.coursesInExams === 'function'){ try{ cursosEx = window.coursesInExams(cursosEx, [examId]); }catch(_){} }
+      const byStore = {};
+      cursosEx.forEach(function(c){ (c.modules || []).forEach(function(m){ Util.unitsOfModule(m).forEach(function(entry){
+        const u = entry.unit;
+        const rec = { c: c, m: m, entry: entry };
+        if(u._storeId != null) byStore[String(u._storeId)] = rec;
+        byStore[String(u.id)] = rec;
+        if(u._origMockId) byStore[String(u._origMockId)] = rec;
+      }); }); });
+      const seenU = {};
+      chg.forEach(function(g){
+        const rec = byStore[String(g.unit_id)];
+        if(!rec || seenU[String(g.unit_id)]) return;
+        seenU[String(g.unit_id)] = 1;
+        const u = rec.entry.unit;
+        const lbl = [rec.c.sigla || rec.c.title, u.number, u.title].filter(Boolean).join(' · ');
+        const href = rec.entry.chapter ? ('#/m/' + rec.m.id + '/c/' + rec.entry.chapter.id + '/u/' + u.id) : ('#/m/' + rec.m.id + '/u/' + u.id);
+        const ts = new Date(g.criado_em).getTime();
+        cards.push({ ts: ts, html:
+          '<a class="ini-fcard" href="' + href + '" data-feed-course="' + Util.attr(rec.c.id) + '"><div class="top"><span class="ini-ftag aula">Aula atualizada</span><span class="when">' + _agoT(ts) + '</span></div>'
+          + '<div class="tt">' + Util.esc(lbl) + '</div>'
+          + '<div class="ini-fchg"><b>O que mudou</b>' + Util.esc(g.note) + '</div></a>' });
+      });
+    }
+  }catch(_){}
   el.innerHTML = cards.length
     ? cards.sort(function(a, b){ return b.ts - a.ts; }).map(function(c){ return c.html; }).join('')
     : '<div class="ini-ph"><span class="ini-ph-t">Sem novidades no concurso por enquanto.</span></div>';
+  // Card de aula: o clique precisa setar o curso ativo (contrato do catálogo).
+  el.querySelectorAll('[data-feed-course]').forEach(function(a){
+    a.addEventListener('click', function(){
+      const t = (window.COURSES || []).find(function(c){ return c && c.id === a.getAttribute('data-feed-course'); });
+      if(t){
+        window.COURSE = t;
+        try{ const rb = window._UbqRebuildCourseHierarchy; if(typeof rb === 'function' && t._subjectId) rb(window.COURSE, t._subjectId, null); }catch(_){}
+      }
+    });
+  });
 }
 
 // ── Colegas agora (amigos ONLINE + o que estão fazendo, via presença) ──
@@ -28206,18 +28254,33 @@ async function _iniLoadColegas(){
       if(el && typeof renderAvatarInto === 'function') renderAvatarInto(el, p.photo_url, p.photo_transform);
     });
   }
+  // LOG persistente (como o feed do drawer das salas): eventos das SUAS salas
+  // (aluno.room_events — "começou a estudar X", "acertou N seguidas"…), que
+  // ficam no bloco. O snapshot current_activity expirava em 90s e sumia.
   if(logEl){
-    const acts = online.map(function(p){
-      const a = p.current_activity;
-      const at = (a && a.at) ? new Date(a.at).getTime() : 0;
-      if(!a || !at || (now - at) >= 90000) return null;
-      const lbl = (typeof _activityUnitLabel === 'function') ? _activityUnitLabel(a) : (a.unit_title || '');
-      if(!lbl) return null;
-      return { nm: nameOf(p), verbo: (a.type === 'practicing' ? 'praticando questões em' : 'estudando'), lbl: lbl };
-    }).filter(Boolean);
-    logEl.innerHTML = acts.length
-      ? acts.map(function(o){ return '<div class="ini-mate-li"><b>' + Util.esc(o.nm) + '</b> ' + o.verbo + ' <b>' + Util.esc(o.lbl) + '</b></div>'; }).join('')
-      : '<div class="ini-mate-li" style="color:var(--text-mute)">' + (online.length ? 'Seus colegas online não estão estudando agora.' : 'Nada acontecendo entre seus colegas no momento.') + '</div>';
+    let evs = [];
+    try{
+      const mr = await window._sb.schema('aluno').from('room_members').select('room_id, status').eq('user_id', meId);
+      const roomIds = (mr.data || []).filter(function(m){ return m && m.status === 'member'; }).map(function(m){ return m.room_id; });
+      if(roomIds.length){
+        const er = await window._sb.schema('aluno').from('room_events').select('*').in('room_id', roomIds).order('created_at', { ascending: false }).limit(15);
+        evs = (er.data || []).filter(function(ev){ return ev && String(ev.user_id) !== String(meId); }).slice(0, 8);
+      }
+    }catch(_){}
+    if(evs.length){
+      try{ if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(evs.map(function(e){ return e.user_id; })); }catch(_){}
+      logEl.innerHTML = evs.map(function(ev){
+        const u = (window.UserDirectory && UserDirectory.getById) ? (UserDirectory.getById(ev.user_id) || {}) : {};
+        const nm = u.nickname || u.handle || 'Colega';
+        const when = (typeof _relTime === 'function' && ev.created_at) ? _relTime(new Date(ev.created_at).getTime()) : '';
+        return '<div class="ini-mate-li"><b>' + Util.esc(nm) + '</b> '
+          + ((typeof _roomEventText === 'function') ? _roomEventText(ev) : Util.esc(ev.type || ''))
+          + (when ? ' <span style="font-family:var(--mono);font-size:.52rem;color:var(--text-mute)">· ' + Util.esc(when) + '</span>' : '')
+          + '</div>';
+      }).join('');
+    } else {
+      logEl.innerHTML = '<div class="ini-mate-li" style="color:var(--text-mute)">Sem atividade recente nas suas salas de estudo.</div>';
+    }
   }
 }
 
