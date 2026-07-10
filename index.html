@@ -10895,13 +10895,24 @@ const Auth = (function(){
   // Verifica se o conteúdo está liberado para o usuário. A posse é por MATÉRIA
   // (o aluno tem a matéria inteira ou não): no modo Personalizado, a matéria do
   // curso ativo precisa estar em subject_ids (= ids de matéria). Completo libera.
+  // O módulo tem alguma unidade GRÁTIS (degustação do freemium)?
+  function _moduleHasGratisUnit(moduleId){
+    const c = window.COURSE; if(!c || !c.modules) return false;
+    const m = c.modules.find(x => String(x.id) === String(moduleId));
+    if(!m) return false;
+    try{ return Util.unitsOfModule(m).some(e => e && e.unit && e.unit.gratis); }catch(_){ return false; }
+  }
   function canAccessModule(moduleId){
-    const data = loadAccessData();
-    if(!data || data.access_type !== 'custom') return true;
     if(isAdmin && isAdmin()) return true;
-    const sid = window.COURSE && window.COURSE._subjectId;
-    if(sid == null) return true; // sem matéria ativa conhecida → não bloqueia
-    return (data.subject_ids || []).map(String).includes(String(sid));
+    if(!window.COURSE) return true; // sem matéria ativa conhecida → não bloqueia
+    // Dono da matéria (Portaria full/custom com ela; compra no futuro).
+    if(window.Commerce && Commerce.isOwned && Commerce.isOwned(window.COURSE.id)) return true;
+    // Degustação (freemium A3): módulo que CONTÉM unidade grátis abre pra
+    // qualquer conta — dentro dele, as demais unidades ficam com cadeado.
+    if(_moduleHasGratisUnit(moduleId)) return true;
+    const data = loadAccessData();
+    if(!data) return true; // modo dev/local sem dados de acesso
+    return data.access_type !== 'custom' && data.access_type !== 'free';
   }
 
   /**
@@ -10934,8 +10945,14 @@ const Auth = (function(){
         const sched = isCurrentCourseScheduled();
         if(sched.locked) return false;
       }
-      if(['module','chapter','unit','portal','portalDetail'].includes(route.view) && route.moduleId){
+      if(['module','chapter','unit'].includes(route.view) && route.moduleId){
         if(!canAccessModule(route.moduleId)) return false;
+      }
+      // Portal (banco de questões/materiais) exige POSSE da matéria — a
+      // degustação do freemium é só a 1ª unidade, não o acervo inteiro.
+      if(['portal','portalDetail'].includes(route.view)){
+        const _ownedP = !!(window.COURSE && window.Commerce && Commerce.isOwned && Commerce.isOwned(window.COURSE.id));
+        if(!_ownedP) return false;
       }
     }
     return true;
@@ -28706,7 +28723,7 @@ Renderers.catalog = function(route){
     const footerCta = (owned && canOpen)
       ? `<span class="catalog-card-cta">Acessar curso</span>`
       : canBuy
-        ? `<span class="catalog-card-cta catalog-card-buy">OBTER · 1ª unidade grátis</span>`
+        ? `<span class="catalog-card-cta catalog-card-buy">Conhecer</span>`
         : `<span class="catalog-card-cta">Em breve</span>`;
     return `<${canOpen?'a':'div'} class="catalog-card${canOpen?'':' catalog-card-locked'}${isScheduled?' catalog-card-scheduled':''}" ${canOpen?`href="${href}"`:''} ${isScheduled?`data-release-at="${Util.attr(c.releaseAt)}"`:''} data-course-id="${Util.attr(c.id)}" data-subject-id="${Util.attr(c._subjectId||'')}" data-a="${i+2}">
       <div class="catalog-card-cover" style="background-image:url('${Util.attr(c.cover||'')}')">
@@ -28837,6 +28854,22 @@ Renderers.catalog.mount = function(stageEl){
 
 Renderers.courseHome = function(){
   const c = window.COURSE;
+  // FREEMIUM (A3): entrou pra CONHECER uma matéria que não possui → registra
+  // o interesse no CRM (lead + tag "Interesse · matéria"), UMA vez por conta
+  // (dedupe local). RPC security definer faz o trabalho no servidor.
+  try{
+    const _ownedC = window.Commerce && Commerce.isOwned && Commerce.isOwned(c.id);
+    const _uI = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    if(!_ownedC && _uI && _uI.id && c._subjectId != null && window._sb){
+      const _kI = 'ubq.interesse.' + _uI.id + '.' + c._subjectId;
+      if(!localStorage.getItem(_kI)){
+        localStorage.setItem(_kI, '1');
+        window._sb.schema('crm').rpc('registrar_interesse', { p_subject_id: Number(c._subjectId) })
+          .then(function(r){ if(r && r.error) console.warn('[interesse]', r.error.message); })
+          .catch(function(e){ console.warn('[interesse ex]', e); });
+      }
+    }
+  }catch(_){}
   const modules = c.modules.map((m,i) => {
     const allowed = Auth.canAccessModule(m.id);
     const pct = allowed ? Store.moduleProgress(m) : 0;
@@ -28847,7 +28880,7 @@ Renderers.courseHome = function(){
       return `<div class="module-card module-card-locked" data-a="${i+2}" data-locked-module="${Util.attr(m.id)}">
         <div class="module-bg" ${bg}></div>
         <div class="module-overlay"></div>
-        <div class="module-lock-badge">⊘ Não disponível</div>
+        <div class="module-lock-badge" title="Módulo do curso completo"><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:.3rem"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>Curso completo</div>
         <div class="module-number" style="opacity:.4">${Util.esc(m.number||Util.pad2(i+1))}</div>
         <div class="module-content">
           <div class="module-label" style="opacity:.45">${Util.esc(m.label||'Módulo')}</div>
@@ -29002,14 +29035,14 @@ function unitCard(unit, m, chapter){
 /* FREEMIUM (A3) — tela de bloqueio da unidade travada. O conteúdo real nem
    desceu do banco (RLS); isto dá um rosto amigável ao cadeado e vira o ponto
    de conversão (o CTA de carrinho chega na Fase C). */
-function _unitLockedView(unit, m, chapter){
+function _unitLockedView(unit, m, chapter, msg){
   const c = window.COURSE || {};
   const LOCK_IC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
   return `<div class="unit-locked-page">
     <span class="ulp-lock">${LOCK_IC}</span>
-    <span class="s-label">Unidade ${Util.esc(unit.number || '')}</span>
+    <span class="s-label">${unit.number ? 'Unidade ' + Util.esc(unit.number) : 'Conteúdo do curso completo'}</span>
     <h1 class="ulp-title">${Util.esc(unit.title || '')}</h1>
-    <p class="ulp-body">Esta unidade faz parte do curso completo${c.title ? ` de <strong>${Util.esc(c.title)}</strong>` : ''}. A primeira unidade de cada matéria é gratuita para você conhecer a plataforma — o restante é liberado com a compra do curso.</p>
+    <p class="ulp-body">${msg || `Esta unidade faz parte do curso completo${c.title ? ` de <strong>${Util.esc(c.title)}</strong>` : ''}. A primeira unidade de cada matéria é gratuita para você conhecer a plataforma — o restante é liberado com a compra do curso.`}</p>
     ${unit.duration ? `<div class="ulp-meta"><span>${unit.duration} min de estudo</span></div>` : ''}
     <div class="ulp-actions">
       <span class="ulp-buy" title="O carrinho de compras chega em breve">Em breve: adicionar ao carrinho</span>
@@ -33333,6 +33366,12 @@ Renderers.portal = function(route){
 /* ═══════════ COURSE-WIDE PORTAL ═══════════ */
 Renderers.coursePortal = function(route){
   const subj = activeSubject();           // matéria ativa (ou null = global)
+  // FREEMIUM (A3): o Portal reúne o ACERVO da matéria (questões, materiais) —
+  // exige posse; a degustação é só a 1ª unidade. Sem posse → tela de bloqueio.
+  if(subj && window.Commerce && Commerce.isOwned && !Commerce.isOwned(subj.id)){
+    return _unitLockedView({ number: '', title: 'Portal · ' + (subj.title || '') }, null, null,
+      `O Portal reúne todas as questões, discursivas e materiais de <strong>${Util.esc(subj.title || 'cada matéria')}</strong> — disponível para alunos do curso completo. Conheça a primeira unidade gratuita ou adquira o curso.`);
+  }
   const courses = Portal.scopeCourses();  // matéria ativa OU todas
   const enabled = Object.keys(Portal.cards);
   const counts = Portal.countsAll();
