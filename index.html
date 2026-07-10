@@ -20210,11 +20210,11 @@ Renderers.account = function(route){
             <span class="field-help">O tutor e os cenários de voz usam isso pra te tratar certinho (senhor / senhora / neutro).</span>
           </div>
           <div class="field">
-            <label for="accCpf">CPF</label>
+            <label for="accCpf">CPF <span class="account-field-required">*</span></label>
             <input class="field-input" id="accCpf" type="text" inputmode="numeric" maxlength="14" placeholder="000.000.000-00" value="${Util.attr(profile.cpf || '')}" ${profile.cpf ? 'disabled' : ''}>
             <span class="field-help">${profile.cpf
-              ? 'CPF registrado — por segurança, não pode mais ser alterado por aqui (ele identifica suas provas na marca d\'água). Precisa corrigir? Fale com o Suporte.'
-              : "Preencha com atenção: depois de salvo ele fica travado (vai na marca d'água das provas que você compila). Só você e a equipe veem."}</span>
+              ? 'CPF registrado — por segurança, não pode mais ser alterado por aqui. Precisa corrigir? Fale com o Suporte.'
+              : 'Obrigatório. Dado pessoal tratado com sigilo e em conformidade com a LGPD — uso interno da equipe.'}</span>
           </div>
           <div class="field">
             <label for="accHandle">@ID único <span class="account-field-required">*</span></label>
@@ -20838,8 +20838,14 @@ Renderers.account.mount = function(stageEl){
         if(handleEl) handleEl.focus();
         return;
       }
-      // CPF é opcional; se preenchido, precisa ser válido (vai na marca d'água).
+      // CPF é OBRIGATÓRIO (identificação interna, LGPD) e trava após salvo.
       const cpfDigits = (cpfEl && cpfEl.value || '').replace(/\D/g, '');
+      const _cpfLockedNow = !!(cpfEl && cpfEl.disabled);
+      if(!_cpfLockedNow && !cpfDigits){
+        if(saveFB){ saveFB.textContent = 'Informe seu CPF (obrigatório).'; saveFB.className = 'account-save-feedback is-error'; }
+        if(cpfEl) cpfEl.focus();
+        return;
+      }
       if(cpfDigits && !_validaCpf(cpfDigits)){
         if(saveFB){ saveFB.textContent = 'CPF inválido. Confira os números.'; saveFB.className = 'account-save-feedback is-error'; }
         if(cpfEl) cpfEl.focus();
@@ -20899,6 +20905,11 @@ Renderers.account.mount = function(stageEl){
         // ele identifica o aluno na marca d'água; o banco também protege via
         // trigger). Correção só pelo Suporte/admin; o webhook preenche sozinho.
         if(cpfEl && cpfMasked) cpfEl.disabled = true;
+        // Espelha o CPF no CRM (crm.clients) — identificação pela equipe adm.
+        // RPC security definer: acha/cria o cliente deste usuário e grava.
+        if(cpfMasked && window._sb){
+          try{ window._sb.schema('crm').rpc('sync_meus_dados', { p_cpf: cpfMasked, p_phone: null }).then(function(r){ if(r && r.error) console.warn('[sync CRM]', r.error.message); }); }catch(_){}
+        }
         // Primeiro acesso: depois de salvar, oferece seguir pro Início (o
         // dashboard). Botão só aparece após um save bem-sucedido.
         let goIni = stageEl.querySelector('#accGoInicio');
@@ -22409,6 +22420,15 @@ Renderers.login = function(){
             <input class="field-input" id="faName" type="text" autocomplete="name" required>
           </div>
           <div class="field">
+            <label for="faDdd">Telefone (WhatsApp)</label>
+            <div style="display:flex;gap:.6rem">
+              <input class="field-input" value="+55" disabled aria-label="Código do país" style="width:64px;text-align:center;flex-shrink:0">
+              <input class="field-input" id="faDdd" type="text" inputmode="numeric" maxlength="2" placeholder="DDD" autocomplete="tel-area-code" style="width:80px;flex-shrink:0">
+              <input class="field-input" id="faPhone" type="text" inputmode="numeric" maxlength="9" placeholder="Número" autocomplete="tel-local">
+            </div>
+            <span class="field-help">Apenas números.</span>
+          </div>
+          <div class="field">
             <label for="faPassword">Senha</label>
             <input class="field-input" id="faPassword" type="password" autocomplete="new-password" required placeholder="mínimo 6 caracteres">
           </div>
@@ -22721,6 +22741,8 @@ Renderers.login.mount = function(stageEl){
   const faSubtitle   = stageEl.querySelector('#firstAccessSubtitle');
   const faEmailEl    = stageEl.querySelector('#faEmail');
   const faNameEl     = stageEl.querySelector('#faName');
+  const faDddEl      = stageEl.querySelector('#faDdd');
+  const faPhoneEl    = stageEl.querySelector('#faPhone');
   const faPwEl       = stageEl.querySelector('#faPassword');
   const faPw2El      = stageEl.querySelector('#faPassword2');
   const faCheckBtn   = stageEl.querySelector('#faCheckEmail');
@@ -22810,11 +22832,15 @@ Renderers.login.mount = function(stageEl){
     faClearMsgs();
     if(!_faAuthorizedEntry){ faShowErr('Sessão expirada. Reabra o modal.'); return; }
     const name = (faNameEl.value || '').trim();
+    const ddd  = ((faDddEl && faDddEl.value) || '').replace(/\D/g, '');
+    const fone = ((faPhoneEl && faPhoneEl.value) || '').replace(/\D/g, '');
     const pw   = faPwEl.value || '';
     const pw2  = faPw2El.value || '';
     if(!name){ faShowErr('Informe seu nome.'); return; }
+    if(ddd.length !== 2 || fone.length < 8){ faShowErr('Informe um telefone válido (DDD + número, só números).'); return; }
     if(pw.length < 6){ faShowErr('Senha precisa de ao menos 6 caracteres.'); return; }
     if(pw !== pw2){ faShowErr('As senhas não coincidem.'); return; }
+    const phoneFull = '+55' + ddd + fone;
 
     faSignUpBtn.disabled = true;
     faShowStat('Criando conta…');
@@ -22822,7 +22848,11 @@ Renderers.login.mount = function(stageEl){
       const { data, error } = await window._sb.auth.signUp({
         email: _faAuthorizedEntry.email,
         password: pw,
-        options: { data: { full_name: name, role: _faAuthorizedEntry.role } }
+        options: {
+          data: { full_name: name, role: _faAuthorizedEntry.role, phone: phoneFull },
+          // Link de confirmação volta pro SITE (não mais pro default do projeto)
+          emailRedirectTo: location.origin + '/'
+        }
       });
       if(error){
         faShowErr('Erro: ' + error.message);
@@ -22842,17 +22872,45 @@ Renderers.login.mount = function(stageEl){
         }
       }catch(e){ console.warn('[app_users upsert]', e); }
 
+      // Espelha o telefone no CRM (identificação da equipe) assim que houver
+      // sessão — RPC security definer acha/cria o cliente e grava o phone.
+      const _syncFone = async function(){
+        try{ if(window._sb) await window._sb.schema('crm').rpc('sync_meus_dados', { p_cpf: null, p_phone: phoneFull }); }catch(_){}
+      };
       faShowStat('Entrando…');
       // Se a sessão já veio no signUp (sem email confirm), redireciona direto
       if(data.session){
+        await _syncFone();
         setTimeout(() => { location.hash = '#/conta'; location.reload(); }, 600);
       } else {
-        // Email confirm exigido — tenta login normal
-        const r = await Auth.login(_faAuthorizedEntry.email, pw, true);
-        if(r.ok){ setTimeout(() => { location.hash = '#/conta'; location.reload(); }, 400); }
-        else { faShowStat(_faAuthorizedEntry.free
-          ? 'Conta gratuita criada! Verifique seu e-mail para confirmar e depois entre. A plataforma está em fase de testes — o acesso completo é liberado para participantes selecionados.'
-          : 'Conta criada! Verifique seu e-mail para confirmar e depois entre.'); }
+        // E-mail de confirmação exigido: ESPERA AQUI. A cada 5s tenta entrar;
+        // quando o aluno clicar no link do e-mail (em outra aba), esta página
+        // percebe e entra sozinha — sem digitar nada de novo.
+        const _tryLogin = async function(){
+          try{
+            const r = await Auth.login(_faAuthorizedEntry.email, pw, true);
+            return !!(r && r.ok);
+          }catch(_){ return false; }
+        };
+        if(await _tryLogin()){
+          await _syncFone();
+          setTimeout(() => { location.hash = '#/conta'; location.reload(); }, 400);
+          return;
+        }
+        faShowStat('Conta criada! Enviamos um link de confirmação para ' + _faAuthorizedEntry.email
+          + '. Abra seu e-mail e clique no link — assim que confirmar, esta página entra sozinha…'
+          + (_faAuthorizedEntry.free ? ' (A plataforma está em fase de testes — o acesso completo é liberado para participantes selecionados.)' : ''));
+        let _tent = 0;
+        const _poll = setInterval(async () => {
+          _tent++;
+          if(_tent > 120){ clearInterval(_poll); faShowStat('Quando confirmar o e-mail, entre com seu e-mail e senha.'); return; }
+          if(await _tryLogin()){
+            clearInterval(_poll);
+            faShowStat('E-mail confirmado! Entrando…');
+            await _syncFone();
+            setTimeout(() => { location.hash = '#/conta'; location.reload(); }, 500);
+          }
+        }, 5000);
       }
     }catch(e){
       faShowErr('Erro de rede: ' + e.message);
