@@ -10938,6 +10938,49 @@ const Auth = (function(){
     }catch(e){}
   }
 
+  // FASE D: matérias COMPRADAS (matrículas ativas em vendas.enrollments).
+  // O servidor já libera o conteúdo por elas (conteudo.aluno_tem_materia);
+  // aqui a UI acompanha: viram acesso 'custom' na régua do cliente.
+  // O RLS só devolve as matrículas do próprio aluno.
+  async function _comprasSubjectIds(){
+    try{
+      if(!window._sb) return [];
+      const { data: enr, error } = await window._sb.schema('vendas').from('enrollments')
+        .select('product_id, ends_at, status')
+        .eq('status', 'active');
+      if(error || !enr || !enr.length) return [];
+      const nowMs = Date.now();
+      const pids = [...new Set(enr
+        .filter(e => !e.ends_at || new Date(e.ends_at).getTime() > nowMs)
+        .map(e => e.product_id))];
+      if(!pids.length) return [];
+      const { data: prods, error: e2 } = await window._sb.schema('catalogo').from('products')
+        .select('id, subject_id').in('id', pids);
+      if(e2 || !prods) return [];
+      return [...new Set(prods.map(p => p.subject_id).filter(v => v != null))];
+    }catch(_){ return []; }
+  }
+  async function _mergeCompras(base){
+    try{
+      if(!base || !base.allowed) return base;   // suspenso: compra não fura a suspensão
+      const t = base.access_type;
+      if(t !== 'free' && t !== 'custom') return base; // full/complete: já vê tudo
+      const compradas = await _comprasSubjectIds();
+      if(!compradas.length) return base;
+      const subj = [...new Set([...(base.subject_ids || []).map(String), ...compradas.map(String)])];
+      let exams = (base.exam_ids || []).map(String);
+      if(exams.length){
+        // Portaria com escopo de concurso: soma os concursos das matérias
+        // compradas pra elas não sumirem do universo do aluno.
+        const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list)
+          ? (UbiqueStore.exam_subjects.list() || []) : [];
+        const extra = rel.filter(es => subj.includes(String(es.subject_id))).map(es => String(es.exam_id));
+        exams = [...new Set([...exams, ...extra])];
+      }
+      return { allowed: true, access_type: 'custom', subject_ids: subj, exam_ids: exams };
+    }catch(_){ return base; }
+  }
+
   // Consulta acesso à plataforma. Prioriza Supabase (source-of-truth);
   // só cai pro UbiqueStore se Supabase indisponível.
   // Retorna { allowed, access_type, subject_ids, reason? }
@@ -10955,14 +10998,15 @@ const Auth = (function(){
         if(!error){
           // FREEMIUM (A3c): fora da Portaria não barra mais — vira conta
           // GRATUITA (degustação: 1ª unidade de cada matéria; resto cadeado).
-          if(!data) return { allowed: true, access_type: 'free', subject_ids: [], exam_ids: [] };
+          // FASE D: em qualquer caso, as matérias COMPRADAS entram na régua.
+          if(!data) return await _mergeCompras({ allowed: true, access_type: 'free', subject_ids: [], exam_ids: [] });
           if(data.status === 'suspended') return { allowed: false, reason: 'suspended' };
-          return {
+          return await _mergeCompras({
             allowed: true,
             access_type: data.access_type || 'full',
             subject_ids: Array.isArray(data.subject_ids) ? data.subject_ids : [],
             exam_ids: Array.isArray(data.exam_ids) ? data.exam_ids : [],
-          };
+          });
         }
         // Se error (rede/RLS), cai pro fallback UbiqueStore abaixo
         console.warn('[checkPlatformAccess] supabase error, falling back:', error.message);
