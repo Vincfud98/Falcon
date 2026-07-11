@@ -11126,6 +11126,9 @@ const Auth = (function(){
   // Roda nos DOIS caminhos de restauração de sessão (load() e onAuthStateChange).
   function _refreshAccessAndRescope(){
     try{
+      // FASE D: liga a antena de matrículas (aviso "matéria liberada" em
+      // tempo real) — idempotente por usuário, definida fora do Auth.
+      try{ if(typeof window.initEnrollmentsRealtime === 'function') window.initEnrollmentsRealtime(); }catch(_){}
       if(current && current.email && !(isAdmin && isAdmin())){
         checkPlatformAccess(current.email).then(acc => {
           if(acc && acc.allowed){
@@ -11190,6 +11193,7 @@ const Auth = (function(){
   return {
     login, logout, getUser, isAdmin, canAccess, landingRoute, allUsers, load,
     checkPlatformAccess, storeAccessData, loadAccessData, canAccessModule,
+    refreshAccess: _refreshAccessAndRescope,
     isCurrentCourseScheduled,
   };
 })();
@@ -11384,6 +11388,15 @@ const Shop = (function(){
     return (course && course.cover) || p.image_url || '';
   }
 
+  // Nome amigável da matéria de um produto (título do card; fallback: nome
+  // do produto no catálogo). Usado nos avisos de liberação de acesso.
+  function nameForProduct(pid){
+    const p = _data && _data.byProduct[pid];
+    if(!p) return '';
+    const course = (window.COURSES || []).find(c => String(c._subjectId) === String(p.subject_id));
+    return (course && course.title) || p.name || '';
+  }
+
   // Motor de preço do carrinho (espelho do servidor — exibição apenas).
   // Combos elegíveis cujos produtos estejam TODOS no carrinho são aplicados
   // (maiores primeiro); o resto sai pelo preço individual.
@@ -11455,9 +11468,45 @@ const Shop = (function(){
     return r;
   }
 
-  return { load, ready, offerForSubject, coverForProduct, priceCart, fmt, installmentsLabel };
+  return { load, ready, offerForSubject, coverForProduct, nameForProduct, priceCart, fmt, installmentsLabel };
 })();
 window.Shop = Shop;
+
+// ── FASE D: aviso em tempo real de matéria liberada ─────────────────
+// Canal nas matrículas (vendas.enrollments); o RLS garante que o aluno só
+// recebe eventos das PRÓPRIAS matrículas. Ao chegar: toast + refaz a régua
+// de acesso (a matéria destrava sem recarregar a página).
+function initEnrollmentsRealtime(){
+  try{
+    const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    if(!u || !u.id || !window._sb || typeof window._sb.channel !== 'function') return;
+    if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return;
+    if(window.__enrRtUser === u.id) return;           // já ligado pra este usuário
+    if(window.__enrRtChannel){
+      try{ window._sb.removeChannel(window.__enrRtChannel); }catch(_){}
+      window.__enrRtChannel = null;
+    }
+    window.__enrRtUser = u.id;
+    window.__enrRtChannel = window._sb.channel('aluno-enrollments-' + u.id)
+      .on('postgres_changes', { event: '*', schema: 'vendas', table: 'enrollments' }, (payload) => {
+        try{
+          const row = payload && payload.new;
+          if(!row || row.status !== 'active') return;
+          const announce = () => {
+            const nome = (window.Shop && Shop.nameForProduct) ? Shop.nameForProduct(row.product_id) : '';
+            const msg = payload.eventType === 'UPDATE'
+              ? ('Acesso renovado' + (nome ? ': ' + nome : '') + '.')
+              : ('Matéria liberada na sua conta' + (nome ? ': ' + nome : '') + '.');
+            if(window.App && App._showAccessToast) App._showAccessToast(msg, 'success');
+          };
+          if(window.Shop && !Shop.ready()) Shop.load().then(announce); else announce();
+          // Refaz a régua de acesso e re-renderiza — destrava sem F5
+          if(window.Auth && typeof Auth.refreshAccess === 'function') Auth.refreshAccess();
+        }catch(e){ console.warn('[enr rt]', e); }
+      })
+      .subscribe();
+  }catch(e){ console.warn('[enr rt init]', e); }
+}
 
 const Cart = (function(){
   let _coupon = null; // {code, coupon_id, discount_type, discount_value, max_discount} validado no servidor
