@@ -2572,6 +2572,7 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .ini-ftag.forum{color:#7aa6d1;border-color:rgba(122,166,209,.35);background:rgba(122,166,209,.12)}
 .ini-ftag.sim{color:#5dd49f;border-color:rgba(93,212,159,.35);background:rgba(93,212,159,.10)}
 .ini-ftag.aula{color:#e9b65a;border-color:rgba(233,182,90,.35);background:rgba(233,182,90,.12)}
+.ini-ftag.lib{color:var(--accent);border-color:rgba(200,169,126,.4);background:rgba(200,169,126,.12)}
 .ini-fchg{margin-top:.55rem;border-left:2px solid rgba(233,182,90,.35);padding:.35rem .7rem;background:rgba(233,182,90,.12);border-radius:0 3px 3px 0;font-size:.78rem;color:var(--text-dim);line-height:1.5}
 .ini-fchg b{display:block;color:#e9b65a;font-weight:400;font-family:var(--mono);font-size:.56rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.15rem}
 .ini-fcard .when{font-family:var(--mono);font-size:.55rem;color:var(--text-mute);margin-left:auto;white-space:nowrap}
@@ -10968,15 +10969,13 @@ const Auth = (function(){
       const compradas = await _comprasSubjectIds();
       if(!compradas.length) return base;
       const subj = [...new Set([...(base.subject_ids || []).map(String), ...compradas.map(String)])];
-      let exams = (base.exam_ids || []).map(String);
-      if(exams.length){
-        // Portaria com escopo de concurso: soma os concursos das matérias
-        // compradas pra elas não sumirem do universo do aluno.
-        const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list)
-          ? (UbiqueStore.exam_subjects.list() || []) : [];
-        const extra = rel.filter(es => subj.includes(String(es.subject_id))).map(es => String(es.exam_id));
-        exams = [...new Set([...exams, ...extra])];
-      }
+      // Os concursos das matérias compradas SEMPRE entram no universo do
+      // aluno — sem isso, o card do concurso na Loja não abre como "Acessar".
+      const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list)
+        ? (UbiqueStore.exam_subjects.list() || []) : [];
+      const compradasStr = compradas.map(String);
+      const extra = rel.filter(es => compradasStr.includes(String(es.subject_id))).map(es => String(es.exam_id));
+      const exams = [...new Set([...(base.exam_ids || []).map(String), ...extra])];
       return { allowed: true, access_type: 'custom', subject_ids: subj, exam_ids: exams };
     }catch(_){ return base; }
   }
@@ -21814,6 +21813,12 @@ function _notifRenderItem(n){
       const href = '#/m/' + encodeURIComponent(p.module_id) + (p.chapter_id ? '/c/' + encodeURIComponent(p.chapter_id) : '') + '/u/' + encodeURIComponent(p.unit_id);
       actions = `<div class="notif-actions"><a class="btn-ghost" href="${href}" data-notif-id="${Util.attr(n.id)}">Abrir unidade →</a></div>`;
     }
+  } else if(n.type === 'matricula_liberada'){
+    // FASE D — matrícula criada/renovada na baixa do pedido (servidor insere)
+    line = p.renovacao
+      ? `Seu acesso a <strong>${Util.esc(p.materia || 'sua matéria')}</strong> foi renovado. Bons estudos!`
+      : `Sua matéria <strong>${Util.esc(p.materia || 'nova')}</strong> foi liberada. Bons estudos!`;
+    actions = `<div class="notif-actions"><a class="btn-ghost" href="#/" data-notif-id="${Util.attr(n.id)}">Abrir minhas matérias →</a></div>`;
   } else if(n.type === 'gabarito_liberado'){
     // S10 — gabarito de simulado liberado pelo professor
     line = `O gabarito do simulado <strong>${Util.esc(p.simulado_title || 'simulado')}</strong> foi liberado! Veja sua nota e a correção.`;
@@ -22827,7 +22832,7 @@ Renderers.notifications = function(route){
     if(filter === 'unread') return !n.read;
     if(filter === 'mentions') return n.type === 'mention' || n.type === 'reply';
     if(filter === 'follows') return n.type === 'follow_request' || n.type === 'follow_accepted';
-    if(filter === 'system') return n.type === 'essay_corrected';
+    if(filter === 'system') return n.type === 'essay_corrected' || n.type === 'matricula_liberada';
     return true;
   });
   const unreadCount = all.filter(n => !n.read).length;
@@ -22836,7 +22841,7 @@ Renderers.notifications = function(route){
     ['unread', 'Não lidas', unreadCount],
     ['mentions', 'Comentários', all.filter(n => n.type === 'mention' || n.type === 'reply').length],
     ['follows', 'Pedidos', all.filter(n => n.type === 'follow_request' || n.type === 'follow_accepted').length],
-    ['system', 'Sistema', all.filter(n => n.type === 'essay_corrected').length]
+    ['system', 'Sistema', all.filter(n => n.type === 'essay_corrected' || n.type === 'matricula_liberada').length]
   ];
   const tabsHtml = `<div class="notif-tabs" role="tablist">
     ${filters.map(([k, lbl, count]) => `
@@ -29018,6 +29023,27 @@ async function _iniLoadFeed(examId){
       });
     }
   }catch(_){}
+  try{
+    // FASE D — matérias liberadas DESTE aluno (matrículas próprias via RLS):
+    // evento pessoal importante, entra no feed junto das novidades do concurso.
+    const er = await window._sb.schema('vendas').from('enrollments')
+      .select('product_id, starts_at, status')
+      .eq('status', 'active')
+      .order('starts_at', { ascending: false })
+      .limit(5);
+    const ens = (er.data || []).filter(function(e){ return e && e.starts_at; });
+    if(ens.length){
+      if(window.Shop && !Shop.ready()){ try{ await Shop.load(); }catch(_){} }
+      ens.forEach(function(en){
+        const nome = (window.Shop && Shop.nameForProduct) ? Shop.nameForProduct(en.product_id) : '';
+        if(!nome) return;
+        const ts = new Date(en.starts_at).getTime();
+        cards.push({ ts: ts, html:
+          '<a class="ini-fcard" href="#/"><div class="top"><span class="ini-ftag lib">Matéria liberada</span><span class="when">' + _agoT(ts) + '</span></div>'
+          + '<div class="tt">' + Util.esc(nome) + ' está liberada na sua conta. Bons estudos!</div></a>' });
+      });
+    }
+  }catch(_){}
   el.innerHTML = cards.length
     ? cards.sort(function(a, b){ return b.ts - a.ts; }).map(function(c){ return c.html; }).join('')
     : '<div class="ini-ph"><span class="ini-ph-t">Sem novidades no concurso por enquanto.</span></div>';
@@ -29384,9 +29410,11 @@ Renderers.myExams = function(){
     // FREEMIUM (A3c): 'free' NÃO é acesso completo — mas pode ABRIR qualquer
     // concurso com conteúdo pra conhecer (degustação por unidade segura o resto).
     const fullAccess = !!(access && access.allowed !== false && access.access_type !== 'custom' && access.access_type !== 'free');
-    const isFreeAcc = !!(access && access.access_type === 'free');
     const owned = isAdmin || fullAccess || myExamIds.has(String(e.id));
-    const canOpen = (owned || isFreeAcc) && hasContent;
+    // LOJA (marketplace): QUALQUER conta logada pode entrar num concurso com
+    // conteúdo pra ver a vitrine — o cadeado vale por matéria/unidade, não na
+    // porta do concurso (free, Portaria personalizada e compradores navegam igual).
+    const canOpen = hasContent;
     const canBuy = !owned && hasContent;
     // "Em breve": sem matérias ainda. Se o admin desligou "mostrar para o aluno",
     // esconde o card (exceto para admin).
@@ -29397,9 +29425,7 @@ Renderers.myExams = function(){
       ? `<span class="catalog-card-cta">Acessar</span>`
       : canOpen
         ? `<span class="catalog-card-cta catalog-card-buy">Conhecer</span>`
-        : canBuy
-          ? `<span class="catalog-card-cta catalog-card-buy">OBTER</span>`
-          : `<span class="catalog-card-cta">Em breve</span>`;
+        : `<span class="catalog-card-cta">Em breve</span>`;
     return `<${canOpen?'a':'div'} class="catalog-card${canOpen?'':' catalog-card-locked'}" ${canOpen?`href="${href}"`:''} data-exam-id="${Util.attr(e.id)}" data-a="${i+2}">
       <div class="catalog-card-cover" style="background-image:url('${Util.attr(((window.LearningBlocks && LearningBlocks.driveImageUrl) ? LearningBlocks.driveImageUrl(e.cover) : e.cover)||'')}')">
         ${!canOpen ? `<div class="catalog-card-soon-badge">${canBuy ? 'Disponível' : 'Em breve'}</div>` : ''}
@@ -29427,8 +29453,12 @@ Renderers.myExams = function(){
 
 Renderers.catalog = function(route){
   const _catIsAdmin = !!(window.Auth && Auth.isAdmin && Auth.isAdmin());
-  // Filtra null/undefined: pode acontecer durante boot pré-hidratação.
-  let courses = (window.COURSES || []).filter(Boolean);
+  // LOJA (&loja=1) usa a lista COMPLETA de matérias (a vitrine ignora o escopo
+  // pessoal do aluno — o cadeado vale por matéria/unidade); "Matérias" usa a
+  // lista escopada normal. Filtra null/undefined (boot pré-hidratação).
+  const _lojaFlag = !!(route && route.query && route.query.loja);
+  const _srcAll = _lojaFlag && Array.isArray(window.COURSES_ALL) && window.COURSES_ALL.length;
+  let courses = ((_srcAll ? window.COURSES_ALL : window.COURSES) || []).filter(Boolean);
   if(!courses.length && window.COURSE) courses.push(window.COURSE);
   // DOIS MODOS (Fase C, ajuste do usuário) — a mesma rota atende dois lugares:
   // — Com &loja=1 (veio da LOJA): vitrine completa do concurso — as matérias
@@ -29591,7 +29621,8 @@ Renderers.catalog.mount = function(stageEl){
     if(card.tagName !== 'A') return;
     card.addEventListener('click', () => {
       const id = card.getAttribute('data-course-id');
-      const target = (window.COURSES || []).find(c => c.id === id);
+      // Na Loja o card pode vir da lista completa (COURSES_ALL) — procura nas duas.
+      const target = ((window.COURSES || []).concat(window.COURSES_ALL || [])).find(c => c && c.id === id);
       if(target){
         window.COURSE = target;
         // Garante que a hierarquia desse curso esteja hidratada do store
@@ -29613,7 +29644,7 @@ Renderers.catalog.mount = function(stageEl){
     btn.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();
-      const course = (window.COURSES || []).find(item => item.id === btn.getAttribute('data-course-bio'));
+      const course = ((window.COURSES || []).concat(window.COURSES_ALL || [])).find(item => item && item.id === btn.getAttribute('data-course-bio'));
       if(course) FSModal.open([course], 0, renderCourseBioModal);
     });
   });
