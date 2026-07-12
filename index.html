@@ -1294,6 +1294,18 @@ html[data-theme="light"] .sim-exam-topbar{
 .cartdw-done-num{font-family:var(--mono);font-size:.8rem;letter-spacing:.12em;color:var(--accent)}
 .cartdw-done p{font-family:var(--sans);font-weight:300;font-size:.8rem;color:var(--text-dim);line-height:1.7;margin:0}
 .cartdw-done-total{font-family:var(--mono);font-size:.9rem;color:var(--text)}
+/* Carteira → Minhas compras (Fase E) */
+.wallet-sec-title{font-family:var(--mono);font-size:.62rem;letter-spacing:.16em;text-transform:uppercase;color:var(--text-mute);margin:1.1rem 0 .5rem}
+.wallet-compra{display:flex;align-items:center;justify-content:space-between;gap:.8rem;padding:.6rem .75rem;border:1px solid var(--border);border-radius:4px;background:var(--bg-elevated);margin-bottom:.5rem}
+.wallet-compra-main{flex:1;display:flex;flex-direction:column;gap:.15rem}
+.wallet-compra-t{font-family:var(--sans);font-weight:300;font-size:.78rem;color:var(--text)}
+.wallet-compra-sub{font-family:var(--sans);font-weight:300;font-size:.64rem;color:var(--text-mute)}
+.wallet-compra-side{display:flex;flex-direction:column;align-items:flex-end;gap:.2rem;flex:none}
+.wallet-compra-val{font-family:var(--mono);font-size:.74rem;color:var(--text)}
+.wallet-chip{font-family:var(--sans);font-weight:300;font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;padding:.14rem .5rem;border-radius:999px;border:1px solid}
+.wallet-chip.ok{color:var(--green);border-color:rgba(93,212,159,.35);background:rgba(93,212,159,.1)}
+.wallet-chip.wait{color:#e9b65a;border-color:rgba(233,182,90,.35);background:rgba(233,182,90,.1)}
+.wallet-chip.off{color:var(--text-mute);border-color:var(--border);background:transparent}
 
 /* User pill agora é dropdown */
 .tb-user{position:relative;cursor:pointer;padding:.25rem .35rem;border-radius:18px;transition:background .2s ease}
@@ -20708,7 +20720,85 @@ async function _loadWalletPane(stageEl, user){
       }
     }
   } catch(e){ console.warn('[carteira custos]', e); }
-  // Sub-abas (Extrato / Tabela de custos)
+  // Minhas compras (Fase E): acessos ativos com dias restantes + balancete de
+  // pedidos. O RLS de vendas devolve só o que é do próprio aluno.
+  try {
+    const V = window._sb.schema('vendas');
+    const fmtD = function(s){ try { return new Date(s).toLocaleDateString('pt-BR'); } catch(_){ return ''; } };
+    const _isAdm = !!(window.Auth && Auth.isAdmin && Auth.isAdmin());
+    if(window.Shop && !Shop.ready()){ try{ await Shop.load(); }catch(_){} }
+    const acBox = stageEl.querySelector('#walletAcessos');
+    const pdBox = stageEl.querySelector('#walletCompras');
+    if(_isAdm){
+      // Pro admin o RLS devolveria os pedidos de TODO MUNDO — o lugar dele é o painel.
+      if(acBox) acBox.innerHTML = '<div class="empty"><div class="empty-body">Compras e matrículas ficam no painel do admin (Comercial → Vendas).</div></div>';
+      if(pdBox) pdBox.innerHTML = '';
+    } else {
+      if(acBox){
+        const { data: enr } = await V.from('enrollments')
+          .select('product_id, starts_at, ends_at, status')
+          .eq('status', 'active');
+        const ativos = (enr || [])
+          .filter(function(e){ return !e.ends_at || new Date(e.ends_at).getTime() > Date.now(); })
+          .sort(function(a, b){
+            if(!a.ends_at) return 1; if(!b.ends_at) return -1;
+            return new Date(a.ends_at) - new Date(b.ends_at);
+          });
+        acBox.innerHTML = '<div class="wallet-sec-title">Acessos ativos</div>' + (ativos.length
+          ? ativos.map(function(e){
+              const nome = (window.Shop && Shop.nameForProduct)
+                ? (Shop.nameForProduct(e.product_id) || ('Produto ' + e.product_id)) : ('Produto ' + e.product_id);
+              let side = '<span class="wallet-compra-sub">sem vencimento</span>';
+              if(e.ends_at){
+                const dias = Math.ceil((new Date(e.ends_at).getTime() - Date.now()) / 86400000);
+                const urg = dias <= 30;
+                side = '<span class="wallet-compra-val"' + (urg ? ' style="color:#e9b65a"' : '') + '>'
+                  + dias + ' dia' + (dias === 1 ? '' : 's') + ' restante' + (dias === 1 ? '' : 's') + '</span>'
+                  + '<span class="wallet-compra-sub">até ' + Util.esc(fmtD(e.ends_at)) + '</span>';
+              }
+              return '<div class="wallet-compra"><div class="wallet-compra-main">'
+                + '<span class="wallet-compra-t">' + Util.esc(nome) + '</span>'
+                + '<span class="wallet-compra-sub">desde ' + Util.esc(fmtD(e.starts_at)) + '</span></div>'
+                + '<div class="wallet-compra-side">' + side + '</div></div>';
+            }).join('')
+          : '<div class="empty"><div class="empty-body">Nenhum acesso por compra ainda. As matérias à venda estão na Loja.</div></div>');
+      }
+      if(pdBox){
+        const { data: ords } = await V.from('orders')
+          .select('id, order_number, placed_at, total, status, payment_status, metadata')
+          .order('placed_at', { ascending: false }).limit(30);
+        const itensBy = {};
+        if(ords && ords.length){
+          try{
+            const { data: its } = await V.from('order_items')
+              .select('order_id, product_name_snapshot')
+              .in('order_id', ords.map(function(o){ return o.id; }));
+            (its || []).forEach(function(it){ (itensBy[it.order_id] = itensBy[it.order_id] || []).push(it.product_name_snapshot); });
+          }catch(_){}
+        }
+        pdBox.innerHTML = '<div class="wallet-sec-title">Pedidos</div>' + ((ords && ords.length)
+          ? ords.map(function(o){
+              const chip = (o.payment_status === 'paid')
+                ? '<span class="wallet-chip ok">Pago</span>'
+                : (o.status === 'cancelled' || o.status === 'refunded')
+                  ? '<span class="wallet-chip off">Cancelado</span>'
+                  : '<span class="wallet-chip wait">Aguardando pagamento</span>';
+              const parcN = Number(o.metadata && o.metadata.parcelas);
+              const parc = parcN > 1
+                ? ' · ' + parcN + '× de R$ ' + Number((o.metadata && o.metadata.valor_parcela) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })
+                : '';
+              const itens = (itensBy[o.id] || []).join(' · ');
+              return '<div class="wallet-compra"><div class="wallet-compra-main">'
+                + '<span class="wallet-compra-t">' + Util.esc(o.order_number || 'Pedido') + (itens ? ' — ' + Util.esc(itens) : '') + '</span>'
+                + '<span class="wallet-compra-sub">' + Util.esc(fmtD(o.placed_at)) + Util.esc(parc) + '</span></div>'
+                + '<div class="wallet-compra-side"><span class="wallet-compra-val">R$ '
+                + Number(o.total).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) + '</span>' + chip + '</div></div>';
+            }).join('')
+          : '<div class="empty"><div class="empty-body">Nenhum pedido ainda.</div></div>');
+      }
+    }
+  } catch(e){ console.warn('[carteira compras]', e); }
+  // Sub-abas (Extrato / Minhas compras / Tabela de custos)
   const subtabs = Array.from(stageEl.querySelectorAll('[data-wallet-sub]'));
   const subpanes = Array.from(stageEl.querySelectorAll('[data-wallet-pane]'));
   subtabs.forEach(function(b){
@@ -20995,10 +21085,15 @@ Renderers.account = function(route){
       </div>
       <div class="wallet-subnav" role="tablist">
         <button class="wallet-subtab is-active" data-wallet-sub="extrato" type="button">Extrato</button>
+        <button class="wallet-subtab" data-wallet-sub="compras" type="button">Minhas compras</button>
         <button class="wallet-subtab" data-wallet-sub="custos" type="button">Tabela de custos</button>
       </div>
       <div class="wallet-sub-pane" data-wallet-pane="extrato">
         <div id="walletExtrato" class="wallet-list"><div class="empty"><div class="empty-body">Carregando…</div></div></div>
+      </div>
+      <div class="wallet-sub-pane" data-wallet-pane="compras" hidden>
+        <div id="walletAcessos" class="wallet-list"><div class="empty"><div class="empty-body">Carregando…</div></div></div>
+        <div id="walletCompras" class="wallet-list"></div>
       </div>
       <div class="wallet-sub-pane" data-wallet-pane="custos" hidden>
         <p class="field-help" style="margin-bottom:.7rem">Custo estimado de cada ação que usa IA, para transparência.</p>
@@ -21819,6 +21914,11 @@ function _notifRenderItem(n){
       ? `Seu acesso a <strong>${Util.esc(p.materia || 'sua matéria')}</strong> foi renovado. Bons estudos!`
       : `Sua matéria <strong>${Util.esc(p.materia || 'nova')}</strong> foi liberada. Bons estudos!`;
     actions = `<div class="notif-actions"><a class="btn-ghost" href="#/" data-notif-id="${Util.attr(n.id)}">Abrir minhas matérias →</a></div>`;
+  } else if(n.type === 'matricula_vencendo'){
+    // FASE E — aviso de vencimento (robô diário insere aos 30/7/1 dias)
+    const _dv = Number(p.dias) || 0;
+    line = `Seu acesso a <strong>${Util.esc(p.materia || 'uma matéria')}</strong> vence ${_dv <= 1 ? 'amanhã' : 'em ' + _dv + ' dias'}. Fale com a nossa equipe para renovar.`;
+    actions = `<div class="notif-actions"><a class="btn-ghost" href="#/conta/carteira" data-notif-id="${Util.attr(n.id)}">Ver meus acessos →</a><a class="btn-ghost" href="#/suporte" data-notif-id="${Util.attr(n.id)}">Falar com o Suporte →</a></div>`;
   } else if(n.type === 'gabarito_liberado'){
     // S10 — gabarito de simulado liberado pelo professor
     line = `O gabarito do simulado <strong>${Util.esc(p.simulado_title || 'simulado')}</strong> foi liberado! Veja sua nota e a correção.`;
@@ -22832,7 +22932,7 @@ Renderers.notifications = function(route){
     if(filter === 'unread') return !n.read;
     if(filter === 'mentions') return n.type === 'mention' || n.type === 'reply';
     if(filter === 'follows') return n.type === 'follow_request' || n.type === 'follow_accepted';
-    if(filter === 'system') return n.type === 'essay_corrected' || n.type === 'matricula_liberada';
+    if(filter === 'system') return n.type === 'essay_corrected' || n.type === 'matricula_liberada' || n.type === 'matricula_vencendo';
     return true;
   });
   const unreadCount = all.filter(n => !n.read).length;
@@ -22841,7 +22941,7 @@ Renderers.notifications = function(route){
     ['unread', 'Não lidas', unreadCount],
     ['mentions', 'Comentários', all.filter(n => n.type === 'mention' || n.type === 'reply').length],
     ['follows', 'Pedidos', all.filter(n => n.type === 'follow_request' || n.type === 'follow_accepted').length],
-    ['system', 'Sistema', all.filter(n => n.type === 'essay_corrected' || n.type === 'matricula_liberada').length]
+    ['system', 'Sistema', all.filter(n => n.type === 'essay_corrected' || n.type === 'matricula_liberada' || n.type === 'matricula_vencendo').length]
   ];
   const tabsHtml = `<div class="notif-tabs" role="tablist">
     ${filters.map(([k, lbl, count]) => `
