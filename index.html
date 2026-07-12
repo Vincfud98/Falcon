@@ -2590,6 +2590,10 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .ini-feed-more:hover,.ini-mate-more:hover{background:var(--accent-lo);border-color:var(--accent)}
 .ini-mate-li a{color:inherit;text-decoration:none}
 .ini-mate-li a:hover{color:var(--accent)}
+.ini-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.1rem;min-height:60vh;color:var(--text-mute)}
+.ini-spinner{width:34px;height:34px;border-radius:50%;border:3px solid var(--border);border-top-color:var(--accent);animation:ini-spin .8s linear infinite}
+.ini-loading-t{font-family:var(--sans);font-weight:300;font-size:.85rem;letter-spacing:.04em}
+@keyframes ini-spin{to{transform:rotate(360deg)}}
 .ini-fchg{margin-top:.55rem;border-left:2px solid rgba(233,182,90,.35);padding:.35rem .7rem;background:rgba(233,182,90,.12);border-radius:0 3px 3px 0;font-size:.78rem;color:var(--text-dim);line-height:1.5}
 .ini-fchg b{display:block;color:#e9b65a;font-weight:400;font-family:var(--mono);font-size:.56rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.15rem}
 .ini-fcard .when{font-family:var(--mono);font-size:.55rem;color:var(--text-mute);margin-left:auto;white-space:nowrap}
@@ -11205,10 +11209,20 @@ const Auth = (function(){
         _renderSoon();
       } else if(event === 'SIGNED_IN' && session && session.user){
         if(!current || current.id !== session.user.id){
+          // ANTI-FLICKER no login: marca "hidratando" ANTES do 1º render, pra o
+          // Início mostrar o spinner (estável) durante toda a carga do login, em
+          // vez de re-renderizar conteúdo pela metade. O conteúdo real é montado
+          // UMA vez quando tudo terminar (_finishIni).
+          window.__hydrating = true;
           current = await _hydrateSupabaseUser(session.user);
           syncMockUser();
           _renderSoon();
           _refreshAccessAndRescope(); // garante exam_ids atualizado nesta via
+          const _finishIni = function(){
+            window.__hydrating = false;
+            try{ if(typeof window.rebuildCourses === 'function') window.rebuildCourses(); }catch(_){}
+            _renderSoon();
+          };
           // CAUSA RAIZ da "unidade em branco": o conteúdo é hidratado no boot,
           // que pode rodar ANTES da sessão restaurar → os blocos (RLS só p/
           // logado) vêm vazios e nunca mais eram buscados. Agora, autenticado,
@@ -11216,11 +11230,11 @@ const Auth = (function(){
           try{
             if(window._hydrateContent && window.UbiqueStore && UbiqueStore.unit_blocks
                && (UbiqueStore.unit_blocks.list() || []).length === 0){
-              window._hydrateContent().then(function(ok){
-                if(ok){ try{ if(typeof window.rebuildCourses === 'function') window.rebuildCourses(); }catch(_){}; _renderSoon(); }
-              });
+              window._hydrateContent().then(function(){ _finishIni(); }).catch(function(){ _finishIni(); });
+            } else {
+              _finishIni();
             }
-          }catch(_){}
+          }catch(_){ window.__hydrating = false; _renderSoon(); }
           // Prepara a sessão do NOVO usuário (notificações ao vivo, etc.) —
           // antes isto só acontecia no boot, por isso ao relogar sem reload
           // tudo aparecia vazio até um reload manual.
@@ -29362,6 +29376,13 @@ async function _iniLoadColegas(){
 // conteúdo à direita). Os blocos com dados reais entram nas Etapas 2-5; por ora
 // cada um mostra um placeholder honesto com a etapa em que chega.
 Renderers.inicio = function(){
+  // Enquanto a página inicial hidrata os dados (login/boot), mostra UM spinner
+  // estável em vez de re-renderizar o conteúdo pela metade várias vezes — que é
+  // o que causava o flicker. Quando a hidratação termina, renderiza o conteúdo
+  // de verdade UMA vez.
+  if(window.__hydrating){
+    return '<div class="ini-loading"><span class="ini-spinner"></span><span class="ini-loading-t">Carregando sua página inicial…</span></div>';
+  }
   const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
   const nome = (me && (me.nickname || me.displayName || me.name)) || 'aluno';
   const h = new Date().getHours();
