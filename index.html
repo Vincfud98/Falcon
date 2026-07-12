@@ -2585,6 +2585,11 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .ini-ftag.sim{color:#5dd49f;border-color:rgba(93,212,159,.35);background:rgba(93,212,159,.10)}
 .ini-ftag.aula{color:#e9b65a;border-color:rgba(233,182,90,.35);background:rgba(233,182,90,.12)}
 .ini-ftag.lib{color:var(--accent);border-color:rgba(200,169,126,.4);background:rgba(200,169,126,.12)}
+.ini-ftag.notif{color:#b48ead;border-color:rgba(180,142,173,.4);background:rgba(180,142,173,.12)}
+.ini-feed-more,.ini-mate-more{display:block;width:100%;margin-top:.2rem;padding:.55rem;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--accent);font-family:var(--mono);font-size:.6rem;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;transition:all .2s ease}
+.ini-feed-more:hover,.ini-mate-more:hover{background:var(--accent-lo);border-color:var(--accent)}
+.ini-mate-li a{color:inherit;text-decoration:none}
+.ini-mate-li a:hover{color:var(--accent)}
 .ini-fchg{margin-top:.55rem;border-left:2px solid rgba(233,182,90,.35);padding:.35rem .7rem;background:rgba(233,182,90,.12);border-radius:0 3px 3px 0;font-size:.78rem;color:var(--text-dim);line-height:1.5}
 .ini-fchg b{display:block;color:#e9b65a;font-weight:400;font-family:var(--mono);font-size:.56rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.15rem}
 .ini-fcard .when{font-family:var(--mono);font-size:.55rem;color:var(--text-mute);margin-left:auto;white-space:nowrap}
@@ -9707,6 +9712,11 @@ window.TAG_REGISTRY = {
     }
     try{
       console.log('[hydrate] buscando conteúdo do Supabase...');
+      // ANTI-FLICKER: durante a carga inicial, cada replaceAll de tabela dispara
+      // um evento no store → um re-render da página inteira (5-6 piscadas feias).
+      // Marcamos "hidratando" pra o subscribe NÃO re-renderizar a cada tabela;
+      // o render final acontece UMA vez quando a hidratação termina.
+      window.__hydrating = true;
       const sb = window._sb.schema('conteudo');
       // Config global (tag de afiliado Amazon) — fire-and-forget, não bloqueia.
       sb.from('platform_config').select('amazon_tag').eq('id', 'default').maybeSingle()
@@ -10233,9 +10243,11 @@ window.TAG_REGISTRY = {
         blocks: blkR.data?.length || 0,
         downloads: dlR.data?.length || 0,
       });
+      window.__hydrating = false;
       return true;
     }catch(e){
       console.error('[hydrate] exception:', e);
+      window.__hydrating = false;
       return false;
     }
   }
@@ -10287,6 +10299,9 @@ window.TAG_REGISTRY = {
   // o rAF coalesce em 1 paint.
   UbiqueStore.subscribe(function(evt){
     if(!evt || !evt.type) return;
+    // ANTI-FLICKER: durante a carga inicial não re-renderiza a cada tabela; o
+    // render final vem no .then da hidratação (1 só). Depois volta ao normal.
+    if(window.__hydrating) return;
     const triggers = ['sync','reset','subjects','modules','chapters','units','unit_blocks','unit_sections'];
     const shouldRebuild = triggers.some(function(t){
       return evt.type === t || evt.type.indexOf(t) === 0;
@@ -29062,6 +29077,46 @@ async function _iniLoadFeed(examId){
   if(!window._sb || !examId){ el.innerHTML = '<div class="ini-ph"><span class="ini-ph-t">Sem novidades no concurso por enquanto.</span></div>'; return; }
   const _agoT = function(ts){ const d = Math.floor((Date.now() - ts) / 86400000); if(d <= 0) return 'hoje'; if(d === 1) return 'ontem'; if(d < 30) return 'há ' + d + ' dias'; try{ return new Date(ts).toLocaleDateString('pt-BR'); }catch(_){ return ''; } };
   const cards = [];
+  // Data de criação da conta: o feed só mostra o que aconteceu DEPOIS disso.
+  let acctMs = window.__acctCreatedMs || 0;
+  if(!acctMs){
+    try{ const _u = await window._sb.auth.getUser(); const _ca = _u && _u.data && _u.data.user && _u.data.user.created_at; if(_ca){ acctMs = new Date(_ca).getTime(); window.__acctCreatedMs = acctMs; } }catch(_){}
+  }
+  // Notificação pessoal → card do feed. Cobre menções (fórum/questão), respostas,
+  // redação corrigida, gabarito, suporte, estudo em dupla e seguir — clicáveis
+  // até o conteúdo. matricula_* e room_* ficam de fora (já aparecem via
+  // enrollments / bloco Colegas), pra não duplicar.
+  const _notifFeedCard = function(n){
+    if(!n || !n.type) return null;
+    const p = n.payload || {};
+    const ts = n.created_at ? new Date(n.created_at).getTime() : 0;
+    const who = Util.esc(p.from_name || p.from_handle || 'Alguém');
+    const exc = p.text_excerpt ? (' <span class="ini-fchg">"' + Util.esc(String(p.text_excerpt).slice(0, 120)) + '"</span>') : '';
+    let tag = '', txt = '', href = '#/notificacoes';
+    if(n.type === 'mention' || n.type === 'reply'){
+      tag = (n.type === 'mention') ? 'Menção' : 'Resposta';
+      txt = who + (n.type === 'mention' ? ' mencionou você' : ' respondeu você') + exc;
+      try{ const t = _resolveNotifTargetHash(p); href = t || '#/forum'; }catch(_){ href = '#/forum'; }
+    } else if(n.type === 'essay_corrected'){
+      tag = 'Redação'; txt = 'Sua discursiva foi corrigida' + (p.score != null ? (' — nota ' + Util.esc(p.score)) : '');
+      if(p.module_id && p.unit_id) href = '#/m/' + encodeURIComponent(p.module_id) + (p.chapter_id ? '/c/' + encodeURIComponent(p.chapter_id) : '') + '/u/' + encodeURIComponent(p.unit_id);
+    } else if(n.type === 'gabarito_liberado'){
+      tag = 'Gabarito'; txt = 'Gabarito de ' + Util.esc(p.simulado_title || 'simulado') + ' liberado';
+      if(p.simulado_id) href = '#/simulados/' + encodeURIComponent(p.simulado_id) + '/performance';
+    } else if(n.type === 'support_reply'){
+      tag = 'Suporte'; txt = 'A equipe respondeu sua conversa' + (p.subject ? (' (' + Util.esc(p.subject) + ')') : '');
+      if(p.thread_id) href = '#/suporte/' + encodeURIComponent(p.thread_id);
+    } else if(n.type === 'coop_request' || n.type === 'coop_done'){
+      tag = 'Estudo em dupla'; txt = who + (n.type === 'coop_request' ? ' te enviou uma questão para corrigir' : ' corrigiu sua questão');
+    } else if(n.type === 'follow_request' || n.type === 'follow_accepted'){
+      tag = 'Colegas'; txt = who + (n.type === 'follow_request' ? ' quer te seguir' : ' aceitou seu pedido para seguir');
+    } else {
+      return null;
+    }
+    return { ts: ts, html:
+      '<a class="ini-fcard" href="' + Util.attr(href) + '"><div class="top"><span class="ini-ftag notif">' + Util.esc(tag) + '</span><span class="when">' + _agoT(ts) + '</span></div>'
+      + '<div class="tt">' + txt + '</div></a>' };
+  };
   try{
     const pr = await window._sb.schema('aluno').from('forum_posts')
       .select('id, title, created_at, exam_id, subject_id')
@@ -29171,19 +29226,41 @@ async function _iniLoadFeed(examId){
       });
     }
   }catch(_){}
-  el.innerHTML = cards.length
-    ? cards.sort(function(a, b){ return b.ts - a.ts; }).map(function(c){ return c.html; }).join('')
-    : '<div class="ini-ph"><span class="ini-ph-t">Sem novidades no concurso por enquanto.</span></div>';
-  // Card de aula: o clique precisa setar o curso ativo (contrato do catálogo).
-  el.querySelectorAll('[data-feed-course]').forEach(function(a){
-    a.addEventListener('click', function(){
-      const t = (window.COURSES || []).find(function(c){ return c && c.id === a.getAttribute('data-feed-course'); });
-      if(t){
-        window.COURSE = t;
-        try{ const rb = window._UbqRebuildCourseHierarchy; if(typeof rb === 'function' && t._subjectId) rb(window.COURSE, t._subjectId, null); }catch(_){}
-      }
+  // NOTIFICAÇÕES pessoais (menções, respostas, redação, gabarito, suporte, dupla,
+  // seguir) — o feed vira um "portal" das notificações + novidades do concurso.
+  try{
+    const _me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    if(_me && _me.id){
+      const nr = await window._sb.schema('aluno').from('notifications')
+        .select('id, type, payload, created_at')
+        .eq('user_id', _me.id)
+        .order('created_at', { ascending: false }).limit(40);
+      (nr.data || []).forEach(function(n){ const c = _notifFeedCard(n); if(c) cards.push(c); });
+    }
+  }catch(_){}
+
+  // Só o que aconteceu DEPOIS da criação da conta; ordena por data (mais novo 1º).
+  const _all = cards.filter(function(c){ return !acctMs || (c.ts && c.ts >= acctMs); })
+                    .sort(function(a, b){ return b.ts - a.ts; });
+  const _wireFeed = function(){
+    el.querySelectorAll('[data-feed-course]').forEach(function(a){
+      a.addEventListener('click', function(){
+        const t = (window.COURSES || []).find(function(c){ return c && c.id === a.getAttribute('data-feed-course'); });
+        if(t){ window.COURSE = t; try{ const rb = window._UbqRebuildCourseHierarchy; if(typeof rb === 'function' && t._subjectId) rb(window.COURSE, t._subjectId, null); }catch(_){} }
+      });
     });
-  });
+  };
+  // Máx. 5 por vez + "Ver mais" que carrega mais 5, pra não empurrar a página.
+  const _renderFeed = function(nShow){
+    const shown = _all.slice(0, nShow);
+    if(!shown.length){ el.innerHTML = '<div class="ini-ph"><span class="ini-ph-t">Sem novidades desde que você entrou.</span></div>'; return; }
+    el.innerHTML = shown.map(function(c){ return c.html; }).join('')
+      + (_all.length > nShow ? '<button type="button" class="ini-feed-more" id="iniFeedMore">Ver mais</button>' : '');
+    _wireFeed();
+    const mb = document.getElementById('iniFeedMore');
+    if(mb) mb.addEventListener('click', function(){ _renderFeed(nShow + 5); });
+  };
+  _renderFeed(5);
 }
 
 // ── Colegas agora (amigos ONLINE + o que estão fazendo, via presença) ──
@@ -29225,28 +29302,57 @@ async function _iniLoadColegas(){
   // (aluno.room_events — "começou a estudar X", "acertou N seguidas"…), que
   // ficam no bloco. O snapshot current_activity expirava em 90s e sumia.
   if(logEl){
-    let evs = [];
+    const items = [];
+    // 1) Eventos das SUAS salas de estudo (aluno.room_events).
     try{
       const mr = await window._sb.schema('aluno').from('room_members').select('room_id, status').eq('user_id', meId);
       const roomIds = (mr.data || []).filter(function(m){ return m && m.status === 'member'; }).map(function(m){ return m.room_id; });
       if(roomIds.length){
         const er = await window._sb.schema('aluno').from('room_events').select('*').in('room_id', roomIds).order('created_at', { ascending: false }).limit(15);
-        evs = (er.data || []).filter(function(ev){ return ev && String(ev.user_id) !== String(meId); }).slice(0, 8);
+        (er.data || []).filter(function(ev){ return ev && String(ev.user_id) !== String(meId); }).forEach(function(ev){
+          items.push({ ts: ev.created_at ? new Date(ev.created_at).getTime() : 0, uid: ev.user_id, kind: 'room', ev: ev });
+        });
       }
     }catch(_){}
-    if(evs.length){
-      try{ if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(evs.map(function(e){ return e.user_id; })); }catch(_){}
-      logEl.innerHTML = evs.map(function(ev){
-        const u = (window.UserDirectory && UserDirectory.getById) ? (UserDirectory.getById(ev.user_id) || {}) : {};
+    // 2) Atividade dos COLEGAS mútuos no fórum (publicou / comentou) — clicável.
+    if(ids.length){
+      try{
+        const [fp, fc] = await Promise.all([
+          window._sb.schema('aluno').from('forum_posts').select('id, title, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10),
+          window._sb.schema('aluno').from('forum_comments').select('id, post_id, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10)
+        ]);
+        (fp.data || []).forEach(function(p){ items.push({ ts: p.created_at ? new Date(p.created_at).getTime() : 0, uid: p.user_id, kind: 'post', title: p.title }); });
+        (fc.data || []).forEach(function(c){ items.push({ ts: c.created_at ? new Date(c.created_at).getTime() : 0, uid: c.user_id, kind: 'comment' }); });
+      }catch(_){}
+    }
+    if(items.length){
+      items.sort(function(a, b){ return b.ts - a.ts; });
+      try{ if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(items.map(function(i){ return i.uid; })); }catch(_){}
+      const _li = function(it){
+        const u = (window.UserDirectory && UserDirectory.getById) ? (UserDirectory.getById(it.uid) || {}) : {};
         const nm = u.nickname || u.handle || 'Colega';
-        const when = (typeof _relTime === 'function' && ev.created_at) ? _relTime(new Date(ev.created_at).getTime()) : '';
+        const when = (typeof _relTime === 'function' && it.ts) ? _relTime(it.ts) : '';
+        const w = when ? ' <span style="font-family:var(--mono);font-size:.52rem;color:var(--text-mute)">· ' + Util.esc(when) + '</span>' : '';
+        if(it.kind === 'post'){
+          return '<div class="ini-mate-li"><a href="#/forum"><b>' + Util.esc(nm) + '</b> publicou no fórum: ' + Util.esc(String(it.title || '').slice(0, 60)) + w + '</a></div>';
+        }
+        if(it.kind === 'comment'){
+          return '<div class="ini-mate-li"><a href="#/forum"><b>' + Util.esc(nm) + '</b> comentou no fórum' + w + '</a></div>';
+        }
         return '<div class="ini-mate-li"><b>' + Util.esc(nm) + '</b> '
-          + ((typeof _roomEventText === 'function') ? _roomEventText(ev) : Util.esc(ev.type || ''))
-          + (when ? ' <span style="font-family:var(--mono);font-size:.52rem;color:var(--text-mute)">· ' + Util.esc(when) + '</span>' : '')
-          + '</div>';
-      }).join('');
+          + ((typeof _roomEventText === 'function') ? _roomEventText(it.ev) : Util.esc(it.ev.type || '')) + w + '</div>';
+      };
+      // Máx. 5 por vez + "Ver mais" (+5), pra não virar lista infinita.
+      let _shown = 5;
+      const _renderLog = function(){
+        logEl.innerHTML = items.slice(0, _shown).map(_li).join('')
+          + (items.length > _shown ? '<button type="button" class="ini-mate-more" id="iniMateMore">Ver mais</button>' : '');
+        const mb = document.getElementById('iniMateMore');
+        if(mb) mb.addEventListener('click', function(){ _shown += 5; _renderLog(); });
+      };
+      _renderLog();
     } else {
-      logEl.innerHTML = '<div class="ini-mate-li" style="color:var(--text-mute)">Sem atividade recente nas suas salas de estudo.</div>';
+      logEl.innerHTML = '<div class="ini-mate-li" style="color:var(--text-mute)">Sem atividade recente das suas salas ou colegas.</div>';
     }
   }
 }
