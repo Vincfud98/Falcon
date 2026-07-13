@@ -11416,6 +11416,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             <summary style="cursor:pointer;font-family:var(--mono);font-size:.65rem;letter-spacing:.06em;text-transform:uppercase;color:var(--text-mute)">Schema aceito + regras</summary>
             <div class="s-body" style="font-size:.74rem;color:var(--text-dim);line-height:1.6;margin-top:.4rem">
               <p style="margin:0 0 .3rem"><strong>Grupo:</strong> <code>title</code> (interno, não aparece pro aluno), <code>description</code>, <code>origin</code> (ID da prova, ex.: <code>[#15/2006]</code>; OMITIR pra Ubique), <code>enunciado</code> (Comando do grupo — ex.: <em>"Julgue os itens"</em> ou <em>"Leia o texto a seguir"</em>), <code>image_url</code> (imagem do grupo, opcional), <code>reference_texts</code> [], <code>questions</code> [].</p>
+              <p style="margin:0 0 .3rem"><strong>Matéria (opcional):</strong> <code>subjects</code> — lista de matérias por <strong>sigla</strong>, nome exato ou id (ex.: <code>["HB","ECO"]</code>). As questões do grupo são marcadas nessas matérias <strong>além</strong> da matéria da unidade onde você importa (soma; não sobrescreve). Use pra questão que vale em mais de uma matéria (ex.: História Econômica Brasileira em HB e ECO). Omita pra usar só a matéria da unidade.</p>
               <p style="margin:0 0 .3rem"><strong>Texto de referência (rico):</strong> <code>reference_texts:[{label, title, subtitle, author, source, body, image}]</code> — <code>label</code> (ex.: <em>"TEXTO I"</em>) e <code>body</code> (HTML) aparecem pro aluno; <code>title/subtitle</code> são internos pra organizar no banco. <code>author/source</code> também são visíveis pro aluno.</p>
               <p style="margin:0 0 .3rem"><strong>Questão (C/E):</strong> <code>type:"true_false"</code>, <code>origin</code> (<code>[#G-N/YYYY]</code> ou <code>[#N/YYYY]</code>; prefixo p/ outro concurso: <code>[pf:#10/2024]</code>), <code>statement</code> (HTML), <code>correct</code> (true=Certo/false=Errado), <code>comment</code> (HTML), <code>tags</code> [].</p>
               <p style="margin:0 0 .3rem"><strong>Múltipla escolha:</strong> <code>type:"multiple_choice"</code>, <code>options:[{label,text,correct}]</code>, <code>statement</code>, <code>comment</code>, <code>tags</code>.</p>
@@ -56078,6 +56079,24 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return frozen;
   }
 
+  // Item 2 (JSON): resolve uma lista de matérias vinda do JSON (aceita SIGLA,
+  // nome exato ou id) para uma lista de subject_id. Ignora o que não bate.
+  function _ueResolveSubjectIds(val){
+    if(val == null) return [];
+    const arr = Array.isArray(val) ? val : [val];
+    const out = [];
+    arr.forEach(function(v){
+      if(v == null) return;
+      const s = String(v).trim(); if(!s) return;
+      let hit = null;
+      if(/^\d+$/.test(s)) hit = (subjectsCache || []).find(function(x){ return String(x.id) === s; });
+      if(!hit) hit = (subjectsCache || []).find(function(x){ return String(x.sigla || '').toLowerCase() === s.toLowerCase(); });
+      if(!hit) hit = (subjectsCache || []).find(function(x){ return String(x.subject || '').toLowerCase() === s.toLowerCase(); });
+      if(hit && out.indexOf(hit.id) < 0) out.push(hit.id);
+    });
+    return out;
+  }
+
   async function _ueBankCreateGroupFromInline(g, subjectId, examId, exceptBid){
     const code = (g.origin || '').trim();
     const ym = code.match(/\/(\d{4})\]/);
@@ -56103,6 +56122,23 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const allRefs = [];
     const allChildErrors = [];
 
+    // Item 2 (JSON): aplica as matérias na junção das questões criadas neste
+    // grupo. Conjunto = matéria da unidade (subjectId) ∪ matérias do JSON
+    // (g.subjects | g.subject_ids | g.materias | g.materia). Upsert idempotente.
+    async function _applySubs(){
+      try{
+        const extra = _ueResolveSubjectIds(g.subjects || g.subject_ids || g.materias || g.materia);
+        const subs = new Set();
+        if(subjectId != null) subs.add(subjectId);
+        extra.forEach(function(id){ subs.add(id); });
+        if(subs.size && allRefs.length){
+          const rows = [];
+          allRefs.forEach(function(ref){ subs.forEach(function(id){ rows.push({ question_id: String(ref.id), subject_id: id }); }); });
+          await questoes().from('question_subjects').upsert(rows, { onConflict: 'question_id,subject_id' });
+        }
+      }catch(e){ console.warn('[import json subjects]', e); }
+    }
+
     // Cria todas as discursivas; coleta refs com type='essay'.
     for(const q of essayQs){
       const r = await _ueBankCreateEssayFromInline(g, q, subjectId, examId);
@@ -56112,6 +56148,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
     // Sem objetivas, retorna o que temos.
     if(!objQs.length){
+      await _applySubs();
       return {
         bankQuestionId: allRefs.length ? allRefs[0].id : null,
         nQuestoes:      essayQs.length,
@@ -56191,6 +56228,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const srcType = existingGroup ? (existingGroup.questao_simulada ? 'ubique' : 'past_exam') : (isUbique ? 'ubique' : 'past_exam');
     // itemIds = os itens DESTA importação → o bloco da unidade fixa só neles.
     allRefs.push({ id: String(bankQuestionId), type: 'objective', sourceType: srcType, itemIds: importedItemIds });
+
+    await _applySubs();
 
     return {
       bankQuestionId: bankQuestionId,
@@ -56408,6 +56447,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         loadMcOptions(),
         (typeof loadReferenceTexts    === 'function') ? loadReferenceTexts()    : null,
         (typeof loadQuestionRefs      === 'function') ? loadQuestionRefs()      : null,
+        (typeof loadQuestionSubjects  === 'function') ? loadQuestionSubjects()  : null,
         (typeof loadEssayCriteria     === 'function') ? loadEssayCriteria()    : null,
         (typeof loadEssayAnswerModels === 'function') ? loadEssayAnswerModels() : null,
         (typeof loadQuestionEditalTopics === 'function') ? loadQuestionEditalTopics() : null,
