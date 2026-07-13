@@ -29395,6 +29395,52 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }catch(e){ console.warn('[kn signed url]', e); alert('Erro ao abrir o arquivo.'); }
   };
 
+  // Camada 2: bucket unit-downloads privado. Assina um arquivo (aceita URL pública
+  // salva ou o caminho). Devolve a string assinada ou null.
+  window._signBucketUrl = async function(bucket, pathOrUrl){
+    if(!pathOrUrl || !window._sb) return null;
+    try{
+      let path = String(pathOrUrl);
+      const marker = '/' + bucket + '/';
+      const idx = path.indexOf(marker);
+      if(idx >= 0) path = decodeURIComponent(path.slice(idx + marker.length).split('?')[0]);
+      const { data, error } = await window._sb.storage.from(bucket).createSignedUrl(path, 3600);
+      if(error || !data || !data.signedUrl) return null;
+      return data.signedUrl;
+    }catch(e){ console.warn('[signed url]', e); return null; }
+  };
+  window._resolveMediaUrl = async function(url){
+    if(!url) return url;
+    if(String(url).indexOf('/unit-downloads/') >= 0){
+      const s = await window._signBucketUrl('unit-downloads', url);
+      return s || url;
+    }
+    return url;
+  };
+  window._openBucketFile = async function(bucket, pathOrUrl){
+    const s = await window._signBucketUrl(bucket, pathOrUrl);
+    if(!s){ alert('Não foi possível abrir o arquivo — verifique o acesso.'); return; }
+    window.open(s, '_blank', 'noopener');
+  };
+  // Troca data-sign-src pelo link assinado (miniaturas/vídeos do contato).
+  window._signSupportMedia = function(root){
+    if(!root || !window._resolveMediaUrl || !root.querySelectorAll) return;
+    root.querySelectorAll('[data-sign-src]').forEach(function(el){
+      const u = el.getAttribute('data-sign-src'); if(!u) return;
+      el.removeAttribute('data-sign-src');
+      window._resolveMediaUrl(u).then(function(s){ if(s) el.setAttribute('src', s); });
+    });
+  };
+  if(typeof document !== 'undefined' && !document._dlFileBound){
+    document._dlFileBound = true;
+    document.addEventListener('click', function(e){
+      const a = e.target.closest && e.target.closest('[data-dl-file]');
+      if(!a) return;
+      e.preventDefault();
+      window._openBucketFile('unit-downloads', a.getAttribute('data-dl-file'));
+    });
+  }
+
   function renderKnowledgeUI(){
     document.getElementById('count-knowledge').textContent = knowledgeCache.length;
     document.getElementById('knowledge-count').textContent =
@@ -44335,18 +44381,20 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // Render do anexo na bolha (imagem/áudio/vídeo/arquivo)
   function _ctAttachmentHtml(att){
     if(!att || !att.url) return '';
+    // Camada 2: unit-downloads privado. Imagem/arquivo abrem por LINK ASSINADO no
+    // clique (data-dl-file); miniatura/vídeo são assinados no passe _signSupportMedia.
     const url = esc(att.url);
     const mime = String(att.mime || '');
     if(mime.indexOf('image/') === 0){
-      return `<a class="ct-att-img" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${esc(att.name || 'imagem')}" loading="lazy"></a>`;
+      return `<a class="ct-att-img" href="#" data-dl-file="${url}"><img data-sign-src="${url}" alt="${esc(att.name || 'imagem')}" loading="lazy"></a>`;
     }
     if(mime.indexOf('audio/') === 0) return `<div class="ct-voice" data-voice-src="${url}">`
       + `<button class="cv-play" type="button" aria-label="Reproduzir"><svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg></button>`
       + `<input type="range" class="cv-seek" min="0" max="1000" value="0" step="1" aria-label="Linha do tempo">`
       + `<span class="cv-time">0:00</span></div>`;
-    if(mime.indexOf('video/') === 0) return `<video class="ct-att-media" controls preload="none" src="${url}"></video>`;
+    if(mime.indexOf('video/') === 0) return `<video class="ct-att-media" controls preload="none" data-sign-src="${url}"></video>`;
     const size = (window.DownloadsSync && DownloadsSync.formatBytes && att.size) ? DownloadsSync.formatBytes(att.size) : '';
-    return `<a class="ct-att-file" href="${url}" target="_blank" rel="noopener" download>
+    return `<a class="ct-att-file" href="#" data-dl-file="${url}" download>
       <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
       <span class="ct-att-file-info"><strong>${esc(att.name || 'arquivo')}</strong>${size ? '<span>' + esc(size) + '</span>' : ''}</span>
       <span class="ct-att-dl">Baixar</span>
@@ -44364,9 +44412,16 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const ICON_PAUSE = '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>';
     let current = null;
     function fmt(s){ if(!isFinite(s) || s < 0) s = 0; return Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
+    // Camada 2: resolve o link assinado (bucket privado) na 1ª reprodução.
+    function _ensureSrc(elx, a){
+      if(a.src) return Promise.resolve();
+      const src = elx.getAttribute('data-voice-src');
+      if(!window._resolveMediaUrl){ a.src = src; return Promise.resolve(); }
+      return window._resolveMediaUrl(src).then(function(s){ a.src = s || src; });
+    }
     function audioFor(elx){
       if(elx._audio) return elx._audio;
-      const a = new Audio(elx.getAttribute('data-voice-src'));
+      const a = new Audio();
       a.preload = 'metadata'; elx._audio = a;
       const seek = elx.querySelector('.cv-seek'), time = elx.querySelector('.cv-time'), play = elx.querySelector('.cv-play');
       const upd = () => {
@@ -44384,7 +44439,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       const play = e.target.closest && e.target.closest('.cv-play'); if(!play) return;
       const elx = play.closest('.ct-voice'); if(!elx) return;
       const a = audioFor(elx);
-      if(a.paused){ if(current && current !== elx && current._audio) current._audio.pause(); current = elx; a.play().catch(()=>{}); }
+      if(a.paused){ if(current && current !== elx && current._audio) current._audio.pause(); current = elx; _ensureSrc(elx, a).then(() => a.play().catch(()=>{})); }
       else { a.pause(); }
     });
     document.addEventListener('input', e => {
@@ -44785,6 +44840,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       </div>
     </div>`;
     const msgsEl = document.getElementById('ctChatMsgs');
+    if(msgsEl && window._signSupportMedia) window._signSupportMedia(msgsEl);
     if(msgsEl) msgsEl.scrollTop = msgsEl.scrollHeight;
     // Topbar: avatar com crop + clique abre o modal com os dados do aluno
     _renderAdminAvatarInto(document.getElementById('ctChatHeadAv'), p.photo_url || '', p.photo_transform, nome);

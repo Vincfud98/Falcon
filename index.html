@@ -22156,23 +22156,35 @@ async function _supUploadAttachment(file){
 // resto (PDF etc.) → cartão com nome + Baixar.
 function _supAttachmentHtml(att){
   if(!att || !att.url) return '';
+  // Camada 2: o arquivo mora no bucket privado unit-downloads (pasta support/).
+  // Imagem/arquivo abrem por LINK ASSINADO no clique (handler data-dl-file);
+  // a miniatura/vídeo são assinados no passe _signSupportMedia após o render.
   const url = Util.attr(_safeUrl(att.url));
   const mime = String(att.mime || '');
   if(mime.indexOf('image/') === 0){
-    return `<a class="sup-att-img" href="${url}" target="_blank" rel="noopener"><img src="${url}" alt="${Util.attr(att.name || 'imagem')}" loading="lazy"></a>`;
+    return `<a class="sup-att-img" href="#" data-dl-file="${url}"><img data-sign-src="${url}" alt="${Util.attr(att.name || 'imagem')}" loading="lazy"></a>`;
   }
   if(mime.indexOf('audio/') === 0) return `<div class="sup-voice" data-voice-src="${url}">`
     + `<button class="sv-play" aria-label="Reproduzir"><svg viewBox="0 0 24 24"><polygon points="6 4 20 12 6 20 6 4"/></svg></button>`
     + `<input type="range" class="sv-seek" min="0" max="1000" value="0" step="1" aria-label="Linha do tempo">`
     + `<span class="sv-time">0:00</span></div>`;
-  if(mime.indexOf('video/') === 0) return `<video class="sup-att-media" controls preload="none" src="${url}"></video>`;
+  if(mime.indexOf('video/') === 0) return `<video class="sup-att-media" controls preload="none" data-sign-src="${url}"></video>`;
   const size = (typeof _fmtBytes === 'function' && att.size) ? _fmtBytes(att.size) : '';
-  return `<a class="sup-att-file" href="${url}" target="_blank" rel="noopener" download>
+  return `<a class="sup-att-file" href="#" data-dl-file="${url}" download>
     <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
     <span class="sup-att-file-info"><strong>${Util.esc(att.name || 'arquivo')}</strong>${size ? '<span>' + Util.esc(size) + '</span>' : ''}</span>
     <span class="sup-att-dl">Baixar</span>
   </a>`;
 }
+// Passe que troca data-sign-src pelo link assinado (miniaturas e vídeos do suporte).
+window._signSupportMedia = function(root){
+  if(!root || !window._resolveMediaUrl || !root.querySelectorAll) return;
+  root.querySelectorAll('[data-sign-src]').forEach(function(el){
+    const u = el.getAttribute('data-sign-src'); if(!u) return;
+    el.removeAttribute('data-sign-src');
+    window._resolveMediaUrl(u).then(function(s){ if(s) el.setAttribute('src', s); });
+  });
+};
 
 // SupVoice — controla os players de mensagem de voz (.sup-voice) do suporte via
 // delegação no document (funciona mesmo com o chat re-renderizando). Play/pause +
@@ -22182,9 +22194,16 @@ function _supAttachmentHtml(att){
   const ICON_PAUSE = '<svg viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14"/><rect x="14" y="5" width="4" height="14"/></svg>';
   let current = null;
   function fmt(s){ if(!isFinite(s) || s < 0) s = 0; return Math.floor(s/60) + ':' + String(Math.floor(s%60)).padStart(2,'0'); }
+  // Camada 2: resolve o link assinado (bucket privado) na 1ª reprodução.
+  function _ensureSrc(el, a){
+    if(a.src) return Promise.resolve();
+    const src = el.getAttribute('data-voice-src');
+    if(!window._resolveMediaUrl){ a.src = src; return Promise.resolve(); }
+    return window._resolveMediaUrl(src).then(function(s){ a.src = s || src; });
+  }
   function audioFor(el){
     if(el._audio) return el._audio;
-    const a = new Audio(el.getAttribute('data-voice-src'));
+    const a = new Audio();
     a.preload = 'metadata';
     el._audio = a;
     const seek = el.querySelector('.sv-seek'), time = el.querySelector('.sv-time'), play = el.querySelector('.sv-play');
@@ -22208,7 +22227,7 @@ function _supAttachmentHtml(att){
     if(a.paused){
       if(current && current !== el && current._audio) current._audio.pause();
       current = el;
-      a.play().catch(() => {});
+      _ensureSrc(el, a).then(() => a.play().catch(() => {}));
     } else { a.pause(); }
   });
   document.addEventListener('input', e => {
@@ -22935,6 +22954,7 @@ Renderers.support.mount = async function(stageEl, route){
             el.textContent = u2 ? Util.initials(u2.nickname || u2.handle || '?') : '?';
           }
         });
+        if(window._signSupportMedia) window._signSupportMedia(msgsEl);
         if(nearBottom || !msgsEl.dataset.scrolled) msgsEl.scrollTop = msgsEl.scrollHeight;
         msgsEl.dataset.scrolled = '1';
         // Marca respostas do admin como lidas e atualiza a bolinha da lista
