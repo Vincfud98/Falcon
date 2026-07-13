@@ -22220,7 +22220,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // ═══════════════════════════════════════════════════════════
   const modal = document.getElementById('questionModal');
 
-  function openQuestionModal(questionId = null){
+  function openQuestionModal(questionId = null, unitContextId = null){
     editingQuestionId = questionId;
     modalDirty = false;
     questionModalImageUrl = null;  // será sobrescrito no ramo de edição se existir
@@ -22372,10 +22372,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         questionTopicsCache
           .filter(qt => qt.question_id === q.id)
           .forEach(qt => modalSelectedTopics.add(qt.topic_id));
-        // Tópicos do EDITAL da questão (async — re-renderiza o chipbox ao voltar)
+        // Tópicos do EDITAL da questão (async — re-renderiza o chipbox ao voltar).
+        // Item 3a: quando o modal é aberto DE DENTRO de uma unidade (unitContextId),
+        // herda também os tópicos da unidade (folha + ancestrais) — pré-seleção é a
+        // UNIÃO {tópicos salvos da questão} ∪ {tópicos da unidade}. _qApplyUnitContext
+        // só faz .add, então rodar depois do load é seguro (não apaga nada).
         questoes().from('question_edital_topics').select('edital_topic_id').eq('question_id', q.id)
           .then(function(r){
             (r.data || []).forEach(function(row){ modalSelectedEditalTopics.add(String(row.edital_topic_id)); });
+            if(unitContextId != null && typeof window._qApplyUnitContext === 'function') window._qApplyUnitContext(unitContextId);
             if(typeof renderTopicsChipbox === 'function') renderTopicsChipbox('');
           }).catch(function(){});
         questionTagsCache
@@ -26331,7 +26336,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       wrap.innerHTML = _current.map((link, idx) => {
         const path = _topicPath(link.topic_id);
         const ed = _editalOfTopic(link.topic_id);
-        const segs = path.map(t => esc((t.number ? t.number + ' ' : '') + (t.title || 'tópico')));
+        const segs = path.map(t => { const _c = t.code || t.number; return esc((_c ? _c + ' ' : '') + (t.title || 'tópico')); });
         const label = (ed ? esc(ed.name || ed.title || ('Edital ' + ed.id)) + ' · ' : '')
                     + segs.join(' › ');
         return '<div style="display:flex;align-items:center;gap:.6rem;padding:.55rem .8rem;background:var(--bg-elev);border:1px solid var(--accent-border-soft);border-radius:4px">' +
@@ -26459,7 +26464,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     function _humanPath(topicId){
       const path = _topicPath(topicId);
       const ed = _editalOfTopic(topicId);
-      const segs = path.map(t => (t.number ? t.number + ' ' : '') + (t.title || 'tópico'));
+      const segs = path.map(t => { const _c = t.code || t.number; return (_c ? _c + ' ' : '') + (t.title || 'tópico'); });
       return (ed ? (ed.name || ed.title || ('Edital ' + ed.id)) + ' · ' : '') + segs.join(' › ');
     }
 
@@ -55168,7 +55173,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         'Provavelmente o cache não foi recarregado após criação/import. Vai tentar abrir mesmo assim — ' +
         'se aparecer alert "Questão não encontrada", essa é a causa.');
     }
-    openQuestionModal(bankQuestionId);
+    // Item 3a: passa a unidade atual pra herdar o tópico do edital dela na pré-seleção.
+    openQuestionModal(bankQuestionId, ueCurrentUnitId);
     // Eleva acima do editor de unidade (que está em z-index 100).
     const m = document.getElementById('questionModal');
     if(m) m.style.zIndex = '600';
@@ -55519,7 +55525,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   };
 
   // S1.1 — insere referência {bank_question_id} no bloco discursivo (formato novo).
-  window.ueEssayImportFromBank = function(questionId){
+  window.ueEssayImportFromBank = async function(questionId){
     const target = window._ueEssayBankPickerTarget;
     if(!target) return;
     const b = _ueGetBlock(target.bid); if(!b) return;
@@ -55539,12 +55545,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     b.content.items.push({ bank_question_id: String(questionId), source_type: src });
     _ueSaveStructured(target.bid); _ueRerenderBlockBody(target.bid);
     document.getElementById('ueEssayBankPickerModal').classList.remove('active');
+    // Item 3b: SOMA o(s) tópico(s) do edital da unidade a esta questão (dedup/aditivo;
+    // se já estava em 1.1 e agora entra numa unidade de 1.2, passa a ter 1.1 E 1.2).
+    try{
+      await _ueLinkQuestionsToUnitTopics([{ id: String(questionId) }]);
+      if(typeof loadQuestionEditalTopics === 'function') await loadQuestionEditalTopics();
+    }catch(e){ console.warn('[import essay topics]', e); }
     if(typeof window.ueToast === 'function') window.ueToast('Discursiva importada do banco', 'success');
   };
 
   // Q3 — um GRUPO DE QUESTÕES do banco vira um grupo-referência no bloco.
   // whole=true → todas as questões; whole=false → só as marcadas (bank_item_ids).
-  window.ueOqImportFromBank = function(bankQuestionId, whole){
+  window.ueOqImportFromBank = async function(bankQuestionId, whole){
     const target = window._ueOqBankPickerTarget;
     if(!target) return;
     const b = _ueGetBlock(target.bid); if(!b) return;
@@ -55561,6 +55573,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     b.content.groups.push(grp);
     _ueSaveStructured(target.bid); _ueRerenderBlockBody(target.bid);
     document.getElementById('ueOqBankPickerModal').classList.remove('active');
+    // Item 3b: SOMA o(s) tópico(s) do edital da unidade a esta questão (dedup/aditivo).
+    try{
+      await _ueLinkQuestionsToUnitTopics([{ id: String(bankQuestionId) }]);
+      if(typeof loadQuestionEditalTopics === 'function') await loadQuestionEditalTopics();
+    }catch(e){ console.warn('[import oq topics]', e); }
     if(typeof window.ueToast === 'function') window.ueToast(itemIds ? (itemIds.length + ' questão(ões) importada(s)') : 'Grupo importado do banco', 'success');
   };
 
@@ -55695,7 +55712,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       console.warn('[migrate persist]', e);
       return;
     }
-    try{ await Promise.all([loadQuestions(), loadTfItems(), loadTfItemComments(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null)].filter(Boolean)); }catch(_){}
+    try{ await Promise.all([loadQuestions(), loadTfItems(), loadTfItemComments(), loadMcOptions(), (typeof loadReferenceTexts === 'function' ? loadReferenceTexts() : null), (typeof loadQuestionRefs === 'function' ? loadQuestionRefs() : null)].filter(Boolean)); }catch(_){}
     _ueRerenderBlockBody(bid);
 
     const lines = [];
@@ -56321,6 +56338,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         loadTfItemComments(),
         loadMcOptions(),
         (typeof loadReferenceTexts    === 'function') ? loadReferenceTexts()    : null,
+        (typeof loadQuestionRefs      === 'function') ? loadQuestionRefs()      : null,
         (typeof loadEssayCriteria     === 'function') ? loadEssayCriteria()    : null,
         (typeof loadEssayAnswerModels === 'function') ? loadEssayAnswerModels() : null,
         (typeof loadQuestionEditalTopics === 'function') ? loadQuestionEditalTopics() : null,
