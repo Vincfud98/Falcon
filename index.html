@@ -13847,20 +13847,37 @@ function _dlGetForUnit(unitId){
    Aceita a URL pública salva (extrai o caminho) ou o próprio caminho. Funciona
    com o bucket público OU privado — por isso dá pra publicar antes de fechar o
    bucket. Camada 2: substitui as URLs públicas diretas no href. */
-window._openBucketFile = async function(bucket, pathOrUrl){
-  if(!pathOrUrl || !window._sb) return;
+// Gera um LINK ASSINADO (string) pra um arquivo do bucket. Aceita a URL pública
+// salva (extrai o caminho) ou o próprio caminho. Devolve a string ou null.
+window._signBucketUrl = async function(bucket, pathOrUrl){
+  if(!pathOrUrl || !window._sb) return null;
   try{
     let path = String(pathOrUrl);
     const marker = '/' + bucket + '/';
     const idx = path.indexOf(marker);
     if(idx >= 0) path = decodeURIComponent(path.slice(idx + marker.length).split('?')[0]);
     const { data, error } = await window._sb.storage.from(bucket).createSignedUrl(path, 3600);
-    if(error || !data || !data.signedUrl){
-      if(window.App && App._showAccessToast) App._showAccessToast('Não foi possível abrir o arquivo — verifique se você tem acesso a este material.');
-      return;
-    }
-    window.open(data.signedUrl, '_blank', 'noopener');
-  }catch(e){ console.warn('[signed url]', e); }
+    if(error || !data || !data.signedUrl) return null;
+    return data.signedUrl;
+  }catch(e){ console.warn('[signed url]', e); return null; }
+};
+// Resolve uma URL de MÍDIA (áudio/imagem/vídeo): se for do bucket unit-downloads,
+// troca pela versão assinada; senão (Google Drive, externo) devolve como está.
+window._resolveMediaUrl = async function(url){
+  if(!url) return url;
+  if(String(url).indexOf('/unit-downloads/') >= 0){
+    const signed = await window._signBucketUrl('unit-downloads', url);
+    return signed || url;
+  }
+  return url;
+};
+window._openBucketFile = async function(bucket, pathOrUrl){
+  const signed = await window._signBucketUrl(bucket, pathOrUrl);
+  if(!signed){
+    if(window.App && App._showAccessToast) App._showAccessToast('Não foi possível abrir o arquivo — verifique se você tem acesso a este material.');
+    return;
+  }
+  window.open(signed, '_blank', 'noopener');
 };
 // Delegação: qualquer link/botão com data-dl-file abre por link assinado.
 if(typeof document !== 'undefined' && !document._dlFileBound){
@@ -14131,8 +14148,15 @@ window.LBAudio = (function(){
     if(boundBar){ boundBar.classList.remove('has-error'); const e = boundBar.querySelector('.tb-audio-err'); if(e) e.remove(); }
     ['timeupdate','durationchange','loadedmetadata','play','pause','ended'].forEach(ev => audio.addEventListener(ev, _sync));
     audio.addEventListener('error', _showErr);
-    audio.src = meta.src;
+    audio.src = meta._playSrc || meta.src;
     return audio;
+  }
+  // Camada 2: se o áudio está no bucket privado unit-downloads, resolve o link
+  // assinado (uma vez por faixa) antes de tocar. Áudio do Drive/externo passa direto.
+  function _resolvePlaySrc(meta){
+    if(meta._playSrc) return Promise.resolve();
+    if(!window._resolveMediaUrl) { meta._playSrc = meta.src; return Promise.resolve(); }
+    return window._resolveMediaUrl(meta.src).then(u => { meta._playSrc = u || meta.src; });
   }
   function _showErr(){
     if(!boundBar) return;
@@ -14144,9 +14168,8 @@ window.LBAudio = (function(){
 
   function toggle(meta, barEl){
     boundBar = barEl;
-    if(_isCur(meta)){ if(audio.paused) audio.play().catch(()=>{}); else audio.pause(); }
-    else { _newAudio(meta); audio.play().catch(()=>{}); }
-    _sync();
+    if(_isCur(meta)){ if(audio.paused) audio.play().catch(()=>{}); else audio.pause(); _sync(); return; }
+    _resolvePlaySrc(meta).then(() => { _newAudio(meta); audio.play().catch(()=>{}); _sync(); });
   }
 
   function _sync(){
@@ -14214,7 +14237,7 @@ window.LBAudio = (function(){
 
   function expand(meta, barEl){
     boundBar = barEl;
-    if(!_isCur(meta)){ _newAudio(meta); audio.play().catch(()=>{}); }
+    if(!_isCur(meta)){ _resolvePlaySrc(meta).then(() => { _newAudio(meta); audio.play().catch(()=>{}); _sync(); }); }
     if(!modalEl) _buildModal();
     const cov = modalEl.querySelector('.lba-cover img');
     cov.src = (curMeta && curMeta.cover) || '';
