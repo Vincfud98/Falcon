@@ -6472,6 +6472,26 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   display:flex;gap:.3rem;border-bottom:1px solid var(--border);
   margin-bottom:1.2rem;flex-wrap:wrap;
 }
+/* Buscar colega, dentro da própria aba. O campo herda .field-input do
+   .account-fields-section (o input não tem estilo fora dela — index.html:6745),
+   então aqui só cuidamos do espaçamento e da lista de resultados. */
+.peers-find{margin-bottom:1.2rem}
+.peers-find-results{
+  display:flex;flex-direction:column;gap:.5rem;
+  margin-top:.7rem;padding-top:.7rem;
+  border-top:1px solid var(--border);
+}
+.peers-find-results[hidden]{display:none}
+.peers-find-empty{
+  font-family:var(--sans);font-weight:300;font-size:.82rem;
+  color:var(--text-mute);font-style:italic;margin:0;
+}
+/* iOS dá zoom ao focar campo com fonte < 16px, e não desfaz. A regra global
+   (@media pointer:coarse) perde pra .account-fields-section .field-input por
+   especificidade — daí o override explícito aqui. */
+@media (pointer: coarse){
+  .peers-find .field-input{font-size:16px}
+}
 .peers-subtab{
   background:transparent;border:0;
   padding:.6rem .9rem;
@@ -20176,7 +20196,18 @@ const UserDirectory = (function(){
     const excludeUserId = opts && opts.excludeUserId;
     return all().filter(u => {
       if(excludeUserId && u.id === excludeUserId) return false;
-      const hay = (u.handle + ' ' + u.displayName + ' ' + u.nickname + ' ' + u.email).toLowerCase();
+      // O que se pode buscar: @handle, apelido e — SÓ de quem deixou o nome
+      // público — o nome. Antes o displayName entrava sempre: quem marcava
+      // "não mostrar meu nome" continuava sendo ACHADO pelo nome real, embora a
+      // tela escondesse (a mesma regra da pintura está em index.html:20006).
+      // Buscar é uma forma de ver.
+      // O e-mail também saiu: casar por e-mail não serve a nenhum caso de uso de
+      // "achar um colega" e transformaria a busca em ferramenta de enumeração
+      // (digitar "gmail" listaria a base). Hoje ele vinha sempre vazio (o
+      // hydrate de perfis não traz a coluna, index.html:10320) — a remoção não
+      // muda resultado nenhum, só fecha a porta antes de alguém abri-la.
+      const nomeBuscavel = (u.namePublic !== false) ? (u.displayName || '') : '';
+      const hay = (u.handle + ' ' + nomeBuscavel + ' ' + u.nickname).toLowerCase();
       return hay.indexOf(q) >= 0;
     }).slice(0, limit);
   }
@@ -21629,6 +21660,19 @@ Renderers.account = function(route){
         <button class="peers-subtab" data-peers-sub="pedidos" role="tab" aria-selected="false">Pedidos <span class="peers-count" data-count-for="pedidos">0</span></button>
         <a class="btn-ghost" href="#/salas" style="margin-left:auto;align-self:center;white-space:nowrap">Salas de Estudos →</a>
       </div>
+      <!-- Buscar colega AQUI. Antes, achar alguém exigia sair da aba e ir na lupa
+           da topbar — o próprio texto de "lista vazia" mandava o aluno embora
+           ("Use a lupa pra buscar usuários por @").
+           .account-fields-section é o padrão do projeto pra o .field-input ter
+           estilo: ele só existe escopado sob essa classe (index.html:6745), e o
+           login e o suporte já resolvem assim. -->
+      <div class="peers-find account-fields-section">
+        <div class="field">
+          <input class="field-input" id="peersFind" type="search" autocomplete="off"
+                 placeholder="Buscar colega por apelido ou @" aria-label="Buscar colega por apelido ou @">
+        </div>
+        <div class="peers-find-results" id="peersFindResults" hidden></div>
+      </div>
       <div class="peers-pane-wrap" data-peers-pane="colegas"></div>
       <div class="peers-pane-wrap" data-peers-pane="seguindo" hidden></div>
       <div class="peers-pane-wrap" data-peers-pane="seguidores" hidden></div>
@@ -21858,7 +21902,7 @@ Renderers.account.mount = function(stageEl){
     }
     fillPane('pedidos',    incoming,  'Nenhum pedido pendente. Quando alguém solicitar seguir você, aparece aqui.');
     fillPane('colegas',    mutual,    'Você ainda não tem colegas mutuais. Aceite um pedido ou siga alguém que também te siga.');
-    fillPane('seguindo',   following, 'Você ainda não segue ninguém. Use a lupa pra buscar usuários por @.');
+    fillPane('seguindo',   following, 'Você ainda não segue ninguém. Use a busca aqui em cima para encontrar colegas.');
     fillPane('seguidores', followers, 'Você ainda não tem seguidores.');
     // Renderiza fotos via helper
     stageEl.querySelectorAll('.peer-card-avatar[data-photo-url]').forEach(av => {
@@ -21875,6 +21919,71 @@ Renderers.account.mount = function(stageEl){
         if(initials) initials.style.display = 'none';
       }
     });
+  }
+
+  // ── Buscar colega dentro da própria aba ──
+  // Reusa renderUserCard (o mesmo card das listas: mostra apelido/@, nunca o
+  // nome completo) e Follows.request. O botão que sai depende da relação atual —
+  // sem isso o aluno mandaria pedido pra quem ele já segue.
+  let _refazerBusca = null;
+  const peersFindEl = stageEl.querySelector('#peersFind');
+  const peersFindOut = stageEl.querySelector('#peersFindResults');
+  if(peersFindEl && peersFindOut){
+    let _findSeq = 0;
+    async function _runFind(){
+      const q = (peersFindEl.value || '').trim();
+      const seq = ++_findSeq;
+      if(q.length < 2){ peersFindOut.hidden = true; peersFindOut.innerHTML = ''; return; }
+      const me = Auth.getUser(); if(!me) return;
+      const achados = UserDirectory.search(q, { excludeUserId: me.id, limit: 8 });
+      if(!achados.length){
+        if(seq !== _findSeq) return;
+        peersFindOut.hidden = false;
+        peersFindOut.innerHTML = '<p class="peers-find-empty">Ninguém encontrado com esse apelido ou @.</p>';
+        return;
+      }
+      const pres = (typeof _presenceFetch === 'function')
+        ? await _presenceFetch(achados.map(u => u.id)) : {};
+      // Digitou de novo enquanto a presença vinha: a resposta velha não pode
+      // sobrescrever a nova.
+      if(seq !== _findSeq) return;
+      peersFindOut.hidden = false;
+      peersFindOut.innerHTML = achados.map(u => {
+        const rel = Follows.relationshipWith(me.id, u.id);
+        let acoes;
+        if(rel.iFollow)            acoes = '<span class="peer-tag">já segue</span>';
+        else if(rel.iSentRequest)  acoes = '<span class="peer-tag">pedido enviado</span>';
+        else if(rel.theySentRequest) acoes = '<span class="peer-tag">te enviou pedido</span>';
+        else acoes = `<button class="btn btn-ghost btn-sm" data-peers-followback="${Util.attr(u.id)}">Seguir</button>`;
+        return renderUserCard(u, acoes, pres[String(u.id)]);
+      }).join('');
+      // Fotos: o renderUserCard só deixa os data-* prontos; quem pinta é isto
+      // (mesmo laço do fim do renderPeersAllSubpanes).
+      peersFindOut.querySelectorAll('.peer-card-avatar[data-photo-url]').forEach(av => {
+        const url = av.getAttribute('data-photo-url') || '';
+        if(!url || typeof window.renderAvatarInto !== 'function') return;
+        renderAvatarInto(av, url, {
+          x: parseFloat(av.getAttribute('data-photo-x')) || 0,
+          y: parseFloat(av.getAttribute('data-photo-y')) || 0,
+          scale: parseFloat(av.getAttribute('data-photo-s')) || 1
+        });
+        const ini = av.querySelector('.peer-card-initials');
+        if(ini) ini.style.display = 'none';
+      });
+    }
+    let _findTimer = null;
+    peersFindEl.addEventListener('input', () => {
+      clearTimeout(_findTimer);
+      _findTimer = setTimeout(_runFind, 180); // não refaz a lista a cada tecla
+    });
+    _refazerBusca = _runFind; // pros cliques de seguir/aceitar repintarem daqui também
+  }
+
+  // Repinta o que mudou de estado: as 4 listas E, se houver busca aberta, os
+  // resultados dela.
+  function _repintarTudo(){
+    renderPeersAllSubpanes();
+    if(typeof _refazerBusca === 'function') _refazerBusca();
   }
 
   // AO VIVO — a lista de colegas só atualizava com F5. O ciclo que recarrega os
@@ -21920,10 +22029,12 @@ Renderers.account.mount = function(stageEl){
     const openProfile = e.target.closest('[data-open-profile]');
     const fresh = Auth.getUser();
     if(!fresh) return;
-    if(accept){ Follows.accept(accept.getAttribute('data-peers-accept')); renderPeersAllSubpanes(); return; }
-    if(decline){ Follows.decline(decline.getAttribute('data-peers-decline')); renderPeersAllSubpanes(); return; }
-    if(unfollow){ Follows.unfollow(fresh.id, unfollow.getAttribute('data-peers-unfollow')); renderPeersAllSubpanes(); return; }
-    if(followBack){ Follows.request(fresh.id, followBack.getAttribute('data-peers-followback')); renderPeersAllSubpanes(); return; }
+    // _repintarTudo: as listas E os resultados da busca. Sem repintar a busca, o
+    // botão clicado ali continuaria dizendo "Seguir" depois de o pedido sair.
+    if(accept){ Follows.accept(accept.getAttribute('data-peers-accept')); _repintarTudo(); return; }
+    if(decline){ Follows.decline(decline.getAttribute('data-peers-decline')); _repintarTudo(); return; }
+    if(unfollow){ Follows.unfollow(fresh.id, unfollow.getAttribute('data-peers-unfollow')); _repintarTudo(); return; }
+    if(followBack){ Follows.request(fresh.id, followBack.getAttribute('data-peers-followback')); _repintarTudo(); return; }
     if(openProfile){
       const uid = openProfile.getAttribute('data-open-profile');
       if(uid && typeof window.openUserProfile === 'function') openUserProfile(uid);
