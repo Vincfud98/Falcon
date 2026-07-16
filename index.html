@@ -10378,9 +10378,18 @@ window.TAG_REGISTRY = {
       // Sem a lista de perfis da plataforma, o UserDirectory fica vazio e o
       // autocomplete do "@" não sugere ninguém. Faz merge (preserva o que já
       // veio do mirror do usuário atual / autores de comentários).
+      // PRIVACIDADE (2026-07-16): lê a VITRINE (crm.user_directory), não a tabela.
+      // A tabela tinha regra `USING (true)`: qualquer aluno logado baixava os
+      // perfis INTEIROS — o nome completo de quem marcou "não mostrar" (a defesa
+      // era só na pintura, em ~20069) e o `genero` de TODO MUNDO, que nenhuma
+      // tela lê de terceiros. A vitrine já sai mascarada da origem e não tem
+      // gênero; a tabela agora é "só o meu perfil, ou admin".
+      // A vitrine NÃO mascara a minha própria linha (o `or user_id = auth.uid()`
+      // no SQL) — senão a /conta abriria com o nome vazio e o Salvar gravaria
+      // nulo, ou seja, o conserto de privacidade apagaria o nome do aluno.
       try {
-        const { data: profs, error } = await window._sb.schema('crm').from('user_profiles')
-          .select('user_id, display_name, nickname, genero, full_name_public, handle, bio, photo_url, photo_transform');
+        const { data: profs, error } = await window._sb.schema('crm').from('user_directory')
+          .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform');
         if(!error && Array.isArray(profs) && UbiqueStore.user_profiles){
           const list = UbiqueStore.user_profiles.list() || [];
           profs.forEach(p => {
@@ -10389,7 +10398,6 @@ window.TAG_REGISTRY = {
               user_id:        p.user_id,
               displayName:    p.display_name || '',
               nickname:       p.nickname || '',
-              genero:         p.genero || '',
               namePublic:     p.full_name_public !== false,
               handle:         p.handle || '',
               bio:            p.bio || '',
@@ -10404,6 +10412,34 @@ window.TAG_REGISTRY = {
           console.log('[hydrate user_profiles] ✅', { perfis: profs.length });
         } else if(error){ console.warn('[hydrate user_profiles] erro:', error); }
       } catch(e){ console.warn('[hydrate user_profiles] exception:', e); }
+
+      // MEU perfil, da TABELA — depois da vitrine, pra sobrescrever a minha
+      // linha com o que só eu posso ver. Hoje isso é o `genero`, que saiu do
+      // diretório por ser dado pessoal que ninguém lê de terceiros. Sem esta
+      // leitura, o <select> de gênero em /conta abriria em "Prefiro não dizer"
+      // e o primeiro Salvar apagaria a escolha do aluno.
+      // A policy nova (user_id = auth.uid() or is_admin()) permite exatamente
+      // esta leitura — é a única linha da tabela que eu enxergo.
+      try {
+        const _me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+        if(_me && _me.id && UbiqueStore.user_profiles){
+          const { data: meu, error: meuErr } = await window._sb.schema('crm').from('user_profiles')
+            .select('user_id, display_name, genero, full_name_public')
+            .eq('user_id', _me.id).maybeSingle();
+          if(!meuErr && meu){
+            const list = UbiqueStore.user_profiles.list() || [];
+            const existing = list.find(x => x && x.user_id === meu.user_id);
+            const patch = {
+              genero: meu.genero || '',
+              displayName: meu.display_name || '',
+              namePublic: meu.full_name_public !== false,
+              updated_at: Date.now()
+            };
+            if(existing) UbiqueStore.user_profiles.update(existing.id, patch);
+            else UbiqueStore.user_profiles.add(Object.assign({ user_id: meu.user_id, created_at: Date.now() }, patch));
+          } else if(meuErr){ console.warn('[hydrate meu perfil] erro:', meuErr); }
+        }
+      } catch(e){ console.warn('[hydrate meu perfil] exception:', e); }
 
       // Foto do sistema (config global, crm.platform_settings) — avatar das
       // notificações de sistema. Linha única id='default'; leitura liberada.
@@ -12559,7 +12595,10 @@ const Store = (function(){
       )];
       if(uniqUserIds.length && window.UbiqueStore && window.UbiqueStore.user_profiles){
         try{
-          const { data: profs, error: pErr } = await window._sb.schema('crm').from('user_profiles')
+          // Perfis de TERCEIROS (autores de comentário): vem da VITRINE. A
+          // tabela agora é só o meu próprio perfil — ler ela aqui devolveria
+          // lista vazia e os comentários ficariam sem nome/foto.
+          const { data: profs, error: pErr } = await window._sb.schema('crm').from('user_directory')
             .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform')
             .in('user_id', uniqUserIds);
           if(!pErr && Array.isArray(profs)){
@@ -20018,7 +20057,9 @@ async function _ensureProfileLoaded(userId){
   if(!userId || !window._sb || !window.UbiqueStore || !UbiqueStore.user_profiles) return;
   if(UserDirectory.getById(userId)) return; // já temos em memória
   try{
-    const { data, error } = await window._sb.schema('crm').from('user_profiles')
+    // Perfil de OUTRA pessoa sob demanda (o modal do colega usa isto) → VITRINE.
+    // A tabela agora só devolve a minha própria linha.
+    const { data, error } = await window._sb.schema('crm').from('user_directory')
       .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform')
       .eq('user_id', userId).maybeSingle();
     if(error || !data) return;
@@ -20385,7 +20426,8 @@ const Notifications = (function(){
           .filter(Boolean).map(String))]
           .filter(id => !(window.UserDirectory && UserDirectory.getById(id)));
         if(fromIds.length && window.UbiqueStore && UbiqueStore.user_profiles && window._sb){
-          const { data: profs } = await window._sb.schema('crm').from('user_profiles')
+          // Quem me mandou a notificação (terceiros) → VITRINE.
+          const { data: profs } = await window._sb.schema('crm').from('user_directory')
             .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform')
             .in('user_id', fromIds);
           const list = UbiqueStore.user_profiles.list() || [];
@@ -20702,7 +20744,10 @@ async function _presenceFetch(userIds){
   const ids = [...new Set((userIds || []).map(String))].filter(Boolean);
   if(!ids.length || !window._sb) return out;
   try{
-    const { data } = await window._sb.schema('crm').from('user_profiles')
+    // Presença de TERCEIROS → VITRINE. A tabela agora é só o meu próprio perfil;
+    // ler ela aqui devolveria vazio e o pontinho de "online" e o streak sumiriam
+    // de todos os cards de colega. A vitrine expõe estas colunas de propósito.
+    const { data } = await window._sb.schema('crm').from('user_directory')
       .select('user_id, last_seen_at, current_activity, streak, streak_day, hot_streak, questions_today, questions_day').in('user_id', ids);
     const now = Date.now();
     const today = _dayFmt(new Date());
@@ -20738,7 +20783,8 @@ async function _ensureProfilesLoaded(ids){
   const need = [...new Set((ids || []).map(String))].filter(id => id && !(window.UserDirectory && UserDirectory.getById(id)));
   if(!need.length || !window._sb || !window.UbiqueStore || !UbiqueStore.user_profiles) return;
   try{
-    const { data } = await window._sb.schema('crm').from('user_profiles')
+    // Perfis de terceiros em lote (cards da aba Colegas) → VITRINE.
+    const { data } = await window._sb.schema('crm').from('user_directory')
       .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform').in('user_id', need);
     const list = UbiqueStore.user_profiles.list() || [];
     (data || []).forEach(p => {
@@ -25287,7 +25333,8 @@ async function _forumResolveAuthors(userIds){
   const need = [...new Set(userIds.map(String))].filter(id => !_forumAuthorCache[id]);
   if(need.length && window._sb){
     try{
-      const { data } = await window._sb.schema('crm').from('user_profiles')
+      // Autores de post/comentário do fórum (terceiros) → VITRINE.
+      const { data } = await window._sb.schema('crm').from('user_directory')
         .select('user_id, display_name, nickname, handle, photo_url, photo_transform').in('user_id', need);
       (data||[]).forEach(p => { _forumAuthorCache[String(p.user_id)] = p; });
     }catch(e){ console.warn('[forum authors]', e); }
@@ -30234,7 +30281,8 @@ async function _iniLoadColegas(){
   if(!ids.length){ empty('Você ainda não tem colegas mútuos. Siga colegas (e eles a você) para vê-los aqui.'); return; }
   let profs = [];
   try{
-    const r = await window._sb.schema('crm').from('user_profiles')
+    // Colegas mútuos na home (terceiros) → VITRINE.
+    const r = await window._sb.schema('crm').from('user_directory')
       .select('user_id, nickname, handle, display_name, full_name_public, photo_url, photo_transform, last_seen_at, current_activity')
       .in('user_id', ids);
     profs = r.data || [];
