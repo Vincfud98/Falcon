@@ -40041,11 +40041,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           const s = students[String(row.user_id)]; if(!s) return;
           const m = row.metadata || {}; const iid = m.item_id;
           if(iid == null || !_falconValidItems.has(String(iid))) return; // ignora questões removidas/órfãs
+          // Resposta do BANCO DE QUESTÕES ('__bank_q') CONTA no ranking — decisão
+          // do usuário (2026-07-16), coerente com o que o aluno vê no Desempenho
+          // dele (index.html:13667 só exclui '__sim_'). Antes o `indexOf('__')`
+          // barrava o banco junto com o simulado, e o ranking do admin divergia
+          // do número que o próprio aluno enxerga.
+          // A matéria vem do item_id (a QUESTÃO), então não precisa de unidade.
           const uid = m.unit_id != null ? String(m.unit_id) : '';
-          if(uid && uid.indexOf('__') === 0) return;
-          const sid = (_falconItemSubject[String(iid)] != null) ? _falconItemSubject[String(iid)] : (uid ? _falconUnitInfo(uid).subjectId : null);
+          const _unidadeReal = !!(uid && uid.indexOf('__') !== 0);
+          const sid = (_falconItemSubject[String(iid)] != null) ? _falconItemSubject[String(iid)] : (_unidadeReal ? _falconUnitInfo(uid).subjectId : null);
           const keys = ['__all']; if(sid != null) keys.push(String(sid));
-          keys.forEach(k => { const b = bucket(s, k); b.ans++; if(row.is_correct === true) b.corr++; if(uid) b.units.add(uid); });
+          // b.units conta UNIDADES estudadas: só entra unidade de verdade.
+          keys.forEach(k => { const b = bucket(s, k); b.ans++; if(row.is_correct === true) b.corr++; if(_unidadeReal) b.units.add(uid); });
         }, ['user_id', 'question_ref']
       );
 
@@ -40636,17 +40643,34 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(iid == null || !_falconValidItems.has(String(iid))) return;
       if(r.is_correct === true){ (r.flagged ? acertoD++ : acerto++); }
       else if(r.is_correct === false){ (r.flagged ? erroD++ : erro++); }
-      if(uid && String(uid).indexOf('__') !== 0 && r.is_correct != null){
-        // matéria pela QUESTÃO atual (mais confiável que pelo unit_id legado)
-        const info = _falconUnitInfo(uid);
+      // MATÉRIA não depende de UNIDADE. Antes as duas coisas viviam sob um
+      // guarda só (`uid && uid.indexOf('__') !== 0`), e o resultado era o modal
+      // se contradizendo: donut com 43% ao lado de "Sem questões objetivas
+      // respondidas". Quem responde no BANCO DE QUESTÕES grava unit_id
+      // '__bank_q' (index.html:37144), então caía fora de tudo — menos do donut,
+      // que nunca teve esse guarda. A matéria vem do item_id (_falconItemSubject,
+      // admin.html:39331), que é a questão — o dado sempre esteve à mão.
+      // Decisão do usuário (2026-07-16): resposta do banco CONTA. É o que o
+      // próprio aluno já vê no Desempenho dele (index.html:13667 só exclui
+      // '__sim_'); se o admin não contasse, os dois veriam números diferentes da
+      // mesma pessoa.
+      const _unidadeReal = !!(uid && String(uid).indexOf('__') !== 0);
+      if(r.is_correct != null){
+        const info = _unidadeReal ? _falconUnitInfo(uid) : {};
         const sid = _falconItemSubject[String(iid)] || info.subjectId;
         if(sid){
           if(!bySubj[sid]) bySubj[sid] = { ans:0, corr:0, items:new Set(), name:(subjectsCache.find(s=>String(s.id)===String(sid))||{}).subject || info.sig || ('Materia '+sid) };
           bySubj[sid].ans++; if(r.is_correct === true) bySubj[sid].corr++; bySubj[sid].items.add(String(iid));
         }
-        const ukey = String(uid);
-        if(!byUnit[ukey]) byUnit[ukey] = { ans:0, corr:0, info };
-        byUnit[ukey].ans++; if(r.is_correct === true) byUnit[ukey].corr++;
+        // RANKING DE UNIDADES: aqui a unidade é obrigatória de verdade — questão
+        // do banco não pertence a unidade nenhuma e não tem como ser ranqueada.
+        // (Idem "Unidades estudadas", acima: responder no banco não é estudar
+        // uma aula, então o 0 do print está correto e continua 0.)
+        if(_unidadeReal){
+          const ukey = String(uid);
+          if(!byUnit[ukey]) byUnit[ukey] = { ans:0, corr:0, info };
+          byUnit[ukey].ans++; if(r.is_correct === true) byUnit[ukey].corr++;
+        }
       }
     });
     const answered = acerto + acertoD + erro + erroD;
@@ -40711,7 +40735,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }));
       const allItems = [...new Set(subs.reduce((a, s) => a.concat(s.items), []))];
       if(!subs.length){
-        cmpEl.innerHTML = '<p class="dash-ped-empty" style="margin:.4rem">Sem questões objetivas respondidas.</p>';
+        // O texto tem que ser HONESTO com o donut ao lado. Antes dizia sempre
+        // "Sem questões objetivas respondidas" — e ficava mentindo ao lado de um
+        // donut de 43%, porque o vazio não era falta de resposta, era falta de
+        // matéria. Agora separa os dois casos.
+        cmpEl.innerHTML = answered
+          ? '<p class="dash-ped-empty" style="margin:.4rem">Respondeu ' + answered + (answered > 1 ? ' questões objetivas' : ' questão objetiva') + ', mas nenhuma tem matéria definida — não dá pra comparar por matéria.</p>'
+          : '<p class="dash-ped-empty" style="margin:.4rem">Sem questões objetivas respondidas.</p>';
       } else {
         const cmpRow = (label, youPct, key) => `
           <div class="fcmp-bar"><span class="fcmp-bar-lbl">Aluno</span><div class="fcmp-track"><div class="fcmp-fill fcmp-you" style="width:${youPct}%"></div></div><span class="fcmp-val">${youPct}%</span></div>
