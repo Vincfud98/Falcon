@@ -8945,6 +8945,39 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
 
 </style>
 
+<!-- Recuperação de senha: MARCA a intenção antes de qualquer um poder apagá-la.
+     Precisa vir ANTES do supabase-js. O SDK, ao validar o link, faz
+     `window.location.hash = ''` (só depois de uma ida à rede) — e o roteador
+     do app só roda no DOMContentLoaded, quando o hash já pode ter sumido.
+     Resultado: a intenção "vim trocar a senha" se perdia e o aluno era jogado
+     pra dentro da plataforma sem nunca ver a tela de nova senha.
+     Aqui a intenção vira ESTADO, lido antes de todo mundo. -->
+<script>
+(function(){
+  // type=recovery é EXCLUSIVO do link "esqueci minha senha". O link de primeiro
+  // acesso vem com type=signup e NÃO ativa nada disto (o próprio SDK separa os
+  // dois: type === 'recovery' ? PASSWORD_RECOVERY : SIGNED_IN).
+  // O [#&] evita casar com o token_type=bearer que vem no mesmo hash.
+  const VEIO_DO_LINK = /[#&]type=recovery(&|$)/.test(location.hash || '');
+  const CHAVE = 'ubique.pw.recovery';
+  try{
+    // sessionStorage: sobrevive ao F5 e à limpeza do hash pelo SDK. Morre ao
+    // fechar a aba — não vira estado pendurado pra sempre.
+    if(VEIO_DO_LINK) sessionStorage.setItem(CHAVE, '1');
+    window.__pwRecovery = sessionStorage.getItem(CHAVE) === '1';
+  }catch(_){
+    // Navegador com storage bloqueado: a variável em memória já basta pra este
+    // carregamento (só se perde num F5).
+    window.__pwRecovery = VEIO_DO_LINK;
+  }
+  // Chamado quando a senha é salva (ou no logout): destranca a plataforma.
+  window.__pwRecoveryDone = function(){
+    window.__pwRecovery = false;
+    try{ sessionStorage.removeItem(CHAVE); }catch(_){}
+  };
+})();
+</script>
+
 <!-- Supabase — verificação de acesso à plataforma (platform_access) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
@@ -11062,6 +11095,9 @@ const Auth = (function(){
   // logout() — signOut no Supabase + limpa state local + cache.
   // Timeout de 2s no signOut pra não travar se Supabase não responder.
   async function logout(){
+    // Sair no meio da troca de senha: a marca precisa morrer junto com a sessão,
+    // senão o roteador continuaria prendendo a aba na tela de nova senha.
+    if(window.__pwRecoveryDone) window.__pwRecoveryDone();
     if(window._sb){
       try {
         await Promise.race([
@@ -11269,8 +11305,14 @@ const Auth = (function(){
 
   function canAccess(route){
     const user = getUser();
-    if(!user) return route.view === 'login';
+    // Nova senha é pública COMO O LOGIN: quem vem do link do e-mail chega antes
+    // de `current` estar hidratado (a sessão ainda está vindo da rede), então
+    // sem esta exceção o guard expulsaria justamente quem precisa da tela.
+    if(!user) return route.view === 'login' || route.view === 'novaSenha';
     if(route.section === 'admin' && user.role !== 'admin' && user.role !== 'superadmin') return false;
+    // Já logado e trocando a senha: a tela continua permitida (é o caso normal
+    // — a sessão do link de recuperação É uma sessão válida).
+    if(route.view === 'novaSenha') return true;
     // Edital é livre pra qualquer usuário logado.
     if(route.view === 'edital') return true;
     // Bloqueio de conteúdo por módulo (apenas alunos)
@@ -11360,12 +11402,14 @@ const Auth = (function(){
   if(window._sb && window._sb.auth && !window._authStateBound){
     window._authStateBound = true;
     window._sb.auth.onAuthStateChange(async (event, session) => {
-      // RECUPERAÇÃO DE SENHA: o link do e-mail cria uma sessão de recuperação e
-      // o SDK dispara este evento. Ele NÃO era tratado — o aluno ficava logado e
-      // sem nenhuma tela pra trocar a senha (era o "esqueci minha senha não
-      // funciona"). Aqui mandamos pra tela de nova senha.
+      // RECUPERAÇÃO DE SENHA: o SDK dispara este evento ao validar o link do
+      // e-mail. Ele NÃO é a defesa principal (chega dentro de um setTimeout, e
+      // um listener registrado depois disso simplesmente não o recebe) — quem
+      // garante a rota é a MARCA lida no topo do <head>. Isto aqui é a segunda
+      // linha: cobre o caso do link aberto numa aba JÁ carregada.
       if(event === 'PASSWORD_RECOVERY'){
         window.__pwRecovery = true;
+        try{ sessionStorage.setItem('ubique.pw.recovery', '1'); }catch(_){}
         if(location.hash !== '#/nova-senha') location.hash = '#/nova-senha';
         _renderSoon();
         return;
@@ -13816,14 +13860,17 @@ const Router = (function(){
     // /m/<mId>/c/<cId>/u/<uId>      → unit (chapter context)
     // /m/<mId>/portal               → portal
     // /m/<mId>/portal/<cardKey>     → portalDetail
+    // RECUPERAÇÃO DE SENHA — precisa vir ANTES de tudo, inclusive da regra de
+    // raiz abaixo. Quem chega pelo link do e-mail tem que ver a tela de nova
+    // senha e mais nada.
+    // Lê a MARCA (window.__pwRecovery, gravada no topo do <head>), não o hash:
+    // o hash é apagado pelo SDK no meio do caminho, e aí a URL fica '' → raiz →
+    // "Meus concursos". Era assim que o aluno caía logado dentro da plataforma
+    // sem nunca ver a tela. A marca só se apaga quando a senha é salva.
+    if(window.__pwRecovery) return asRoute('public', 'novaSenha', {}, query);
     if(parts.length === 0) return asRoute('student', 'myExams', { root: true }, query); // raiz: entrada inteligente (redireciona pro Início se houver universo)
     // Retorno do OAuth (Google) / confirmação de e-mail: o Supabase devolve
     // #access_token=…; o SDK processa e limpa — até lá, trata como a raiz.
-    // Link de RECUPERAÇÃO de senha: o Supabase devolve #access_token=…&type=recovery.
-    // Sem esta linha ele caía na regra genérica abaixo e o aluno era jogado em
-    // "Meus concursos" — logado, mas SEM tela pra definir a senha. Era a causa do
-    // "esqueci minha senha não funciona". Checa o hash CRU (o SDK limpa depois).
-    if(/type=recovery/.test(location.hash || '')) return asRoute('public', 'novaSenha', {}, query);
     if(/^(access_token|error|error_code|error_description|type)=/.test(parts[0] || '')) return asRoute('student', 'myExams', { root: true }, query);
     if(parts[0] === 'nova-senha') return asRoute('public', 'novaSenha', {}, query);
     if(parts[0] === 'concursos') return asRoute('student', 'myExams', {}, query); // página Concursos (seleção/marketplace) — sempre acessível
@@ -23528,11 +23575,13 @@ Renderers.novaSenha = function(){
           </div>
           <button type="submit" id="pwSubmit" class="btn-primary auth-submit">Salvar nova senha</button>
         </form>
+        <button type="button" id="pwSkip" class="auth-reset">Não quero trocar a senha agora — entrar na plataforma</button>
       </section>
     </div>
   </div>`;
 };
 Renderers.novaSenha.mount = function(stageEl){
+  ensureAuthStyles();
   const topbarLogoHTML = document.querySelector('.tb-brand-logo')?.innerHTML;
   const authLogoEl = stageEl.querySelector('#authBrandLogo');
   if(authLogoEl && topbarLogoHTML){ authLogoEl.innerHTML = topbarLogoHTML; }
@@ -23550,6 +23599,16 @@ Renderers.novaSenha.mount = function(stageEl){
   const tgl = stageEl.querySelector('#pwToggle');
   if(tgl) tgl.addEventListener('click', () => { f1.type = (f1.type === 'password') ? 'text' : 'password'; });
 
+  // Saída de emergência: a marca de recuperação tranca esta tela até a senha ser
+  // salva. Sem esta porta, quem clicasse no link sem querer (ou desistisse) ficava
+  // preso — a marca só morreria ao fechar a aba. A sessão do link é válida, então
+  // entrar na plataforma sem trocar a senha é legítimo.
+  const skip = stageEl.querySelector('#pwSkip');
+  if(skip) skip.addEventListener('click', () => {
+    if(window.__pwRecoveryDone) window.__pwRecoveryDone();
+    location.hash = '#/';
+  });
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     limpar();
@@ -23563,7 +23622,9 @@ Renderers.novaSenha.mount = function(stageEl){
       // próprio Supabase que garante isso; sem sessão devolve erro.
       const { error } = await window._sb.auth.updateUser({ password: a });
       if(error){ limpar(); mostrar(err, 'Não deu pra salvar: ' + error.message); btn.disabled = false; return; }
-      window.__pwRecovery = false;
+      // Senha trocada: apaga a marca (e o sessionStorage) — é isto que destranca
+      // a plataforma e deixa o roteador voltar ao normal.
+      if(window.__pwRecoveryDone) window.__pwRecoveryDone();
       limpar(); mostrar(sts, '✓ Senha alterada com sucesso. Entrando…');
       setTimeout(() => { location.hash = '#/inicio'; }, 900);
     }catch(ex){
@@ -23679,20 +23740,32 @@ Renderers.login = function(){
     </div>
   </div>`;
 };
-Renderers.login.mount = function(stageEl){
-  // Injeta CSS no head (evita <style> dentro de innerHTML que browsers
-  // não processam de forma consistente)
-  if(!document.getElementById('uq-auth-styles')){
-    const st = document.createElement('style');
-    st.id = 'uq-auth-styles';
-    st.textContent = `
+// CSS das telas de autenticação (login E nova senha).
+// Extraído de dentro de Renderers.login.mount: estava preso lá, então quem
+// caísse direto na tela de nova senha (vindo do link do e-mail, sem passar pelo
+// login) renderizava a página CRUA — sem cartão, sem centralização, com o botão
+// do olho solto. Agora os dois mounts chamam esta função.
+// Injeta no <head> (um <style> dentro de innerHTML não é processado de forma
+// consistente pelos navegadores).
+function ensureAuthStyles(){
+  if(document.getElementById('uq-auth-styles')) return;
+  const st = document.createElement('style');
+  st.id = 'uq-auth-styles';
+  st.textContent = `
       body[data-route="login"] .topbar,
       body[data-route="login"] .sidebar,
-      body[data-route="login"] .app-shell-footer { display:none !important; }
+      body[data-route="login"] .app-shell-footer,
+      body[data-route="novaSenha"] .topbar,
+      body[data-route="novaSenha"] .sidebar,
+      body[data-route="novaSenha"] .app-shell-footer { display:none !important; }
       body[data-route="login"] #stage,
       body[data-route="login"] .stage,
-      body[data-route="login"] .main { padding-top:0 !important; margin-top:0 !important; }
-      body[data-route="login"] .breadcrumb { display:none !important; }
+      body[data-route="login"] .main,
+      body[data-route="novaSenha"] #stage,
+      body[data-route="novaSenha"] .stage,
+      body[data-route="novaSenha"] .main { padding-top:0 !important; margin-top:0 !important; }
+      body[data-route="login"] .breadcrumb,
+      body[data-route="novaSenha"] .breadcrumb { display:none !important; }
 
       .auth-shell{
         min-height:100vh; display:flex; align-items:center; justify-content:center;
@@ -23774,9 +23847,12 @@ Renderers.login.mount = function(stageEl){
       .auth-modal-close:hover{ color:var(--text); }
       .auth-modal-title{ font-family:var(--serif); font-weight:400; font-size:1.4rem; color:var(--text); margin:0 0 .4rem; }
       .auth-modal-subtitle{ font-family:var(--sans); font-weight:300; color:var(--text-mute); font-size:.82rem; margin:0 0 1.5rem; }
-    `;
-    document.head.appendChild(st);
-  }
+  `;
+  document.head.appendChild(st);
+}
+
+Renderers.login.mount = function(stageEl){
+  ensureAuthStyles();
 
   // Reusa o SVG do logo da topbar (que está sempre presente no <header> e
   // tem o CSS .tb-brand-logo svg path{fill:var(--accent)} funcionando).
@@ -42534,7 +42610,13 @@ const App = {
     }
 
     // 2) Sem user e não está em /login → manda pra login.
-    if(!user && route.view !== 'login'){
+    //    A tela de nova senha é EXCEÇÃO: quem vem do link do e-mail chega aqui
+    //    com `user` ainda null (a sessão está vindo da rede neste instante).
+    //    Sem esta exceção ele era mandado pro /login e, quando a sessão chegava
+    //    ~300ms depois, a regra (3) abaixo o empurrava pra dentro da plataforma
+    //    — sem nunca ver a tela de trocar a senha. Era a causa raiz do
+    //    "esqueci minha senha não funciona".
+    if(!user && route.view !== 'login' && route.view !== 'novaSenha'){
       location.hash = '#/login';
       route = Router.parse();
     }
@@ -42564,9 +42646,12 @@ const App = {
     }
     // Fase 2 — onboarding: usuário sem @handle definido é levado pra /conta
     // na 1ª renderização pós-login. Só roda pra alunos (admin não precisa
-    // do perfil) e ignora se já está na /conta ou no /login.
+    // do perfil) e ignora se já está na /conta, no /login ou trocando a senha
+    // (quem veio do link do e-mail termina a troca ANTES de qualquer onboarding;
+    // sem esta exceção, um aluno sem @handle era desviado pra /conta e nunca
+    // via a tela de nova senha).
     if(user && user.role !== 'admin'
-       && route.view !== 'account' && route.view !== 'login'
+       && route.view !== 'account' && route.view !== 'login' && route.view !== 'novaSenha'
        && window.Profile && Profile.needsOnboarding(user.id)){
       location.hash = '#/conta';
       route = Router.parse();
