@@ -7733,6 +7733,18 @@ html[data-theme="light"] .q-ref{background:rgba(244,241,236,.8)}
   transition:all .2s var(--ease);
 }
 .src-detail-citation-row:hover{border-color:var(--accent);background:var(--accent-xlo)}
+/* "Ver mais" das citações: as 5 primeiras ficam soltas na lista; da 6ª em diante
+   entram neste bloco, que o toggle revela. É irmão das linhas, então herda o
+   gap da .src-detail-citations — não precisa de margem própria. */
+.src-detail-citations-more{display:flex;flex-direction:column;gap:.4rem}
+.src-detail-citations-more[hidden]{display:none}
+.src-detail-citations-toggle{
+  align-self:flex-start;margin-top:.2rem;
+  background:transparent;border:0;padding:.3rem 0;cursor:pointer;
+  color:var(--accent);font-family:var(--sans);font-weight:300;
+  font-size:.72rem;letter-spacing:.06em;text-decoration:underline;
+}
+.src-detail-citations-toggle:hover{color:var(--text)}
 .src-detail-citation-unit{
   font-family:var(--serif);font-size:.95rem;color:var(--text);
 }
@@ -11131,12 +11143,9 @@ const Auth = (function(){
     const user = getUser();
     return !!user && (user.role === 'admin' || user.role === 'superadmin');
   }
-  function canAccess(route){
-    const user = getUser();
-    if(!user) return route.view === 'login';
-    if(route.section === 'admin' && user.role !== 'admin' && user.role !== 'superadmin') return false;
-    return true;
-  }
+  // (Removida uma canAccess duplicada que existia aqui: por hoisting do JS a
+  // declaração lá de baixo a sobrescrevia, então esta nunca rodava. Editar aqui
+  // não tinha efeito nenhum. A canAccess de verdade é a única que sobrou.)
   function landingRoute(user){
     const currentUser = user || getUser();
     if(!currentUser) return '#/login';
@@ -16503,56 +16512,83 @@ const SourceModals = (function(){
     document.body.style.overflow = 'hidden';
   }
 
+  // Onde a obra foi citada, em TODAS as matérias que o aluno tem.
+  //
+  // CAUSA RAIZ DO "nunca lista nada" (corrigido em 2026-07-16): a versão antiga
+  // varria `unit.blocks` / `unit.sections[].blocks` — campos que NÃO EXISTEM.
+  // Nenhuma linha do arquivo os atribui; a unidade montada por
+  // rebuildCourseHierarchyFromStore (index.html:9765) não tem `blocks` nem
+  // `sections`. Logo a busca devolvia [] SEMPRE — mesmo pra obra citada em 10
+  // unidades. Os blocos reais moram em UbiqueStore.unit_blocks, indexados por
+  // unit_id (o mesmo engano já tinha sido documentado em Util.unitBlockIds e
+  // corrigido no modal de Biografia).
+  //
+  // ESCOPO (decisão do usuário, 2026-07-16): só as matérias que o aluno tem, e
+  // nunca rascunho. Por isso a varredura parte de window.COURSES (já escopado
+  // por concurso em 9843 e já sem draft em 9755) e usa o Store só pra achar os
+  // blocos daquelas unidades — em vez de ler o store cru, que é a plataforma
+  // inteira. Mesmo padrão do Portal.aggregate (index.html:19343).
   function findCitations(item, currentBlock, ctx){
-    // Procura a obra (por sourceId ou title) em todas as unidades do COURSE / Store
     const results = [];
-    const targetId = item.sourceId || null;
-    const targetTitle = (item.title||'').toLowerCase().trim();
+    const targetId = item.sourceId != null ? String(item.sourceId) : null;
+    // Fallback por título só pra obra digitada à mão (sourceId null — ver
+    // admin.html:53364). _slugifyTerm tira acento e pontuação, senão "Histórica"
+    // e "Historica" não casariam. (Não dá pra usar o normName do course builder:
+    // ele é privado da IIFE do <script id="data-course">.)
+    const targetTitle = targetId ? null : (_slugifyTerm(item.title) || null);
     if(!targetId && !targetTitle) return results;
     try{
-      const course = window.COURSE;
-      if(!course || !Array.isArray(course.modules)) return results;
-      course.modules.forEach(m => {
-        (m.chapters||[]).forEach(c => {
-          (c.units||[]).forEach(u => {
-            const blocks = collectBlocks(u);
-            blocks.forEach(b => {
-              if(b.type !== 'sources' && b.type !== 'references') return;
-              if(currentBlock && b.id === currentBlock.id) return; // skip self
-              (b.items||[]).forEach(ref => {
-                const matchId = targetId && ref.sourceId === targetId;
-                const matchTitle = targetTitle && (ref.title||'').toLowerCase().trim() === targetTitle;
-                if(matchId || matchTitle){
-                  results.push({
-                    moduleId: m.id, moduleTitle: m.title,
-                    chapterId: c.id, chapterTitle: c.title,
-                    unitId: u.id, unitTitle: u.title,
-                    blockTitle: b.title || 'Fontes e referências'
-                  });
-                }
+      const store = window.UbiqueStore;
+      if(!store || !store.unit_blocks) return results;
+      const allBlocks = store.unit_blocks.list() || [];
+      if(!allBlocks.length) return results;
+
+      // Índice unit_id (banco) → caminho navegável, a partir das matérias do
+      // aluno. Os ids daqui já são os de exibição (_origMockId || 'm'+id), então
+      // o href sai correto inclusive pra conteúdo legado.
+      const porUnidade = new Map();
+      (window.COURSES || []).forEach(course => {
+        (course.modules || []).forEach(m => {
+          (m.chapters || []).forEach(c => {
+            (c.units || []).forEach(u => {
+              if(u._storeId == null) return; // unidade mockada legada: sem par no store
+              porUnidade.set(String(u._storeId), {
+                moduleId: m.id, moduleTitle: m.title,
+                chapterId: c.id, chapterTitle: c.title,
+                unitId: u.id, unitTitle: u.title
               });
             });
           });
         });
       });
+      if(!porUnidade.size) return results;
+
+      // Id do bloco aberto: o render entrega `id: sb._origMockId || sb.id`
+      // (index.html:31570), enquanto o store guarda o id numérico — comparar em
+      // String() dos dois lados, senão o skip-self não pega.
+      const selfId = currentBlock
+        ? String(currentBlock._storeId != null ? currentBlock._storeId : currentBlock.id)
+        : null;
+
+      const jaVistas = new Set(); // dedup: mesma unidade citando em 2 blocos = 1 linha
+      allBlocks.forEach(b => {
+        if(!b || (b.type !== 'sources' && b.type !== 'references')) return;
+        if(selfId && String(b.id) === selfId) return;
+        const onde = porUnidade.get(String(b.unit_id));
+        if(!onde) return;               // matéria que o aluno não tem, ou rascunho
+        if(jaVistas.has(onde.unitId)) return;
+        const items = (b.content && Array.isArray(b.content.items)) ? b.content.items : [];
+        const cita = items.some(ref => {
+          if(!ref) return false;
+          if(targetId) return ref.sourceId != null && String(ref.sourceId) === targetId;
+          return ref.sourceId == null && _slugifyTerm(ref.title) === targetTitle;
+        });
+        if(!cita) return;
+        jaVistas.add(onde.unitId);
+        results.push(Object.assign({}, onde, { blockTitle: b.title || 'Fontes e referências' }));
+      });
     }catch(e){ console.warn('findCitations error', e); }
     return results;
-  }
-
-  function collectBlocks(unit){
-    // Achata blocks de seções/compound/parts
-    const out = [];
-    function walk(arr){
-      (arr||[]).forEach(b => {
-        if(!b) return;
-        out.push(b);
-        if(Array.isArray(b.parts)) walk(b.parts);
-        if(Array.isArray(b.blocks)) walk(b.blocks);
-      });
-    }
-    walk(unit.blocks);
-    (unit.sections||[]).forEach(s => walk(s.blocks));
-    return out;
   }
 
   function buildBuyLinks(item){
@@ -16581,11 +16617,20 @@ const SourceModals = (function(){
       ? `<div class="src-detail-cover"><img src="${escapeAttr(item.image)}" alt=""></div>`
       : `<div class="src-detail-cover src-detail-cover-empty">${escapeHtml((title||'?').charAt(0))}</div>`;
     const citations = findCitations(item, block, ctx);
-    const citationsHtml = citations.length
-      ? citations.map(c => `<a class="src-detail-citation-row" href="#/m/${escapeAttr(c.moduleId)}/c/${escapeAttr(c.chapterId)}/u/${escapeAttr(c.unitId)}" onclick="SourceModals.close()">
+    // Só as 5 primeiras aparecem; o resto fica atrás de "Ver mais". Obra muito
+    // citada (dezenas de unidades) empurraria o "Onde comprar" pra fora da tela.
+    const CITACOES_VISIVEIS = 5;
+    const _citRow = c => `<a class="src-detail-citation-row" href="#/m/${escapeAttr(c.moduleId)}/c/${escapeAttr(c.chapterId)}/u/${escapeAttr(c.unitId)}" onclick="SourceModals.close()">
           <div class="src-detail-citation-unit">${escapeHtml(c.unitTitle)}</div>
           <div class="src-detail-citation-path">${escapeHtml(c.moduleTitle)} · ${escapeHtml(c.chapterTitle)}</div>
-        </a>`).join('')
+        </a>`;
+    const _resto = citations.slice(CITACOES_VISIVEIS);
+    const citationsHtml = citations.length
+      ? citations.slice(0, CITACOES_VISIVEIS).map(_citRow).join('')
+        + (_resto.length
+            ? `<div class="src-detail-citations-more" id="srcCitMore" hidden>${_resto.map(_citRow).join('')}</div>
+               <button type="button" class="src-detail-citations-toggle" id="srcCitToggle" onclick="SourceModals.toggleCitations()" aria-expanded="false" aria-controls="srcCitMore">Ver mais ${_resto.length} ${_resto.length === 1 ? 'unidade' : 'unidades'}</button>`
+            : '')
       : '<p class="src-detail-empty">Esta obra ainda não foi citada em outras unidades.</p>';
     const buy = buildBuyLinks(item);
     const _buyUrl = (item.buy_url || '').trim();
@@ -16644,7 +16689,20 @@ const SourceModals = (function(){
     if(e.target.classList.contains('src-lightbox') || e.target.classList.contains('src-detail-bg')) close();
   }
 
-  return { openCover, openDetail, close, _bgClose };
+  // "Ver mais / Ver menos" das citações. Exposto porque o markup do modal liga
+  // os botões por onclick="SourceModals.…" (padrão do próprio modal).
+  function toggleCitations(){
+    const mais = document.getElementById('srcCitMore');
+    const btn  = document.getElementById('srcCitToggle');
+    if(!mais || !btn) return;
+    const abrindo = mais.hidden;
+    mais.hidden = !abrindo;
+    btn.setAttribute('aria-expanded', abrindo ? 'true' : 'false');
+    const n = mais.children.length;
+    btn.textContent = abrindo ? 'Ver menos' : `Ver mais ${n} ${n === 1 ? 'unidade' : 'unidades'}`;
+  }
+
+  return { openCover, openDetail, close, _bgClose, toggleCitations };
 })();
 window.SourceModals = SourceModals;
 
