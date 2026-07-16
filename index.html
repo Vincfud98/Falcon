@@ -20823,7 +20823,13 @@ function _refreshNotifsAndFollows(userId){
   const tasks = [];
   if(window.Notifications && Notifications.hydrate) tasks.push(Notifications.hydrate(userId).catch(()=>{}));
   if(window.Follows && Follows.hydrate) tasks.push(Follows.hydrate(userId).catch(()=>{}));
-  Promise.all(tasks).then(() => { if(window._refreshNotifsUI) window._refreshNotifsUI(); }).catch(()=>{});
+  Promise.all(tasks).then(() => {
+    if(window._refreshNotifsUI) window._refreshNotifsUI();
+    // Os dados de colegas acabaram de ser recarregados — repinta a aba, se o
+    // aluno estiver nela. Sem isto a lista só mudava com F5: o dado chegava e
+    // ninguém redesenhava. (A própria função se apaga quando a tela sai do ar.)
+    if(window._repaintPeers) window._repaintPeers();
+  }).catch(()=>{});
 }
 window._refreshNotifsAndFollows = _refreshNotifsAndFollows;
 
@@ -20963,7 +20969,20 @@ const Follows = (function(){
           n++;
         }
       });
-      if(n) console.log('[Follows] hydrated:', n);
+      // PODA — sem isto o hydrate só SOMAVA. Quando alguém te dava unfollow, a
+      // linha sumia do banco mas ficava no store pra sempre: a pessoa continuava
+      // na sua lista de seguidores até você dar F5. O select acima traz TODAS as
+      // arestas que me envolvem, então o que me envolve e NÃO voltou foi apagado
+      // no banco. Só poda o que me envolve — aresta de terceiros (que o RLS nem
+      // deixa ler) não é assunto deste hydrate.
+      const vieram = new Set((data || []).map(r => r.id));
+      let podados = 0;
+      existing.forEach(f => {
+        if(!f || !f.id) return;
+        const meEnvolve = f.follower_id === userId || f.following_id === userId;
+        if(meEnvolve && !vieram.has(f.id)){ UbiqueStore.follows.remove(f.id); podados++; }
+      });
+      if(n || podados) console.log('[Follows] hydrated:', n, 'podados:', podados);
       return n;
     }catch(e){ console.warn('[follows hydrate ex]', e); return 0; }
   }
@@ -21857,6 +21876,27 @@ Renderers.account.mount = function(stageEl){
       }
     });
   }
+
+  // AO VIVO — a lista de colegas só atualizava com F5. O ciclo que recarrega os
+  // dados (realtime de notificações + poll de 30s) já existia e já chamava
+  // Follows.hydrate; o que faltava era alguém REPINTAR a aba: o _refreshNotifsUI
+  // só mexe no sino e só redesenha a página de notificações.
+  //
+  // Por que expor a função em vez de dar App.render(): a sub-aba ativa
+  // (Pedidos/Colegas/Seguindo/Seguidores) é estado do DOM, não da URL — um
+  // redesenho geral jogaria o aluno de volta pra primeira aba no meio do uso.
+  // Esta função repinta as 4 listas e os contadores sem tocar na aba ativa.
+  //
+  // A guarda do document.contains é obrigatória: o app não tem desmontagem de
+  // tela (grep 'unmount' = zero), então esta referência sobrevive à saída da
+  // página. Sem a guarda, o ciclo ficaria pintando num DOM já descartado.
+  window._repaintPeers = function(){
+    try{
+      if(!stageEl || !document.contains(stageEl)){ window._repaintPeers = null; return; }
+      renderPeersAllSubpanes();
+    }catch(e){ console.warn('[peers repaint]', e); }
+  };
+
   // Sub-tabs de colegas
   const peersSubTabs = Array.from(stageEl.querySelectorAll('[data-peers-sub]'));
   const peersPanes = Array.from(stageEl.querySelectorAll('[data-peers-pane]'));
