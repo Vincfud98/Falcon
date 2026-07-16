@@ -10149,7 +10149,7 @@ window.TAG_REGISTRY = {
       // primeira hidratação idêntica ao comportamento anterior.
       window._hydrateQBank = async function _hydrateQBank(){
         const qsb = window._sb.schema('questoes');
-        const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR] = await Promise.all([
+        const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR, qetR] = await Promise.all([
           qsb.from('questions').select('*'),
           qsb.from('tf_items').select('*'),
           qsb.from('tf_item_comments').select('*'),
@@ -10158,12 +10158,24 @@ window.TAG_REGISTRY = {
           qsb.from('question_reference_texts').select('*'),
           qsb.from('essay_criteria').select('*'),
           qsb.from('essay_answer_models').select('*'),
+          // A ETIQUETA questão→tópico do edital. É o que o admin grava quando a
+          // questão entra numa unidade (_ueLinkQuestionsToUnitTopics) — e que o
+          // filtro do Portal IGNORAVA: ele só olhava o caminho indireto
+          // (unidade→edital_topic_units). Medido no banco (2026-07-16): 28
+          // questões de HB tinham a etiqueta do Período Colonial e ZERO unidades
+          // tinham o vínculo indireto — o trabalho do admin era jogado fora e o
+          // aluno via 13 de 25.
+          qsb.from('question_edital_topics').select('question_id, edital_topic_id'),
         ]);
         // tf_item_comments, essay_criteria e essay_answer_models são EXTRAS:
         // se falharem, NÃO derrubam o banco — só ficam sem os dados extras.
         if(tfcR.error) console.warn('[hydrate qbank] tf_item_comments (extra) falhou:', tfcR.error.message);
         if(ecR.error)  console.warn('[hydrate qbank] essay_criteria (extra) falhou:', ecR.error.message);
         if(eamR.error) console.warn('[hydrate qbank] essay_answer_models (extra) falhou:', eamR.error.message);
+        // Extra também: sem a etiqueta, o filtro cai no caminho indireto (o de
+        // antes) — degrada, não quebra. Se este aviso aparecer com lista vazia
+        // tendo dados no banco, falta policy de SELECT pra authenticated.
+        if(qetR.error) console.warn('[hydrate qbank] question_edital_topics (extra) falhou:', qetR.error.message);
         // Tabelas essenciais para resolver as questões:
         const qErrs = [qR.error, tfR.error, mcR.error, rtR.error, qrtR.error].filter(Boolean);
         if(qErrs.length){
@@ -10179,12 +10191,23 @@ window.TAG_REGISTRY = {
           questionRefTexts: qrtR.data || [],
           essayCriteria:        ecR.data  || [],
           essayAnswerModels:    eamR.data || [],
+          questionEditalTopics: qetR.data || [],
         };
+        // Índice questão → tópicos (a etiqueta), pronto pro filtro consultar em
+        // O(1). Montado UMA vez por hidratação, não a cada tecla no filtro.
+        const _qet = {};
+        (qetR.data || []).forEach(function(l){
+          if(!l || l.question_id == null || l.edital_topic_id == null) return;
+          const k = String(l.question_id);
+          (_qet[k] = _qet[k] || []).push(String(l.edital_topic_id));
+        });
+        window._QBank.topicsByQuestion = _qet;
         console.log('[hydrate qbank] ✅', {
           questions: (qR.data||[]).length, tf_items: (tfR.data||[]).length,
           tf_item_comments: (tfcR.data||[]).length,
           mc_options: (mcR.data||[]).length, reference_texts: (rtR.data||[]).length,
           essay_criteria: (ecR.data||[]).length, essay_answer_models: (eamR.data||[]).length,
+          question_edital_topics: (qetR.data||[]).length,
         });
       };
 
@@ -36874,9 +36897,29 @@ function _bankApplyFilters(items, f, opts){
   if(_selNodes.length){
     const descSet = new Set();
     _selNodes.forEach(function(n){ _bankEditalDescendants(n).forEach(function(d){ descSet.add(d); }); });
+    // A ETIQUETA (questoes.question_edital_topics): o vínculo direto que o
+    // admin grava quando a questão entra numa unidade. Era IGNORADO aqui — o
+    // filtro só aceitava o caminho indireto (unidade→edital_topic_units), e
+    // como as unidades de HB não tinham vínculo com o subtópico, 12 de 25
+    // questões sumiam do "Período Colonial" mesmo etiquetadas nele.
+    // UNIÃO com o caminho indireto, não substituição: nada que aparecia
+    // antes deixa de aparecer.
+    const _tbq = (window._QBank && window._QBank.topicsByQuestion) || {};
     out = out.filter(function(q){
       // 1) Campo explícito (raro mas suportado)
       if(q.edital_topic_id != null && descSet.has(String(q.edital_topic_id))) return true;
+      // 1.5) A etiqueta direta questão→tópico. descSet já contém o nó
+      // escolhido + todos os descendentes (pai traz filhos; irmão não traz
+      // irmão — a semântica que o produto quer).
+      // A etiqueta é gravada na QUESTÃO-MÃE. Nos C/E, a entrada daqui é o
+      // ITEM (q.id = tf_item) e a mãe viaja em q.bank_question_id — checar só
+      // q.id perderia justamente os C/E, que são a maioria no CACD.
+      const _direto = _tbq[String(q.bank_question_id != null ? q.bank_question_id : q.id)];
+      if(_direto){
+        for(let d = 0; d < _direto.length; d++){
+          if(descSet.has(_direto[d])) return true;
+        }
+      }
       // 2) Cadeia indireta: appears_in → unit → edital_topic_units
       const unitIds = _bankQuestionUnitIds(q);
       for(let i = 0; i < unitIds.length; i++){
@@ -37485,12 +37528,44 @@ function _bankBuildResultSections(filteredQuestions, mode){
 
   const groupKeys = [];
   const groupBuckets = {};
+  // Meta (enunciado/texto-base/origin) do grupo REAL do banco — resolvida uma
+  // vez por questão-mãe. Os campos são os mesmos que originalGroupsMap acharia;
+  // a diferença é a CHAVE de acesso (id da questão, não aparição na unidade).
+  const bankMetaCache = {};
+  const _metaFromBank = function(qid){
+    if(qid in bankMetaCache) return bankMetaCache[qid];
+    let meta = null;
+    if(typeof window.resolveBankGroup === 'function'){
+      const bg = window.resolveBankGroup(qid);
+      if(bg){
+        meta = {
+          enunciado:       bg.enunciado || '',
+          description:     bg.description || '',
+          title:           bg.title || '',
+          reference_text:  bg.reference_text || '',
+          reference_image: bg.reference_image || '',
+          origin:          bg.origin || ''
+        };
+      }
+    }
+    bankMetaCache[qid] = meta;
+    return meta;
+  };
   (filteredQuestions || []).forEach(function(q){
     const usage = (q && Array.isArray(q.appears_in) && q.appears_in[0]) || null;
-    const key = usage ? String(usage.block_id) + '|' + String(usage.group_id || '') : '__ungrouped__';
+    // AGRUPA PELO GRUPO REAL DO BANCO (bank_question_id), não pela aparição na
+    // unidade. Na unidade, separar os itens de um grupo em blocos diferentes é
+    // escolha pedagógica legítima do professor — mas o Portal é a visão do
+    // BANCO, e lá o grupo tem que voltar a ser um: os itens 45-1 e 45-4 do
+    // mesmo #45/2017 apareciam como dois grupos, cada um repetindo o comando
+    // e o selo da prova (o banco tinha UMA linha com 2 itens; conferido no
+    // SQL de 2026-07-16). Questão avulsa (sem banco) mantém a chave antiga.
+    const bqid = (q && q.bank_question_id != null) ? String(q.bank_question_id) : null;
+    const key = bqid ? ('bq|' + bqid)
+              : (usage ? String(usage.block_id) + '|' + String(usage.group_id || '') : '__ungrouped__');
     if(!(key in groupBuckets)){
       groupBuckets[key] = {
-        meta: originalGroupsMap[key] || { enunciado:'', reference_text:'', reference_image:'', origin:'' },
+        meta: (bqid && _metaFromBank(bqid)) || originalGroupsMap[key] || { enunciado:'', reference_text:'', reference_image:'', origin:'' },
         materia: _bankMateriaOfUnit(usage ? usage.unit_id : null, ctx, subjById),
         questions: []
       };
@@ -37498,8 +37573,21 @@ function _bankBuildResultSections(filteredQuestions, mode){
     }
     groupBuckets[key].questions.push({ bank_id: q.id });
   });
+  // Ordem DENTRO do grupo fundido: pelo número do item no banco (45-1 antes do
+  // 45-4), não pela ordem em que os blocos da unidade os importaram — a fusão
+  // junta fragmentos que podem chegar fora de ordem. Sort estável: itens sem
+  // número (MC, avulsos) ficam onde estavam.
+  const _tfNum = {};
+  ((window._QBank && window._QBank.tfItems) || []).forEach(function(t){
+    if(t && t.id != null) _tfNum[String(t.id)] = (t.numero != null ? t.numero : 0);
+  });
   const groups = groupKeys.map(function(k, idx){
     const bucket = groupBuckets[k];
+    if(k.indexOf('bq|') === 0 && bucket.questions.length > 1){
+      bucket.questions.sort(function(a, b){
+        return (_tfNum[String(a.bank_id)] || 0) - (_tfNum[String(b.bank_id)] || 0);
+      });
+    }
     return Object.assign({}, bucket.meta, { id:'bg-'+idx, questions: bucket.questions, __materia: bucket.materia });
   });
 
@@ -37767,7 +37855,7 @@ const QuestionsCompiler = (function(){
       '.pc-corpo{column-count:2;column-gap:2.2rem;column-rule:1px solid #d8c4a8}'+
       // Faixa de matéria FLUI dentro da coluna (não span-all) — preenche os
       // espaços mortos e segue o estilo da prova (cabeçalho por coluna).
-      '.pc-materia{break-inside:avoid;text-align:center;background:#d8b48a;color:#3a2c12;font-weight:700;font-size:15px;padding:6px 10px;border-radius:4px;margin:4px 0 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
+      '.pc-materia{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;text-align:center;background:#d8b48a;color:#3a2c12;font-weight:700;font-size:15px;padding:6px 10px;border-radius:4px;margin:4px 0 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
       '.pc-materia small{display:block;font-family:\'Inter\',Arial,sans-serif;font-weight:400;font-size:10.5px;margin-top:2px}'+
       // Grupo fica inteiro numa coluna (referência + suas questões juntas).
       // SEM break-inside:avoid no grupo: ele começa onde há espaço e as questões
@@ -37775,19 +37863,19 @@ const QuestionsCompiler = (function(){
       // (.pc-ref) e cada questão (.pc-q) seguem intactos via seus próprios avoid.
       '.pc-grupo{margin:0 0 12px;padding-top:9px;border-top:2px solid #c8a97e}'+
       '.pc-grp-head{margin-bottom:5px}'+
-      '.pc-ref{break-inside:avoid;border-left:3px solid #8a6a24;background:#faf7f0;padding:8px 10px;margin-bottom:8px;border-radius:3px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
+      '.pc-ref{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;border-left:3px solid #8a6a24;background:#faf7f0;padding:8px 10px;margin-bottom:8px;border-radius:3px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
       // Limita a altura da imagem pra o grupo caber na coluna (sem isso, imagem grande deixava o grupo enorme).
       '.pc-ref-img{margin-bottom:6px;text-align:center}.pc-ref-img img{max-width:100%;max-height:300px;border-radius:3px}'+
       '.pc-ref-txt{font-size:10.5px;color:#2a2419;text-align:justify}'+
       '.pc-ref p{margin:0 0 .4em}.pc-ref p:last-child{margin-bottom:0}'+
       '.pc-cmd{font-size:10.5px;margin-top:6px;font-style:italic;color:#3a3228}'+
       // Questão: número na margem esquerda (recuo), texto justificado ao lado.
-      '.pc-q{break-inside:avoid;position:relative;padding-left:2.2em;margin:7px 0;text-align:justify}'+
+      '.pc-q{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;position:relative;padding-left:2.2em;margin:7px 0;text-align:justify}'+
       '.pc-num{position:absolute;left:0;top:0;font-weight:700;color:#8a6a24;font-variant-numeric:tabular-nums}'+
       '.pc-origin{display:inline-block;font-size:8px;letter-spacing:.04em;padding:1px 5px;margin:0 5px 0 0;border:1px solid #c8a97e;border-radius:999px;color:#8a6a24;vertical-align:middle}'+
       '.pc-stmt{display:block}.pc-stmt p{margin:0}.pc-stmt p + p{margin-top:.4em}'+
       '.pc-opts{margin:.35em 0 0 0}.pc-opt{margin:2px 0}.pc-opt p{margin:0;display:inline}'+
-      '.page-break{break-before:page;height:0}'+
+      '.page-break{-webkit-column-break-before:always;page-break-before:always;break-before:page;height:0}'+
       // Folha
       '.folha{padding-top:6px}'+
       '.fl-head{display:flex;align-items:baseline;justify-content:space-between;background:#f3e2cf;border:1px solid #d8b48a;border-radius:4px;padding:8px 14px}'+
@@ -37800,7 +37888,7 @@ const QuestionsCompiler = (function(){
       '.fl-note{font-size:9.5px;color:#3a3228;margin:6px 0 12px;padding:6px 10px;border:1px dashed #cbb89a;border-radius:3px}'+
       '.fl-note strong{color:#8a6a24}'+
       '.fl-grid{column-count:4;column-gap:14px}'+
-      '.fl-row{break-inside:avoid;display:flex;align-items:center;gap:6px;padding:2px 4px;border-bottom:1px solid #eee}'+
+      '.fl-row{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;display:flex;align-items:center;gap:6px;padding:2px 4px;border-bottom:1px solid #eee}'+
       '.fl-n{min-width:1.8em;text-align:right;font-weight:700;font-size:10px;color:#5a4f3f;font-variant-numeric:tabular-nums}'+
       '.fl-bubs{display:flex;gap:4px}'+
       '.fl-bub{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border:1px solid #8a6a24;border-radius:50%;font-size:8px;color:#8a6a24}'+
@@ -37810,7 +37898,7 @@ const QuestionsCompiler = (function(){
       '.gb-title{font-size:20px;color:#8a6a24;margin:16px 0 8px;border-bottom:1px solid #8a6a24;padding-bottom:4px}'+
       '.gb-seco{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11px;margin-bottom:10px}'+
       '.gb-cell{font-variant-numeric:tabular-nums}.gb-cell b{color:#8a6a24}'+
-      '.gb-com{break-inside:avoid;margin:0 0 10px;padding-bottom:8px;border-bottom:1px dashed rgba(26,23,18,.16)}'+
+      '.gb-com{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;margin:0 0 10px;padding-bottom:8px;border-bottom:1px dashed rgba(26,23,18,.16)}'+
       '.gb-com-head{display:flex;align-items:center;gap:8px;margin-bottom:3px}'+
       '.gb-num{font-weight:700;color:#8a6a24}.gb-key{font-weight:700;border:1px solid #8a6a24;border-radius:3px;padding:0 6px;color:#8a6a24}'+
       '.gb-stmt{font-size:10.5px;color:#2a2419;margin-bottom:3px;text-align:justify}'+
@@ -38065,14 +38153,14 @@ const EssaysCompiler = (function(){
       '.cover .info{margin-top:8px;font-size:10.5px;color:#5a4f3f}'+
       '.instr{margin:14px 0 20px;padding:10px 14px;background:#f6f1e6;border-left:3px solid #8a6a24;font-size:10.5px;color:#3a3228}'+
       '.instr b{color:#8a6a24}'+
-      '.pc-materia{break-inside:avoid;text-align:center;background:#d8b48a;color:#3a2c12;font-weight:700;font-size:15px;padding:6px 10px;border-radius:4px;margin:14px 0 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
+      '.pc-materia{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;text-align:center;background:#d8b48a;color:#3a2c12;font-weight:700;font-size:15px;padding:6px 10px;border-radius:4px;margin:14px 0 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
       '.pc-materia small{display:block;font-family:\'Inter\',Arial,sans-serif;font-weight:400;font-size:10.5px;margin-top:2px}'+
       '.pc-origin{display:inline-block;font-size:8px;letter-spacing:.04em;padding:1px 5px;border:1px solid #c8a97e;border-radius:999px;color:#8a6a24;vertical-align:middle}'+
       // Discursiva: 1 coluna (textos longos + linhas de resposta).
       '.ec-q{margin:0 0 18px;padding-top:10px;border-top:2px solid #c8a97e}'+
       '.ec-q-head{margin-bottom:6px;display:flex;align-items:center;gap:8px}'+
       '.ec-num{font-weight:700;color:#8a6a24;font-size:15px;font-variant-numeric:tabular-nums}'+
-      '.pc-ref{break-inside:avoid;border-left:3px solid #8a6a24;background:#faf7f0;padding:8px 10px;margin-bottom:8px;border-radius:3px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
+      '.pc-ref{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;border-left:3px solid #8a6a24;background:#faf7f0;padding:8px 10px;margin-bottom:8px;border-radius:3px;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
       '.ec-ref-label{font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:#8a6a24;font-weight:700;margin-bottom:2px}'+
       '.ec-ref-title{font-weight:700;font-size:11px;margin-bottom:3px}'+
       '.pc-ref-img{margin-bottom:6px;text-align:center}.pc-ref-img img{max-width:100%;max-height:320px;border-radius:3px}'+
@@ -38088,19 +38176,24 @@ const EssaysCompiler = (function(){
       '.el-answer-head{font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:#8a6a24;font-weight:700;margin-bottom:6px}'+
       '.el-answer-head small{font-weight:400;letter-spacing:.02em;text-transform:none;color:#8a7e68}'+
       '.el-lines{border-top:1px solid #9a8a6a}'+
-      '.el-line{display:flex;align-items:stretch;min-height:8.2mm;break-inside:avoid}'+
+      '.el-line{display:flex;align-items:stretch;min-height:8.2mm;-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid}'+
       '.el-ln{flex:0 0 9mm;display:flex;align-items:center;justify-content:center;font-size:8px;color:#5a4f3f;border-right:1px solid #9a8a6a;border-bottom:1px solid #9a8a6a;font-variant-numeric:tabular-nums}'+
       '.el-ln-mark{background:#e6dcc6;font-weight:700;-webkit-print-color-adjust:exact;print-color-adjust:exact}'+
       '.el-write{flex:1;border-bottom:1px solid #9a8a6a}'+
-      '.page-break{break-before:page;height:0}'+
+      '.page-break{-webkit-column-break-before:always;page-break-before:always;break-before:page;height:0}'+
       // Quebra de página antes do elemento (cada questão, cada matéria, cada item do espelho).
-      '.pc-break{break-before:page}'+
+      '.pc-break{page-break-before:always;break-before:page}'+
       // Faixa "Licenciado para…" no topo de cada questão e de cada item do espelho.
       '.page-lic{font-size:8px;color:#8a7e68;letter-spacing:.02em;margin-bottom:8px;padding-bottom:3px;border-bottom:1px dotted #d8c4a8}'+
       // Espelho
-      '.espelho{padding-top:6px;break-before:page}'+
+      // O alias legado importa AQUI mais que em qualquer lugar: esta é a única
+      // quebra antes do gabarito (o 1º .es-item de propósito não tem pc-break).
+      // Sem ela, num WebKit que ignore break-before:page o Espelho de correção
+      // começa na MESMA página da última questão — o gabarito vaza pra folha
+      // que o aluno preenche.
+      '.espelho{padding-top:6px;page-break-before:always;break-before:page}'+
       '.gb-title{font-size:20px;color:#8a6a24;margin:16px 0 10px;border-bottom:1px solid #8a6a24;padding-bottom:4px}'+
-      '.es-item{break-inside:avoid;margin:0 0 14px;padding-bottom:12px;border-bottom:1px dashed rgba(26,23,18,.16)}'+
+      '.es-item{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;margin:0 0 14px;padding-bottom:12px;border-bottom:1px dashed rgba(26,23,18,.16)}'+
       '.es-head{display:flex;align-items:center;gap:8px;margin-bottom:5px}'+
       '.gb-num{font-weight:700;color:#8a6a24;font-size:14px}'+
       '.es-prompt{font-size:10.5px;color:#2a2419;text-align:justify;margin-bottom:6px}'+
