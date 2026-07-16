@@ -2357,6 +2357,25 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 @media (max-width:640px){
   .block-actions{width:100%;justify-content:flex-start}
 }
+/* Rodapé do bloco: espelho do .block-header (mesma borda, mas em cima).
+   Classe própria em vez de reusar .block-actions de propósito — a regra mobile
+   logo acima joga o .block-actions pra ESQUERDA, e o rodapé tem que ficar no
+   canto direito em qualquer tela. */
+.block-footer{
+  display:flex;justify-content:flex-end;align-items:center;
+  gap:1rem;flex-wrap:wrap;
+  margin-top:1.4rem;padding-top:.9rem;border-top:1px solid var(--border);
+}
+.block-footer-actions{display:flex;gap:.45rem;flex-wrap:wrap;justify-content:flex-end}
+/* "Parei aqui": só o ícone (é um marcador, não uma ação com rótulo). Quando
+   ligado, ganha o dourado — é o único marcador da unidade, então precisa se
+   distinguir do "Lido", que pode estar em vários blocos ao mesmo tempo. */
+.block-resume-btn{padding-left:.5rem;padding-right:.5rem}
+.block-resume-btn svg{fill:none}
+/* Ligado, o ícone fica PREENCHIDO — é o que distingue do "Lido" (só contorno).
+   O resto do estado ligado (fundo, cor, borda) já vem do .icon-btn.on; repetir
+   aqui só sobrescrevia a borda dele por uma mais fraca. */
+.block-resume-btn.on svg{fill:currentColor}
 .block-type{
   font-family:var(--sans);font-weight:300;font-size:.55rem;
   letter-spacing:.22em;text-transform:uppercase;color:var(--accent);
@@ -12253,6 +12272,11 @@ const Store = (function(){
         if(patch.completed) row.completed_at = new Date().toISOString();
         else row.completed_at = null;
       }
+      // "Parei aqui". `in` e não truthy: desmarcar manda null, que é o valor
+      // que APAGA o marcador — com truthy o null seria ignorado e o marcador
+      // ficaria pra sempre.
+      if('resumeBlockId' in patch)   row.resume_block_id   = patch.resumeBlockId   == null ? null : String(patch.resumeBlockId);
+      if('resumeSectionId' in patch) row.resume_section_id = patch.resumeSectionId == null ? null : String(patch.resumeSectionId);
       const { error } = await window._sb.schema('aluno').from('unit_progress')
         .upsert(row, { onConflict: 'user_id,unit_id' });
       if(error) console.warn('[unit_progress sync]', error);
@@ -12330,7 +12354,7 @@ const Store = (function(){
     if(!userId || !window._sb || !_state) return;
     try{
       const { data, error } = await window._sb.schema('aluno').from('unit_progress')
-        .select('unit_id, first_seen_at, last_seen_at, view_count, completed, completed_at').eq('user_id', userId);
+        .select('unit_id, first_seen_at, last_seen_at, view_count, completed, completed_at, resume_block_id, resume_section_id').eq('user_id', userId);
       if(error){ console.warn('[hydrate unit_progress]', error); return; }
       let n = 0;
       (data || []).forEach(row => {
@@ -12340,6 +12364,8 @@ const Store = (function(){
           viewCount: row.view_count || 1,
           completed: !!row.completed,
           completedAt: row.completed_at ? new Date(row.completed_at).getTime() : null,
+          resumeBlockId: row.resume_block_id || null,
+          resumeSectionId: row.resume_section_id || null,
         };
         n++;
       });
@@ -13222,9 +13248,17 @@ const Store = (function(){
           break;
         }
       }
+      // Unidade concluída não tem "parei aqui": o marcador ficaria zumbi (a home
+      // pula unidade concluída, então nem apareceria) e reapareceria estranho se
+      // ela fosse desmarcada depois.
+      v.resumeBlockId = null;
+      v.resumeSectionId = null;
       _persist(); _emit();
       // Fase 4f — unit progress
-      _syncUnitProgressToSupabase(unitId, { firstSeenAt: v.firstSeenAt, viewCount: v.viewCount, completed: true }).catch(()=>{});
+      _syncUnitProgressToSupabase(unitId, {
+        firstSeenAt: v.firstSeenAt, viewCount: v.viewCount, completed: true,
+        resumeBlockId: null, resumeSectionId: null
+      }).catch(()=>{});
       // Fase 4f+ — bulk bookmark dos blocks vinculados
       _syncBlockBookmarksBulkToSupabase(unitId, cascadeBlockIds).catch(()=>{});
     },
@@ -13348,6 +13382,40 @@ const Store = (function(){
       _persist(); _emit();
       // Fase 4f+ — fire-and-forget sync Supabase (insere se marcou, deleta se desmarcou)
       _syncBlockBookmarkToSupabase(unitId, blockId, !wasMarked).catch(()=>{});
+    },
+
+    /* "Parei aqui" — o bloco onde o aluno parou de ler, UM por unidade.
+       Mora em unit_progress (não em tabela nova): aquela linha já é única por
+       aluno+unidade, então "só um por unidade" e "marcar outro troca o anterior"
+       saem de graça, sem código pra apagar o anterior. */
+    getResumeBlock(unitId){
+      const v = _state.unitViews[unitId];
+      if(!v || !v.resumeBlockId) return null;
+      return { blockId: v.resumeBlockId, sectionId: v.resumeSectionId || null };
+    },
+    isResumeBlock(unitId, blockId){
+      const v = _state.unitViews[unitId];
+      // String dos dois lados: o id vem numérico do banco e string do atributo
+      // HTML — mesmo cuidado do isInReadingList logo abaixo.
+      return !!(v && v.resumeBlockId != null && String(v.resumeBlockId) === String(blockId));
+    },
+    setResumeBlock(unitId, blockId, sectionId){
+      const v = _state.unitViews[unitId] || (_state.unitViews[unitId] = {
+        firstSeenAt: Date.now(), lastSeenAt: Date.now(), viewCount: 1, completed: false, completedAt: null
+      });
+      v.resumeBlockId   = blockId   == null ? null : String(blockId);
+      v.resumeSectionId = sectionId == null ? null : String(sectionId);
+      _persist(); _emit();
+      _syncUnitProgressToSupabase(unitId, {
+        resumeBlockId: v.resumeBlockId, resumeSectionId: v.resumeSectionId
+      }).catch(()=>{});
+    },
+    toggleResumeBlock(unitId, blockId, sectionId){
+      // Clicar no que já está marcado = desmarcar. Clicar em outro = troca (é a
+      // mesma linha do banco; o anterior é sobrescrito).
+      const jaEra = Store.isResumeBlock(unitId, blockId);
+      Store.setResumeBlock(unitId, jaEra ? null : blockId, jaEra ? null : sectionId);
+      return !jaEra;
     },
     /* Reading list — ordered, insertion-order-preserving */
     isInReadingList(unitId, blockId){
@@ -15157,15 +15225,16 @@ Blocks.video = {
       ? window.LearningBlocks.embedVideo(rawUrl)
       : (rawUrl ? `<iframe src="${Util.attr(rawUrl)}" allowfullscreen loading="lazy" style="width:100%;height:100%;border:0"></iframe>` : '<div class="empty-title">Sem vídeo</div>');
 
-    // Actions-only header (bookmark / reading-list); title + description live in the right column below.
+    // Actions-only header (reading-list); title + description live in the right column below.
+    // "Marcar como lido" saiu daqui junto com o do blockHeader — agora vem do
+    // blockFooter, no fim do bloco. Duas cópias do mesmo botão ficariam
+    // dessincronizadas: o handler só reescreve o botão que recebeu o clique.
     let actions = '';
     if(ctx && ctx.unitId && !ctx.suppressActions){
-      const done = Store.isBookmarked(ctx.unitId, block.id);
       const inList = Store.isInReadingList(ctx.unitId, block.id);
       actions = `<header class="block-header block-header--actions-only">
         <div class="block-actions">
           <button class="icon-btn block-action-btn ${inList?'on':''}" data-action="readinglist" data-block-id="${Util.attr(block.id)}" title="${inList?'Remover da lista de leitura':'Adicionar à lista de leitura'}">${Icons.readingList}<span>${inList?'Na lista':'Ler depois'}</span></button>
-          <button class="icon-btn block-action-btn ${done?'on':''}" data-action="bookmark" data-block-id="${Util.attr(block.id)}" title="${done?'Desmarcar':'Marcar como lido'}">${Icons.check}<span>${done?'Lido':'Marcar como lido'}</span></button>
         </div>
       </header>`;
     }
@@ -18513,14 +18582,22 @@ function attachViewToggle(stageEl, block, ctx, kind){
       block.viewMode = view;
       // Persiste no localStorage por bloco
       try{ localStorage.setItem('ubique-viewmode-' + block.id, view); }catch(_){}
-      // Re-renderiza o bloco inteiro
-      const section = stageEl.closest('.block-wrap') || stageEl;
+      // Re-renderiza o bloco inteiro pelo MESMO funil do render da unidade.
+      // Antes remontava só o `renderer.render()` cru, e o que voltava era meio
+      // bloco: sem o rodapé (que vem do blockSectionHtml) e — pior, e desde
+      // antes disto — sem o `id="block-<id>"` da .block-section, que é o alvo do
+      // deep-link ?b=. Trocar de Slides pra Lista arrebentava a âncora do bloco.
+      // O `.closest('.block-wrap')` de antes devolvia null (o stageEl É a
+      // .block-section, e nem ela nem os pais têm .block-wrap), então o fallback
+      // `|| stageEl` é que segurava a peteca — por acidente.
+      const section = stageEl.closest('.block-section') || stageEl;
       const parent = section.parentNode;
       const renderer = Blocks[block.type] || Blocks[kind === 'bio' ? 'bio' : block.type];
       if(!renderer || !parent) return;
       const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = renderer.render(block, ctx);
+      tempDiv.innerHTML = blockSectionHtml(block, ctx);
       const newSection = tempDiv.firstElementChild;
+      if(!newSection) return;
       parent.replaceChild(newSection, section);
       renderer.mount(newSection, block, ctx);
     });
@@ -19299,17 +19376,17 @@ Blocks.comments = {
 };
 Blocks.discussion = Blocks.comments;
 
+// "Marcar como lido" saiu daqui pro RODAPÉ do bloco (blockFooter, logo abaixo):
+// o aluno lê o bloco inteiro, chega no fim e tinha que SUBIR pra marcar.
+// "Ler depois" fica no cabeçalho de propósito — é uma decisão que se toma ANTES
+// de ler, não depois.
 function blockHeader(block, typeLabel, icon, ctx){
   let actions = '';
   if(ctx && ctx.unitId && !ctx.suppressActions){
-    const done = Store.isBookmarked(ctx.unitId, block.id);
     const inList = Store.isInReadingList(ctx.unitId, block.id);
     actions = `<div class="block-actions">
       <button class="icon-btn block-action-btn ${inList?'on':''}" data-action="readinglist" data-block-id="${Util.attr(block.id)}" title="${inList?'Remover da lista de leitura':'Adicionar à lista de leitura'}">
         ${Icons.readingList}<span>${inList?'Na lista':'Ler depois'}</span>
-      </button>
-      <button class="icon-btn block-action-btn ${done?'on':''}" data-action="bookmark" data-block-id="${Util.attr(block.id)}" title="${done?'Desmarcar':'Marcar como lido'}">
-        ${Icons.check}<span>${done?'Lido':'Marcar como lido'}</span>
       </button>
     </div>`;
   }
@@ -19321,6 +19398,80 @@ function blockHeader(block, typeLabel, icon, ctx){
     </div>
     ${actions}
   </header>`;
+}
+
+// Rodapé do learning block: "Marcar como lido" (que morava no cabeçalho) e o
+// "Parei aqui". Ficam no FIM do bloco porque são as decisões que o aluno toma
+// quando TERMINA de ler — não faz sentido subir a página pra clicar.
+//
+// Chamado num lugar só: o wrapper .block-section do render da unidade
+// (index.html:34609). É de propósito. Os 29 call-sites de blockHeader ficariam
+// impossíveis de manter em sincronia, e blocos renderizados FORA da unidade
+// (aba de comentários do drawer de questão, banco de questões, simulado) não
+// passam por esse wrapper — então não ganham rodapé, que é o correto: lá o
+// clique nem seria escutado (a delegação vive no #blockStage) e o "bloco" pode
+// ser uma questão, não um bloco de verdade.
+// Blocos que NUNCA tiveram ações de bloco e continuam sem. O quiz renderiza o
+// cabeçalho sem ctx (index.html:15983), então nunca mostrou "Ler depois" nem
+// "Marcar como lido" — ele tem o próprio fluxo de conclusão ("Verificar
+// respostas", com barra própria no rodapé). O pedido foi MOVER o botão de lugar,
+// não criá-lo onde não existia; sem esta lista o rodapé apareceria no quiz pela
+// primeira vez, e ainda por cima empilhado na barra de verificar.
+const BLOCOS_SEM_ACOES = new Set(['quiz', 'objective_questions']);
+
+function blockFooter(block, ctx){
+  if(!(ctx && ctx.unitId && !ctx.suppressActions)) return '';
+  if(BLOCOS_SEM_ACOES.has(block.type)) return '';
+  const done = Store.isBookmarked(ctx.unitId, block.id);
+  const aqui = Store.isResumeBlock(ctx.unitId, block.id);
+  // Rótulo calculado uma vez e ESCAPADO: o texto tem aspas, e aspas cruas dentro
+  // de atributo entre aspas fecham o atributo na cara do parser.
+  const rot = aqui ? 'Desmarcar "parei aqui"' : 'Parei aqui';
+  // data-action="resume", NUNCA "bookmark": esse nome já é do "marcar como lido"
+  // (o handler o escuta) — reusar faria o "parei aqui" marcar o bloco como lido.
+  // Só ícone, sem rótulo: é um marcador, não uma ação com texto.
+  return `<footer class="block-footer">
+    <div class="block-footer-actions">
+      <button class="icon-btn block-action-btn block-resume-btn ${aqui?'on':''}" data-action="resume" data-block-id="${Util.attr(block.id)}" title="${Util.attr(rot)}" aria-label="${Util.attr(rot)}" aria-pressed="${aqui?'true':'false'}">
+        ${Icons.bookmark}
+      </button>
+      <button class="icon-btn block-action-btn ${done?'on':''}" data-action="bookmark" data-block-id="${Util.attr(block.id)}" title="${done?'Desmarcar':'Marcar como lido'}">
+        ${Icons.check}<span>${done?'Lido':'Marcar como lido'}</span>
+      </button>
+    </div>
+  </footer>`;
+}
+
+// UM bloco completo = o card do renderer + o rodapé DENTRO dele, embrulhados na
+// .block-section que carrega o id (é ela que o deep-link ?b= procura).
+//
+// Existe pra ser a ÚNICA definição de "bloco completo": o render inicial da
+// unidade e o re-render do toggle Slides/Lista chamam esta função. Antes o
+// toggle remontava o bloco por conta própria e devolvia meio bloco — sem o
+// rodapé e sem o id.
+function blockSectionHtml(block, ctx){
+  const renderer = Blocks[block.type];
+  if(!renderer) return '';
+  const inner = renderer.render(block, ctx);
+  const foot = blockFooter(block, ctx);
+  let corpo = inner;
+  if(foot){
+    // O rodapé pertence DENTRO do card — e o card (.block-wrap) é do renderer,
+    // não nosso. Concatenar depois dele deixaria os botões flutuando FORA do
+    // quadro, sem o recuo do card. Os 29 renderers devolvem .block-wrap na raiz,
+    // então basta abrir e pendurar o rodapé lá dentro. (Parsear saída de
+    // renderer numa div é padrão do arquivo — o toggle e o carrossel fazem igual.)
+    const holder = document.createElement('div');
+    holder.innerHTML = inner;
+    const card = holder.firstElementChild;
+    if(card && card.classList.contains('block-wrap')){
+      card.insertAdjacentHTML('beforeend', foot);
+      corpo = holder.innerHTML;
+    } else {
+      corpo = inner + foot; // renderer fora do padrão: melhor fora do card que sumido
+    }
+  }
+  return `<div class="block-section" id="block-${Util.attr(block.id)}">${corpo}</div>`;
 }
 
 /* ───────── Portal ───────── */
@@ -29957,7 +30108,29 @@ Renderers.inicio = function(){
     if(hit){
       let prog = { pct: 0 };
       try{ prog = Store.unitProgress(hit.entry.unit) || prog; }catch(_){}
-      const href = hit.entry.chapter ? ('#/m/' + hit.m.id + '/c/' + hit.entry.chapter.id + '/u/' + hit.entry.unit.id) : ('#/m/' + hit.m.id + '/u/' + hit.entry.unit.id);
+      let href = hit.entry.chapter ? ('#/m/' + hit.m.id + '/c/' + hit.entry.chapter.id + '/u/' + hit.entry.unit.id) : ('#/m/' + hit.m.id + '/u/' + hit.entry.unit.id);
+      // "Parei aqui": se o aluno marcou um bloco, o card leva LITERALMENTE até
+      // ele — ?g= abre a seção certa (a unidade só desenha uma por vez) e ?b=
+      // rola até o bloco. O deep-link já existia; aqui só passamos os valores.
+      // Só anexa se o bloco ainda existir na seção salva: se o admin apagou ou
+      // moveu o bloco, o link levaria pra uma âncora morta — sem isso, abre a
+      // unidade no topo, que é o comportamento de sempre.
+      //
+      // _unitWithStoreOverride é OBRIGATÓRIO aqui: a unidade "crua" NÃO tem
+      // `groups` — esse campo é CONSTRUÍDO a partir do UbiqueStore, e só o
+      // renderizador da unidade fazia isso (index.html:34650). Ler
+      // `unit.groups` direto devolveria [] sempre e o ?g=&b= nunca seria
+      // anexado, deixando o "parei aqui" sem efeito nenhum. É o mesmo campo
+      // fantasma do `unit.blocks` que quebrava as citações do livro.
+      if(v.resumeBlockId && v.resumeSectionId){
+        const _u = (typeof _unitWithStoreOverride === 'function')
+          ? _unitWithStoreOverride(hit.entry.unit) : hit.entry.unit;
+        const _sec = (_u.groups || []).find(g => String(g.id) === String(v.resumeSectionId));
+        const _existe = _sec && (_sec.blocks || []).some(b => String(b.id) === String(v.resumeBlockId));
+        if(_existe){
+          href += '?g=' + encodeURIComponent(v.resumeSectionId) + '&b=' + encodeURIComponent(v.resumeBlockId);
+        }
+      }
       resume = { c: hit.c, u: hit.entry.unit, prog: prog, href: href, last: v.lastSeenAt };
       break;
     }
@@ -34603,11 +34776,9 @@ Renderers.unit = function(route){
   // cada bloco de texto SOMA os seus (setFragments faz merge), então o hover
   // resolve verbetes de QUALQUER bloco, não só do último.
   if(window.FragmentCard && FragmentCard.resetFragments) FragmentCard.resetFragments();
-  const allBlocksHtml = groupBlocks.map(b => {
-    const renderer = Blocks[b.type];
-    if(!renderer) return '';
-    return `<div class="block-section" id="block-${Util.attr(b.id)}">${renderer.render(b, ctx)}</div>`;
-  }).join('<hr class="block-divider">');
+  // blockSectionHtml = card do renderer + rodapé, com o id pro deep-link. É o
+  // funil único: o toggle Slides/Lista remonta o bloco pela MESMA função.
+  const allBlocksHtml = groupBlocks.map(b => blockSectionHtml(b, ctx)).join('<hr class="block-divider">');
   // Section/unit navigation at bottom
   const gIdx = activeGroupIdx >= 0 ? activeGroupIdx : 0;
   const ARROW_LEFT = '<svg viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>';
@@ -34897,10 +35068,29 @@ Renderers.unit.mount = function(stageEl, route){
   }, { rootMargin:'-20% 0px -60% 0px', threshold:0 });
   sections.forEach(s => scrollObs.observe(s));
 
-  // Action delegation — bookmark ("mark as finished") + reading list
+  // Action delegation — bookmark ("mark as finished") + reading list + "parei aqui"
   blockStage.addEventListener('click', e => {
     const bmBtn = e.target.closest('[data-action="bookmark"]');
     const rlBtn = e.target.closest('[data-action="readinglist"]');
+    const rsBtn = e.target.closest('[data-action="resume"]');
+    if(rsBtn){
+      const bid = rsBtn.getAttribute('data-block-id');
+      // A seção ativa vai junto: a unidade só desenha os blocos de uma seção por
+      // vez, então sem ela o retorno abriria a seção errada e o bloco não
+      // existiria na tela pra rolar até ele.
+      const secId = activeGroup ? activeGroup.id : null;
+      const agora = Store.toggleResumeBlock(unit.id, bid, secId);
+      // Só um "parei aqui" por unidade: apaga o destaque dos outros botões da
+      // tela (o Store já trocou a marca; isto é só a UI acompanhando).
+      stageEl.querySelectorAll('[data-action="resume"]').forEach(b => {
+        const on = b === rsBtn && agora;
+        b.classList.toggle('on', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+        const rot = on ? 'Desmarcar "parei aqui"' : 'Parei aqui';
+        b.title = rot; b.setAttribute('aria-label', rot);
+      });
+      return;
+    }
     if(bmBtn){
       const bid = bmBtn.getAttribute('data-block-id');
       Store.toggleBookmark(unit.id, bid);
