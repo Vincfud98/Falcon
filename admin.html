@@ -6060,10 +6060,6 @@
   .qc-chip.anulada{color:#e87878;border-color:rgba(232,120,120,.3)}
   .qc-chip.desatualizada{color:#e87878;border-color:rgba(232,120,120,.3);opacity:.7}
   .qc-chip.phase{color:#b69978;border-color:rgba(182,153,120,.3);background:rgba(182,153,120,.04)}
-  .qc-chip.diff-facil{color:#a7c799;border-color:rgba(167,199,153,.25)}
-  .qc-chip.diff-media{color:#c8b97e;border-color:rgba(200,185,126,.28)}
-  .qc-chip.diff-dificil{color:#e8a978;border-color:rgba(232,169,120,.3)}
-  .qc-chip.diff-variable{color:var(--text-mute);border-color:rgba(200,169,126,.12);font-style:italic}
 
   /* ═══════════════════════════════════════════════════════════
      REFTEXTS — aba Textos de Referência
@@ -9243,11 +9239,22 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           Para criar questões já vinculadas a uma aula, use o fluxo de <strong>Estrutura curricular → Unidade → Editor da aula</strong>.
         </p>
 
+        <!-- Busca por texto: varre enunciado + alternativas + comentários, tudo
+             já em cache (client-side, instantâneo). -->
+        <div class="field" style="margin-bottom:.9rem">
+          <label for="qf-search">Buscar questão</label>
+          <input type="search" id="qf-search" autocomplete="off" placeholder="Busca no enunciado, nas alternativas e nos comentários…">
+        </div>
+
         <!-- Filtros -->
         <div class="qfilter-bar">
           <div class="field">
             <label>Concurso</label>
             <div id="qf-exam"></div>
+          </div>
+          <div class="field">
+            <label>Origem</label>
+            <div id="qf-origin"></div>
           </div>
           <div class="field">
             <label>Ano</label>
@@ -16607,7 +16614,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // Questions state
   let questionsCache = [];
   let questionsFilters = {
-    exam_id: [], year: [], subject_id: [], type: [], topic_id: [], tag_id: [], difficulty: []
+    exam_id: [], year: [], subject_id: [], type: [], topic_id: [], tag_id: [], difficulty: [],
+    origin: [],       // multiselect: 'ubique' | 'prova'
+    search: ''        // texto livre (enunciado/alternativas/comentários)
   };
   let questionsPage = 1;
   const QUESTIONS_PER_PAGE = 15;
@@ -18397,6 +18406,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     renderExamsList();
     populateQuestionFilters();
     renderQuestionsList();
+    // O card e a ordenação usam a dificuldade orgânica → carrega as stats (1
+    // RPC) e re-renderiza quando chegarem. Não bloqueia o 1º render.
+    if(typeof window._qStatsEnsureAll === 'function'){
+      window._qStatsEnsureAll().then(function(){ renderQuestionsList(); }).catch(function(){});
+    }
     renderReftextsList();
     renderAuthors();
     renderProfessors();
@@ -21549,6 +21563,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       return;
     }
     questionsCache = data || [];
+    if(window._qSearchInvalidate) window._qSearchInvalidate();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -21929,13 +21944,23 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const yearOpts = cascade.availableYears.map(y => ({ value: y, label: String(y) }));
     upsertMS('year', 'qf-year', yearOpts, 'todos', false);
 
-    // ─── Dificuldade ───
+    // ─── Dificuldade (ORGÂNICA, os 5 tiers do modal + "Sem dados") ───
     const diffOpts = [
-      { value: 'facil', label: 'Fácil' },
-      { value: 'media', label: 'Média' },
-      { value: 'dificil', label: 'Difícil' },
+      { value: 'muito-facil',   label: 'Muito Fácil' },
+      { value: 'facil',         label: 'Fácil' },
+      { value: 'regular',       label: 'Regular' },
+      { value: 'dificil',       label: 'Difícil' },
+      { value: 'muito-dificil', label: 'Muito Difícil' },
+      { value: 'sem-dados',     label: 'Sem dados' },
     ];
     upsertMS('difficulty', 'qf-difficulty', diffOpts, 'todas', false);
+
+    // ─── Origem (Ubique/inédita vs prova anterior) ───
+    const originOpts = [
+      { value: 'prova',  label: 'Prova anterior' },
+      { value: 'ubique', label: 'Ubique (inédita)' },
+    ];
+    upsertMS('origin', 'qf-origin', originOpts, 'todas', false);
 
     // ─── Tipo ───
     const typeOpts = [
@@ -21996,12 +22021,31 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       });
     }
 
+    // Busca por texto (debounce leve pra não re-renderizar a cada tecla).
+    const searchInput = document.getElementById('qf-search');
+    if(searchInput && !searchInput.dataset.bound){
+      searchInput.dataset.bound = '1';
+      let _searchTimer = null;
+      searchInput.addEventListener('input', () => {
+        clearTimeout(_searchTimer);
+        _searchTimer = setTimeout(() => {
+          questionsFilters.search = searchInput.value || '';
+          questionsPage = 1;
+          renderQuestionsList();
+        }, 180);
+      });
+    }
+
     // Limpar tudo
     const clearBtn = document.getElementById('clearFiltersBtn');
     if(clearBtn && !clearBtn.dataset.bound){
       clearBtn.dataset.bound = '1';
       clearBtn.addEventListener('click', () => {
-        Object.keys(questionsFilters).forEach(k => questionsFilters[k] = []);
+        // search é STRING (não array) — zerar com [] quebraria o filtro de texto.
+        Object.keys(questionsFilters).forEach(k => {
+          questionsFilters[k] = (k === 'search') ? '' : [];
+        });
+        const si = document.getElementById('qf-search'); if(si) si.value = '';
         Object.values(msInstances).forEach(ms => ms.setSelected([]));
         sortCriteria = [{ field: 'id', dir: 'desc' }];
         questionsPage = 1;
@@ -22024,48 +22068,31 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         if(!f.subject_id.some(function(id){ return _subs.has(String(id)); })) return false;
       }
       if(f.type && f.type.length > 0 && !f.type.includes(q.type)) return false;
+      // Origem: 'ubique' = questao_simulada true; 'prova' = false.
+      if(f.origin && f.origin.length > 0){
+        const orig = q.questao_simulada ? 'ubique' : 'prova';
+        if(!f.origin.includes(orig)) return false;
+      }
       return true;
     });
 
-    // Filtro por dificuldade (múltipla):
-    // - MC/essay: q.difficulty em algum dos selecionados
-    // - TF: tem pelo menos 1 item com difficulty em algum dos selecionados
+    // Busca por texto: enunciado + alternativas + comentários, tudo em cache.
+    // Case/acento-insensível, com strip de HTML (os campos guardam tags).
+    if(f.search && String(f.search).trim()){
+      const needle = _qSearchNorm(f.search);
+      if(needle){
+        filtered = filtered.filter(function(q){ return _qSearchHaystack(q).indexOf(needle) >= 0; });
+      }
+    }
+
+    // Filtro por dificuldade ORGÂNICA (5 tiers + "Sem dados"). Uma fonte só:
+    // _qOrganicDifficulty (mesma do card e da ordenação). 'sem-dados' é um
+    // valor selecionável — questão sem resposta de aluno.
     if(f.difficulty && f.difficulty.length > 0){
-      // Pacote #10 — Filtro agora usa difficulty CALCULADA (RPC
-      // question_stats) em vez de q.difficulty (coluna do banco, que
-      // sempre fica 'media' default). Mapeia tier 5-cores (Muito Fácil/
-      // Fácil/Regular/Difícil/Muito Difícil) pros 3 valores legacy do
-      // filtro (facil/media/dificil) por proximidade — UI legacy
-      // continua compatível até a esteira de UI ampliar pros 5 tiers.
       const want = new Set(f.difficulty);
-      const tierToLegacy = function(tier){
-        if(!tier) return 'media';
-        if(tier.key === 'muito-facil' || tier.key === 'facil') return 'facil';
-        if(tier.key === 'muito-dificil' || tier.key === 'dificil') return 'dificil';
-        return 'media'; // regular cai em media
-      };
       filtered = filtered.filter(function(q){
-        let itemIds;
-        if(q.type === 'true_false'){
-          itemIds = (tfItemsCache || [])
-            .filter(function(t){ return String(t.question_id) === String(q.id); })
-            .map(function(t){ return String(t.id); });
-        } else {
-          itemIds = [String(q.id)];
-        }
-        let total = 0, correct = 0;
-        itemIds.forEach(function(id){
-          const s = (typeof window._qStatsGet === 'function') ? window._qStatsGet(id) : null;
-          if(s){ total += s.total; correct += s.correct; }
-        });
-        if(total === 0){
-          // Sem respostas → cai em "media" por convenção (legacy também
-          // mostrava como 'media' por default). Aceita se filtro inclui media.
-          return want.has('media');
-        }
-        const pct = Math.round((correct / total) * 100);
-        const legacy = tierToLegacy(_classifyDifficultyFromPct(pct));
-        return want.has(legacy);
+        const org = window._qOrganicDifficulty(q);
+        return org && want.has(org.key);
       });
     }
 
@@ -22119,7 +22146,6 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const subjectsMap = Object.fromEntries(subjectsCache.map(s => [s.id, s]));
     const topicsMap = Object.fromEntries(topicsCache.map(t => [t.id, t]));
 
-    const difficultyRank = { 'facil': 1, 'media': 2, 'dificil': 3 };
     const typeRank = { 'true_false': 1, 'multiple_choice': 2, 'essay': 3 };
 
     // Pré-calcula o primeiro tema (por item ordem hierárquica) de cada questão
@@ -22158,7 +22184,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           // Normalizar para string com zero-padding (ex: "001.002.003")
           return parts.map(n => String(n).padStart(3, '0')).join('.');
         }
-        case 'difficulty': return difficultyRank[q.difficulty] || 99;
+        case 'difficulty': {
+          // Ordena pela dificuldade ORGÂNICA: 0% acerto (mais difícil) → 100%
+          // (mais fácil). "Sem dados" vai pro fim (101).
+          const org = window._qOrganicDifficulty(q);
+          return (org && org.pct != null) ? org.pct : 101;
+        }
         case 'type':       return typeRank[q.type] || 99;
         default:           return 0;
       }
@@ -22228,28 +22259,22 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       'multiple_choice': { label: 'Múltipla', cls: 'type-mc' },
       'essay': { label: 'Discursiva', cls: 'type-essay' },
     };
-    const diffLabels = {
-      'facil': { label: 'Fácil', cls: 'diff-facil' },
-      'media': { label: 'Média', cls: 'diff-media' },
-      'dificil': { label: 'Difícil', cls: 'diff-dificil' },
-    };
 
     const html = pageRows.map(q => {
       const exam = examsMap[q.exam_id];
       const subject = subjectsMap[q.subject_id];
       const typeInfo = typeLabels[q.type] || { label: q.type, cls: '' };
 
-      // Dificuldade: para TF, pega a "representativa" (única ou "variável")
-      let diffKey = q.difficulty;
-      let diffIsVar = false;
-      if(q.type === 'true_false'){
-        const itemDiffs = [...new Set(
-          tfItemsCache.filter(i => i.question_id === q.id).map(i => i.difficulty || 'media')
-        )];
-        if(itemDiffs.length === 1) diffKey = itemDiffs[0];
-        else if(itemDiffs.length > 1){ diffKey = null; diffIsVar = true; }
-      }
-      const diffInfo = diffKey ? diffLabels[diffKey] : null;
+      // Dificuldade ORGÂNICA (do acerto/erro real dos alunos) — a mesma do
+      // filtro, da ordenação e do badge do modal. A classificação manual antiga
+      // (q.difficulty / item.difficulty) não é mais usada aqui. Sem emoji: só a
+      // cor do tier + o rótulo. "Sem dados" = ninguém respondeu ainda.
+      const _org = window._qOrganicDifficulty(q);
+      // borda: alpha só faz sentido em cor hex; em var(--…) usa a cor inteira.
+      const _diffBd = (_org && _org.color.charAt(0) === '#') ? _org.color + '66' : (_org ? _org.color : '');
+      const diffChip = _org
+        ? `<span class="qc-chip" style="color:${_org.color};border-color:${_diffBd}">${esc(_org.label)}${_org.pct != null ? ' · ' + _org.pct + '%' : ''}</span>`
+        : '';
 
       // Chip de fase (se a questão tem phase_numero, busca o nome)
       let phaseLabel = '';
@@ -22268,8 +22293,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         phaseLabel ? `<span class="qc-chip phase">${esc(phaseLabel)}</span>` : '',
         subject ? `<span class="qc-chip">${esc(subject.sigla || subject.subject)}</span>` : '',
         q.numero ? `<span class="qc-chip">Q${q.numero}</span>` : '',
-        diffInfo ? `<span class="qc-chip ${diffInfo.cls}">${diffInfo.label}</span>` : '',
-        diffIsVar ? `<span class="qc-chip diff-variable">dif. variável</span>` : '',
+        diffChip,
         q.anulada ? '<span class="qc-chip anulada">anulada</span>' : '',
         q.desatualizada ? '<span class="qc-chip desatualizada">desatualizada</span>' : '',
         q.questao_simulada ? '<span class="qc-chip" style="background:rgba(120,160,200,.12);color:#78a0c8;border-color:rgba(120,160,200,.3)">simulada</span>' : '',
@@ -24086,21 +24110,106 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const p = Math.max(0, Math.min(100, Number(pct) || 0));
     return DIFFICULTY_TIERS.find(t => p >= t.min) || DIFFICULTY_TIERS[DIFFICULTY_TIERS.length - 1];
   }
+  // Dificuldade ORGÂNICA de uma questão (do acerto/erro real dos alunos), a
+  // MESMA do badge do modal. Fonte única pro filtro, o card e a ordenação —
+  // pra não haver três lógicas divergentes. Classifica a partir de 1 resposta
+  // (decisão do usuário); sem nenhuma resposta = 'sem-dados'. Depende de
+  // _qStatsGet já estar carregado (_qStatsEnsureAll roda antes de renderizar).
+  // Memo por questão: a ordenação chama isto DENTRO do comparador (O(N log N))
+  // e, pra C/E, cada chamada varreria tfItemsCache inteiro — sem memo travaria
+  // a UI com muitas questões. Invalidado quando as stats/itens/questões mudam
+  // (_qOrgInvalidate nos loaders e no sucesso do fetch de stats).
+  const _qOrgCache = {};
+  window._qOrganicDifficulty = function(q){
+    if(!q) return null;
+    const ckey = String(q.id);
+    if(_qOrgCache[ckey]) return _qOrgCache[ckey];
+    let itemIds;
+    if(q.type === 'true_false'){
+      itemIds = (tfItemsCache || [])
+        .filter(function(t){ return String(t.question_id) === ckey; })
+        .map(function(t){ return String(t.id); });
+    } else {
+      itemIds = [ckey];
+    }
+    let total = 0, correct = 0;
+    itemIds.forEach(function(id){
+      const s = (typeof window._qStatsGet === 'function') ? window._qStatsGet(id) : null;
+      if(s){ total += s.total; correct += s.correct; }
+    });
+    let res;
+    if(total === 0){
+      res = { key: 'sem-dados', label: 'Sem dados', color: 'var(--text-mute)', pct: null, total: 0 };
+    } else {
+      const pct = Math.round((correct / total) * 100);
+      const tier = _classifyDifficultyFromPct(pct);
+      res = { key: tier.key, label: tier.label, color: tier.color, pct: pct, total: total };
+    }
+    _qOrgCache[ckey] = res;
+    return res;
+  };
+
+  // Busca textual do banco de questões. Normaliza (minúsculas, sem acento) e
+  // tira as tags HTML — os campos guardam HTML. O "palheiro" de cada questão
+  // (enunciado + alternativas + comentários) é montado uma vez e cacheado por
+  // id, pra não recompor tudo a cada tecla. Invalidar quando os caches recarregam.
+  function _qSearchNorm(s){
+    return String(s == null ? '' : s)
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')  // remove acento
+      .replace(/<[^>]*>/g, ' ')                            // remove tags HTML
+      .replace(/\s+/g, ' ')
+      .toLowerCase().trim();
+  }
+  const _qHaystackCache = {};
+  // Limpa os DOIS memos derivados (busca + dificuldade). Os loaders e o fetch de
+  // stats chamam isto quando questões/itens/respostas mudam. Dois nomes,
+  // mesma função: a fiação existente usa _qSearchInvalidate.
+  function _qClearDerivedCaches(){
+    for(const k in _qHaystackCache){ delete _qHaystackCache[k]; }
+    for(const k in _qOrgCache){ delete _qOrgCache[k]; }
+  }
+  window._qSearchInvalidate = _qClearDerivedCaches;
+  window._qOrgInvalidate = _qClearDerivedCaches;
+  function _qSearchHaystack(q){
+    const key = String(q.id);
+    if(_qHaystackCache[key] != null) return _qHaystackCache[key];
+    const parts = [q.enunciado, q.command, q.description];
+    if(q.type === 'true_false'){
+      const itemIds = new Set();
+      (tfItemsCache || []).forEach(function(t){
+        // A assertiva C/E vive na coluna `assertiva` (o resto do app usa
+        // `assertiva || texto`); `texto` é só fallback legado. Sem isto, a busca
+        // não achava o enunciado do item — o tipo dominante no CACD.
+        if(String(t.question_id) === key){ parts.push(t.assertiva, t.texto, t.comment); itemIds.add(String(t.id)); }
+      });
+      (tfItemCommentsCache || []).forEach(function(c){
+        if(itemIds.has(String(c.tf_item_id))) parts.push(c.text);   // gabaritos comentados (E3)
+      });
+    } else if(q.type === 'multiple_choice'){
+      (mcOptionsCache || []).forEach(function(o){
+        if(String(o.question_id) === key){ parts.push(o.opcao, o.texto, o.comment); }
+      });
+    }
+    const hay = _qSearchNorm(parts.filter(Boolean).join(' '));
+    _qHaystackCache[key] = hay;
+    return hay;
+  }
   const _qStatsCache = {};   // item_id -> { total, correct }
   let _qStatsAllLoaded = false;
   async function _fetchQuestionStats(itemIds){
-    if(!window._sb) return;
+    if(!window._sb) return false;
     try{
       const args = (itemIds && itemIds.length) ? { p_item_ids: itemIds.map(String) } : {};
       const { data, error } = await window._sb.schema('aluno').rpc('question_stats', args);
-      if(error){ console.warn('[admin question_stats]', error); return; }
+      if(error){ console.warn('[admin question_stats]', error); return false; }
       (data || []).forEach(r => {
         if(r && r.item_id != null){
           _qStatsCache[String(r.item_id)] = { total: Number(r.total) || 0, correct: Number(r.correct) || 0 };
         }
       });
       (itemIds || []).forEach(id => { const k = String(id); if(!(k in _qStatsCache)) _qStatsCache[k] = { total: 0, correct: 0 }; });
-    }catch(e){ console.warn('[admin question_stats ex]', e); }
+      return true;
+    }catch(e){ console.warn('[admin question_stats ex]', e); return false; }
   }
   async function _ensureQStats(itemIds){
     const miss = (itemIds || []).map(String).filter(id => !(id in _qStatsCache));
@@ -24108,8 +24217,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
   async function _ensureAllQStats(){
     if(_qStatsAllLoaded) return;
-    _qStatsAllLoaded = true;
-    await _fetchQuestionStats(null);
+    // Só marca "carregado" no SUCESSO — senão uma falha do RPC prenderia a lista
+    // em "Sem dados" a sessão toda, sem retry (card+ordenação+filtro dependem).
+    const ok = await _fetchQuestionStats(null);
+    if(ok){
+      _qStatsAllLoaded = true;
+      // As stats mudaram a dificuldade calculada → limpa o memo orgânico.
+      if(window._qOrgInvalidate) window._qOrgInvalidate();
+    }
   }
   window._qStatsGet = function(itemId){ return _qStatsCache[String(itemId)] || null; };
   window._qStatsInvalidate = function(itemId){ if(itemId != null) delete _qStatsCache[String(itemId)]; _qStatsAllLoaded = false; };
@@ -24681,11 +24796,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const { data, error } = await questoes().from('tf_items').select('*');
     if(error){ console.error('tf_items:', error); return; }
     tfItemsCache = data || [];
+    if(window._qSearchInvalidate) window._qSearchInvalidate();
   }
   async function loadTfItemComments(){
     const { data, error } = await questoes().from('tf_item_comments').select('*');
     if(error){ console.error('tf_item_comments:', error); return; }
     tfItemCommentsCache = data || [];
+    if(window._qSearchInvalidate) window._qSearchInvalidate();
   }
   async function loadTfItemTopics(){
     const { data, error } = await questoes().from('tf_item_topics').select('*');
@@ -24701,6 +24818,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const { data, error } = await questoes().from('mc_options').select('*');
     if(error){ console.error('mc_options:', error); return; }
     mcOptionsCache = data || [];
+    if(window._qSearchInvalidate) window._qSearchInvalidate();
   }
   async function loadEssayCriteria(){
     const { data, error } = await questoes().from('essay_criteria').select('*');
