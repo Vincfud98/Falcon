@@ -6376,8 +6376,15 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   border:1px solid var(--accent-border-soft);
   border-radius:3px;
   background:transparent;color:var(--accent);
-  cursor:pointer;flex-shrink:0;
+  cursor:pointer;flex-shrink:0;align-self:center;
   transition:all .15s ease;
+  white-space:nowrap;
+}
+/* No celular a linha do tópico fica apertada (checkbox+título+pílula+botão+
+   seta). Aperta pílula e botão só no toque, sem tocar no desktop. */
+@media(pointer:coarse){
+  .edital-perf-pill{min-width:2.3rem;font-size:.64rem;padding:.18rem .45rem}
+  .edital-topic-aulas{font-size:.62rem;padding:.25rem .5rem;letter-spacing:.02em}
 }
 .edital-topic-aulas:hover{
   background:var(--accent);color:var(--bg);border-color:var(--accent);
@@ -6392,6 +6399,38 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   padding-left:.4rem;padding-right:.4rem;padding-bottom:.4rem;
 }
 .edital-topic-children.is-open{ display:flex;flex-direction:column;gap:.35rem;padding-top:.2rem; }
+
+/* Pílula de desempenho por nó (item 3): fundo em degradê vermelho→verde
+   (gradient3, absoluto). "—" quando o aluno ainda não respondeu no tópico. */
+.edital-perf-pill{
+  flex-shrink:0;align-self:center;
+  font-family:var(--sans);font-weight:500;font-size:.7rem;letter-spacing:.02em;
+  padding:.2rem .55rem;border-radius:10px;
+  min-width:2.7rem;text-align:center;
+  /* cor do texto + sombra vêm inline (escolhidas pela luminância do fundo) */
+}
+.edital-perf-pill--empty{
+  background:transparent;color:var(--text-mute);
+  border:1px solid var(--accent-border-soft);
+  text-shadow:none;font-weight:300;
+}
+/* Lista de unidades do nó (item 2): abre/fecha ao clicar na contagem. */
+.edital-units-list{
+  display:none;flex-direction:column;gap:.15rem;
+  padding:.2rem 1.1rem .6rem 2.8rem;
+}
+.edital-units-list.is-open{ display:flex; }
+.edital-unit-link{
+  font-family:var(--sans);font-weight:300;font-size:.82rem;
+  color:var(--text-dim);text-decoration:none;line-height:1.4;
+  padding:.35rem .55rem;border-radius:3px;
+  border-left:2px solid var(--accent-border-soft);
+  transition:all .15s ease;
+}
+.edital-unit-link:hover{ color:var(--accent);background:var(--accent-lo);border-left-color:var(--accent); }
+.edital-unit-link--dead{ color:var(--text-mute);border-left-color:transparent;cursor:default; }
+.edital-unit-link--locked{ color:var(--text-mute);border-left-color:transparent;cursor:default;font-style:italic; }
+.edital-unit-link--locked:hover{ color:var(--text-mute);background:transparent; }
 
 /* ─── Mentions (LB Discussão — Fase 2.3) ─── */
 .cmt-mention{
@@ -28087,11 +28126,92 @@ Renderers.edital = function(){
   const userId = window.MOCK_USER ? window.MOCK_USER.id : 'guest';
   const myProgress = new Set(progress.filter(p => p.user_id === userId).map(p => p.topic_id));
 
+  // ── Contagem de unidades (item 2) + desempenho (item 3), recursivos ──
+  // Hierarquia dos tópicos deste edital.
+  const _childrenOf = {};
+  topics.forEach(t => { const p = (t.parent_id == null) ? '__root' : String(t.parent_id); (_childrenOf[p] = _childrenOf[p] || []).push(t); });
+  // tópico → Set(store unit id) DIRETO. _expandTopicUnitLinks já expande
+  // capítulo/módulo → unidades e deduplica; cobre TODAS as unidades (a estrutura
+  // do edital é pública), então a CONTAGEM aparece em toda matéria.
+  const _expanded = (typeof window._expandTopicUnitLinks === 'function') ? window._expandTopicUnitLinks() : {};
+  // store unit id → agg de desempenho. buildPerformanceReport usa
+  // Portal.scopeCourses (só as matérias que o aluno tem), então o DESEMPENHO só
+  // existe onde há dado; nas demais a pílula mostra "—".
+  const _unitAgg = {};
+  try {
+    const _perf = buildPerformanceReport();
+    Object.values(_perf.perUnit || {}).forEach(pu => { if(pu && pu.storeUnitId != null && pu.agg) _unitAgg[String(pu.storeUnitId)] = pu.agg; });
+  } catch(_){}
+  // Unidades do tópico + descendentes, como Set DISTINTO (memoizado). O conjunto
+  // distinto evita a dupla-contagem quando a mesma unidade está ligada ao pai E
+  // a um filho — vale pra contagem E pro desempenho.
+  const _unitsCache = {};
+  function _unitsOfTopic(tid){
+    const key = String(tid);
+    if(_unitsCache[key]) return _unitsCache[key];
+    const set = new Set();
+    // Grava a referência ANTES de recorrer: se houver ciclo em parent_id (dado
+    // corrompido), a reentrada retorna este Set (parcial) em vez de estourar a
+    // pilha. Como Set é mutável, o preenchimento abaixo continua valendo.
+    _unitsCache[key] = set;
+    if(_expanded[key]) _expanded[key].forEach(u => set.add(u));
+    (_childrenOf[key] || []).forEach(ch => { _unitsOfTopic(ch.id).forEach(u => set.add(u)); });
+    return set;
+  }
+  // % de acerto do tópico = corretas/respondidas das unidades distintas (só quiz;
+  // simulado já é excluído no motor de desempenho). null = sem resposta ainda.
+  function _perfOfTopic(tid){
+    let answered = 0, correct = 0;
+    _unitsOfTopic(tid).forEach(uid => { const a = _unitAgg[uid]; if(a && a.quiz){ answered += a.quiz.answered; correct += a.quiz.correct; } });
+    return { answered: answered, pct: answered > 0 ? Math.round(correct / answered * 100) : null };
+  }
+  // Unidades do store por id (pra listar número + título e linkar).
+  const _unitsById = {};
+  ((window.UbiqueStore && window.UbiqueStore.units.list()) || []).forEach(u => { if(u) _unitsById[String(u.id)] = u; });
+  // Matéria (subjects.id) de uma unidade, via capítulo→módulo.
+  const _modById = {}; ((window.UbiqueStore && window.UbiqueStore.modules.list()) || []).forEach(m => { if(m) _modById[String(m.id)] = m; });
+  const _chById = {}; ((window.UbiqueStore && window.UbiqueStore.chapters.list()) || []).forEach(c => { if(c) _chById[String(c.id)] = c; });
+  function _subjectOfUnit(uid){
+    const u = _unitsById[uid]; if(!u) return null;
+    const ch = _chById[String((u.course_chapter_id != null) ? u.course_chapter_id : u.chapter_id)];
+    const m = ch ? _modById[String(ch.module_id)] : null;
+    return m ? String(m.subject_id) : null;
+  }
+  // Título só nas matérias COMPRADAS (decisão do usuário). Reusa Commerce.isOwned
+  // (fonte única de posse) — nas não compradas a contagem aparece, mas a lista
+  // fica trancada. Memoizado por matéria.
+  const _ownedSubjCache = {};
+  function _subjectOwned(sid){
+    if(sid == null) return true;                 // sem matéria resolvível → não tranca
+    const k = String(sid);
+    if(k in _ownedSubjCache) return _ownedSubjCache[k];
+    const course = ((window.COURSES) || []).find(c => c && String(c._subjectId) === k);
+    const owned = course ? (!(window.Commerce && Commerce.isOwned) || Commerce.isOwned(course.id)) : true;
+    return (_ownedSubjCache[k] = owned);
+  }
+  // Cadeado em SVG (proibido emoji).
+  const _lockSvg = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px;margin-right:.3rem"><rect x="5" y="11" width="14" height="9" rx="1.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+
   function renderNode(t, level){
     const children = topics.filter(c => c.parent_id === t.id).sort((a,b) => (a.position||0) - (b.position||0));
-    const links = ((window.UbiqueStore && window.UbiqueStore.edital_topic_units.list()) || []).filter(l => l.topic_id === t.id);
+    const unitSet = _unitsOfTopic(t.id);
+    const unitCount = unitSet.size;
+    const perf = _perfOfTopic(t.id);
     const isViewed = myProgress.has(t.id);
     const depthClass = 'depth-' + Math.min(level, 5);
+    // Pílula de desempenho (item 3): degradê onde há dado; neutra "—" senão.
+    let pill;
+    if(perf.pct != null){
+      const _bg = gradient3(perf.pct / 100);
+      // Texto escuro no fundo claro (o dourado do meio da escala), branco no
+      // escuro — senão o número fica ilegível em ~50% de acerto.
+      const _lum = (0.299 * parseInt(_bg.substr(1,2),16) + 0.587 * parseInt(_bg.substr(3,2),16) + 0.114 * parseInt(_bg.substr(5,2),16)) / 255;
+      const _txt = _lum > 0.62 ? '#1a1a1a' : '#fff';
+      const _sh = _lum > 0.62 ? 'none' : '0 1px 2px rgba(0,0,0,.4)';
+      pill = `<span class="edital-perf-pill" style="background:${_bg};color:${_txt};text-shadow:${_sh}" title="Seu acerto neste tópico">${perf.pct}%</span>`;
+    } else {
+      pill = `<span class="edital-perf-pill edital-perf-pill--empty" title="Sem questões respondidas neste tópico">—</span>`;
+    }
 
     const head = `<div class="edital-topic-head" data-toggle="${Util.attr(t.id)}">
       <input type="checkbox" class="edital-topic-cb" data-progress="${Util.attr(t.id)}" ${isViewed ? 'checked' : ''}>
@@ -28102,15 +28222,40 @@ Renderers.edital = function(){
         </div>
         ${t.description ? `<p class="edital-topic-desc">${Util.esc(t.description)}</p>` : ''}
       </div>
-      ${links.length > 0 ? `<button type="button" class="edital-topic-aulas" data-show-aulas="${Util.attr(t.id)}">${links.length} ${links.length === 1 ? 'aula' : 'aulas'} →</button>` : ''}
+      ${pill}
+      ${unitCount > 0 ? `<button type="button" class="edital-topic-aulas" data-show-aulas="${Util.attr(t.id)}">${unitCount} ${unitCount === 1 ? 'unidade' : 'unidades'} →</button>` : ''}
       ${children.length > 0 ? `<span class="edital-topic-chevron" data-chevron="${Util.attr(t.id)}">▸</span>` : ''}
     </div>`;
+
+    // Lista de unidades do nó (item 2): número + título, cada uma linkando pra
+    // página da unidade via _unitHashById (que resolve a rota certa com String()).
+    // Recursiva = as MESMAS unidades que a contagem representa. Ordena por número.
+    const unitsHtml = unitCount > 0
+      ? `<div class="edital-units-list" data-units-list="${Util.attr(t.id)}">${
+          [...unitSet]
+            .map(uid => _unitsById[uid]).filter(Boolean)
+            .sort((a,b) => (parseInt(a.number)||0) - (parseInt(b.number)||0) || String(a.title||'').localeCompare(String(b.title||''),'pt-BR'))
+            .map(u => {
+              // Matéria não comprada: título trancado (a contagem continua cheia).
+              // Mostra só o número (não é o título) pra distinguir as linhas.
+              if(!_subjectOwned(_subjectOfUnit(String(u.id)))){
+                const _n = (u.number != null && u.number !== '') ? Util.esc(String(u.number)) : '';
+                return `<span class="edital-unit-link edital-unit-link--locked" title="Disponível ao adquirir a matéria">${_lockSvg}Unidade${_n ? ' ' + _n : ''} · bloqueada</span>`;
+              }
+              const label = (u.number != null && u.number !== '' ? u.number + ' · ' : '') + (u.title || 'Unidade');
+              const href = (typeof window._unitHashById === 'function') ? window._unitHashById(u.id) : '';
+              return href
+                ? `<a class="edital-unit-link" href="${Util.attr(href)}">${Util.esc(label)}</a>`
+                : `<span class="edital-unit-link edital-unit-link--dead" title="Unidade sem capítulo/módulo — não navegável">${Util.esc(label)}</span>`;
+            }).join('')
+        }</div>`
+      : '';
 
     const childrenHtml = children.length > 0
       ? `<div class="edital-topic-children" data-children="${Util.attr(t.id)}">${children.map(c => renderNode(c, level + 1)).join('')}</div>`
       : '';
 
-    return `<div class="edital-topic ${depthClass}">${head}${childrenHtml}</div>`;
+    return `<div class="edital-topic ${depthClass}">${head}${unitsHtml}${childrenHtml}</div>`;
   }
 
   const roots = topics.filter(t => t.parent_id == null).sort((a,b) => (a.position||0) - (b.position||0));
@@ -28176,27 +28321,20 @@ Renderers.edital.mount = function(stage){
       }
     });
   });
-  // Atalho pras aulas
+  // Clique na contagem: abre/fecha a lista de unidades daquele nó. A lista já
+  // vem no HTML (com os links certos via _unitHashById), então aqui só alterna a
+  // visibilidade — sem re-resolver vínculo, sem o bug antigo de "Aula não
+  // encontrada" (que comparava u.id number com unit_id text e lia só o campo
+  // legado unit_id). Os links da lista navegam sozinhos (âncoras de hash).
   stage.querySelectorAll('[data-show-aulas]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      // ⚠️ tid agora é UUID string (topic_id é UUID)
       const tid = btn.getAttribute('data-show-aulas');
-      const links = ((window.UbiqueStore && window.UbiqueStore.edital_topic_units.list()) || []).filter(l => l.topic_id === tid);
-      if(!links.length){ App._showAccessToast('Nenhuma aula vinculada ainda.'); return; }
-      const unitId = links[0].unit_id;
-      const unit = ((window.UbiqueStore && window.UbiqueStore.units.list()) || []).find(u => u.id === unitId);
-      if(!unit){ App._showAccessToast('Aula não encontrada.'); return; }
-      const ch = ((window.UbiqueStore && window.UbiqueStore.chapters.list()) || []).find(c => c.id === unit.chapter_id);
-      const mod = ch ? ((window.UbiqueStore && window.UbiqueStore.modules.list()) || []).find(m => m.id === ch.module_id) : null;
-      if(mod && ch && unit){
-        const mid = mod._origMockId || ('m' + mod.id);
-        const cid = ch._origMockId || ('c' + ch.id);
-        const uid = unit._origMockId || ('u' + unit.id);
-        location.hash = '#/m/' + mid + '/c/' + cid + '/u/' + uid;
-      } else {
-        App._showAccessToast('Mapeamento de aulas pendente.');
-      }
+      const list = stage.querySelector('[data-units-list="' + (window.CSS && CSS.escape ? CSS.escape(tid) : tid) + '"]');
+      if(!list){ return; }
+      const willOpen = !list.classList.contains('is-open');
+      list.classList.toggle('is-open', willOpen);
+      btn.classList.toggle('is-open', willOpen);
     });
   });
 };
