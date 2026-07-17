@@ -9085,6 +9085,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
               <span class="sub-h-text" id="editalDetailTitle">—</span>
               <span class="sub-h-rule"></span>
               <button class="btn btn-ghost btn-sm" id="btnEditCurrentEdital" title="Editar este edital">editar edital</button>
+              <button class="btn btn-ghost btn-sm" id="btnResyncEditalTags" title="Recalcula as etiquetas automáticas das questões a partir das unidades vinculadas. Não mexe nas marcações manuais.">re-sincronizar etiquetas</button>
               <button class="btn btn-ghost btn-sm" id="btnDeleteCurrentEdital" title="Apagar este edital" style="color:#e87878">apagar edital</button>
               <button class="btn" id="btnAddRootTopic">+ Matéria</button>
             </div>
@@ -16584,6 +16585,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // Modal state: seleções temporárias (não persistidas até salvar)
   let modalSelectedTopics = new Set();   // Set<topic_id> (taxonomia legada — sai na E6)
   let modalSelectedEditalTopics = new Set();   // Set<edital_topic_id (uuid)> — Tópicos do edital
+  // Os tópicos que vieram DA UNIDADE (pré-marcados por _qApplyUnitContext), não
+  // do clique manual do admin. O save NÃO marca esses como manual — a marca
+  // automática (from_unit) é da função no banco. Sem isso, salvar uma questão de
+  // dentro da unidade "grudaria" os tópicos derivados como manuais, e eles nunca
+  // sumiriam ao desvincular.
+  let modalUnitDerivedTopics = new Set();
   let modalSelectedTags = new Set();     // Set<tag_id>
   let modalSelectedRefs = new Map();     // Map<reference_text_id, ordem>
   let modalSelectedSubjectId = null;     // para filtrar topics disponíveis
@@ -22288,6 +22295,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // Reset estado das abas Classificação e Referências
     modalSelectedTopics = new Set();
     modalSelectedEditalTopics = new Set();
+    modalUnitDerivedTopics = new Set();
     modalSelectedTags = new Set();
     modalSelectedRefs = new Map();
     modalSelectedSubjectId = null;
@@ -23144,17 +23152,40 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
     // E1/E6 — TÓPICOS DO EDITAL (substitui a taxonomia "Temas"). Vale p/ todos os
     // tipos. Sincroniza question_edital_topics a partir de modalSelectedEditalTopics.
+    // Este editor gerencia SÓ a marca MANUAL (from_manual). A automática
+    // (from_unit) é da função no banco.
+    // "Manual" = o que está marcado no modal MENOS o que veio da unidade
+    // (modalUnitDerivedTopics) — os derivados ficam por conta do recompute, pra
+    // não "grudarem" como manuais. Só comparamos com o que HOJE é manual no
+    // banco, nunca tocando from_unit.
     try{
-      const cur = await questoes().from('question_edital_topics').select('edital_topic_id').eq('question_id', savedId);
-      const currentEt = new Set((cur.data || []).map(r => String(r.edital_topic_id)));
-      const desiredEt = new Set([...modalSelectedEditalTopics].map(String));
-      const toAddEt = [...desiredEt].filter(id => !currentEt.has(id));
-      const toRemoveEt = [...currentEt].filter(id => !desiredEt.has(id));
-      if(toRemoveEt.length > 0){
-        await questoes().from('question_edital_topics').delete().eq('question_id', savedId).in('edital_topic_id', toRemoveEt);
+      const cur = await questoes().from('question_edital_topics').select('edital_topic_id, from_unit, from_manual').eq('question_id', savedId);
+      const curRows = cur.data || [];
+      const curManual = new Set(curRows.filter(r => r.from_manual === true).map(r => String(r.edital_topic_id)));
+      const fromUnitOf = {}; curRows.forEach(r => { fromUnitOf[String(r.edital_topic_id)] = r.from_unit === true; });
+      // desejado MANUAL: marcado no modal e NÃO derivado da unidade.
+      const desiredManual = new Set([...modalSelectedEditalTopics].map(String).filter(id => !modalUnitDerivedTopics.has(id)));
+      const toAddManual    = [...desiredManual].filter(id => !curManual.has(id));
+      const toRemoveManual = [...curManual].filter(id => !desiredManual.has(id));
+      if(toRemoveManual.length > 0){
+        // Tira a marca manual. Se a unidade AINDA justifica (from_unit), a linha
+        // fica (vira só-unidade); senão, some.
+        const soManual  = toRemoveManual.filter(id => fromUnitOf[id]);   // fica
+        const semLastro = toRemoveManual.filter(id => !fromUnitOf[id]);  // some
+        if(soManual.length > 0){
+          await questoes().from('question_edital_topics').update({ from_manual: false }).eq('question_id', savedId).in('edital_topic_id', soManual);
+        }
+        if(semLastro.length > 0){
+          // .eq('from_unit', false) fecha a corrida: se o import ligou from_unit
+          // entre a leitura e agora, NÃO apaga às cegas a linha que virou auto.
+          await questoes().from('question_edital_topics').delete().eq('question_id', savedId).eq('from_unit', false).in('edital_topic_id', semLastro);
+        }
       }
-      if(toAddEt.length > 0){
-        const insEt = await questoes().from('question_edital_topics').insert(toAddEt.map(edital_topic_id => ({ question_id: savedId, edital_topic_id })));
+      if(toAddManual.length > 0){
+        // upsert: se a linha já existe (from_unit), só liga from_manual (o
+        // payload não tem from_unit, então ele é preservado).
+        const insEt = await questoes().from('question_edital_topics')
+          .upsert(toAddManual.map(edital_topic_id => ({ question_id: savedId, edital_topic_id, from_manual: true })), { onConflict: 'question_id,edital_topic_id' });
         if(insEt && insEt.error) throw insEt.error;
       }
     }catch(e){
@@ -23502,6 +23533,20 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(error){ console.error('question_edital_topics:', error); return; }
     questionEditalTopicsCache = data || [];
   }
+  // Recomputa a parte AUTOMÁTICA das etiquetas (from_unit) a partir do estado
+  // atual das unidades — quem faz o trabalho pesado é a função no banco
+  // (questoes.recompute_edital_tags), atômica e que NUNCA toca a marca manual.
+  // Chamado ao vincular/desvincular unidade<->tópico e pelo botão "Re-sincronizar".
+  // Silencioso se a função ainda não existir no banco (o SQL não rodou) — o
+  // vínculo em si já foi salvo; só a etiqueta não recomputa.
+  async function _ueRecomputeEditalTags(){
+    try{
+      const { data, error } = await questoes().rpc('recompute_edital_tags');
+      if(error){ console.warn('[recompute edital tags]', error.message); return null; }
+      await loadQuestionEditalTopics(); // cache do admin em dia após a mudança
+      return data; // { ligadas, desligadas, removidas }
+    }catch(e){ console.warn('[recompute edital tags ex]', e); return null; }
+  }
   async function loadQuestionTags(){
     const { data, error } = await questoes()
       .from('question_tags').select('*');
@@ -23618,6 +23663,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         let cur = etById[String(tid)], guard = 0;
         while(cur && guard++ < 30){
           modalSelectedEditalTopics.add(String(cur.id));
+          modalUnitDerivedTopics.add(String(cur.id)); // marca como "veio da unidade"
           cur = (cur.parent_id != null) ? etById[String(cur.parent_id)] : null;
         }
       }
@@ -56050,11 +56096,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     refs.forEach(function(ref){
       topicIds.forEach(function(tid){
         const k = String(ref.id) + '|' + String(tid);
-        if(!existing.has(k)){ rows.push({ question_id: ref.id, edital_topic_id: tid }); existing.add(k); }
+        if(!existing.has(k)){ rows.push({ question_id: ref.id, edital_topic_id: tid, from_unit: true }); existing.add(k); }
       });
     });
     if(rows.length){
-      const { error } = await questoes().from('question_edital_topics').insert(rows);
+      // from_unit=true: é a etiqueta AUTOMÁTICA da unidade. upsert pra não
+      // colidir com uma linha que já exista por marca manual (só liga from_unit).
+      const { error } = await questoes().from('question_edital_topics')
+        .upsert(rows, { onConflict: 'question_id,edital_topic_id' });
       if(error){ console.warn('[import topics]', error.message); }
     }
     return topicIds.length;
@@ -59286,13 +59335,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }).join('');
     // Wire remove
     wrap.querySelectorAll('[data-remove-link-id]').forEach(function(btn){
-      btn.addEventListener('click', function(){
+      btn.addEventListener('click', async function(){
         // ⚠️ lid agora é UUID string (não parseInt) — edital_topic_units virou uuid
         const lid = btn.dataset.removeLinkId;
         if(lid && window.UbiqueStore && window.UbiqueStore.edital_topic_units){
           window.UbiqueStore.edital_topic_units.remove(lid);
           // Fase 4i — espelha pro Supabase
-          ConcursosSync.topicUnitDelete(lid);
+          await ConcursosSync.topicUnitDelete(lid);
+          // Recomputa: a etiqueta automática cai — MAS só se nenhuma OUTRA
+          // unidade da questão ainda justificar aquele tópico, e nunca mexe na
+          // marca manual. Quem garante isso é a função no banco (recompute, não
+          // delete cego). Roda DEPOIS do delete (senão ainda veria o vínculo).
+          await _ueRecomputeEditalTags();
           renderCurrentLinks();
           renderEditalTree();
         }
@@ -59359,7 +59413,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         uns.map(u => `<option value="${u.id}">${esc(_unLabel(u))}</option>`).join('');
       unSel.disabled = uns.length === 0;
     });
-    btn.addEventListener('click', function(){
+    btn.addEventListener('click', async function(){
       const modId = parseInt(modSel.value);
       const chId  = parseInt(chSel.value);
       const unId  = parseInt(unSel.value);
@@ -59388,9 +59442,17 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(target_type === 'unit') newRow.unit_id = target_id;
       const created = window.UbiqueStore.edital_topic_units.add(newRow);
       // Fase 4i — espelha pro Supabase com UUID gerado
-      ConcursosSync.topicUnitInsert(Object.assign({ id: created.id }, newRow));
-      msg.innerHTML = '<div class="message success" style="font-size:.8rem">Vínculo adicionado.</div>';
-      setTimeout(() => { msg.innerHTML = ''; }, 2500);
+      await ConcursosSync.topicUnitInsert(Object.assign({ id: created.id }, newRow));
+      // Carimba as questões que já estão nessas unidades com o tópico novo — é o
+      // "atualiza sozinho": antes, questão adicionada ANTES do vínculo nunca
+      // recebia a etiqueta. Roda DEPOIS do insert (senão a função não veria o
+      // vínculo). Acumula, não substitui: mantém as outras etiquetas da questão.
+      msg.innerHTML = '<div class="message success" style="font-size:.8rem">Vínculo adicionado. Atualizando etiquetas…</div>';
+      const _rc = await _ueRecomputeEditalTags();
+      msg.innerHTML = _rc
+        ? '<div class="message success" style="font-size:.8rem">Vínculo adicionado. ' + (_rc.ligadas || 0) + ' etiqueta(s) atualizada(s).</div>'
+        : '<div class="message success" style="font-size:.8rem">Vínculo adicionado.</div>';
+      setTimeout(() => { msg.innerHTML = ''; }, 2800);
       // Reset dropdowns pra próximo
       chSel.value = ''; chSel.dispatchEvent(new Event('change'));
       modSel.value = '';
@@ -59415,6 +59477,22 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const btnDelCur = document.getElementById('btnDeleteCurrentEdital');
     if(btnDelCur) btnDelCur.addEventListener('click', () => {
       if(_currentEditalId != null) deleteEdital(_currentEditalId);
+    });
+    // Re-sincronizar etiquetas: conserta o passado (questões cuja unidade foi
+    // vinculada ao tópico DEPOIS de a questão entrar) e serve de rede de
+    // segurança. Recomputa só a marca automática; a manual fica intocada.
+    const btnResync = document.getElementById('btnResyncEditalTags');
+    if(btnResync) btnResync.addEventListener('click', async () => {
+      const _old = btnResync.textContent;
+      btnResync.disabled = true; btnResync.textContent = 'sincronizando…';
+      const r = await _ueRecomputeEditalTags();
+      btnResync.disabled = false; btnResync.textContent = _old;
+      if(typeof ueToast === 'function'){
+        ueToast(r
+          ? 'Etiquetas sincronizadas: ' + (r.ligadas||0) + ' ligada(s), ' + (r.desligadas||0) + ' desligada(s), ' + (r.removidas||0) + ' removida(s).'
+          : 'Não deu pra sincronizar. Confira se o SQL das etiquetas já foi rodado.',
+          r ? 'success' : 'error');
+      }
     });
     const btnSaveEd = document.getElementById('btnSaveEdital');
     if(btnSaveEd) btnSaveEd.addEventListener('click', saveEdital);
