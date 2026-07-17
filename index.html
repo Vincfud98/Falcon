@@ -2125,6 +2125,19 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 .side-downloads{
   margin-top:1.6rem;padding-top:1rem;border-top:1px solid var(--border);
 }
+/* Botão "Compilar texto para estudo" — perto do Material para download. */
+.side-compile-text-btn{
+  margin-top:1rem;width:100%;
+  display:flex;align-items:center;gap:.55rem;
+  padding:.6rem .7rem;border:1px solid var(--accent-border-soft);border-radius:3px;
+  background:var(--accent-lo);color:var(--accent);cursor:pointer;
+  font-family:var(--sans);font-weight:400;font-size:.74rem;letter-spacing:.02em;
+  transition:all .2s ease;text-align:left;
+}
+.side-compile-text-btn:hover{ background:var(--accent);color:var(--bg);border-color:var(--accent); }
+.side-compile-text-btn[disabled]{ opacity:.6;cursor:default; }
+.side-compile-text-icon{ display:inline-flex;width:15px;height:15px;flex-shrink:0; }
+.side-compile-text-icon svg{ width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8; }
 .side-downloads-summary{
   list-style:none;cursor:pointer;
   display:flex;align-items:center;gap:.55rem;padding:.4rem 0;
@@ -35498,6 +35511,10 @@ Renderers.unit = function(route){
       </div>
       ${sidebarGroups}
       ${renderSidebarDownloads(_dlGetForUnit(unit.id))}
+      <button class="side-compile-text-btn" id="compileTextBtn" type="button" title="Baixar o texto desta unidade com seus grifos e anotações">
+        <span class="side-compile-text-icon">${Icons.download}</span>
+        <span>Compilar texto para estudo</span>
+      </button>
     </aside>
     <main class="unit-main">
       <div class="block-stage" id="blockStage" data-unit-id="${Util.attr(unit.id)}">${allBlocksHtml}${endNav}${recommendationsHtml}</div>
@@ -35841,6 +35858,23 @@ Renderers.unit.mount = function(stageEl, route){
       TutorIA.openCaderno({ unitId: unit.id, unitTitle: (unit.number ? unit.number + ' · ' : '') + unit.title, unitText: stageTxt });
     }
   });
+
+  // Compilar texto para estudo (item 2): baixa o texto da unidade com os grifos,
+  // notas e o Caderno do aluno, no mesmo padrão da prova (marca d'água + código
+  // verificável do servidor).
+  const compileTextBtn = stageEl.querySelector('#compileTextBtn');
+  if(compileTextBtn){
+    compileTextBtn.addEventListener('click', async function(){
+      const _lbl = compileTextBtn.querySelector('span:last-child');
+      const _old = _lbl ? _lbl.textContent : '';
+      compileTextBtn.disabled = true; if(_lbl) _lbl.textContent = 'Gerando…';
+      try{
+        const _materia = (window.COURSE && (window.COURSE.title || window.COURSE.name)) || '';
+        await TextCompiler.download(unit, { materia: _materia, modulo: (m && (m.title || m.label)) || '' });
+      }catch(e){ console.warn('[compilar texto] falhou:', e); alert('Não consegui gerar o texto agora. Tente novamente.'); }
+      finally { compileTextBtn.disabled = false; if(_lbl) _lbl.textContent = _old; }
+    });
+  }
 
   // Focus mode — sidebar collapses to a thin strip; clicking it expands back.
   const focusBtn = stageEl.querySelector('#focusModeBtn');
@@ -38328,6 +38362,255 @@ async function _compileIdentity(kind, ref, contentText){
     return { ok: true, name: d.name || fallback.name, email: d.email || fallback.email, code: d.code, token: d.token || '', issuedAt: d.issued_at || fallback.issuedAt };
   }catch(_){ return fallback; }
 }
+
+/* ───────── TextCompiler — "Compilar texto" da unidade (item 2) ─────────
+   Reúne os learning blocks de TEXTO e PONTOS-CHAVE de uma unidade num HTML
+   imprimível com a MESMA formatação da prova (marca d'água + código verificável
+   do servidor), incluindo os grifos, as notas e o Caderno do aluno.
+   Regras (decisões do usuário): bloco COM título → nova página; título de
+   PARÁGRAFO na lateral (como o modo foco); grifo "oculto" REVELADO; inclui o
+   Caderno. Exclui imagem/vídeo/referências/discussão. */
+const TextCompiler = (function(){
+  const esc = function(s){ return Util.esc(s == null ? '' : s); };
+  const _normTxt = function(s){ return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase(); };
+
+  function collectBlocks(unit){
+    const out = [];
+    (unit.groups || []).forEach(function(g){
+      (g.blocks || []).forEach(function(b){
+        if(b && (b.type === 'text' || b.type === 'keypoints')) out.push(b);
+      });
+    });
+    return out;
+  }
+
+  function kpHtml(block){
+    const rows = (block.items || []).map(function(it){
+      return '<div class="ct-kp-item">' +
+        (it.label ? '<span class="ct-kp-label">' + esc(it.label) + '</span>' : '') +
+        (it.title ? '<span class="ct-kp-title">' + esc(it.title) + '</span>' : '') +
+        (it.body  ? '<div class="ct-kp-body">' + (it.body) + '</div>' : '') +   // HTML do admin (igual à tela)
+      '</div>';
+    }).join('');
+    return '<div class="ct-kp">' + (block.intro ? '<p class="ct-kp-intro">' + esc(block.intro) + '</p>' : '') + rows + '</div>';
+  }
+
+  function blockBodyHtml(block){
+    if(block.type === 'keypoints') return kpHtml(block);
+    const body = block.paragraphs ? renderParagraphs(block.paragraphs, block.topics, block.tags) : (block.html || '');
+    return '<div class="tb-body">' + body + '</div>';
+  }
+
+  // Container VIVO oculto: precisa da estrutura #block-<id> .tb-body pra
+  // _restoreHighlightsForUnit e pra ancorar as notas (offsets de texto).
+  function buildLiveContainer(unit, blocks){
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;left:-99999px;top:0;width:680px;';
+    wrap.innerHTML = blocks.map(function(b){
+      return '<div class="ct-block' + (b.title ? ' has-title' : '') + '" id="block-' + Util.attr(b.id) + '">' +
+        (b.title ? '<h2 class="ct-block-title">' + esc(b.title) + '</h2>' : '') +
+        blockBodyHtml(b) +
+      '</div>';
+    }).join('');
+    return wrap;
+  }
+
+  // Envolve o trecho da nota num <mark>, sem mexer no que já está marcado.
+  function wrapQuote(para, quote){
+    const raw = String(quote || ''); if(raw.length < 3) return;
+    const walker = document.createTreeWalker(para, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(n){ return (n.parentElement && n.parentElement.closest('.ct-note-mark, .ct-note-stack')) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT; }
+    });
+    let n, full = ''; const map = [];
+    while((n = walker.nextNode())){ map.push({ node: n, start: full.length, len: n.textContent.length }); full += n.textContent; }
+    const start = full.indexOf(raw); if(start < 0) return;
+    const end = start + raw.length;
+    for(let i = map.length - 1; i >= 0; i--){
+      const m = map[i], ns = m.start, ne = m.start + m.len, from = Math.max(start, ns), to = Math.min(end, ne);
+      if(from >= to) continue;
+      try{
+        const r = document.createRange(); r.setStart(m.node, from - ns); r.setEnd(m.node, to - ns);
+        const mk = document.createElement('mark'); mk.className = 'ct-note-mark'; r.surroundContents(mk);
+      }catch(_){}
+    }
+  }
+
+  // Notas do aluno → mark no trecho + caixa na margem (print-safe, sem offsetTop).
+  function applyNotes(container, unit){
+    const notes = ((window.Store && Store.get() && Store.get().notes) || [])
+      .filter(function(nn){ return String(nn.unitId) === String(unit.id) && (nn.quote || nn.paragraphId); });
+    notes.forEach(function(note){
+      let para = null;
+      if(note.paragraphId && note.blockId){
+        const scope = container.querySelector('#block-' + CSS.escape(String(note.blockId)));
+        if(scope) para = scope.querySelector('[data-paragraph-id="' + CSS.escape(String(note.paragraphId)) + '"]');
+      }
+      if(!para && note.paragraphId) para = container.querySelector('[data-paragraph-id="' + CSS.escape(String(note.paragraphId)) + '"]');
+      if(!para && note.quote){
+        const q = _normTxt(note.quote).slice(0, 40);
+        // Escopa ao bloco da nota primeiro (o mesmo trecho pode se repetir em
+        // outra seção); só cai no container inteiro se o bloco não bater.
+        let scope = null;
+        if(note.blockId) scope = container.querySelector('#block-' + CSS.escape(String(note.blockId)));
+        const search = function(root){ return Array.from(root.querySelectorAll('.tb-paragraph')).find(function(p){ return _normTxt(p.textContent).indexOf(q) >= 0; }) || null; };
+        para = (scope ? search(scope) : null) || search(container);
+      }
+      if(!para) return;
+      if(note.quote) wrapQuote(para, note.quote);
+      para.classList.add('ct-has-note');
+      let stack = para.querySelector(':scope > .ct-note-stack');
+      if(!stack){ stack = document.createElement('aside'); stack.className = 'ct-note-stack'; para.appendChild(stack); }
+      const box = document.createElement('div'); box.className = 'ct-note';
+      box.innerHTML = '<div class="ct-note-body">' + esc(note.body || '') + '</div>';
+      stack.appendChild(box);
+    });
+  }
+
+  function cadernoHtml(unit){
+    let body = '';
+    try{
+      const list = (window.Store && Store.listCadernos) ? Store.listCadernos() : [];
+      const rec = list.find(function(c){ return String(c.unitId) === String(unit.id); });
+      body = (rec && rec.body) || '';
+    }catch(_){}
+    if(!body || !String(body).trim()) return '';
+    // O caderno guarda texto simples — preserva quebras de linha.
+    return '<div class="ct-caderno"><h2 class="ct-block-title">Meu caderno</h2>' +
+           '<div class="ct-caderno-body">' + esc(body) + '</div></div>';
+  }
+
+  function buildHTML(bodyInner, unit, ident, cadHtml, meta){
+    const _nm = ident.name || '', _em = ident.email || '', _cid = ident.code || '', _verified = ident.ok === true;
+    const _issuedAt = ident.issuedAt || '';
+    const _licParts = [_nm, _em].filter(Boolean);
+    const _verifTxt = _verified ? ('Verificação ' + _cid) : 'SEM VERIFICAÇÃO — cópia não registrada';
+    const licLine = (_licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + '  ·  ') : '') + _verifTxt;
+    const forensic = ['emitido-para=' + _nm, 'email=' + _em, 'codigo=' + _cid, 'verificado=' + _verified, 'emitido-em=' + _issuedAt].join(' | ').replace(/--+/g, '-');
+    const metaTags =
+      '<meta name="x-emitido-para" content="' + esc(_nm) + '">' +
+      '<meta name="x-email" content="' + esc(_em) + '">' +
+      '<meta name="x-codigo" content="' + esc(_cid) + '">' +
+      '<meta name="x-verificado" content="' + (_verified ? '1' : '0') + '">' +
+      '<meta name="x-emitido-em" content="' + esc(_issuedAt) + '">';
+    const infoBits = [
+      meta.materia ? ('Matéria: ' + esc(meta.materia)) : '',
+      meta.modulo ? ('Módulo: ' + esc(meta.modulo)) : '',
+      meta.dateStr ? ('Emitido em ' + esc(meta.dateStr)) : ''
+    ].filter(Boolean);
+    return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' + metaTags +
+      '<title>Texto para estudo — ' + esc(meta.unitTitle || 'Unidade') + '</title><style>' +
+      '@page{size:A4;margin:14mm 13mm}' +
+      '*{box-sizing:border-box}' +
+      'body{margin:0;font-family:Georgia,"Times New Roman",serif;color:#222;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
+      '.print-btn{position:fixed;top:14px;right:14px;z-index:10;padding:.6rem 1rem;background:#8a6a24;color:#fff;border:none;border-radius:4px;font:600 .85rem sans-serif;cursor:pointer}' +
+      '@media print{.print-btn{display:none}}' +
+      '.wrap{max-width:180mm;margin:0 auto;padding:8mm 0}' +
+      '.cover{text-align:center;border-bottom:2px solid rgba(138,106,36,.3);padding-bottom:1rem;margin-bottom:1.2rem}' +
+      '.cover .brand{font:600 .68rem sans-serif;letter-spacing:.28em;text-transform:uppercase;color:#8a6a24}' +
+      '.cover h1{font:400 1.9rem Georgia,serif;color:#2a2212;margin:.4rem 0 .2rem}' +
+      '.cover .sub{font:400 .9rem sans-serif;color:#555}' +
+      '.cover .info{font:400 .78rem sans-serif;color:#666;margin-top:.4rem}' +
+      '.cover-lic{font:400 .66rem sans-serif;color:#8a6a24;margin-top:.5rem;opacity:.85}' +
+      // área de texto com margem RESERVADA: títulos de parágrafo à esquerda, notas à direita
+      '.ct-wrap{position:relative;padding:0 38mm 0 34mm}' +
+      '.ct-block{position:relative;margin:0 0 1.1rem}' +
+      '.ct-block.has-title{page-break-before:always}' +
+      '.ct-block-title{font:700 1.35rem/1.3 Georgia,serif;color:#2a2212;margin:0 0 .7rem;border-bottom:2px solid rgba(138,106,36,.28);padding-bottom:.3rem}' +
+      '.tb-body{font:400 .95rem/1.65 Georgia,serif;color:#222}' +
+      '.tb-body p{margin:0 0 .7rem}' +
+      '.tb-paragraph{position:relative;margin:0 0 .9rem}' +
+      // título do parágrafo na LATERAL esquerda (como o modo foco/sidebar recolhida)
+      '.tb-para-title{position:absolute;left:-34mm;width:30mm;text-align:right;margin:0;font:600 .68rem/1.3 sans-serif;letter-spacing:.04em;text-transform:uppercase;color:#8a6a24;border-right:2px solid rgba(138,106,36,.35);padding-right:.4rem}' +
+      '.tb-para-desc{font-style:italic;color:#666;font-size:.82rem;margin:.15rem 0 .3rem}' +
+      '.tb-section-title{font:700 1.05rem Georgia,serif;color:#2a2212;margin:1.1rem 0 .5rem}' +
+      // grifos: MESMAS cores da plataforma, transparentes (dá pra ler)
+      '.hl-mark{border-radius:2px;padding:0 1px}' +
+      '.hl-mark[data-hl-color="red"]{background:rgba(232,120,120,.25)}' +
+      '.hl-mark[data-hl-color="pink"]{background:rgba(228,145,184,.25)}' +
+      '.hl-mark[data-hl-color="orange"]{background:rgba(232,168,87,.25)}' +
+      '.hl-mark[data-hl-color="blue"]{background:rgba(107,163,214,.25)}' +
+      '.hl-mark[data-hl-color="green"]{background:rgba(93,212,159,.25)}' +
+      '.hl-mark[data-hl-color="yellow"]{background:rgba(232,212,77,.35)}' +
+      '.hl-mark[data-hl-color="underline"]{text-decoration:underline;text-decoration-color:#8a6a24;text-underline-offset:3px}' +
+      // "oculto" (veil) REVELADO: mostra o texto, com um traço leve indicando
+      '.hl-mark[data-hl-color="veil"]{background:rgba(200,169,126,.18);border-bottom:1px dashed rgba(138,106,36,.55)}' +
+      // notas na margem direita
+      '.ct-note-mark{background:rgba(122,95,48,.14);border-bottom:1px solid rgba(122,95,48,.45)}' +
+      '.ct-note-stack{position:absolute;top:0;right:-38mm;width:34mm}' +
+      '.ct-note{font:400 .7rem/1.42 sans-serif;color:#3a3222;background:rgba(122,95,48,.06);border-left:2px solid #8a6a24;padding:.3rem .45rem;margin:0 0 .35rem;border-radius:2px}' +
+      // pontos-chave
+      '.ct-kp{margin:.4rem 0}' +
+      '.ct-kp-intro{font-style:italic;color:#555;margin:0 0 .5rem}' +
+      '.ct-kp-item{margin:0 0 .5rem;padding-left:.6rem;border-left:2px solid rgba(138,106,36,.3)}' +
+      '.ct-kp-label{font-weight:700;color:#8a6a24;margin-right:.4rem}' +
+      '.ct-kp-title{font-weight:600}' +
+      '.ct-kp-body{font-size:.9rem;color:#333;margin-top:.15rem}' +
+      // caderno no fim
+      '.ct-caderno{page-break-before:always}' +
+      '.ct-caderno-body{white-space:pre-wrap;font:400 .95rem/1.6 Georgia,serif;color:#222}' +
+      // imagens do texto não entram (só texto), mas por segurança limita
+      '.tb-body img{display:none}' +
+      // marca d'água diagonal (só na impressão)
+      '.print-wm{display:none}' +
+      '@media print{.print-wm{display:block;position:fixed;top:42%;left:8%;right:8%;text-align:center;transform:rotate(-24deg);transform-origin:center;font-size:14px;line-height:1.7;letter-spacing:.04em;font-weight:700;color:rgba(138,106,36,.14);z-index:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}}' +
+      '</style></head><body>' +
+      '<!-- ' + forensic + ' -->' +
+      '<button class="print-btn" onclick="window.print()">Imprimir / Salvar PDF</button>' +
+      (licLine ? '<div class="print-wm">' + esc(licLine) + '</div>' : '') +
+      '<div class="wrap">' +
+        '<header class="cover">' +
+          '<div class="brand">Ubique · Texto para estudo</div>' +
+          '<h1>' + esc(meta.unitTitle || 'Unidade') + '</h1>' +
+          (infoBits.length ? '<div class="info">' + infoBits.join('  ·  ') + '</div>' : '') +
+          (licLine ? '<div class="cover-lic">' + esc(licLine) + '</div>' : '') +
+        '</header>' +
+        '<div class="ct-wrap">' + bodyInner + '</div>' +
+        cadHtml +
+      '</div></body></html>';
+  }
+
+  function downloadFile(html, name){
+    try{
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
+    }catch(e){ console.warn('[compilar texto] download falhou:', e); alert('Não consegui baixar o arquivo.'); }
+  }
+
+  return {
+    async download(unit, ctxMeta){
+      const blocks = collectBlocks(unit);
+      if(!blocks.length){ alert('Esta unidade não tem blocos de texto ou pontos-chave para compilar.'); return; }
+      // 1) render num container vivo oculto e aplica grifos + notas.
+      // Captura o texto ANTES do enriquecimento e isola cada etapa: se grifos ou
+      // notas falharem, o documento sai com o texto (sem o realce), nunca vazio.
+      const container = buildLiveContainer(unit, blocks);
+      document.body.appendChild(container);
+      let inner = container.innerHTML;   // texto garantido
+      try{
+        try{ if(typeof window._restoreHighlightsForUnit === 'function') window._restoreHighlightsForUnit(unit.id, container, blocks); }
+        catch(e){ console.warn('[compilar texto] grifos:', e); }
+        try{ applyNotes(container, unit); }
+        catch(e){ console.warn('[compilar texto] notas:', e); }
+        inner = container.innerHTML;      // agora com grifos + notas
+      } finally { container.remove(); }
+      // 2) identidade verificável do servidor (item 1)
+      const contentText = blocks.map(function(b){ return String(b.id) + ':' + String(b.title || ''); }).join('|');
+      const ident = await _compileIdentity('texto', 'unidade:' + unit.id, contentText);
+      // 3) monta e baixa
+      let dateStr = ''; try{ dateStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); }catch(e){}
+      const meta = {
+        unitTitle: (unit.number != null && unit.number !== '' ? unit.number + ' · ' : '') + (unit.title || 'Unidade'),
+        materia: (ctxMeta && ctxMeta.materia) || '', modulo: (ctxMeta && ctxMeta.modulo) || '', dateStr: dateStr
+      };
+      const html = buildHTML(inner, unit, ident, cadernoHtml(unit), meta);
+      downloadFile(html, 'texto-unidade-' + (unit.number || unit.id) + '.html');
+    }
+  };
+})();
 
 async function _bankCompileProva(route){
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
