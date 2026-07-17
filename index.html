@@ -38142,16 +38142,20 @@ const QuestionsCompiler = (function(){
     // Forense: vai SEMPRE no código-fonte (meta + comentário), invisível na
     // tela. Visível só na IMPRESSÃO: faixa no topo de toda página.
     const _nm = meta.candidato || '', _em = meta.email || '', _cpf = meta.cpf || '', _cid = meta.copiaId || '';
-    let _issuedAt = ''; try { _issuedAt = new Date().toISOString(); } catch(e){}
+    const _verified = meta.verified === true;
+    let _issuedAt = meta.issuedAt || ''; if(!_issuedAt){ try { _issuedAt = new Date().toISOString(); } catch(e){} }
     const _licParts = [_nm, _em, _cpf].filter(Boolean);
-    const licLine = _licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + (_cid ? '  ·  ID ' + _cid : ''))
-                                     : (_cid ? ('Cópia ID ' + _cid) : '');
-    const forensic = ['emitido-para='+_nm, 'email='+_em, 'cpf='+_cpf, 'copia-id='+_cid, 'emitido-em='+_issuedAt].join(' | ').replace(/--+/g,'-');
+    // Selo de verificação: o código vem ASSINADO do servidor (rastreável). Sem
+    // ele, o documento é marcado como não verificado.
+    const _verifTxt = _verified ? ('Verificação ' + _cid) : 'SEM VERIFICAÇÃO — cópia não registrada';
+    const licLine = (_licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + '  ·  ') : '') + _verifTxt;
+    const forensic = ['emitido-para='+_nm, 'email='+_em, 'cpf='+_cpf, 'codigo='+_cid, 'verificado='+_verified, 'emitido-em='+_issuedAt].join(' | ').replace(/--+/g,'-');
     const metaTags =
       '<meta name="x-emitido-para" content="'+esc(_nm)+'">'+
       '<meta name="x-email" content="'+esc(_em)+'">'+
       '<meta name="x-cpf" content="'+esc(_cpf)+'">'+
-      '<meta name="x-copia-id" content="'+esc(_cid)+'">'+
+      '<meta name="x-codigo" content="'+esc(_cid)+'">'+
+      '<meta name="x-verificado" content="'+(_verified?'1':'0')+'">'+
       '<meta name="x-emitido-em" content="'+esc(_issuedAt)+'">';
     return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'+metaTags+'<title>Prova Objetiva — '+esc(meta.concursoSigla||'Ubique')+'</title><style>'+
       // A margem VIVE no @page, não no .wrap. O padding do .wrap só criava
@@ -38242,7 +38246,7 @@ const QuestionsCompiler = (function(){
       // Escondida na TELA; visível só na impressão.
       '.print-wm{display:none}'+
       // Marca d'água: largura limitada (8%–92%) e SEM nowrap, pra o texto inteiro
-      // caber (inclusive o "ID …") quebrando em linhas se preciso, em vez de cortar.
+      // caber (inclusive o "Verificação …") quebrando em linhas se preciso, em vez de cortar.
       '@media print{.print-wm{display:block;position:fixed;top:42%;left:8%;right:8%;text-align:center;transform:rotate(-24deg);transform-origin:center;font-size:14px;line-height:1.7;letter-spacing:.04em;font-weight:700;color:rgba(138,106,36,.14);z-index:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}}'+
       '</style></head><body>'+
         '<!-- '+forensic+' -->'+
@@ -38289,7 +38293,43 @@ function _userCpf(){
 }
 
 // Junta tudo e dispara o download da prova a partir do estado atual de filtros.
-function _bankCompileProva(route){
+// ── Identidade VERIFICÁVEL de compilação (anti-fraude, item 1) ──
+// Chama a Edge Function `compile-token`, que identifica o aluno pela SESSÃO
+// (o JWT, não pelo que o cliente diz), registra a compilação no servidor e
+// devolve um CÓDIGO assinado + nome/email canônicos do servidor. Se o servidor
+// não responder, degrada pra "sem verificação" (nome local, sem código) — e o
+// documento sai marcado como não verificado, pra deixar claro que não é
+// confiável. Todos os compiladores passam por aqui.
+async function _sha256Hex(str){
+  try{
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(str == null ? '' : str)));
+    return Array.from(new Uint8Array(buf)).map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
+  }catch(_){ return ''; }
+}
+async function _compileIdentity(kind, ref, contentText){
+  const fallback = {
+    ok: false,
+    name: (window.MOCK_USER && window.MOCK_USER.name) || '',
+    email: (window.MOCK_USER && window.MOCK_USER.email) || '',
+    code: '', token: '',
+    issuedAt: (function(){ try { return new Date().toISOString(); } catch(_){ return ''; } })()
+  };
+  try{
+    if(!window._sb || !window._sb.functions) return fallback;
+    const content_hash = await _sha256Hex(contentText || '');
+    const call = window._sb.functions.invoke('compile-token', { body: { kind: kind, ref: (ref == null ? null : String(ref)), content_hash: content_hash } });
+    let _t = null;
+    const timeout = new Promise(function(_, rej){ _t = setTimeout(function(){ rej(new Error('timeout')); }, 8000); });
+    let r;
+    try { r = await Promise.race([call, timeout]); }
+    finally { if(_t) clearTimeout(_t); }
+    const d = r && r.data;
+    if(!d || !d.ok || !d.code) return fallback;
+    return { ok: true, name: d.name || fallback.name, email: d.email || fallback.email, code: d.code, token: d.token || '', issuedAt: d.issued_at || fallback.issuedAt };
+  }catch(_){ return fallback; }
+}
+
+async function _bankCompileProva(route){
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
   const bankItems = _bankItemsForQuestions();
   const results = _bankApplyFilters(bankItems, f, { isEssay:false });
@@ -38307,14 +38347,17 @@ function _bankCompileProva(route){
   const anos = Object.keys(anosSet).map(Number).sort(function(a,b){ return a - b; });
   let dateStr = '';
   try { dateStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); } catch(e){}
-  // ID único por cópia (rastreável). Math.random/Date.now são OK no app.
-  let copiaId = '';
-  try { copiaId = 'UBQ-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2,6).toUpperCase(); } catch(e){}
+  // Identidade VERIFICÁVEL do servidor (registra a compilação e assina o código).
+  // Fingerprint do conteúdo = ids + enunciados das questões compiladas.
+  const _contentText = results.map(function(it){ return String(it && it.id) + ':' + String((it && it.enunciado) || ''); }).join('|');
+  const _ident = await _compileIdentity('prova-objetiva', (f.exam || '') + '|' + materias.join(','), _contentText);
   QuestionsCompiler.download(sections, itemById, {
-    candidato:    (window.MOCK_USER && window.MOCK_USER.name) || '',
-    email:        (window.MOCK_USER && window.MOCK_USER.email) || '',
+    candidato:    _ident.name,
+    email:        _ident.email,
     cpf:          _userCpf(),
-    copiaId:      copiaId,
+    copiaId:      _ident.code,      // código verificável do servidor (vazio se não verificado)
+    verified:     _ident.ok,
+    issuedAt:     _ident.issuedAt,
     concursoSigla: concursoSigla,
     concursoName: examObj ? examObj.name : concursoSigla,
     materias:     materias,
@@ -38443,11 +38486,12 @@ const EssaysCompiler = (function(){
     // Identificação (anti-compartilhamento) — calculada ANTES do corpo/espelho
     // pra carimbar a licença em CADA questão e em CADA item do espelho.
     const _nm = meta.candidato || '', _em = meta.email || '', _cpf = meta.cpf || '', _cid = meta.copiaId || '';
-    let _issuedAt = ''; try { _issuedAt = new Date().toISOString(); } catch(e){}
+    const _verified = meta.verified === true;
+    let _issuedAt = meta.issuedAt || ''; if(!_issuedAt){ try { _issuedAt = new Date().toISOString(); } catch(e){} }
     const _licParts = [_nm, _em, _cpf].filter(Boolean);
-    const licLine = _licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + (_cid ? '  ·  ID ' + _cid : ''))
-                                     : (_cid ? ('Cópia ID ' + _cid) : '');
-    const forensic = ['emitido-para='+_nm, 'email='+_em, 'cpf='+_cpf, 'copia-id='+_cid, 'emitido-em='+_issuedAt].join(' | ').replace(/--+/g,'-');
+    const _verifTxt = _verified ? ('Verificação ' + _cid) : 'SEM VERIFICAÇÃO — cópia não registrada';
+    const licLine = (_licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + '  ·  ') : '') + _verifTxt;
+    const forensic = ['emitido-para='+_nm, 'email='+_em, 'cpf='+_cpf, 'codigo='+_cid, 'verificado='+_verified, 'emitido-em='+_issuedAt].join(' | ').replace(/--+/g,'-');
     const flat = [];
     const corpo = buildCorpo(sections, flat, licLine);
     meta.total = flat.length;
@@ -38462,7 +38506,8 @@ const EssaysCompiler = (function(){
       '<meta name="x-emitido-para" content="'+esc(_nm)+'">'+
       '<meta name="x-email" content="'+esc(_em)+'">'+
       '<meta name="x-cpf" content="'+esc(_cpf)+'">'+
-      '<meta name="x-copia-id" content="'+esc(_cid)+'">'+
+      '<meta name="x-codigo" content="'+esc(_cid)+'">'+
+      '<meta name="x-verificado" content="'+(_verified?'1':'0')+'">'+
       '<meta name="x-emitido-em" content="'+esc(_issuedAt)+'">';
     return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'+metaTags+'<title>Prova Discursiva — '+esc(meta.concursoSigla||'Ubique')+'</title><style>'+
       // A margem VIVE no @page, não no .wrap. O padding do .wrap só criava
@@ -38581,7 +38626,7 @@ const EssaysCompiler = (function(){
 window.EssaysCompiler = EssaysCompiler;
 
 // Junta tudo e dispara o download da PROVA DISCURSIVA a partir dos filtros atuais.
-function _bankCompileEssayProva(route){
+async function _bankCompileEssayProva(route){
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
   const bankItems = _bankItemsForEssays();
   const results = _bankApplyFilters(bankItems, f, { isEssay:true });
@@ -38596,13 +38641,15 @@ function _bankCompileEssayProva(route){
   const anos = Object.keys(anosSet).map(Number).sort(function(a,b){ return a - b; });
   let dateStr = '';
   try { dateStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); } catch(e){}
-  let copiaId = '';
-  try { copiaId = 'UBQ-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).slice(2,6).toUpperCase(); } catch(e){}
+  const _contentText = results.map(function(it){ return String(it && it.id) + ':' + String((it && (it.enunciado || it.command)) || ''); }).join('|');
+  const _ident = await _compileIdentity('prova-discursiva', (f.exam || '') + '|' + materias.join(','), _contentText);
   EssaysCompiler.download(sections, {
-    candidato:    (window.MOCK_USER && window.MOCK_USER.name) || '',
-    email:        (window.MOCK_USER && window.MOCK_USER.email) || '',
+    candidato:    _ident.name,
+    email:        _ident.email,
     cpf:          _userCpf(),
-    copiaId:      copiaId,
+    copiaId:      _ident.code,
+    verified:     _ident.ok,
+    issuedAt:     _ident.issuedAt,
     concursoSigla: concursoSigla,
     concursoName: examObj ? examObj.name : concursoSigla,
     materias:     materias,
@@ -38642,9 +38689,12 @@ Renderers.questionBank.mount = function(stageEl, route){
   // Compilar prova (baixar HTML imprimível: prova + folha + gabarito/comentários).
   const compileBtn = stageEl.querySelector('#bfCompile');
   if(compileBtn){
-    compileBtn.addEventListener('click', function(){
-      try { _bankCompileProva(route); }
+    compileBtn.addEventListener('click', async function(){
+      const _old = compileBtn.textContent;
+      compileBtn.disabled = true; compileBtn.textContent = 'Gerando…';
+      try { await _bankCompileProva(route); }
       catch(e){ console.warn('[compilar prova] falhou:', e); alert('Não consegui gerar a prova agora. Tente novamente.'); }
+      finally { compileBtn.disabled = false; compileBtn.textContent = _old; }
     });
   }
 };
@@ -38751,9 +38801,12 @@ Renderers.essayBank.mount = function(stageEl, route){
   // linhas para resposta + espelho de correção).
   const compileBtn = stageEl.querySelector('#bfCompile');
   if(compileBtn){
-    compileBtn.addEventListener('click', function(){
-      try { _bankCompileEssayProva(route); }
+    compileBtn.addEventListener('click', async function(){
+      const _old = compileBtn.textContent;
+      compileBtn.disabled = true; compileBtn.textContent = 'Gerando…';
+      try { await _bankCompileEssayProva(route); }
       catch(e){ console.warn('[compilar prova discursiva] falhou:', e); alert('Não consegui gerar a prova agora. Tente novamente.'); }
+      finally { compileBtn.disabled = false; compileBtn.textContent = _old; }
     });
   }
 };
