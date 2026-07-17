@@ -36087,7 +36087,10 @@ const BankFilters = (function(){
       return String(t.parent_id) === String(parentId);
     });
     return filteredByParent.map(function(t){
-      return { id: t.id, code: t.code || '', title: t.title || ('Tópico '+t.id), alias: t.alias || '' };
+      // subject_id vai junto: é a ponte entre a árvore do EDITAL e a do CURSO
+      // (módulo→capítulo→unidade pendura em subjects.id). Só a raiz tem — nos
+      // filhos vem null, e quem precisa sobe a cadeia.
+      return { id: t.id, code: t.code || '', title: t.title || ('Tópico '+t.id), alias: t.alias || '', subject_id: t.subject_id };
     }).sort(function(a,b){
       // Ordena por code numérico (1, 1.1, 1.2, 2…)
       const ca = String(a.code||''); const cb = String(b.code||'');
@@ -36189,9 +36192,17 @@ function _bankParseFilters(routeQuery){
   return {
     keyword:   String(q.k || '').trim(),
     exam:      String(q.exam || ''),
+    // Como o aluno afunila dentro da matéria: 'edital' (tópico/subtópico do
+    // edital) ou 'estrutura' (módulo/capítulo/unidade do curso). São EXCLUSIVOS
+    // — trocar de aba limpa o recorte da outra, senão o filtro escondido de uma
+    // continuaria cortando o resultado da outra.
+    modo:      (String(q.modo || '') === 'estrutura') ? 'estrutura' : 'edital',
     materias:  materias,   // [matéria/top-level id, ...]
     mtopics:   mtopics,    // { matéria_id: [tópico id, ...] }
     msubs:     msubs,      // { matéria_id: [subtópico id, ...] }
+    mmods:     parseByMateria(q.mmod),   // { matéria_id: [module_id, ...] }
+    mchaps:    parseByMateria(q.mcap),   // { matéria_id: [chapter_id, ...] }
+    munits:    parseByMateria(q.muni),   // { matéria_id: [unit_id, ...] }
     tags:      splitCSV(q.tags),
     origem:    String(q.origem || ''),  // 'past_exam' | 'ubique' | ''
     status:    splitCSV(q.status),       // ['unanswered','right',...]
@@ -36220,8 +36231,17 @@ function _bankFiltersToQuery(f, applied){
     }).filter(Boolean).join(';');
   };
   if(f.materias && f.materias.length) out.mat = f.materias.join(';');
-  const mt = buildByMateria(f.mtopics); if(mt) out.mt = mt;
-  const ms = buildByMateria(f.msubs);   if(ms) out.ms = ms;
+  if(f.modo === 'estrutura') out.modo = 'estrutura';   // 'edital' é o padrão (implícito)
+  // Só serializa o recorte da aba ATIVA: as abas são exclusivas, e levar o
+  // recorte da outra na URL a faria voltar sozinha ao trocar de aba.
+  if(f.modo === 'estrutura'){
+    const mmod = buildByMateria(f.mmods);  if(mmod) out.mmod = mmod;
+    const mcap = buildByMateria(f.mchaps); if(mcap) out.mcap = mcap;
+    const muni = buildByMateria(f.munits); if(muni) out.muni = muni;
+  } else {
+    const mt = buildByMateria(f.mtopics); if(mt) out.mt = mt;
+    const ms = buildByMateria(f.msubs);   if(ms) out.ms = ms;
+  }
   if(f.tags && f.tags.length) out.tags = f.tags.join(',');
   if(f.origem)      out.origem = f.origem;
   if(f.status && f.status.length) out.status = f.status.join(',');
@@ -36674,6 +36694,34 @@ function _bankQuestionUnitIds(q){
   return q.appears_in.map(function(u){ return String(u && u.unit_id); }).filter(Boolean);
 }
 
+/* Matéria (subjects.id) de um tópico-RAIZ do edital — a ponte entre a árvore do
+   edital e a do curso (módulo→capítulo→unidade pendura em subjects.id).
+   O FK edital_topics.subject_id é OPCIONAL: o admin só exige o título ao criar
+   a raiz, então ele vem null/'' com frequência — e todo o resto do app tem
+   fallback por isso (_bankResolveMateriaTopic usa 3 camadas). Aqui: FK primeiro
+   e, se faltar, deriva pela matéria das unidades que linkam neste ramo.
+   Retorna string ou null. */
+function _bankSubjectIdOfMateria(mid){
+  const S = window.UbiqueStore;
+  const topics = (S && S.edital_topics && S.edital_topics.list && S.edital_topics.list()) || [];
+  const t = topics.find(function(x){ return String(x.id) === String(mid); });
+  // '' passa no != null e envenenaria a comparação — daí o teste de vazio.
+  if(t && t.subject_id != null && String(t.subject_id) !== '') return String(t.subject_id);
+  const desc = new Set((_bankEditalDescendants(mid) || []).map(String));
+  const uctx = _bankBuildUnitContext();
+  const votos = {};
+  Object.keys(uctx).forEach(function(uid){
+    const c = uctx[uid];
+    if(!c || c.subject_id == null || !Array.isArray(c.edital_topic_ids)) return;
+    if(!c.edital_topic_ids.some(function(x){ return desc.has(String(x)); })) return;
+    const k = String(c.subject_id);
+    votos[k] = (votos[k] || 0) + 1;
+  });
+  let melhor = null, max = 0;
+  Object.keys(votos).forEach(function(k){ if(votos[k] > max){ max = votos[k]; melhor = k; } });
+  return melhor;
+}
+
 /* PORTAL FILTER FIX — bankItems eram puxados de QuestionBank.list() que
    ficava vazio porque _bankRescanQuestions nunca foi implementado. O bank
    só era populado quando alguém editava questão inline (cenário raro).
@@ -36881,6 +36929,46 @@ function _bankApplyFilters(items, f, opts){
       return false;
     });
   }
+  // ESTRUTURA CURRICULAR — alternativa ao recorte por edital (abas exclusivas).
+  // A questão passa se aparecer em alguma unidade que caia no recorte
+  // módulo/capítulo/unidade escolhido. O nível mais específico marcado manda:
+  // unidade > capítulo > módulo (marcar a unidade 3 já diz tudo; o módulo dela
+  // seria redundante). Entre matérias é OU, como no edital.
+  // Questão sem vínculo com unidade nenhuma (só do banco) não passa neste modo —
+  // ela não está em lugar nenhum da estrutura, e é isso que o aluno pediu.
+  const _matComEstrutura = new Set();   // matérias resolvidas pela estrutura
+  if(f.modo === 'estrutura' && f.materias && f.materias.length){
+    const alvos = new Set();     // unit_ids que satisfazem o recorte
+    const uctx = _bankBuildUnitContext();
+    (f.materias || []).forEach(function(mid){
+      const unis = (f.munits && f.munits[mid]) || [];
+      const caps = (f.mchaps && f.mchaps[mid]) || [];
+      const mods = (f.mmods && f.mmods[mid]) || [];
+      // TODA matéria marcada contribui unidades — inclusive a sem recorte, que
+      // entra INTEIRA. (Se ela não contribuísse, o filtro abaixo, que é um passe
+      // único sobre o conjunto todo, apagaria as questões dela: marcar "módulo X"
+      // em História faria Economia sumir mesmo com "Qualquer módulo".)
+      _matComEstrutura.add(String(mid));
+      if(unis.length){ unis.forEach(function(u){ alvos.add(String(u)); }); return; }
+      const capSet = new Set(caps.map(String));
+      const modSet = new Set(mods.map(String));
+      const sid = (!caps.length && !mods.length) ? _bankSubjectIdOfMateria(mid) : null;
+      Object.keys(uctx).forEach(function(uid){
+        const c = uctx[uid];
+        if(!c) return;
+        if(caps.length){ if(capSet.has(String(c.chapter_id))) alvos.add(String(uid)); return; }
+        if(mods.length){ if(modSet.has(String(c.module_id))) alvos.add(String(uid)); return; }
+        // Sem recorte: a matéria inteira (todas as unidades dela).
+        if(sid != null && String(c.subject_id) === String(sid)) alvos.add(String(uid));
+      });
+    });
+    out = out.filter(function(q){
+      const uids = _bankQuestionUnitIds(q);
+      for(let i = 0; i < uids.length; i++){ if(alvos.has(String(uids[i]))) return true; }
+      return false;
+    });
+  }
+
   // EDITAL (MULTI) — para cada matéria marcada, junta os "ramos" escolhidos
   // (tópicos ∪ subtópicos). Regras:
   //  - matéria sem nenhum ramo → a matéria INTEIRA entra como filtro… EXCETO
@@ -36892,7 +36980,11 @@ function _bankApplyFilters(items, f, opts){
   (f.materias || []).forEach(function(mid){
     const subs = ((f.mtopics && f.mtopics[mid]) || []).concat((f.msubs && f.msubs[mid]) || []);
     if(subs.length){ subs.forEach(function(n){ _selNodes.push(n); }); }
-    else if(mid !== f._lockedMateria){ _selNodes.push(mid); } // matéria inteira (modo global)
+    // Mesma razão da matéria TRAVADA: quando o recorte de unidades já restringe
+    // (aba Estrutura), aplicar o nó-matéria por cima descartaria as questões da
+    // unidade cujo vínculo com o edital não existe — o aluno pediu a unidade,
+    // não o edital.
+    else if(mid !== f._lockedMateria && !_matComEstrutura.has(String(mid))){ _selNodes.push(mid); }
   });
   if(_selNodes.length){
     const descSet = new Set();
@@ -37156,21 +37248,100 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
     const mObj = materiaOptions.find(function(o){ return String(o.id) === String(mid); });
     const mName = mObj ? ((mObj.code ? mObj.code + ' · ' : '') + (mObj.name || mObj.title || mid)) : 'Matéria';
     const topicos = _editalChildren(mid);
-    // Subtópicos = filhos de TODOS os tópicos da matéria (lista estável,
-    // independente de quais tópicos estão marcados — a regra "união de ramos"
-    // cuida do resto na hora de filtrar).
+    const selT = new Set((f.mtopics && f.mtopics[mid]) || []);
+    // Subtópicos = filhos dos tópicos MARCADOS. Antes vinham os filhos de todos
+    // os tópicos da matéria: marcar "5.1 Microeconomia" e ver "5.2.3" na lista
+    // de subtópico não faz sentido — não é filho do que foi escolhido.
+    // Sem tópico marcado ("Qualquer tópico"), a matéria inteira vale, então
+    // mostra os subtópicos de todos.
+    const paisDosSubs = selT.size ? topicos.filter(function(t){ return selT.has(String(t.id)); }) : topicos;
     const subtopicos = [];
     const seenSub = {};
-    topicos.forEach(function(t){
+    paisDosSubs.forEach(function(t){
       _editalChildren(t.id).forEach(function(s){ if(!seenSub[String(s.id)]){ seenSub[String(s.id)] = 1; subtopicos.push(s); } });
     });
-    const selT = new Set((f.mtopics && f.mtopics[mid]) || []);
     const selS = new Set((f.msubs && f.msubs[mid]) || []);
     return '<div class="bf-materia-block" data-bf-materia="'+Util.attr(mid)+'">'+
       '<div class="bf-materia-title">'+Util.esc(mName)+'</div>'+
       '<div class="bf-grid">'+
         buildMulti('mt:'+mid, 'Tópico', topicos, selT, 'data-bf-topic', 'Qualquer tópico')+
         buildMulti('ms:'+mid, 'Subtópico', subtopicos, selS, 'data-bf-subtopic', 'Qualquer subtópico')+
+      '</div>'+
+    '</div>';
+  }
+
+  // Bloco de UMA matéria no modo ESTRUTURA: Módulo → Capítulo → Unidade, a
+  // hierarquia real do curso. Mesmo componente (buildMulti) e mesmo CSS do modo
+  // edital — só muda o que está dentro. Cada nível filtra o de baixo, igual ao
+  // Tópico→Subtópico.
+  function estruturaBlock(mid){
+    const mObj = materiaOptions.find(function(o){ return String(o.id) === String(mid); });
+    const mName = mObj ? ((mObj.code ? mObj.code + ' · ' : '') + (mObj.name || mObj.title || mid)) : 'Matéria';
+    // mid é o id do TÓPICO-RAIZ do edital; a estrutura do curso pendura em
+    // subjects.id. O helper resolve a ponte com fallback: o FK subject_id da
+    // raiz é opcional (o admin não o exige), e sem fallback a aba inteira
+    // ficaria morta — três dropdowns vazios, sem explicação.
+    const sid = _bankSubjectIdOfMateria(mid);
+    const S = window.UbiqueStore;
+    // ESCOPO: o Store do aluno carrega TODAS as unidades do banco, inclusive de
+    // matéria não comprada (index.html:~10116 dá replaceAll sem filtro). Listar
+    // o Store cru aqui vazaria títulos de aulas que ele não tem. As questões já
+    // passam por Portal.scopeUnitDbIdSet; o dropdown tem que respeitar o mesmo
+    // escopo. Sem escopo definido (null = modo global), cai pras unidades dos
+    // cursos que o aluno realmente tem (Portal.scopeCourses).
+    const escopo = (function(){
+      const s = (window.Portal && Portal.scopeUnitDbIdSet) ? Portal.scopeUnitDbIdSet() : null;
+      if(s) return s;
+      const ids = new Set();
+      const cursos = (window.Portal && Portal.scopeCourses) ? (Portal.scopeCourses() || []) : [];
+      cursos.forEach(function(c){
+        (c.modules || []).forEach(function(m){
+          (Util.unitsOfModule ? Util.unitsOfModule(m) : []).forEach(function(e){
+            const uid = (window.Portal && Portal._unitDbId) ? Portal._unitDbId(e.unit) : null;
+            if(uid) ids.add(String(uid));
+          });
+        });
+      });
+      return ids;
+    })();
+    const noEscopo = function(uid){ return escopo.has(String(uid)); };
+    const unidadesOk = ((S && S.units && S.units.list && S.units.list()) || []).filter(function(u){ return noEscopo(u.id); });
+    // Só os capítulos/módulos que têm alguma unidade no escopo.
+    const capsComUnidade = new Set(unidadesOk.map(function(u){
+      return String((u.course_chapter_id != null) ? u.course_chapter_id : u.chapter_id);
+    }));
+    const chapsOk = ((S && S.chapters && S.chapters.list && S.chapters.list()) || [])
+      .filter(function(c){ return capsComUnidade.has(String(c.id)); });
+    const modsComCap = new Set(chapsOk.map(function(c){ return String(c.module_id); }));
+    const mods = ((S && S.modules && S.modules.list && S.modules.list()) || [])
+      .filter(function(m){ return sid != null && String(m.subject_id) === sid && modsComCap.has(String(m.id)); })
+      .slice().sort(function(a,b){ return (a.position||0) - (b.position||0); });
+    const selMod = new Set((f.mmods && f.mmods[mid]) || []);
+    // Capítulos dos módulos MARCADOS (sem módulo marcado: de todos).
+    const modsBase = selMod.size ? mods.filter(function(m){ return selMod.has(String(m.id)); }) : mods;
+    const modIds = new Set(modsBase.map(function(m){ return String(m.id); }));
+    const chaps = chapsOk
+      .filter(function(c){ return modIds.has(String(c.module_id)); })
+      .slice().sort(function(a,b){ return (a.position||0) - (b.position||0); });
+    const selChap = new Set((f.mchaps && f.mchaps[mid]) || []);
+    // Unidades dos capítulos MARCADOS (sem capítulo marcado: de todos os acima).
+    const chapsBase = selChap.size ? chaps.filter(function(c){ return selChap.has(String(c.id)); }) : chaps;
+    const chapIds = new Set(chapsBase.map(function(c){ return String(c.id); }));
+    const unidades = unidadesOk
+      .filter(function(u){
+        // course_chapter_id é a FK real; chapter_id é o legado normalizado.
+        const cid = (u.course_chapter_id != null) ? u.course_chapter_id : u.chapter_id;
+        return chapIds.has(String(cid));
+      })
+      .slice().sort(function(a,b){ return (a.position||0) - (b.position||0); });
+    const selUni = new Set((f.munits && f.munits[mid]) || []);
+    const rot = function(x){ return { id: x.id, name: (x.number != null ? x.number + ' · ' : '') + (x.title || x.name || ('#' + x.id)) }; };
+    return '<div class="bf-materia-block" data-bf-materia="'+Util.attr(mid)+'">'+
+      '<div class="bf-materia-title">'+Util.esc(mName)+'</div>'+
+      '<div class="bf-grid">'+
+        buildMulti('mmod:'+mid, 'Módulo',   mods.map(rot),      selMod,  'data-bf-mod',  'Qualquer módulo')+
+        buildMulti('mcap:'+mid, 'Capítulo', chaps.map(rot),     selChap, 'data-bf-cap',  'Qualquer capítulo')+
+        buildMulti('muni:'+mid, 'Unidade',  unidades.map(rot),  selUni,  'data-bf-uni',  'Qualquer unidade')+
       '</div>'+
     '</div>';
   }
@@ -37184,6 +37355,10 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
         try {
           return _bankApplyFilters(bankItems, {
             exam: f.exam, materias: f.materias, mtopics: f.mtopics, msubs: f.msubs,
+            // O recorte por estrutura também estreita a base: sem isto, Origem e
+            // Ano ofereceriam opções da matéria inteira e o aluno escolheria um
+            // ano que dá zero ao cruzar com a unidade escolhida.
+            modo: f.modo, mmods: f.mmods, mchaps: f.mchaps, munits: f.munits,
             _lockExam: f._lockExam, _lockMateria: f._lockMateria,
             _lockedMateria: f._lockedMateria, _skipExamFilter: f._skipExamFilter
           }, { isEssay: isEssay });
@@ -37256,7 +37431,14 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
   const materiaSelHtml = f._lockMateria ? '' :
     buildMulti('mat', 'Matérias', materiaOptions, new Set(f.materias || []), 'data-bf-mat',
                f.exam ? 'Todas as matérias' : '— Escolha o concurso primeiro —');
-  const materiaBlocksHtml = (f.materias || []).map(materiaBlock).join('');
+  // Aba Edital × Estrutura: só aparece com matéria marcada (sem matéria não há
+  // o que afunilar). Reusa buildRadioSet — o mesmo componente de "Priorizar
+  // questões", já estilizado (.bf-org). Zero CSS novo.
+  const modoHtml = (f.materias && f.materias.length)
+    ? buildRadioSet('bfmodo', 'Afunilar por', [['edital','Edital'],['estrutura','Estrutura curricular']], f.modo || 'edital')
+    : '';
+  const materiaBlocksHtml = (f.materias || [])
+    .map(f.modo === 'estrutura' ? estruturaBlock : materiaBlock).join('');
 
   // Ano da questão (multi) — anos DISTINTOS presentes no banco escopado,
   // rotulados com a SIGLA do concurso ativo (ex.: "CACD 2024", "PF 2024"),
@@ -37321,6 +37503,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
     // ─── Concurso, matérias (multi) e edital por matéria ───
     sectionHead(editalLabel, editalHint) +
     ((examFieldHtml || materiaSelHtml) ? '<div class="bf-grid">'+ examFieldHtml + materiaSelHtml +'</div>' : '') +
+    modoHtml +
     materiaBlocksHtml +
     // ─── Refinar ───
     sectionHead('Refinar', 'Filtros adicionais opcionais') +
@@ -38501,21 +38684,37 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
     const materias = lockedMat
       ? [lockedMat]
       : Array.from(panel.querySelectorAll('[data-bf-mat]:checked')).map(function(c){ return c.getAttribute('data-bf-mat'); });
-    const mtopics = {}, msubs = {};
+    const mtopics = {}, msubs = {}, mmods = {}, mchaps = {}, munits = {};
+    const marcados = function(blk, attr){
+      return Array.from(blk.querySelectorAll('['+attr+']:checked')).map(function(c){ return c.getAttribute(attr); });
+    };
     materias.forEach(function(mid){
       const blk = panel.querySelector('.bf-materia-block[data-bf-materia="'+mid+'"]');
       if(!blk) return;
-      const ts = Array.from(blk.querySelectorAll('[data-bf-topic]:checked')).map(function(c){ return c.getAttribute('data-bf-topic'); });
-      const ss = Array.from(blk.querySelectorAll('[data-bf-subtopic]:checked')).map(function(c){ return c.getAttribute('data-bf-subtopic'); });
+      // Só um dos dois conjuntos existe no DOM por vez (as abas são exclusivas),
+      // então ler os dois é seguro: o da aba inativa vem vazio.
+      const ts = marcados(blk, 'data-bf-topic');
+      const ss = marcados(blk, 'data-bf-subtopic');
+      const md = marcados(blk, 'data-bf-mod');
+      const cp = marcados(blk, 'data-bf-cap');
+      const un = marcados(blk, 'data-bf-uni');
       if(ts.length) mtopics[mid] = ts;
       if(ss.length) msubs[mid] = ss;
+      if(md.length) mmods[mid] = md;
+      if(cp.length) mchaps[mid] = cp;
+      if(un.length) munits[mid] = un;
     });
+    const modoAtual = (panel.querySelector('input[name="bfmodo"]:checked') || {}).value || 'edital';
     return {
       keyword:     (panel.querySelector('[data-bf="keyword"]')||{}).value || '',
       exam:        (panel.querySelector('[data-bf="exam"]')||{}).value || '',
       materias:    materias,
+      modo:        modoAtual,
       mtopics:     mtopics,
       msubs:       msubs,
+      mmods:       mmods,
+      mchaps:      mchaps,
+      munits:      munits,
       tags:        Array.from(panel.querySelectorAll('[data-bf-tag].is-on')).map(function(b){ return b.getAttribute('data-bf-tag'); }),
       origem:      (panel.querySelector('[data-bf="origem"]')||{}).value || '',
       status:      Array.from(panel.querySelectorAll('[data-bf-status]:checked')).map(function(c){ return c.getAttribute('data-bf-status'); }),
@@ -38568,10 +38767,86 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
   panel.querySelectorAll('[data-bf-mat]').forEach(function(cb){
     cb.addEventListener('change', function(){ repaint(); });
   });
+  // Marcar/desmarcar um TÓPICO muda a lista de Subtópicos (passam a aparecer só
+  // os filhos dele) → repinta. E PODA os subtópicos órfãos: o gather() lê o DOM,
+  // então um subtópico marcado de um tópico que saiu iria pra URL e continuaria
+  // filtrando escondido — o aluno veria menos questões sem entender por quê.
+  panel.querySelectorAll('[data-bf-topic]').forEach(function(cb){
+    cb.addEventListener('change', function(){
+      const g = gather();
+      // BankFilters (global) e não _editalChildren: aquele é `const` de OUTRA
+      // função (o render do painel, que fecha na linha ~38441) — daqui daria
+      // ReferenceError.
+      const filhos = function(pid){
+        return (window.BankFilters && BankFilters.availableEditalTopics)
+          ? BankFilters.availableEditalTopics(pid, g.exam || null) : [];
+      };
+      (g.materias || []).forEach(function(mid){
+        const ts = (g.mtopics && g.mtopics[mid]) || [];
+        if(!ts.length) return;                    // "Qualquer tópico": todos valem
+        const validos = new Set();
+        ts.forEach(function(t){ filhos(t).forEach(function(s){ validos.add(String(s.id)); }); });
+        const subs = (g.msubs && g.msubs[mid]) || [];
+        const fica = subs.filter(function(s){ return validos.has(String(s)); });
+        if(fica.length) g.msubs[mid] = fica; else if(g.msubs) delete g.msubs[mid];
+      });
+      Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(g, wasApplied)));
+    });
+  });
   // Trocar organização/priorização/exibição reorganiza os resultados na hora
   // (preserva o estado applied). (Filtro de Ano aplica no Buscar, como os outros.)
   panel.querySelectorAll('input[name="bforg"], input[name="bfpri"], input[name="bfexib"]').forEach(function(rb){
     rb.addEventListener('change', function(){ repaint(); });
+  });
+  // Trocar a ABA (Edital ↔ Estrutura) zera o recorte da outra e repinta. As duas
+  // são exclusivas: deixar o recorte da anterior o faria filtrar escondido, e ao
+  // voltar pra aba ele reapareceria "do nada".
+  panel.querySelectorAll('input[name="bfmodo"]').forEach(function(rb){
+    rb.addEventListener('change', function(){
+      const g = Object.assign(gather(), { mtopics:{}, msubs:{}, mmods:{}, mchaps:{}, munits:{} });
+      Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(g, wasApplied)));
+    });
+  });
+  // Estrutura: Módulo filtra Capítulo, que filtra Unidade. Marcar um nível de
+  // cima repinta e poda os de baixo que ficaram órfãos (mesma razão do
+  // Tópico→Subtópico: o gather lê o DOM e a URL levaria o que sumiu da tela).
+  panel.querySelectorAll('[data-bf-mod], [data-bf-cap]').forEach(function(cb){
+    cb.addEventListener('change', function(){
+      const g = gather();
+      const S = window.UbiqueStore;
+      const chaps = (S && S.chapters && S.chapters.list && S.chapters.list()) || [];
+      const units = (S && S.units && S.units.list && S.units.list()) || [];
+      (g.materias || []).forEach(function(mid){
+        const mods = (g.mmods && g.mmods[mid]) || [];
+        const modSet = new Set(mods.map(String));
+        // Capítulos que os módulos marcados oferecem — o MESMO conjunto que o
+        // estruturaBlock usa pra montar a lista.
+        const capsDoModulo = mods.length
+          ? chaps.filter(function(c){ return modSet.has(String(c.module_id)); }).map(function(c){ return String(c.id); })
+          : [];
+        if(mods.length){
+          const capsOk = new Set(capsDoModulo);
+          const caps = ((g.mchaps && g.mchaps[mid]) || []).filter(function(c){ return capsOk.has(String(c)); });
+          if(caps.length) g.mchaps[mid] = caps; else if(g.mchaps) delete g.mchaps[mid];
+        }
+        // Escopo das unidades: os capítulos marcados; se não houver, os
+        // capítulos dos módulos marcados. Sem esse segundo caso, marcar um
+        // módulo depois de já ter marcado uma unidade de OUTRO módulo deixava a
+        // unidade viva na URL: ela sumia da tela e continuava filtrando sozinha.
+        const capsMarcados = ((g.mchaps && g.mchaps[mid]) || []).map(String);
+        const escopoCaps = capsMarcados.length ? capsMarcados : capsDoModulo;
+        if(escopoCaps.length){
+          const capSet = new Set(escopoCaps);
+          const unisOk = new Set(units.filter(function(u){
+            const cid = (u.course_chapter_id != null) ? u.course_chapter_id : u.chapter_id;
+            return capSet.has(String(cid));
+          }).map(function(u){ return String(u.id); }));
+          const unis = ((g.munits && g.munits[mid]) || []).filter(function(u){ return unisOk.has(String(u)); });
+          if(unis.length) g.munits[mid] = unis; else if(g.munits) delete g.munits[mid];
+        }
+      });
+      Router.go('/portal/'+cardKey+Router.querystring(_bankFiltersToQuery(g, wasApplied)));
+    });
   });
   // Trocar o Concurso muda a lista de matérias do edital → zera a seleção e repinta.
   const examSel = panel.querySelector('[data-bf="exam"]');
