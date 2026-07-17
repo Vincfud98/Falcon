@@ -11180,6 +11180,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             <div id="q-loc-context" style="font-family:var(--sans);font-size:.85rem;color:var(--text-dim);line-height:1.6"></div>
           </div>
 
+          <!-- Onde a questão (o grupo) está nas unidades. Auditoria do admin:
+               cruza com as etiquetas acesas abaixo — cada unidade listada aqui
+               justifica as etiquetas automáticas dela. Populada por
+               _qRenderUnitsOfQuestion ao abrir questão existente. -->
+          <div class="classif-section" id="q-units-section" style="display:none">
+            <div class="classif-head">
+              <h4>Onde está nas unidades</h4>
+              <span class="hint">quais itens do grupo cada unidade usa</span>
+            </div>
+            <div id="q-units-list" style="font-family:var(--sans);font-size:.82rem;color:var(--text-dim);line-height:1.7;display:flex;flex-direction:column;gap:.3rem"></div>
+          </div>
+
           <!-- Dificuldade: descontinuada na UI (vem do uso na plataforma) -->
           <div class="classif-section" style="display:none">
             <div class="classif-head">
@@ -22296,6 +22308,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     modalSelectedTopics = new Set();
     modalSelectedEditalTopics = new Set();
     modalUnitDerivedTopics = new Set();
+    // Questão nova ainda não está em unidade nenhuma — esconde a seção.
+    const _qus = document.getElementById('q-units-section');
+    if(_qus){ _qus.style.display = 'none'; const l = document.getElementById('q-units-list'); if(l) l.innerHTML = ''; }
     modalSelectedTags = new Set();
     modalSelectedRefs = new Map();
     modalSelectedSubjectId = null;
@@ -22424,12 +22439,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         // herda também os tópicos da unidade (folha + ancestrais) — pré-seleção é a
         // UNIÃO {tópicos salvos da questão} ∪ {tópicos da unidade}. _qApplyUnitContext
         // só faz .add, então rodar depois do load é seguro (não apaga nada).
-        questoes().from('question_edital_topics').select('edital_topic_id').eq('question_id', q.id)
+        questoes().from('question_edital_topics').select('edital_topic_id, from_unit').eq('question_id', q.id)
           .then(function(r){
-            (r.data || []).forEach(function(row){ modalSelectedEditalTopics.add(String(row.edital_topic_id)); });
+            (r.data || []).forEach(function(row){
+              modalSelectedEditalTopics.add(String(row.edital_topic_id));
+              // Etiqueta AUTOMÁTICA salva também é "da unidade" — sem isto, abrir
+              // a questão pelo BANCO e salvar converteria as automáticas em
+              // manuais (o save trata tudo fora deste Set como marcação manual),
+              // e elas nunca mais sumiriam ao desvincular a unidade.
+              if(row.from_unit === true) modalUnitDerivedTopics.add(String(row.edital_topic_id));
+            });
             if(unitContextId != null && typeof window._qApplyUnitContext === 'function') window._qApplyUnitContext(unitContextId);
             if(typeof renderTopicsChipbox === 'function') renderTopicsChipbox('');
           }).catch(function(){});
+        // Onde a questão está nas unidades (auditoria — async, best-effort)
+        if(typeof _qRenderUnitsOfQuestion === 'function') _qRenderUnitsOfQuestion(q.id);
         questionTagsCache
           .filter(qt => qt.question_id === q.id)
           .forEach(qt => modalSelectedTags.add(qt.tag_id));
@@ -23607,19 +23631,35 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       box.innerHTML = `<p class="modal-panel-hint" style="padding:1rem 0;font-size:.85rem">Nenhum tópico encontrado.</p>`;
     } else {
       box.innerHTML = filtered.map(t => {
-        const active = modalSelectedEditalTopics.has(String(t.id)) ? 'active' : '';
+        const tid = String(t.id);
+        const active = modalSelectedEditalTopics.has(tid) ? 'active' : '';
+        // Etiqueta automática (veio da unidade): mostra a origem no chip. O
+        // admin vê TODAS as etiquetas da questão e sabe qual é qual.
+        const daUnidade = active && modalUnitDerivedTopics.has(tid);
         const name = t.alias || t.title || '(sem título)';
         return `
-          <button type="button" class="classif-chip ${active}" data-edital-topic-id="${esc(String(t.id))}">
+          <button type="button" class="classif-chip ${active}" data-edital-topic-id="${esc(tid)}">
             ${t.code ? `<span class="item-tag">${esc(t.code)}</span>` : ''}
             ${esc(name)}
+            ${daUnidade ? '<span class="item-tag" style="opacity:.65;font-size:.55rem">unidade</span>' : ''}
           </button>`;
       }).join('');
 
       box.querySelectorAll('.classif-chip').forEach(chip => {
         chip.addEventListener('click', () => {
           const tid = String(chip.dataset.editalTopicId);
-          if(modalSelectedEditalTopics.has(tid)) modalSelectedEditalTopics.delete(tid);
+          if(modalSelectedEditalTopics.has(tid)){
+            // Etiqueta da unidade não se desmarca AQUI: ela existe porque a
+            // questão está numa unidade vinculada ao tópico — desmarcar não
+            // colaria (o recompute a reacenderia). O caminho certo é desvincular
+            // a unidade (ou tirar a questão dela). Sem este aviso, o admin
+            // desmarcava, salvava, reabria e a via de volta, parecendo bug.
+            if(modalUnitDerivedTopics.has(tid)){
+              if(typeof ueToast === 'function') ueToast('Esta etiqueta vem de uma unidade (veja "Onde está nas unidades"). Para removê-la, desvincule a unidade do tópico no Edital.', 'info');
+              return;
+            }
+            modalSelectedEditalTopics.delete(tid);
+          }
           else modalSelectedEditalTopics.add(tid);
           modalDirty = true;
           renderTopicsChipbox(filter);
@@ -23678,6 +23718,74 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(typeof renderTopicsChipbox === 'function') renderTopicsChipbox('');
     }catch(e){ console.warn('[qApplyUnitContext]', e); }
   };
+
+  // "Onde está nas unidades" do modal da questão: lista as unidades cujos
+  // blocos referenciam esta questão-mãe (objetivas em content.groups[], com o
+  // subconjunto de itens que cada uma usa; discursivas em content.items[]).
+  // É a contraparte de auditoria das etiquetas: cada unidade listada aqui é o
+  // que justifica as etiquetas automáticas ("unidade") acesas no chipbox.
+  async function _qRenderUnitsOfQuestion(questionId){
+    const sec = document.getElementById('q-units-section');
+    const box = document.getElementById('q-units-list');
+    if(!sec || !box) return;
+    sec.style.display = 'none'; box.innerHTML = '';
+    if(questionId == null) return;
+    try{
+      const US = window.UbiqueStore;
+      const qid = String(questionId);
+      let blocks = (US && US.unit_blocks && US.unit_blocks.list && US.unit_blocks.list()) || [];
+      // Cache vazio (admin abriu direto no banco, sem passar pelo Conteúdo):
+      // busca no servidor em vez de mentir "não está em nenhuma unidade".
+      if(!blocks.length){
+        const r = await conteudo().from('unit_blocks').select('unit_id, content');
+        if(r.error){ return; } // sem dado confiável → seção fica oculta, não mente
+        blocks = r.data || [];
+      }
+      const hits = [];
+      blocks.forEach(function(b){
+        if(!b || !b.content) return;
+        (Array.isArray(b.content.groups) ? b.content.groups : []).forEach(function(g){
+          if(!g || String(g.bank_question_id || '') !== qid) return;
+          hits.push({ unit_id: b.unit_id, itemIds: (Array.isArray(g.bank_item_ids) && g.bank_item_ids.length) ? g.bank_item_ids.map(String) : null, essay: false });
+        });
+        (Array.isArray(b.content.items) ? b.content.items : []).forEach(function(it){
+          if(!it || String(it.bank_question_id || '') !== qid) return;
+          hits.push({ unit_id: b.unit_id, itemIds: null, essay: true });
+        });
+      });
+      if(!hits.length){
+        box.innerHTML = '<p class="hint" style="font-size:.75rem;color:var(--text-mute);margin:0">Esta questão ainda não está em nenhuma unidade.</p>';
+        sec.style.display = ''; return;
+      }
+      // número real de cada item C/E (pra "usa os itens 1, 2")
+      const numOf = {};
+      ((typeof tfItemsCache !== 'undefined' && tfItemsCache) || []).forEach(function(t){
+        if(t && String(t.question_id) === qid) numOf[String(t.id)] = t.numero;
+      });
+      const units = (US && US.units && US.units.list && US.units.list()) || [];
+      const chapters = (US && US.chapters && US.chapters.list && US.chapters.list()) || [];
+      const modules = (US && US.modules && US.modules.list && US.modules.list()) || [];
+      const subjects = (US && US.subjects && US.subjects.list && US.subjects.list()) || [];
+      box.innerHTML = hits.map(function(h){
+        const u = units.find(function(x){ return String(x.id) === String(h.unit_id); });
+        const chId = u ? ((u.course_chapter_id != null) ? u.course_chapter_id : u.chapter_id) : null;
+        const ch = chapters.find(function(x){ return String(x.id) === String(chId); });
+        const mod = ch ? modules.find(function(x){ return String(x.id) === String(ch.module_id); }) : null;
+        const subj = mod ? subjects.find(function(x){ return String(x.id) === String(mod.subject_id); }) : null;
+        const caminho = [subj && (subj.sigla || subj.subject), mod && mod.title,
+                         u ? (u.title || ('Unidade ' + (u.number || u.id))) : ('Unidade ' + h.unit_id)]
+                        .filter(Boolean).join(' › ');
+        let itens;
+        if(h.essay){ itens = 'discursiva'; }
+        else if(h.itemIds){
+          const nums = h.itemIds.map(function(id){ return numOf[id]; }).filter(function(n){ return n != null; }).sort(function(a,b){ return a - b; });
+          itens = nums.length ? ('usa os itens ' + nums.join(', ')) : ('usa ' + h.itemIds.length + ' item(ns)');
+        } else { itens = 'grupo completo'; }
+        return '<div>' + esc(caminho) + ' <span class="item-tag" style="opacity:.75">' + esc(itens) + '</span></div>';
+      }).join('');
+      sec.style.display = '';
+    }catch(e){ console.warn('[qRenderUnitsOfQuestion]', e); }
+  }
 
   function renderTagsSelectorQuestao(){
     const container = document.getElementById('tags-selector-questao');
