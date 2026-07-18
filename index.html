@@ -7670,6 +7670,15 @@ html[data-theme="light"] .q-group{background:rgba(255,255,255,.7)}
   color:var(--text);font-style:italic;
 }
 html[data-theme="light"] .q-group-enunciado{color:#1a1a1a}
+/* Tag (origem CACD+ano) no topo do grupo — sozinha, nada acima. */
+.q-group-tagrow{display:flex;flex-wrap:wrap;gap:.4rem}
+/* Comando/enunciado do grupo: ÚLTIMA coisa antes das questões (depois do texto
+   de referência). Um filete no topo separa do texto-base logo acima. */
+.q-group-command{
+  display:flex;flex-direction:column;gap:.5rem;
+  padding-top:.9rem;border-top:1px solid var(--border);
+}
+.q-group-command:first-child{padding-top:0;border-top:none}
 .q-group-items{display:flex;flex-direction:column;gap:.7rem}
 
 /* Reference-text panel (texto-base) */
@@ -15691,6 +15700,25 @@ function normalizeQuizBlock(block){
 }
 window.normalizeQuizBlock = normalizeQuizBlock; // exposto p/ debug/teste no console
 
+// O campo "texto de referência" guarda HTML (o editor do admin salva innerHTML).
+// Alguns valores foram gravados ESCAPADOS — ex.: alguém colou o código-fonte
+// (<p>…</p>) como TEXTO no contenteditable, que virou &lt;p&gt;… no innerHTML.
+// Aí o sanitizador (que renderiza HTML de verdade) mantinha o escape e as tags
+// VAZAVAM na tela. Aqui, se o valor for HTML escapado (tem &lt;tag&gt; e NENHUMA
+// tag real), desescapamos 1 nível ANTES de sanitizar. Ordem: &amp; por último.
+// Seguro: quem chama sempre passa o resultado por sanitizeRichHTML depois (que
+// remove <script>/handlers). HTML já cru (com < de verdade) passa intacto.
+function _refHtmlForRender(raw){
+  const s = String(raw == null ? '' : raw);
+  if(/&lt;\/?[a-z][\s\S]*?&gt;/i.test(s) && !/<[a-z][\s\S]*?>/i.test(s)){
+    return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
+            .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+  }
+  return s;
+}
+window._refHtmlForRender = _refHtmlForRender;
+
 function renderQuizReference(g){
   if(!g) return '';
 
@@ -15709,8 +15737,8 @@ function renderQuizReference(g){
 
   let textHTML = '';
   if(refText){
-    // HTML direto sanitizado
-    textHTML = '<div class="q-ref-text q-ref-text-html">' + sanitize(refText) + '</div>';
+    // HTML direto sanitizado (desescapa antes se veio escapado — ver _refHtmlForRender)
+    textHTML = '<div class="q-ref-text q-ref-text-html">' + sanitize(_refHtmlForRender(refText)) + '</div>';
   } else if(legacyTxt){
     textHTML = `<div class="q-ref-text">
       ${legacyTxt.label  ? `<div class="q-ref-label">${Util.esc(legacyTxt.label)}</div>`   : ''}
@@ -16038,7 +16066,7 @@ function renderQuizItemReference(it){
   const txt = it.reference_text  || '';
   const img = it.reference_image || '';
   if(!txt && !img) return '';
-  const textHTML = txt ? '<div class="q-item-ref-text">' + sanitize(txt) + '</div>' : '';
+  const textHTML = txt ? '<div class="q-item-ref-text">' + sanitize(_refHtmlForRender(txt)) + '</div>' : '';
   const mediaHTML = img
     ? `<button class="q-item-ref-img" data-lightbox data-lightbox-src="${Util.attr(img)}" data-lightbox-cap="" style="border:none;padding:0;background:transparent;cursor:zoom-in">
         <img src="${Util.attr(img)}" alt="" loading="lazy" style="max-width:100%;border-radius:var(--radius)">
@@ -16169,22 +16197,27 @@ Blocks.quiz = {
         : '';
 
       // No grupo sintético (avulsas), não mostra "Grupo N"; só mostra
-      // as questões na sequência sem header
-      let header = '';
+      // as questões na sequência sem header.
+      // ORDEM (espelha a discursiva, que está correta): TAG (origem CACD+ano) no
+      // TOPO, nada acima → TEXTO DE REFERÊNCIA → COMANDO/ENUNCIADO. O comando é a
+      // ÚLTIMA coisa antes das questões: ele se refere ao "parágrafo acima" (o
+      // texto de referência), então tem de vir DEPOIS dele.
+      let tagRow = '', command = '';
       if(!singleFlat && !g._synthetic){
         // Comando/enunciado do grupo é HTML autoral do admin (ex.: <p>, <i>) —
         // renderiza cru. Fallback "Grupo N" é texto puro (escapa por segurança).
         const groupLabelRaw = g.title || g.enunciado;
         const groupLabelHtml = groupLabelRaw ? groupLabelRaw : Util.esc('Grupo ' + (g.idx + 1));
-        header = `<div class="q-group-header">
+        tagRow = groupOriginBadge ? `<div class="q-group-tagrow">${groupOriginBadge}</div>` : '';
+        command = `<div class="q-group-command">
           <div class="q-group-label">${groupLabelHtml}</div>
-          ${groupOriginBadge}
           ${g.description ? `<div class="q-group-enunciado">${g.description}</div>` : ''}
         </div>`;
       }
       return `<div class="q-group${singleFlat?' q-group-flat':''}${g._synthetic?' q-group-synth':''}" data-group-idx="${g.idx}">
-        ${header}
+        ${tagRow}
         ${renderQuizReference(g)}
+        ${command}
         <div class="q-group-items">${itemsHTML}</div>
       </div>`;
     }).join('');
@@ -18042,7 +18075,7 @@ Blocks.essay = {
         <div class="essay-ref-content">
           <div class="essay-ref-label">${Util.esc(r.label||'Fonte')}</div>
           ${r.title ? `<a class="essay-ref-title essay-ref-link" href="#essay-ref-${Util.attr(itemId)}-${ri}" onclick="this.closest('.essay-ref').scrollIntoView({behavior:'smooth',block:'center'});return false;">${Util.esc(r.title)}</a>` : ''}
-          <div class="essay-ref-body">${sanitize(String(r.body||''))}</div>
+          <div class="essay-ref-body">${sanitize(_refHtmlForRender(r.body))}</div>
         </div>
       </div>`).join('');
 
