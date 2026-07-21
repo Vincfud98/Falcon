@@ -19225,13 +19225,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return (u.course_chapter_id != null) ? u.course_chapter_id : u.chapter_id;
   }
 
-  // Ordem canônica: position (nulo por último) → number → id.
+  // Ordem canônica: position → id.
+  // CRÍTICO — posição VAZIA conta como 0 (vem PRIMEIRO), exatamente como o app do
+  // aluno ordena (`(a.position||0) - (b.position||0)`, index.html). Antes aqui o
+  // nulo ia pro FIM: as duas regras discordavam e a 1ª unidade de História do
+  // Brasil (sem position) aparecia em 1º pro aluno mas era numerada como a última.
+  // Desempate por id (o menor id = criada antes), que é o que a query do banco
+  // faz (.order('position').order('id')). NÃO desempatar por `number`: ele é
+  // justamente o que estamos recalculando — usá-lo tornaria a ordem circular.
+  function _uhPos(x){
+    const p = (x && x.position != null && x.position !== '') ? Number(x.position) : 0;
+    return isNaN(p) ? 0 : p;
+  }
   function _uhCmp(a, b){
-    const pa = (a.position == null || a.position === '') ? Number.MAX_SAFE_INTEGER : Number(a.position);
-    const pb = (b.position == null || b.position === '') ? Number.MAX_SAFE_INTEGER : Number(b.position);
+    const pa = _uhPos(a), pb = _uhPos(b);
     if(pa !== pb) return pa - pb;
-    const na = parseInt(a.number, 10), nb = parseInt(b.number, 10);
-    if(!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
     return String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
   }
 
@@ -19275,10 +19283,48 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return out;
   };
 
+  // Normaliza as POSIÇÕES de um capítulo (0..n-1) quando alguma unidade está sem
+  // position. Posição vazia é ambígua — cada parte do código dava um palpite
+  // diferente — então a curamos na origem em vez de conviver com o buraco.
+  // Só mexe em capítulo que TEM o problema; capítulo já consistente fica intacto.
+  async function _uhNormalizeChapterPositions(chapterId){
+    const us = window.unitsOfChapterInOrder(chapterId);
+    if(!us.length) return 0;
+    const temVazia = us.some(function(u){ return u.position == null || u.position === ''; });
+    if(!temVazia) return 0;
+    let fixed = 0;
+    for(let i = 0; i < us.length; i++){
+      const u = us[i];
+      if(Number(u.position) === i && u.position != null && u.position !== '') continue;
+      const idNum = isNaN(parseInt(u.id)) ? u.id : parseInt(u.id);
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          const { error } = await conteudo().from('units').update({ position: i }).eq('id', idNum);
+          if(error){ console.warn('[posições] update falhou', u.id, error.message); continue; }
+        }catch(e){ console.warn('[posições] exceção', u.id, e); continue; }
+      }
+      if(window.UbiqueStore) UbiqueStore.units.update(idNum, { position: i });
+      fixed++;
+    }
+    return fixed;
+  }
+
   // Recalcula e PERSISTE o número de todas as unidades de uma matéria.
   // Devolve só o que mudou: [{id, title, from, to}]. opts.dryRun = só simula.
   window.renumberSubjectUnits = async function(subjectId, opts){
     opts = opts || {};
+    // Antes de numerar, cura posições vazias (senão a ordem fica ao sabor de
+    // quem interpreta o nulo). Na simulação não grava nada.
+    if(!opts.dryRun){
+      const chaps = [];
+      window.modulesOfSubjectInOrder(subjectId).forEach(function(m){
+        window.chaptersOfModuleInOrder(m.id).forEach(function(c){ chaps.push(c.id); });
+      });
+      for(const cid of chaps){
+        try{ await _uhNormalizeChapterPositions(cid); }
+        catch(e){ console.warn('[posições] capítulo ' + cid + ':', e); }
+      }
+    }
     const ordered = window.unitsOfSubjectInOrder(subjectId);
     const changes = [];
     ordered.forEach(function(u, i){
@@ -27228,7 +27274,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     document.getElementById('unit-cover').value = u ? (u.cover_url||'') : '';
     document.getElementById('unit-duration').value = u ? (u.duration_min||'') : '';
     document.getElementById('unit-status').value = u ? (u.status||'draft') : 'draft';
-    document.getElementById('unit-position').value = u ? (u.position||'') : '';
+    // `u.position||''` mostrava a posição 0 como campo VAZIO (0 é falsy) — e ao
+    // salvar, o vazio virava NULL. Testar contra null preserva o zero.
+    document.getElementById('unit-position').value = (u && u.position != null && u.position !== '') ? u.position : '';
     document.getElementById('unitModalTitle').textContent = u ? 'Editar Unidade' : 'Nova Unidade';
     document.getElementById('unitModalOpenEditorBtn').style.display = u ? '' : 'none';
     document.getElementById('unitModalSaveAndEditBtn').textContent = u ? 'Salvar e abrir aula' : 'Criar e abrir aula';
@@ -27539,8 +27587,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       cover_url: document.getElementById('unit-cover').value.trim() || null,
       duration_min: parseInt(document.getElementById('unit-duration').value) || null,
       status: document.getElementById('unit-status').value,
-      position: parseInt(document.getElementById('unit-position').value) || null,
     };
+
+    // POSIÇÃO — antes era `parseInt(v) || null`, e como 0 é "falsy" isso
+    // transformava a posição 0 em NULL: a 1ª unidade do capítulo PERDIA a posição
+    // ao ser salva. Sem posição, cada parte do código chutava a ordem (o app do
+    // aluno tratava nulo como 0/primeiro; a numeração jogava pro fim), e a
+    // unidade aparecia em 1º mas era numerada como a última.
+    // Agora: campo vazio/inválido → não mexe na posição gravada; número válido
+    // (INCLUSIVE 0) → grava o número.
+    const _posRaw = String(document.getElementById('unit-position').value || '').trim();
+    const _posNum = (_posRaw === '') ? NaN : parseInt(_posRaw, 10);
+    if(!isNaN(_posNum)) localPayload.position = _posNum;
 
     // Payload pro Supabase (course_chapter_id é a FK correta pra nossa hierarquia;
     // chapter_id legacy fica null pra não confundir com chapters de PDF/livro)
