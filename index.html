@@ -41267,6 +41267,263 @@ function openPerfComparisonModal(){
 }
 window.openPerfComparisonModal = openPerfComparisonModal;
 
+/* ══ RAIO-X DO DESEMPENHO ═══════════════════════════════════════════════
+   Diagnóstico QUALITATIVO do perfil de erro (ideia do Diego/chefe): a Edge
+   Function `raiox` agrega os números em código, manda os agregados + amostra
+   dos itens errados pra IA e devolve o diagnóstico estruturado. Cobra em
+   UbiTokens (preço em carteira.tabela_custos, acao='raiox'). Relatórios ficam
+   em aluno.raiox_reports (revisita grátis; o próximo compara com o anterior).
+   Substitui o botão "Ver certificado" na hero (certificado só escondido —
+   reative com window.PERF_SHOW_CERT = true). */
+const RaioX = (function(){
+  let _overlay = null, _genTimer = null;
+
+  function _ensureStyles(){
+    if(document.getElementById('rxStyles')) return;
+    const st = document.createElement('style'); st.id = 'rxStyles';
+    st.textContent = [
+      '.rx-overlay{position:fixed;inset:0;z-index:900;background:rgba(8,9,12,.78);backdrop-filter:blur(3px);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:4vh 1rem 6vh}',
+      '.rx-modal{width:min(860px,100%);background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:1.6rem 1.8rem;position:relative}',
+      '.rx-close{position:absolute;top:.9rem;right:1rem;background:none;border:none;color:var(--text-mute);font-size:1.3rem;cursor:pointer;line-height:1}',
+      '.rx-close:hover{color:var(--text)}',
+      '.rx-title{font-family:var(--serif);font-size:1.5rem;color:var(--text);margin:.2rem 0 .2rem}',
+      '.rx-sub{font-size:.82rem;color:var(--text-dim);line-height:1.55;margin:0 0 1rem}',
+      '.rx-table{width:100%;border-collapse:collapse;font-size:.82rem;margin:.6rem 0 1rem}',
+      '.rx-table td{padding:.35rem .5rem;border-bottom:1px solid var(--border);color:var(--text-dim)}',
+      '.rx-table td:last-child{text-align:right;white-space:nowrap}',
+      '.rx-ok{color:#5dd49f}.rx-warn{color:#e0b45a}',
+      '.rx-row{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border)}',
+      '.rx-price{font-family:var(--mono);font-size:.85rem;color:var(--accent)}',
+      '.rx-spin{display:flex;flex-direction:column;align-items:center;gap:1rem;padding:2.5rem 0;color:var(--text-dim);font-size:.85rem}',
+      '.rx-spin .rx-dot{width:34px;height:34px;border:2px solid var(--accent-border);border-top-color:var(--accent);border-radius:50%;animation:rxspin 1s linear infinite}',
+      '@keyframes rxspin{to{transform:rotate(360deg)}}',
+      '.rx-sec{margin:1.2rem 0}',
+      '.rx-sec-h{font-family:var(--sans);font-size:.62rem;letter-spacing:.2em;text-transform:uppercase;color:var(--accent);margin-bottom:.45rem}',
+      '.rx-sec-b{font-family:var(--serif);font-size:.95rem;line-height:1.7;color:var(--text);white-space:pre-line}',
+      '.rx-sec ul{margin:.3rem 0 0 1.2rem;font-family:var(--serif);font-size:.92rem;line-height:1.65;color:var(--text)}',
+      '.rx-mat{margin:.7rem 0;padding:.7rem .9rem;background:var(--bg-elevated);border-left:2px solid var(--accent);border-radius:4px}',
+      '.rx-mat-h{display:flex;justify-content:space-between;gap:.6rem;font-weight:600;font-family:var(--serif);color:var(--text);margin-bottom:.3rem}',
+      '.rx-mat-pct{font-family:var(--mono);font-size:.78rem;color:var(--text-dim)}',
+      '.rx-hist{margin-top:1.1rem;padding-top:1rem;border-top:1px solid var(--border)}',
+      '.rx-hist-item{display:flex;justify-content:space-between;gap:.6rem;padding:.35rem .2rem;font-size:.8rem;color:var(--text-dim);cursor:pointer;border-radius:4px}',
+      '.rx-hist-item:hover{background:var(--bg-elevated);color:var(--text)}',
+      '.rx-meta{margin-top:1.2rem;font-size:.68rem;color:var(--text-mute);font-family:var(--mono)}',
+    ].join('\n');
+    document.head.appendChild(st);
+  }
+
+  function _esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function _fmtData(iso){ try{ return new Date(iso).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); }catch(_){ return ''; } }
+  function _ubt(v){ return 'ⓤ ' + String(Number(v).toFixed(2)).replace('.', ',').replace(/,?0+$/, function(m){ return m.indexOf(',')===0 ? '' : m; }); }
+
+  function _open(){
+    _ensureStyles();
+    if(_overlay) _overlay.remove();
+    _overlay = document.createElement('div');
+    _overlay.className = 'rx-overlay';
+    _overlay.innerHTML = '<div class="rx-modal"><button type="button" class="rx-close" title="Fechar">×</button><div class="rx-body"></div></div>';
+    _overlay.addEventListener('click', function(e){ if(e.target === _overlay) _close(); });
+    _overlay.querySelector('.rx-close').addEventListener('click', _close);
+    document.body.appendChild(_overlay);
+    document.body.style.overflow = 'hidden';
+    return _overlay.querySelector('.rx-body');
+  }
+  function _close(){
+    if(_genTimer){ clearInterval(_genTimer); _genTimer = null; }
+    if(_overlay){ _overlay.remove(); _overlay = null; }
+    document.body.style.overflow = '';
+  }
+
+  async function open(){
+    const body = _open();
+    body.innerHTML = '<div class="rx-spin"><div class="rx-dot"></div><div>Verificando sua amostra de questões…</div></div>';
+    let pf = null;
+    try{
+      const r = await Promise.race([
+        window._sb.functions.invoke('raiox', { body: { mode: 'preflight' } }),
+        new Promise(function(res){ setTimeout(function(){ res({ error: { message: 'timeout' } }); }, 30000); }),
+      ]);
+      if(r && r.data && r.data.ok) pf = r.data;
+    }catch(_){}
+    if(!pf){
+      body.innerHTML = '<h2 class="rx-title">Raio-X do desempenho</h2><p class="rx-sub">Não consegui verificar seus dados agora. Tente novamente em instantes.</p>';
+      return;
+    }
+    _renderPreflight(body, pf);
+  }
+
+  function _renderPreflight(body, pf){
+    const linhas = (pf.subjects || []).map(function(s){
+      const okTxt = s.eligible ? '<span class="rx-ok">análise completa</span>'
+        : '<span class="rx-warn">faltam ' + (pf.min_subject - s.n) + '</span>';
+      return '<tr><td>' + _esc(s.nome) + '</td><td>' + s.n + ' respondidas</td><td>' + okTxt + '</td></tr>';
+    }).join('');
+    const podeAmostra = !!pf.eligible;
+    const podeSaldo = pf.ilimitado || (Number(pf.saldo) >= Number(pf.price));
+    let aviso = '';
+    if(!podeAmostra) aviso = '<p class="rx-sub" style="color:#e0b45a">Responda pelo menos ' + pf.min_total + ' questões de Certo/Errado (faltam ' + (pf.min_total - pf.total) + ') para liberar o Raio-X — assim a análise é fiel, não chute. Uma unidade tem ~50 questões.</p>';
+    else if(!podeSaldo) aviso = '<p class="rx-sub" style="color:#e0b45a">Saldo insuficiente (' + _ubt(pf.saldo) + '). Adicione UbiTokens na sua Carteira (Minha Conta).</p>';
+    body.innerHTML =
+      '<span class="s-label">Diagnóstico por IA</span>' +
+      '<h2 class="rx-title">Raio-X do desempenho</h2>' +
+      '<p class="rx-sub">Um treinador que olhou cada resposta sua: <strong>por que</strong> você erra (leitura, extrapolação, atenção, pegadinha, viés Certo×Errado), matéria por matéria, comparado com a média da plataforma e com o seu Raio-X anterior. Analisa suas questões de Certo/Errado do banco (simulados fora).</p>' +
+      '<table class="rx-table"><tbody>' + (linhas || '<tr><td>Nenhuma resposta ainda.</td></tr>') + '</tbody></table>' +
+      aviso +
+      '<div class="rx-row">' +
+        '<span class="rx-price">Custo: ' + _ubt(pf.price) + (pf.ilimitado ? ' (sua conta é ilimitada)' : ' · seu saldo: ' + _ubt(pf.saldo)) + '</span>' +
+        '<button type="button" class="btn-primary" id="rxGerar"' + ((podeAmostra && podeSaldo) ? '' : ' disabled style="opacity:.5;cursor:not-allowed"') + '>Gerar Raio-X</button>' +
+      '</div>' +
+      '<div class="rx-hist" id="rxHist"></div>';
+    const btn = body.querySelector('#rxGerar');
+    if(btn && podeAmostra && podeSaldo) btn.addEventListener('click', function(){ _generate(body); });
+    _loadHistory(body.querySelector('#rxHist'));
+  }
+
+  async function _loadHistory(host){
+    if(!host || !window._sb) return;
+    try{
+      const { data } = await window._sb.schema('aluno').from('raiox_reports')
+        .select('id, created_at, custo_ubt, findings, aggregates')
+        .order('created_at', { ascending: false }).limit(24);
+      if(!data || !data.length){ host.innerHTML = '<div style="font-size:.75rem;color:var(--text-mute)">Seus Raio-X ficam guardados aqui — o próximo compara com o anterior.</div>'; return; }
+      host.innerHTML = '<div class="rx-sec-h">Meus Raio-X anteriores</div>' + data.map(function(r, i){
+        return '<div class="rx-hist-item" data-rx-idx="' + i + '"><span>Raio-X de ' + _fmtData(r.created_at) + '</span><span>ver</span></div>';
+      }).join('');
+      host.querySelectorAll('.rx-hist-item').forEach(function(el){
+        el.addEventListener('click', function(){
+          const r = data[parseInt(el.getAttribute('data-rx-idx'), 10)];
+          if(r) _renderReport(_overlay.querySelector('.rx-body'), { created_at: r.created_at, findings: r.findings, aggregates: r.aggregates }, true);
+        });
+      });
+    }catch(_){}
+  }
+
+  function _generate(body){
+    const frases = [
+      'Reunindo todas as suas respostas…',
+      'Cruzando com a estatística global de cada item…',
+      'Relendo as questões que você errou…',
+      'Procurando padrões de leitura e atenção…',
+      'Comparando com o seu Raio-X anterior…',
+      'Escrevendo o diagnóstico…',
+    ];
+    let fi = 0;
+    body.innerHTML = '<div class="rx-spin"><div class="rx-dot"></div><div id="rxFase">' + frases[0] + '</div><div style="font-size:.72rem;color:var(--text-mute)">Isso leva 1 a 3 minutos — a análise é profunda de verdade.</div></div>';
+    _genTimer = setInterval(function(){
+      fi = Math.min(fi + 1, frases.length - 1);
+      const el = body.querySelector('#rxFase'); if(el) el.textContent = frases[fi];
+    }, 18000);
+    (async function(){
+      let out = null;
+      try{
+        const r = await Promise.race([
+          window._sb.functions.invoke('raiox', { body: { mode: 'generate' } }),
+          new Promise(function(res){ setTimeout(function(){ res({ error: { message: 'timeout' } }); }, 300000); }),
+        ]);
+        out = r && r.data ? r.data : null;
+      }catch(_){}
+      if(_genTimer){ clearInterval(_genTimer); _genTimer = null; }
+      if(!_overlay) return;   // usuário fechou
+      if(out && out.ubt_error){
+        body.innerHTML = '<h2 class="rx-title">Raio-X do desempenho</h2><p class="rx-sub" style="color:#e0b45a">Saldo insuficiente (' + _ubt(out.saldo) + ' de ' + _ubt(out.needed) + '). Adicione UbiTokens na sua Carteira (Minha Conta) e tente de novo.</p>';
+        return;
+      }
+      if(!out || !out.ok || !out.report){
+        body.innerHTML = '<h2 class="rx-title">Raio-X do desempenho</h2><p class="rx-sub">Não consegui gerar agora. <strong>Você não foi cobrado.</strong> Tente novamente em instantes.</p>';
+        return;
+      }
+      if(window.UbtWallet && UbtWallet.load) try{ UbtWallet.load(); }catch(_){}
+      _renderReport(body, out.report, false);
+    })();
+  }
+
+  function _secTxt(t, txt){ return txt ? '<div class="rx-sec"><div class="rx-sec-h">' + t + '</div><div class="rx-sec-b">' + _esc(txt) + '</div></div>' : ''; }
+  function _secList(t, arr, fmt){
+    if(!Array.isArray(arr) || !arr.length) return '';
+    return '<div class="rx-sec"><div class="rx-sec-h">' + t + '</div><ul>' + arr.map(fmt).join('') + '</ul></div>';
+  }
+
+  function _renderReport(body, report, fromHistory){
+    const f = report.findings || {};
+    const ag = report.aggregates || {};
+    const pctBy = {};
+    (ag.materias || []).forEach(function(m){ pctBy[m.materia] = m; });
+    const matHtml = (Array.isArray(f.por_materia) ? f.por_materia : []).map(function(m){
+      const st = pctBy[m.materia];
+      const pct = st && st.pct_acerto != null ? (st.pct_acerto + '% de acerto · ' + st.n + ' questões') : '';
+      const recs = Array.isArray(m.recomendacoes) && m.recomendacoes.length
+        ? '<ul>' + m.recomendacoes.map(function(r){ return '<li>' + _esc(r) + '</li>'; }).join('') + '</ul>' : '';
+      return '<div class="rx-mat"><div class="rx-mat-h"><span>' + _esc(m.materia) + '</span><span class="rx-mat-pct">' + pct + '</span></div><div class="rx-sec-b" style="font-size:.9rem">' + _esc(m.diagnostico) + '</div>' + recs + '</div>';
+    }).join('');
+    const geral = ag.geral || {};
+    body.innerHTML =
+      '<span class="s-label">Raio-X de ' + _fmtData(report.created_at) + (fromHistory ? ' (arquivado)' : '') + '</span>' +
+      '<h2 class="rx-title">Seu perfil de erro</h2>' +
+      (geral.n ? '<p class="rx-sub">' + geral.n + ' questões de Certo/Errado analisadas · ' + (geral.pct_acerto != null ? geral.pct_acerto + '% de acerto geral' : '') + '</p>' : '') +
+      _secTxt('Resumo', f.resumo) +
+      _secTxt('Evolução', f.evolucao) +
+      _secTxt('Perfil de leitura (extrapolação)', f.perfil_leitura) +
+      _secTxt('Atenção e pegadinhas', f.atencao_pegadinhas) +
+      _secTxt('Viés Certo × Errado', f.vies_certo_errado) +
+      (matHtml ? '<div class="rx-sec"><div class="rx-sec-h">Matéria por matéria</div>' + matHtml + '</div>' : '') +
+      _secList('Prioridades (onde sua nota mais cresce)', f.prioridades, function(p){ return '<li><strong>' + _esc(p.titulo) + '</strong> — ' + _esc(p.motivo) + '</li>'; }) +
+      _secList('Macetes de banca', f.macetes, function(m){ return '<li>' + _esc(m) + '</li>'; }) +
+      _secList('Próximos passos', f.proximos_passos, function(p){ return '<li>' + _esc(p) + '</li>'; }) +
+      '<div class="rx-row">' +
+        '<button type="button" class="btn-ghost" id="rxVoltar">Voltar</button>' +
+        '<button type="button" class="btn-primary" id="rxBaixar">Baixar / Imprimir</button>' +
+      '</div>' +
+      '<div class="rx-meta">Gerado pela IA da Ubique a partir das suas respostas reais. Questões anuladas e simulados não entram na conta.</div>';
+    const vb = body.querySelector('#rxVoltar'); if(vb) vb.addEventListener('click', function(){ open(); });
+    const db = body.querySelector('#rxBaixar'); if(db) db.addEventListener('click', function(){ _download(report); });
+  }
+
+  // Documento avulso (padrão dos compiladores): HTML autossuficiente pra
+  // imprimir/guardar. Sem código verificável — é um documento pessoal.
+  function _download(report){
+    const f = report.findings || {};
+    const nome = (window.MOCK_USER && (MOCK_USER.name || MOCK_USER.nickname)) || '';
+    const sec = function(t, x){ return x ? '<h2>' + _esc(t) + '</h2><p>' + _esc(x).replace(/\n/g, '<br>') + '</p>' : ''; };
+    const list = function(t, arr, fmt){ return (Array.isArray(arr) && arr.length) ? '<h2>' + _esc(t) + '</h2><ul>' + arr.map(fmt).join('') + '</ul>' : ''; };
+    const html = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Raio-X do desempenho — ' + _esc(_fmtData(report.created_at)) + '</title><style>' +
+      '@page{size:A4;margin:0}*{box-sizing:border-box}body{margin:0;font-family:Georgia,serif;color:#1e1a12;background:#fff}' +
+      '.wrap{max-width:820px;margin:0 auto}.sheet{width:100%;border-collapse:collapse}.sheet td{border:0;padding:0}.sheet>thead td>div,.sheet>tfoot td>div{height:14mm}.sheet>tbody>tr>td{padding:0 14mm}' +
+      'h1{font-size:26px;margin:.2rem 0 .1rem}h2{font-size:15px;color:#8a6a24;margin:1.4rem 0 .4rem;letter-spacing:.04em;text-transform:uppercase;font-family:Arial,sans-serif}' +
+      'p,li{font-size:14px;line-height:1.7}ul{margin:.3rem 0 .3rem 1.2rem}.eyebrow{font-family:Arial;font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:#8a6a24}' +
+      '.mat{margin:.6rem 0;padding:.5rem .8rem;border-left:2px solid #8a6a24;background:#faf7f0}.mat b{font-size:14px}' +
+      '.print-btn{position:fixed;top:14px;right:14px;padding:.6rem 1rem;background:#8a6a24;color:#fff;border:none;border-radius:4px;font:600 13px Arial;cursor:pointer}@media print{.print-btn{display:none}}' +
+      '.meta{margin-top:1.6rem;font-size:10px;color:#8a7e68;font-family:Arial}' +
+      '</style></head><body><button class="print-btn" onclick="window.print()">Imprimir / Salvar PDF</button><div class="wrap"><table class="sheet"><thead><tr><td><div></div></td></tr></thead><tfoot><tr><td><div></div></td></tr></tfoot><tbody><tr><td>' +
+      '<div class="eyebrow">Grupo Ubique · Raio-X do desempenho</div>' +
+      '<h1>Seu perfil de erro</h1>' +
+      '<p style="color:#6a604c;font-size:12px;margin:.1rem 0 0">' + _esc(nome) + (nome ? ' · ' : '') + _esc(_fmtData(report.created_at)) + '</p>' +
+      sec('Resumo', f.resumo) + sec('Evolução', f.evolucao) +
+      sec('Perfil de leitura (extrapolação)', f.perfil_leitura) +
+      sec('Atenção e pegadinhas', f.atencao_pegadinhas) +
+      sec('Viés Certo × Errado', f.vies_certo_errado) +
+      ((Array.isArray(f.por_materia) && f.por_materia.length) ? '<h2>Matéria por matéria</h2>' + f.por_materia.map(function(m){
+        return '<div class="mat"><b>' + _esc(m.materia) + '</b><p style="margin:.2rem 0 0">' + _esc(m.diagnostico) + '</p>' +
+          ((Array.isArray(m.recomendacoes) && m.recomendacoes.length) ? '<ul>' + m.recomendacoes.map(function(r){ return '<li>' + _esc(r) + '</li>'; }).join('') + '</ul>' : '') + '</div>';
+      }).join('') : '') +
+      list('Prioridades', f.prioridades, function(p){ return '<li><b>' + _esc(p.titulo) + '</b> — ' + _esc(p.motivo) + '</li>'; }) +
+      list('Macetes de banca', f.macetes, function(m){ return '<li>' + _esc(m) + '</li>'; }) +
+      list('Próximos passos', f.proximos_passos, function(p){ return '<li>' + _esc(p) + '</li>'; }) +
+      '<div class="meta">Gerado pela IA da Ubique a partir das respostas reais do aluno nas questões de Certo/Errado. Questões anuladas e simulados não entram na conta.</div>' +
+      '</td></tr></tbody></table></div></body></html>';
+    try{
+      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'raiox-' + String(report.created_at || '').slice(0, 10) + '.html';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+    }catch(e){ console.warn('[raiox] download:', e); }
+  }
+
+  return { open: open };
+})();
+window.RaioX = RaioX;
+
 Renderers.performance = function(route){
   const perf = buildPerformanceReport();
   const fmtPct = v => v == null ? '—' : Math.round(v*100)+'%';
@@ -41533,8 +41790,11 @@ Renderers.performance = function(route){
     <p class="s-subtitle" data-a="3">${Util.esc(activeSubject() ? window.COURSE.title : 'Todas as matérias')}</p>
     <div class="s-divider" data-a="4"></div>
     <p class="s-body" data-a="5">Visão agregada por tópicos e tags. Cada linha mostra objetivas respondidas, percentual de acertos, pontuação em discursivas e conclusão ponderada (blocos marcados, flashcards dominados e unidades concluídas). Clique na seta para abrir uma decomposição por módulo, capítulo e unidade.</p>
-    <div class="cta-row" data-a="6" style="margin-top:1rem">
-      <a class="btn-ghost" href="#/certificate">${Icons.download} Ver certificado</a>
+    <div class="cta-row" data-a="6" style="margin-top:1rem;display:flex;gap:.6rem;flex-wrap:wrap">
+      <button type="button" class="btn-primary" id="raioxBtn" title="Diagnóstico por IA do seu perfil de erro nas questões de Certo/Errado — leitura, atenção, viés C×E e prioridades">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:.4rem"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>Raio-X do desempenho
+      </button>
+      ${window.PERF_SHOW_CERT ? `<a class="btn-ghost" href="#/certificate">${Icons.download} Ver certificado</a>` : ''}
     </div>
   </div>
   ${radarAside}
@@ -41582,6 +41842,10 @@ Renderers.performance = function(route){
 Renderers.performance.mount = function(stageEl, route){
   // Tooltips rápidos da plataforma (data-tip) — ex.: legenda da pizza.
   if(typeof setupQuickTooltips === 'function') setupQuickTooltips(stageEl);
+
+  // Raio-X do desempenho (diagnóstico por IA) — abre o modal do módulo RaioX.
+  const _rxBtn = stageEl.querySelector('#raioxBtn');
+  if(_rxBtn) _rxBtn.addEventListener('click', function(){ if(window.RaioX) RaioX.open(); });
 
   // Avatar do radar: aplica a foto com o crop do usuário (photoTransform).
   const _radarAv = stageEl.querySelector('[data-radar-avatar]');
