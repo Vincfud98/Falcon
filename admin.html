@@ -12712,6 +12712,17 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       <div id="csModulesList" style="margin-bottom:.6rem"></div>
       <button type="button" class="btn btn-ghost" id="csAddModuleBtn" style="margin-bottom:1.6rem">+ Adicionar módulo</button>
 
+      <!-- ───── 6b. ORGANIZAR UNIDADES (arrastar entre capítulos) ───── -->
+      <div id="csUnitsOrgWrap" style="display:none">
+        <div class="sub-h"><span class="sub-h-text">Unidades — arraste para mover</span><span class="sub-h-rule"></span></div>
+        <p style="font-family:var(--sans);font-weight:200;font-size:.78rem;color:var(--text-mute);margin:0 0 .8rem;line-height:1.5">
+          Arraste uma unidade para outro capítulo, ou para cima/baixo dentro do mesmo capítulo.
+          <strong>Mover salva na hora</strong> e renumera a matéria inteira — não depende do botão "Salvar" lá embaixo.
+          Capítulos que você acabou de adicionar aqui em cima só aparecem depois de salvar a matéria.
+        </p>
+        <div id="csUnitsOrg" style="margin-bottom:1.6rem"></div>
+      </div>
+
       <!-- ───── 7. STATUS / LIBERAÇÃO ───── -->
       <div class="sub-h"><span class="sub-h-text">Liberação para alunos</span><span class="sub-h-rule"></span></div>
       <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:1rem 1.2rem">
@@ -19234,20 +19245,32 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return mod ? mod.subject_id : null;
   };
 
+  // Fatias ordenadas da hierarquia — MESMA ordem usada pela numeração, pra o
+  // organizador de unidades (arrastar) e a numeração nunca divergirem.
+  window.modulesOfSubjectInOrder = function(subjectId){
+    if(!window.UbiqueStore || subjectId == null) return [];
+    return (UbiqueStore.modules.list() || [])
+      .filter(function(m){ return String(m.subject_id) === String(subjectId); }).sort(_uhCmp);
+  };
+  window.chaptersOfModuleInOrder = function(moduleId){
+    if(!window.UbiqueStore || moduleId == null) return [];
+    return (UbiqueStore.chapters.list() || [])
+      .filter(function(c){ return String(c.module_id) === String(moduleId); }).sort(_uhCmp);
+  };
+  window.unitsOfChapterInOrder = function(chapterId){
+    if(!window.UbiqueStore || chapterId == null) return [];
+    return (UbiqueStore.units.list() || [])
+      .filter(function(u){ return String(_uhChapterIdOfUnit(u)) === String(chapterId); }).sort(_uhCmp);
+  };
+
   // Unidades da matéria na ORDEM do curso (módulo → capítulo → unidade).
   window.unitsOfSubjectInOrder = function(subjectId){
     if(!window.UbiqueStore || subjectId == null) return [];
-    const mods = (UbiqueStore.modules.list() || [])
-      .filter(function(m){ return String(m.subject_id) === String(subjectId); }).sort(_uhCmp);
-    const chapters = UbiqueStore.chapters.list() || [];
-    const units = UbiqueStore.units.list() || [];
     const out = [];
-    mods.forEach(function(m){
-      chapters.filter(function(c){ return String(c.module_id) === String(m.id); }).sort(_uhCmp)
-        .forEach(function(c){
-          units.filter(function(u){ return String(_uhChapterIdOfUnit(u)) === String(c.id); }).sort(_uhCmp)
-            .forEach(function(u){ out.push(u); });
-        });
+    window.modulesOfSubjectInOrder(subjectId).forEach(function(m){
+      window.chaptersOfModuleInOrder(m.id).forEach(function(c){
+        window.unitsOfChapterInOrder(c.id).forEach(function(u){ out.push(u); });
+      });
     });
     return out;
   };
@@ -19282,6 +19305,71 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const sid = window._uhSubjectIdOfChapter(chapterId);
     if(sid == null) return [];
     return await window.renumberSubjectUnits(sid);
+  };
+
+  // Move uma unidade para um capítulo, na posição pedida (targetIndex). Reindexa
+  // as posições dos capítulos afetados, PERSISTE e renumera a matéria. Serve tanto
+  // pra mover entre capítulos/módulos quanto pra reordenar dentro do mesmo capítulo.
+  window.moveUnitToChapter = async function(unitId, targetChapterId, targetIndex){
+    if(!window.UbiqueStore || unitId == null || targetChapterId == null) return false;
+    const units = UbiqueStore.units.list() || [];
+    const unit = units.find(function(u){ return String(u.id) === String(unitId); });
+    if(!unit) return false;
+    const fromChapterId = _uhChapterIdOfUnit(unit);
+    const sameChapter = String(fromChapterId) === String(targetChapterId);
+
+    // Lista do capítulo destino SEM a unidade movida, com ela inserida no índice.
+    const dest = window.unitsOfChapterInOrder(targetChapterId)
+      .filter(function(u){ return String(u.id) !== String(unitId); });
+    const idx = Math.max(0, Math.min(targetIndex == null ? dest.length : targetIndex, dest.length));
+    dest.splice(idx, 0, unit);
+
+    // Novas posições 0..n-1 no destino (+ fecha o buraco na origem, se mudou).
+    const patches = [];
+    dest.forEach(function(u, i){
+      const p = { id: u.id, position: i };
+      if(String(u.id) === String(unitId) && !sameChapter) p.chapterId = targetChapterId;
+      patches.push(p);
+    });
+    if(!sameChapter){
+      window.unitsOfChapterInOrder(fromChapterId)
+        .filter(function(u){ return String(u.id) !== String(unitId); })
+        .forEach(function(u, i){ patches.push({ id: u.id, position: i }); });
+    }
+
+    // Grava só o que mudou de fato.
+    for(const p of patches){
+      const cur = units.find(function(u){ return String(u.id) === String(p.id); });
+      const posChanged = !cur || Number(cur.position) !== Number(p.position);
+      const chapChanged = p.chapterId != null;
+      if(!posChanged && !chapChanged) continue;
+      const idNum = isNaN(parseInt(p.id)) ? p.id : parseInt(p.id);
+      const supaPatch = { position: p.position };
+      const localPatch = { position: p.position };
+      if(chapChanged){
+        supaPatch.course_chapter_id = p.chapterId; supaPatch.chapter_id = null;
+        localPatch.chapter_id = p.chapterId;
+      }
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          const { error } = await conteudo().from('units').update(supaPatch).eq('id', idNum);
+          if(error){ console.warn('[mover unidade] update falhou', p.id, error.message); continue; }
+        }catch(e){ console.warn('[mover unidade] exceção', p.id, e); continue; }
+      }
+      UbiqueStore.units.update(idNum, localPatch);
+    }
+
+    // A numeração é derivada da posição → acompanha o movimento.
+    try{ await window.renumberSubjectOfChapter(targetChapterId); }
+    catch(e){ console.warn('[mover unidade] renumerar destino:', e); }
+    if(!sameChapter){
+      const sidFrom = window._uhSubjectIdOfChapter(fromChapterId);
+      const sidTo   = window._uhSubjectIdOfChapter(targetChapterId);
+      if(sidFrom != null && String(sidFrom) !== String(sidTo)){
+        try{ await window.renumberSubjectUnits(sidFrom); }catch(_){}
+      }
+    }
+    return true;
   };
 
   async function cuCreateUnit(){
@@ -19481,6 +19569,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     csRenderConcursos();
     csRenderAliases();
     csRenderModules();
+    // Esconde o organizador (matéria nova não tem unidades; e evita árvore
+    // remanescente de uma edição anterior).
+    if(typeof window.csRenderUnitsTree === 'function') window.csRenderUnitsTree();
     csUpdateStatusUI('coming-soon', null);
     const _swc = document.getElementById('csShowWhenLocked'); if(_swc) _swc.checked = true;
     document.getElementById('createSubjectModal').classList.add('active');
@@ -19540,6 +19631,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       });
     }
     csRenderModules();
+    // Organizador de unidades (só na edição — matéria nova ainda não tem unidades)
+    if(typeof window.csRenderUnitsTree === 'function') window.csRenderUnitsTree();
 
     // Status
     csUpdateStatusUI(subj.status || 'coming-soon', subj.scheduled_at || null);
@@ -19842,6 +19935,126 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         title: r.querySelector('[data-chap-title]').value.trim(),
         description: r.querySelector('[data-chap-desc]').value.trim(),
       }));
+    });
+  }
+
+  // ─── Organizar unidades: árvore módulo → capítulo → unidade (arrastar) ───
+  // Renderiza do BANCO (UbiqueStore), não do csModulesState: só capítulo já
+  // SALVO existe de verdade e pode receber unidade. Mover grava na hora
+  // (moveUnitToChapter) e renumera a matéria — a seção avisa isso na tela.
+  window.csRenderUnitsTree = function(){
+    const wrap = document.getElementById('csUnitsOrgWrap');
+    const host = document.getElementById('csUnitsOrg');
+    if(!wrap || !host) return;
+    if(csEditingId == null || !window.UbiqueStore || typeof window.modulesOfSubjectInOrder !== 'function'){
+      wrap.style.display = 'none'; host.innerHTML = ''; return;
+    }
+    const mods = window.modulesOfSubjectInOrder(csEditingId);
+    if(!mods.length){ wrap.style.display = 'none'; host.innerHTML = ''; return; }
+    wrap.style.display = '';
+
+    const S_MOD   = 'background:var(--accent-xlo);border:1px solid var(--accent-border-soft);border-left:3px solid var(--accent);border-radius:var(--radius);padding:.7rem .9rem;margin-bottom:.6rem';
+    const S_MODT  = 'font-family:var(--mono);font-size:.65rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:.5rem';
+    const S_CHAP  = 'margin:.45rem 0 .45rem .6rem;padding-left:.7rem;border-left:1px solid var(--accent-border-soft)';
+    const S_CHAPT = 'font-family:var(--sans);font-size:.72rem;color:var(--text-dim);margin-bottom:.3rem';
+    const S_LIST  = 'display:flex;flex-direction:column;gap:.3rem;min-height:28px;padding:.25rem;border:1px dashed transparent;border-radius:var(--radius)';
+    const S_UNIT  = 'display:flex;align-items:center;gap:.5rem;background:var(--bg-card);border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.32rem .6rem;font-size:.8rem;cursor:grab';
+    const S_NUM   = 'font-family:var(--mono);font-size:.7rem;color:var(--accent);flex-shrink:0';
+    const S_EMPTY = 'font-size:.72rem;color:var(--text-mute);font-style:italic;padding:.2rem .3rem';
+
+    host.innerHTML = mods.map(function(m, mi){
+      const chaps = window.chaptersOfModuleInOrder(m.id);
+      const chapsHtml = chaps.length ? chaps.map(function(c, ci){
+        const us = window.unitsOfChapterInOrder(c.id);
+        const unitsHtml = us.length ? us.map(function(u){
+          return '<div class="cs-uorg-unit" draggable="true" data-unit-id="' + esc(String(u.id)) + '" style="' + S_UNIT + '" title="Arraste para mover">' +
+                   '<span style="' + S_NUM + '">' + esc(u.number || '--') + '</span>' +
+                   '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(u.title || 'Sem título') + '</span>' +
+                 '</div>';
+        }).join('') : '<div style="' + S_EMPTY + '">— vazio (arraste uma unidade para cá) —</div>';
+        return '<div style="' + S_CHAP + '">' +
+                 '<div style="' + S_CHAPT + '">' + esc((mi+1) + '.' + (ci+1)) + ' · ' + esc(c.title || 'Capítulo') + '</div>' +
+                 '<div class="cs-uorg-list" data-chap-id="' + esc(String(c.id)) + '" style="' + S_LIST + '">' + unitsHtml + '</div>' +
+               '</div>';
+      }).join('') : '<div style="' + S_EMPTY + '">Sem capítulos salvos neste módulo.</div>';
+      return '<div style="' + S_MOD + '">' +
+               '<div style="' + S_MODT + '">Módulo ' + String(mi+1).padStart(2,'0') + ' · ' + esc(m.title || '') + '</div>' +
+               chapsHtml +
+             '</div>';
+    }).join('');
+
+    _csBindUnitsDnD();
+  };
+
+  // Índice de inserção conforme a altura do cursor (metade de cada item).
+  function _csDropIndex(list, clientY, draggingId){
+    const items = [].slice.call(list.querySelectorAll('.cs-uorg-unit'))
+      .filter(function(el){ return String(el.dataset.unitId) !== String(draggingId); });
+    for(let i = 0; i < items.length; i++){
+      const r = items[i].getBoundingClientRect();
+      if(clientY < r.top + r.height / 2) return i;
+    }
+    return items.length;
+  }
+
+  function _csClearDropHints(host){
+    host.querySelectorAll('.cs-uorg-list').forEach(function(l){
+      l.style.borderColor = 'transparent'; l.style.background = '';
+    });
+  }
+
+  // Delegação ligada UMA vez no container (o innerHTML é reescrito a cada render).
+  function _csBindUnitsDnD(){
+    const host = document.getElementById('csUnitsOrg');
+    if(!host || host._uorgBound) return;
+    host._uorgBound = true;
+    let draggingId = null;
+
+    host.addEventListener('dragstart', function(e){
+      const el = e.target.closest && e.target.closest('.cs-uorg-unit');
+      if(!el) return;
+      draggingId = el.dataset.unitId;
+      el.style.opacity = '.45';
+      try{ e.dataTransfer.setData('text/plain', draggingId); e.dataTransfer.effectAllowed = 'move'; }catch(_){}
+    });
+    host.addEventListener('dragend', function(e){
+      const el = e.target.closest && e.target.closest('.cs-uorg-unit');
+      if(el) el.style.opacity = '';
+      _csClearDropHints(host);
+      draggingId = null;
+    });
+    host.addEventListener('dragover', function(e){
+      const list = e.target.closest && e.target.closest('.cs-uorg-list');
+      if(!list) return;
+      e.preventDefault();
+      try{ e.dataTransfer.dropEffect = 'move'; }catch(_){}
+      list.style.borderColor = 'var(--accent)';
+      list.style.background = 'var(--accent-xlo)';
+    });
+    host.addEventListener('dragleave', function(e){
+      const list = e.target.closest && e.target.closest('.cs-uorg-list');
+      if(list && !list.contains(e.relatedTarget)){ list.style.borderColor = 'transparent'; list.style.background = ''; }
+    });
+    host.addEventListener('drop', async function(e){
+      const list = e.target.closest && e.target.closest('.cs-uorg-list');
+      if(!list) return;
+      e.preventDefault();
+      _csClearDropHints(host);
+      let id = draggingId;
+      try{ id = e.dataTransfer.getData('text/plain') || draggingId; }catch(_){}
+      if(!id) return;
+      const chapId = list.dataset.chapId;
+      const index = _csDropIndex(list, e.clientY, id);
+      host.style.pointerEvents = 'none';   // evita drop duplo enquanto grava
+      try{
+        const ok = await window.moveUnitToChapter(id, chapId, index);
+        if(ok){
+          if(typeof loadUnits === 'function') await loadUnits();
+          if(typeof renderUnitCards === 'function') renderUnitCards();
+          window.csRenderUnitsTree();
+        }
+      }catch(err){ console.warn('[organizar unidades] mover:', err); }
+      finally{ host.style.pointerEvents = ''; }
     });
   }
 
