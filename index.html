@@ -4487,6 +4487,11 @@ body.gallery-detail-open{overflow:hidden}
   background:var(--bg-elevated);letter-spacing:.08em;
   font-style:italic;
 }
+/* Questão anulada na prova original: não conta como acerto nem como erro. */
+.q-badge-anulada{
+  color:#e87878;border-color:rgba(232,120,120,.35);
+  background:rgba(232,120,120,.08);letter-spacing:.06em;font-weight:500;
+}
 .q-group-origin-badge{
   /* align-self impede que o flex-column pai (.q-group-header) estique a
      badge horizontalmente (default align-items: stretch). */
@@ -13762,13 +13767,15 @@ const Store = (function(){
       const isBank = _isBankItemId;
       const map = new Map();           // chave distinta → objeto da resposta
       const add = (k, a) => { if(!map.has(k)) map.set(k, a); };
+      // ANULADA não entra: nem no XP, nem em acertos/erros, nem no total do dia.
+      const _anul = (id) => !!(window._isAnnulledItem && window._isAnnulledItem(id));
       const byBank = _state.quizAnswersByBankId || {};
-      for(const bid in byBank){ const a = byBank[bid]; if(a && a.selected != null && isToday(a.answeredAt)) add('b:' + bid, a); }
+      for(const bid in byBank){ const a = byBank[bid]; if(a && a.selected != null && isToday(a.answeredAt) && !_anul(bid)) add('b:' + bid, a); }
       const byUnit = _state.quizAnswers || {};
       for(const u in byUnit){
         if(String(u).indexOf('__sim_') === 0) continue; // simulado não conta
         const bb = byUnit[u] || {};
-        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || !isToday(a.answeredAt)) continue; add(isBank(it) ? ('b:' + it) : ('q:' + u + ':' + b + ':' + it), a); } }
+        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || !isToday(a.answeredAt)) continue; if(_anul(it)) continue; add(isBank(it) ? ('b:' + it) : ('q:' + u + ':' + b + ':' + it), a); } }
       }
       // XP do dia (Gamificação — Parte G): acerto=50, erro=10; só conta as que já
       // têm correção conhecida (a.correct === true/false).
@@ -16061,10 +16068,16 @@ function itemBadges(it, norm){
   const customTags = Array.isArray(it.tags) && it.tags.length
     ? it.tags.map(t => `<span class="q-badge q-badge-tag">${Util.esc(t)}</span>`).join('')
     : '';
+  // ANULADA: selo explicando por que a questão não pesa no desempenho. Ela
+  // continua respondível e com gabarito/comentário (serve de estudo).
+  const anulada = !!(it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)));
+  const anuladaBadge = anulada
+    ? `<span class="q-badge q-badge-anulada" data-tip="Questão anulada na prova original — não conta como acerto nem como erro no seu desempenho">Anulada · não conta</span>`
+    : '';
   // Fase 3.2: a distribuição de % NÃO aparece mais no estado inicial (enviesa
   // o aluno). Vai pro painel "Dados", revelado só após responder.
-  if(!ref && !customTags) return '';
-  return `<div class="q-badges">${ref}${customTags}</div>`;
+  if(!ref && !customTags && !anuladaBadge) return '';
+  return `<div class="q-badges">${anuladaBadge}${ref}${customTags}</div>`;
 }
 
 // Y3: renderiza reference_text/reference_image individual da questão
@@ -16400,7 +16413,8 @@ Blocks.quiz = {
             return;
           }
           ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { selected:value, correct, doubt:existingDoubt });
-          if(window._recordPractice) window._recordPractice(ctx.unitId, correct);
+          // ANULADA não alimenta a sequência de acertos (nem quebra a sequência).
+          if(window._recordPractice && !(item.anulada || (window._isAnnulledItem && window._isAnnulledItem(item.id)))) window._recordPractice(ctx.unitId, correct);
           itemEl.querySelectorAll('.q-option').forEach((b,j) => {
             b.classList.remove('selected','correct','wrong');
             if(j === idx) b.classList.add(correct ? 'correct' : 'wrong', 'selected');
@@ -16458,16 +16472,20 @@ Blocks.quiz = {
         // Conta progresso. No modo adiado, NÃO revela acertos antes de
         // verificar: mostra "respondidas / total". No modo instantâneo, mantém
         // "X / Y corretas" como antes.
+        // ANULADA sai do numerador E do denominador (ver _isAnnulledItem).
+        const _contaveis = allItems.filter(it =>
+          !(it && (it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)))));
         let answered = 0, correctCount = 0;
-        allItems.forEach(it => {
+        _contaveis.forEach(it => {
           const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
           if(p && p.selected != null){ answered++; if(p.correct) correctCount++; }
         });
-        const remaining = allItems.length - answered;
+        const _totalContavel = _contaveis.length;
+        const remaining = _totalContavel - answered;
         if(counterEl) counterEl.textContent = defer
-          ? (answered + ' / ' + allItems.length + ' respondidas')
-          : (correctCount + ' / ' + allItems.length + ' corretas');
-        const pct = allItems.length ? Math.round((defer ? answered : correctCount)/allItems.length*100) : 0;
+          ? (answered + ' / ' + _totalContavel + ' respondidas')
+          : (correctCount + ' / ' + _totalContavel + ' corretas');
+        const pct = _totalContavel ? Math.round((defer ? answered : correctCount)/_totalContavel*100) : 0;
         if(barEl) barEl.style.width = pct + '%';
         if(remainEl) remainEl.textContent = remaining > 0 ? 'Faltam ' + remaining : 'Todas respondidas';
         // Detalhe do item ativo. No modo adiado, só revela gabarito/comentário/
@@ -16585,7 +16603,10 @@ Blocks.quiz = {
           allItems.forEach(it => {
             const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
             if(!p) return;
-            if(p.verified){ verifiedCount++; if(p.correct) verifiedCorrect++; }
+            // ANULADA: continua respondível e é revelada normalmente, mas não
+            // entra no "Você acertou X de Y" (ver _isAnnulledItem).
+            const _anul = !!(it && (it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id))));
+            if(p.verified){ if(!_anul){ verifiedCount++; if(p.correct) verifiedCorrect++; } }
             else if(p.selected != null){ unverified++; }
             if(p.selected != null) selected++;
           });
@@ -16663,7 +16684,8 @@ Blocks.quiz = {
                   // Verifica + SINCRONIZA (só agora conta na estatística global).
                   ctx.store.updateQuizAnswer(ctx.unitId, block.id, it.id,
                     { selected:p.selected, correct, verified:true, doubt:!!p.doubt });
-                  if(window._recordPractice) window._recordPractice(ctx.unitId, correct);
+                  // ANULADA não alimenta (nem quebra) a sequência de acertos.
+                  if(window._recordPractice && !(it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)))) window._recordPractice(ctx.unitId, correct);
                   const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
                   if(itemEl){
                     revealItem(itemEl, selIdx, correct);
@@ -31972,6 +31994,35 @@ function _getDerivedEBankMap(){
 // partir de uma questão do banco REAL (questoes.*, carregado em window._QBank).
 // Saída no MESMO formato que normalizeQuizBlock produz, pronta pro renderer (Q5).
 // Não é usada por nada ainda — é a fundação testável da migração.
+// ══ QUESTÃO ANULADA — fonte única ════════════════════════════════════════
+// Uma questão anulada não conta NEM como acerto NEM como erro: sai da conta
+// (numerador e denominador), como na prova original.
+// Consultamos o flag ATUAL do banco (questoes.questions / questoes.tf_items) em
+// vez do que ficou gravado na resposta — é isso que faz as respostas ANTIGAS,
+// dadas antes de a questão ser anulada, também saírem da conta, sem migração.
+// O _QBank é hidratado com select('*'), então a coluna chega sozinha.
+let _annulSetCache = null, _annulSetBank = null;
+function _annulledIdSet(){
+  const bank = window._QBank;
+  if(!bank) return null;
+  if(_annulSetCache && _annulSetBank === bank) return _annulSetCache;   // invalida se re-hidratar
+  const qAnul = new Set();
+  (bank.questions || []).forEach(function(q){ if(q && q.anulada) qAnul.add(String(q.id)); });
+  const set = new Set(qAnul);                       // MC: o item É a questão
+  (bank.tfItems || []).forEach(function(t){
+    if(!t) return;
+    if(t.anulada || qAnul.has(String(t.question_id))) set.add(String(t.id));   // item ou grupo anulado
+  });
+  _annulSetCache = set; _annulSetBank = bank;
+  return set;
+}
+// Recebe o id do item respondível (tf_item_id na C/E; question_id na MC).
+window._isAnnulledItem = function(itemId){
+  if(itemId == null) return false;
+  const s = _annulledIdSet();
+  return !!(s && s.has(String(itemId)));
+};
+
 function resolveBankGroup(questionId, itemIds, commentChoice){
   const bank = window._QBank;
   if(!bank || questionId == null) return null;
@@ -32010,6 +32061,9 @@ function resolveBankGroup(questionId, itemIds, commentChoice){
         year: (q.year != null) ? q.year : null,
         options: opts.map(o => o.opcao || ''),
         key: correct ? (correct.opcao || '') : '',
+        // Múltipla escolha: o item É a questão, então o flag dela vale direto.
+        // Sem isto o app do aluno nunca ficava sabendo da anulação.
+        anulada: !!q.anulada,
         tags: [], topics: [],
       }];
     }
@@ -32044,6 +32098,8 @@ function resolveBankGroup(questionId, itemIds, commentChoice){
         year: (q.year != null) ? q.year : null,
         options: ['Certo', 'Errado'],
         key: (t.key === true || t.key === 'Certo') ? 'Certo' : 'Errado',
+        // Anulada por ITEM, ou herdada da questão-mãe (grupo inteiro anulado).
+        anulada: !!(t.anulada || q.anulada),
         tags: [], topics: [],
       };
     });
@@ -32652,6 +32708,8 @@ function getUnitQuizStats(unit){
       let qgroups; try{ qgroups = normalizeQuizBlock(b); }catch(_){ qgroups = []; }
       qgroups.forEach(qg => (qg.items || []).forEach(it => {
         if(!it || it.id == null) return;
+        // ANULADA sai da conta (ver _isAnnulledItem).
+        if(it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id))) return;
         out.itemIds.push(it.id);
         const ans = Store.getQuizAnswer(unit.id, b.id, it.id);
         if(ans && ans.verified && ans.selected != null){
@@ -41967,6 +42025,10 @@ function buildPerformanceReport(){
           let _qg; try{ _qg = normalizeQuizBlock(b); }catch(_){ _qg = []; }
           _qg.forEach(qg => {
             (qg.items||[]).forEach(it => {
+              // ANULADA: sai da conta por inteiro (nem numerador nem denominador,
+              // nem "pendente"). Vale também pra quem respondeu ANTES da anulação,
+              // porque _isAnnulledItem olha o flag atual do banco.
+              if(it && (it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)))) return;
               const itTopics = Array.from(new Set([...(it.topics||[]), ...inheritTopics]));
               const itTags = Array.from(new Set([...(it.tags||[]), ...inheritTags]));
               const prior = Store.getQuizAnswer(unit.id, b.id, it.id);
@@ -42052,6 +42114,8 @@ function buildPerformanceReport(){
         const bTopics = b.topics||[];
         if(b.type==='quiz'){
           ((b.groups||[{items:b.items||[]}])).forEach(g=>(g.items||[]).forEach(it=>{
+            // ANULADA sai da conta (ver _isAnnulledItem).
+            if(it && (it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)))) return;
             const itT = Array.from(new Set([...(it.topics||[]),...bTopics]));
             itT.forEach(tid=>{ unitTopicAgg[tid]=unitTopicAgg[tid]||{quiz:{answered:0,total:0,correct:0},essay:{scoreTotal:0,maxTotal:0,submitted:0},completion:{num:0,denom:0},flashcards:{mastered:0,learning:0,unseen:0,total:0}}; unitTopicAgg[tid].quiz.total++; const p=(((state.quizAnswers||{})[pu.unitId]||{})[b.id]||{})[it.id]; if(p){unitTopicAgg[tid].quiz.answered++;if(p.correct)unitTopicAgg[tid].quiz.correct++;} });
           }));
@@ -42122,6 +42186,8 @@ function buildContextBreakdown(filterDef, kind, perUnit){
             const itTags = Array.from(new Set([...(it.tags||[]), ...blockTags]));
             const match = kind==='topic' ? itTopics.some(id => filterSet.has(id)) : itTags.includes(filterId);
             if(!match) return;
+            // ANULADA sai da conta (ver _isAnnulledItem).
+            if(it && (it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)))) return;
             touched = true;
             agg.quiz.total++;
             const prior = (((state.quizAnswers||{})[unit.id]||{})[b.id]||{})[it.id];
