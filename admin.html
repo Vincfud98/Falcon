@@ -8804,6 +8804,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           <div class="sub-h">
             <span class="sub-h-text">Unidades cadastradas</span>
             <span class="sub-h-rule"></span>
+            <button class="btn btn-ghost" id="btnRenumberUnits" title="Recalcula o número das unidades para ficar contínuo dentro de cada matéria (módulo → capítulo → unidade). Mostra o que vai mudar antes de gravar.">Renumerar unidades</button>
             <button class="btn" id="btnOpenCreateUnit">+ Criar Unidade</button>
           </div>
 
@@ -13041,7 +13042,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       <div class="sub-h"><span class="sub-h-text">Unidade</span><span class="sub-h-rule"></span></div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
         <div class="field" style="grid-column:1/-1"><label for="unit-title">Título *</label><input class="field-input" type="text" id="unit-title" placeholder="Título da unidade"></div>
-        <div class="field"><label for="unit-number">Número</label><input class="field-input" type="text" id="unit-number" placeholder="1, 2, 3..."></div>
+        <div class="field"><label for="unit-number">Número (automático)</label><input class="field-input" type="text" id="unit-number" readonly tabindex="-1" placeholder="—" title="Calculado pela posição da unidade na matéria (módulo → capítulo → unidade). Contínuo em toda a matéria." style="opacity:.7;cursor:not-allowed"><p class="s-body" style="font-size:.7rem;color:var(--text-mute);margin:.25rem 0 0">Contínuo na matéria, calculado pela posição. Não é editável.</p></div>
         <div class="field"><label for="unit-duration">Duração (min)</label><input class="field-input" type="number" id="unit-duration" placeholder="minutos"></div>
         <div class="field"><label for="unit-position">Posição</label><input class="field-input" type="number" id="unit-position" placeholder="1, 2, 3..."></div>
         <div class="field"><label for="unit-status">Status</label>
@@ -19197,19 +19198,113 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     document.getElementById('btnCreateUnitConfirm').disabled = !ok;
   }
 
+  // ══ NUMERAÇÃO CONTÍNUA DAS UNIDADES POR MATÉRIA ═══════════════════════════
+  // O `number` da unidade é DERIVADO da posição no curso: conta 01, 02, 03…
+  // seguindo módulo (position) → capítulo (position) → unidade (position),
+  // ATRAVESSANDO capítulos e módulos da mesma matéria. Antes o número era
+  // "quantas unidades já existem NESTE capítulo + 1", então zerava a cada
+  // capítulo/módulo novo (a 3ª unidade da matéria nascia como 01 no cap. 2).
+  // Estas funções são a fonte única: chame renumberSubjectUnits() sempre que a
+  // estrutura mudar (criar / apagar / mover / reordenar).
+
+  // FK do capítulo: no Supabase é course_chapter_id; no store local vira
+  // chapter_id (ver hidratação). Resolve os dois, como o resto do admin faz.
+  function _uhChapterIdOfUnit(u){
+    if(!u) return null;
+    return (u.course_chapter_id != null) ? u.course_chapter_id : u.chapter_id;
+  }
+
+  // Ordem canônica: position (nulo por último) → number → id.
+  function _uhCmp(a, b){
+    const pa = (a.position == null || a.position === '') ? Number.MAX_SAFE_INTEGER : Number(a.position);
+    const pb = (b.position == null || b.position === '') ? Number.MAX_SAFE_INTEGER : Number(b.position);
+    if(pa !== pb) return pa - pb;
+    const na = parseInt(a.number, 10), nb = parseInt(b.number, 10);
+    if(!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+    return String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
+  }
+
+  // Matéria de um capítulo (capítulo → módulo → matéria). String() dos dois lados:
+  // os ids têm tipos diferentes por tabela (modules.subject_id é número).
+  window._uhSubjectIdOfChapter = function(chapterId){
+    if(!window.UbiqueStore || chapterId == null) return null;
+    const ch = (UbiqueStore.chapters.list() || []).find(function(c){ return String(c.id) === String(chapterId); });
+    if(!ch) return null;
+    const mod = (UbiqueStore.modules.list() || []).find(function(m){ return String(m.id) === String(ch.module_id); });
+    return mod ? mod.subject_id : null;
+  };
+
+  // Unidades da matéria na ORDEM do curso (módulo → capítulo → unidade).
+  window.unitsOfSubjectInOrder = function(subjectId){
+    if(!window.UbiqueStore || subjectId == null) return [];
+    const mods = (UbiqueStore.modules.list() || [])
+      .filter(function(m){ return String(m.subject_id) === String(subjectId); }).sort(_uhCmp);
+    const chapters = UbiqueStore.chapters.list() || [];
+    const units = UbiqueStore.units.list() || [];
+    const out = [];
+    mods.forEach(function(m){
+      chapters.filter(function(c){ return String(c.module_id) === String(m.id); }).sort(_uhCmp)
+        .forEach(function(c){
+          units.filter(function(u){ return String(_uhChapterIdOfUnit(u)) === String(c.id); }).sort(_uhCmp)
+            .forEach(function(u){ out.push(u); });
+        });
+    });
+    return out;
+  };
+
+  // Recalcula e PERSISTE o número de todas as unidades de uma matéria.
+  // Devolve só o que mudou: [{id, title, from, to}]. opts.dryRun = só simula.
+  window.renumberSubjectUnits = async function(subjectId, opts){
+    opts = opts || {};
+    const ordered = window.unitsOfSubjectInOrder(subjectId);
+    const changes = [];
+    ordered.forEach(function(u, i){
+      const next = String(i + 1).padStart(2, '0');
+      const cur = (u.number == null) ? '' : String(u.number);
+      if(cur !== next) changes.push({ id: u.id, title: u.title || '', from: cur, to: next });
+    });
+    if(opts.dryRun) return changes;
+    for(const c of changes){
+      const idNum = isNaN(parseInt(c.id)) ? c.id : parseInt(c.id);
+      if(window.UBIQUE_USE_SUPABASE){
+        try{
+          const { error } = await conteudo().from('units').update({ number: c.to }).eq('id', idNum);
+          if(error){ console.warn('[renumerar] units.update falhou', c.id, error.message); continue; }
+        }catch(e){ console.warn('[renumerar] units.update exceção', c.id, e); continue; }
+      }
+      if(window.UbiqueStore) UbiqueStore.units.update(idNum, { number: c.to });
+    }
+    return changes;
+  };
+
+  // Atalho: renumera a matéria DONA de um capítulo (usado após criar/apagar/mover).
+  window.renumberSubjectOfChapter = async function(chapterId){
+    const sid = window._uhSubjectIdOfChapter(chapterId);
+    if(sid == null) return [];
+    return await window.renumberSubjectUnits(sid);
+  };
+
   async function cuCreateUnit(){
     if(!_cuSelectedChapter){ showMsg('cuModalMsg','Complete os 4 passos.'); return; }
     const title = document.getElementById('cuName').value.trim();
     if(!title){ showMsg('cuModalMsg','Nome da unidade é obrigatório.'); return; }
     const subtitle = document.getElementById('cuSubtitle').value.trim();
-    const sameChap = (window.UbiqueStore && window.UbiqueStore.units.list()) || [];
-    const position = sameChap.filter(function(u){return u.chapter_id === _cuSelectedChapter.id;}).length;
+    const allUnits = (window.UbiqueStore && window.UbiqueStore.units.list()) || [];
+    // position = ordem DENTRO do capítulo (continua por capítulo — é o que ordena
+    // as unidades ali). Só o `number` é contínuo na matéria.
+    const position = allUnits.filter(function(u){
+      return String(_uhChapterIdOfUnit(u)) === String(_cuSelectedChapter.id);
+    }).length;
+    // Número PROVISÓRIO (chute: entra no fim da matéria). Logo após inserir,
+    // renumberSubjectOfChapter recalcula a matéria inteira e corrige.
+    const _sid = window._uhSubjectIdOfChapter(_cuSelectedChapter.id);
+    const _provis = (_sid != null ? window.unitsOfSubjectInOrder(_sid).length : position) + 1;
 
     const localPayload = {
       chapter_id: _cuSelectedChapter.id,
       title: title,
       subtitle: subtitle || null,
-      number: String(position + 1).padStart(2,'0'),
+      number: String(_provis).padStart(2,'0'),
       description: null,
       cover_url: null,
       duration_min: null,
@@ -19245,6 +19340,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         supaId != null ? Object.assign({}, localPayload, { id: supaId }) : localPayload
       );
     }
+    // Numeração contínua: recalcula a matéria inteira (a nova unidade pode ter
+    // entrado num capítulo do meio, empurrando as seguintes).
+    try{ await window.renumberSubjectOfChapter(_cuSelectedChapter.id); }
+    catch(e){ console.warn('[renumerar] após criar unidade:', e); }
 
     document.getElementById('createUnitModal').classList.remove('active');
     if(typeof loadUnits === 'function') await loadUnits();
@@ -19272,14 +19371,66 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }
 
     // 2. UbiqueStore — cascade local (blocks/downloads)
+    // Guarda o capítulo ANTES de remover: sem ele não dá pra achar a matéria.
+    let _delChapterId = null;
     if(window.UbiqueStore){
+      const _u = (UbiqueStore.units.list() || []).find(function(x){ return String(x.id) === String(unitId); });
+      _delChapterId = _u ? _uhChapterIdOfUnit(_u) : null;
       UbiqueStore.unit_blocks.list().filter(function(b){return b.unit_id === unitId;}).forEach(function(b){UbiqueStore.unit_blocks.remove(b.id);});
       UbiqueStore.unit_downloads.list().filter(function(d){return d.unit_id === unitId;}).forEach(function(d){UbiqueStore.unit_downloads.remove(d.id);});
       UbiqueStore.units.remove(unitId);
     }
+    // Fecha o buraco na numeração da matéria.
+    try{ if(_delChapterId != null) await window.renumberSubjectOfChapter(_delChapterId); }
+    catch(e){ console.warn('[renumerar] após apagar unidade:', e); }
+
     if(typeof loadUnits === 'function') await loadUnits();
     renderUnitCards();
     showMsg('globalMessageUnits','Unidade apagada.', 'success');
+  };
+
+  // Botão "Renumerar unidades": recalcula a numeração contínua. Escopo = a matéria
+  // do filtro (se houver) ou TODAS. Mostra o que vai mudar e pede confirmação.
+  window.cuRenumberUnitsFlow = async function(){
+    if(!window.UbiqueStore){ alert('Conteúdo ainda não carregou. Tente de novo em instantes.'); return; }
+    const filtered = (window.unitsFilters && window.unitsFilters.subjectId) || null;
+    const subjects = (UbiqueStore.subjects.list() || [])
+      .filter(function(s){ return !filtered || String(s.id) === String(filtered); });
+    if(!subjects.length){ alert('Nenhuma matéria encontrada.'); return; }
+    const nomeDe = function(s){ return s.subject || s.title || s.name || ('Matéria ' + s.id); };
+
+    // 1) Simula pra montar a prévia (não grava nada)
+    const preview = [];
+    for(const s of subjects){
+      const ch = await window.renumberSubjectUnits(s.id, { dryRun: true });
+      if(ch.length) preview.push({ subject: s, changes: ch });
+    }
+    if(!preview.length){
+      alert('A numeração já está correta' + (filtered ? ' nesta matéria.' : ' em todas as matérias.'));
+      return;
+    }
+    const total = preview.reduce(function(n, p){ return n + p.changes.length; }, 0);
+    let msg = 'Vou renumerar ' + total + (total === 1 ? ' unidade' : ' unidades') + ':\n\n';
+    preview.slice(0, 8).forEach(function(p){
+      msg += '• ' + nomeDe(p.subject) + ' — ' + p.changes.length + (p.changes.length === 1 ? ' unidade' : ' unidades') + '\n';
+      p.changes.slice(0, 4).forEach(function(c){
+        msg += '     ' + (c.from || '—') + ' → ' + c.to + '   ' + String(c.title || '').slice(0, 42) + '\n';
+      });
+      if(p.changes.length > 4) msg += '     …e mais ' + (p.changes.length - 4) + '\n';
+    });
+    if(preview.length > 8) msg += '\n…e mais ' + (preview.length - 8) + ' matéria(s).';
+    msg += '\n\nConfirmar?';
+    if(!confirm(msg)) return;
+
+    // 2) Aplica de verdade
+    let applied = 0;
+    for(const p of preview){
+      try{ const done = await window.renumberSubjectUnits(p.subject.id); applied += done.length; }
+      catch(e){ console.warn('[renumerar] matéria ' + p.subject.id + ':', e); }
+    }
+    if(typeof loadUnits === 'function') await loadUnits();
+    if(typeof renderUnitCards === 'function') renderUnitCards();
+    showMsg('globalMessageUnits', applied + (applied === 1 ? ' unidade renumerada.' : ' unidades renumeradas.'), 'success');
   };
 
   window.openCreateUnitModal = openCreateUnitModal;
@@ -19292,6 +19443,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       const t = e.target.closest('[id]');
       if(!t) return;
       if(t.id === 'btnOpenCreateUnit') openCreateUnitModal();
+      else if(t.id === 'btnRenumberUnits') window.cuRenumberUnitsFlow();
       else if(t.id === 'btnCreateUnitConfirm') cuCreateUnit();
     });
     document.addEventListener('input', function(e){
@@ -20027,6 +20179,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     await loadSubjects();
     if(typeof loadModules === 'function') await loadModules();
     if(typeof loadCourseChapters === 'function') await loadCourseChapters();
+    // A ordem de módulos/capítulos pode ter mudado → a numeração contínua das
+    // unidades da matéria tem que acompanhar.
+    try{
+      if(subjectId != null){
+        await window.renumberSubjectUnits(subjectId);
+        if(typeof loadUnits === 'function') await loadUnits();
+      }
+    }catch(e){ console.warn('[renumerar] após salvar estrutura da matéria:', e); }
     showMsg('globalMessageGerenciar', csEditingId ? 'Matéria atualizada.' : 'Matéria criada.', 'success');
   }
 
@@ -27156,10 +27316,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(!title){ showMsg('unitModalMsg','Título obrigatório.'); return; }
 
     // Payload pro UbiqueStore (usa chapter_id como referência local)
+    // `number` NÃO entra aqui: é derivado da posição na matéria e recalculado por
+    // renumberSubjectUnits no fim desta função (o campo do form é só leitura).
     const localPayload = {
       chapter_id: chapterId,
       title,
-      number: document.getElementById('unit-number').value.trim() || null,
       subtitle: document.getElementById('unit-subtitle').value.trim() || null,
       description: document.getElementById('unit-description').value.trim() || null,
       cover_url: document.getElementById('unit-cover').value.trim() || null,
@@ -27224,6 +27385,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         savedUnitId = supaId;
       }
     }
+
+    // Numeração contínua na matéria: a posição pode ter mudado (ou é unidade
+    // nova), então recalcula a matéria inteira.
+    try{ await window.renumberSubjectOfChapter(chapterId); }
+    catch(e){ console.warn('[renumerar] após salvar unidade:', e); }
 
     // Persiste vínculos com edital (diff insert/delete via RPC) usando o
     // unitId definitivo (recém-criado ou existente). Erros parciais logam
