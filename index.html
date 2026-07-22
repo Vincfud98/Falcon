@@ -41267,6 +41267,516 @@ function openPerfComparisonModal(){
 }
 window.openPerfComparisonModal = openPerfComparisonModal;
 
+/* ══ TEMPO DE ESTUDO — Fase 1 (relógio + auto-timer) ════════════════════
+   Registra sessões de estudo em aluno.study_sessions. Três modos manuais
+   (Cronômetro, Timer, Inserir) + AUTO-TIMER (ideia do chefe): ao entrar numa
+   unidade o relógio dispara sozinho; ao sair, salva com toast Editar/Apagar.
+   Anti-inflação do auto: pausa por inatividade (5min) e por aba oculta;
+   1 sessão ativa por vez (manual rodando → auto não conta em dobro); mínimo
+   de 3min para salvar. Pill flutuante SÓ com sessão rodando (padrão do botão
+   do tutor). Estado persiste em localStorage (sobrevive a reload; sessão
+   auto órfã de outra visita é salva no próximo boot).
+   A aba Rotina (gráficos/heatmap/metas) é a Fase 2 — mockup-rotina.html. */
+const StudyTimer = (function(){
+  const LS_KEY = 'ubq_st_active_v1';
+  const IDLE_MS = 5 * 60 * 1000;       // 5min sem interação → pausa o auto
+  const MIN_AUTO_SEC = 180;            // auto só salva com 3min+ (anti-ruído)
+  const now = () => Date.now();
+
+  let S = null;                        // sessão ativa (ou null)
+  let _tick = null, _overlay = null, _view = 'crono', _editRow = null;
+  let _bootAuto = null, _bootClaimT = null;
+
+  /* ── estado persistente ── */
+  function _save(){ try{ if(S) localStorage.setItem(LS_KEY, JSON.stringify(S)); else localStorage.removeItem(LS_KEY); }catch(_){} }
+  function _load(){ try{ const r = localStorage.getItem(LS_KEY); return r ? JSON.parse(r) : null; }catch(_){ return null; } }
+
+  function _esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  // dia LOCAL do navegador (toISOString seria UTC e viraria o dia na madrugada)
+  function _diaLocal(ts){
+    const d = ts ? new Date(ts) : new Date();
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  }
+  function _fmt(sec){
+    sec = Math.max(0, Math.round(sec));
+    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+    return (h ? String(h).padStart(2,'0') + ':' : '') + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+  }
+  function _fmtMin(min){
+    min = Math.max(1, Math.round(min));
+    const h = Math.floor(min/60), m = min%60;
+    return h ? (h + 'h' + (m ? String(m).padStart(2,'0') : '')) : (m + 'min');
+  }
+  function _elapsedSec(){
+    if(!S) return 0;
+    return (S.accSec || 0) + (S.running ? (now() - S.startedAt)/1000 : 0);
+  }
+
+  /* ── catálogo: matérias do aluno + categorias Revisão/Simulado ── */
+  function _matOptions(){
+    const out = [];
+    ((window.COURSES || []).filter(Boolean)).forEach(function(c){
+      if(c._subjectId != null) out.push({ id: 'm:' + c._subjectId, nome: c.title || ('Matéria ' + c._subjectId), sigla: c.sigla || '' });
+    });
+    out.push({ id: 'revisao', nome: 'Revisão', sigla: 'REV' });
+    out.push({ id: 'simulado', nome: 'Simulado', sigla: 'SIM' });
+    return out;
+  }
+  function _unitOptions(subjectId){
+    const c = ((window.COURSES || []).filter(Boolean)).find(function(x){ return String(x._subjectId) === String(subjectId); });
+    if(!c) return [];
+    const out = [];
+    (c.modules || []).forEach(function(m){
+      (typeof Util !== 'undefined' && Util.unitsOfModule ? Util.unitsOfModule(m) : []).forEach(function(e){
+        if(e.unit && e.unit.id != null){
+          const n = String(e.unit.number || '').trim(), t = String(e.unit.title || '').trim();
+          out.push({ id: String(e.unit.id), nome: (n && t) ? (n + ' · ' + t) : (t || ('Unidade ' + e.unit.id)) });
+        }
+      });
+    });
+    return out;
+  }
+  function _catInfo(catKey){
+    if(catKey === 'revisao') return { categoria: 'revisao', subjectId: null, nome: 'Revisão', sigla: 'REV' };
+    if(catKey === 'simulado') return { categoria: 'simulado', subjectId: null, nome: 'Simulado', sigla: 'SIM' };
+    if(String(catKey || '').indexOf('m:') === 0){
+      const sid = String(catKey).slice(2);
+      const o = _matOptions().find(function(x){ return x.id === catKey; });
+      return { categoria: 'materia', subjectId: sid, nome: (o && o.nome) || ('Matéria ' + sid), sigla: (o && o.sigla) || '' };
+    }
+    return null;
+  }
+
+  /* ── gravação no banco ── */
+  async function _insertSession(row){
+    const uid = (typeof _currentSupaUserId === 'function') ? _currentSupaUserId() : null;
+    if(!uid || !window._sb) return null;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('study_sessions')
+        .insert(Object.assign({ user_id: uid }, row)).select('id').single();
+      if(error){ console.warn('[study] insert:', error.message); return null; }
+      return data && data.id;
+    }catch(e){ console.warn('[study] insert ex:', e); return null; }
+  }
+  async function _updateSession(id, patch){
+    try{
+      const { error } = await window._sb.schema('aluno').from('study_sessions').update(patch).eq('id', id);
+      if(error) console.warn('[study] update:', error.message);
+      return !error;
+    }catch(e){ return false; }
+  }
+  async function _deleteSession(id){
+    try{
+      const { error } = await window._sb.schema('aluno').from('study_sessions').delete().eq('id', id);
+      return !error;
+    }catch(e){ return false; }
+  }
+
+  /* ── estilos (tokens do app; dd = porte do .dd da maquete, mesmas lições
+        do rx-dd: --bg-elevated e raio fixo, nada de var inexistente) ── */
+  function _ensureStyles(){
+    if(document.getElementById('stStyles')) return;
+    const st = document.createElement('style'); st.id = 'stStyles';
+    st.textContent = [
+      '.st-overlay{position:fixed;inset:0;z-index:920;background:rgba(8,9,12,.78);backdrop-filter:blur(3px);display:flex;align-items:flex-start;justify-content:center;overflow-y:auto;padding:6vh 1rem}',
+      '.st-modal{width:min(460px,100%);background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:1.5rem 1.6rem;position:relative}',
+      '.st-close{position:absolute;top:.8rem;right:.95rem;background:none;border:none;color:var(--text-mute);font-size:1.25rem;cursor:pointer;line-height:1}',
+      '.st-close:hover{color:var(--text)}',
+      '.st-title{font-family:var(--serif);font-size:1.3rem;color:var(--text);margin:.1rem 0 .9rem}',
+      '.st-pills{display:flex;gap:.35rem;flex-wrap:wrap;margin-bottom:1rem}',
+      '.st-pill{background:var(--bg-elevated);border:1px solid var(--border);color:var(--text-dim);font-size:.7rem;padding:.34rem .8rem;border-radius:99px;cursor:pointer;font-family:var(--sans)}',
+      '.st-pill.on{border-color:var(--accent);color:var(--accent)}',
+      '.st-field{margin:.55rem 0}',
+      '.st-field label{display:block;font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute);margin-bottom:.3rem}',
+      '.st-input{width:100%;background:var(--bg-elevated);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:.5rem .7rem;font-size:.85rem;font-family:var(--sans);color-scheme:dark}',
+      '.st-clock{font-family:var(--mono);font-size:2.4rem;text-align:center;letter-spacing:.05em;margin:.9rem 0 .3rem;color:var(--text)}',
+      '.st-ctx{text-align:center;font-size:.72rem;color:var(--text-dim);margin-bottom:.6rem;min-height:1em}',
+      '.st-btnrow{display:flex;gap:.55rem;justify-content:center;flex-wrap:wrap;margin-top:.9rem}',
+      '.st-hint{font-size:.68rem;color:var(--text-mute);text-align:center;margin-top:.7rem;line-height:1.5}',
+      // dropdown (mesmo visual do rx-dd)
+      '.st-dd{position:relative;width:100%}',
+      '.st-dd-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:.6rem;padding:.5rem .7rem;background:var(--bg-elevated);cursor:pointer;border:1px solid var(--border);border-radius:4px;font-family:var(--sans);font-size:.83rem;color:var(--text);text-align:left}',
+      '.st-dd-lab{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.st-dd-lab.is-empty{color:var(--text-mute)}',
+      '.st-dd-caret{width:11px;height:11px;stroke:var(--accent);fill:none;stroke-width:1.8;flex-shrink:0}',
+      '.st-dd-menu{position:absolute;top:calc(100% + .3rem);left:0;right:0;background:var(--bg-elevated,#181a20);border:1px solid var(--accent-border,rgba(200,169,126,.25));border-radius:4px;padding:.3rem;z-index:50;max-height:220px;overflow-y:auto;box-shadow:0 20px 50px -20px rgba(0,0,0,.7);display:none}',
+      '.st-dd.is-open .st-dd-menu{display:block}',
+      '.st-dd-item{display:block;width:100%;text-align:left;background:none;border:none;padding:.42rem .6rem;border-radius:2px;font-family:var(--sans);font-size:.8rem;color:var(--text-dim);cursor:pointer;line-height:1.4}',
+      '.st-dd-item:hover{background:var(--accent-lo,rgba(200,169,126,.12));color:var(--accent)}',
+      '.st-dd-item.is-selected{color:var(--accent)}',
+      // pill flutuante (só com sessão rodando)
+      '.st-float{position:fixed;right:1.3rem;bottom:1.3rem;z-index:910;background:var(--bg-elevated);border:1px solid var(--accent-border,rgba(200,169,126,.3));border-radius:99px;padding:.5rem .95rem .5rem .75rem;display:flex;align-items:center;gap:.55rem;box-shadow:0 18px 44px -18px rgba(0,0,0,.7);cursor:pointer}',
+      '.st-float .dot{width:8px;height:8px;border-radius:50%;background:#5dd49f;animation:stpulse 1.6s infinite}',
+      '@keyframes stpulse{0%,100%{opacity:1}50%{opacity:.35}}',
+      '.st-float .tm{font-family:var(--mono);font-size:.84rem;color:var(--text)}',
+      '.st-float .mat{font-size:.64rem;color:var(--text-mute)}',
+      // toast pós-salvar (auto e manual)
+      '.st-toast{position:fixed;left:1.3rem;bottom:1.3rem;z-index:915;background:var(--bg-elevated);border:1px solid var(--accent-border,rgba(200,169,126,.3));border-left:3px solid var(--accent);border-radius:4px;padding:.75rem .95rem;font-size:.75rem;color:var(--text-dim);max-width:340px;line-height:1.55;box-shadow:0 18px 44px -18px rgba(0,0,0,.7)}',
+      '.st-toast b{color:var(--text);font-weight:600}',
+      '.st-toast a{color:var(--accent);cursor:pointer;margin-right:.7rem}',
+    ].join('\n');
+    document.head.appendChild(st);
+  }
+
+  /* ── pill flutuante ── */
+  function _pillUpdate(){
+    let el = document.getElementById('stFloat');
+    const on = !!(S && S.running);
+    if(!on){ if(el) el.remove(); return; }
+    _ensureStyles();
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'stFloat'; el.className = 'st-float';
+      el.innerHTML = '<span class="dot"></span><span class="tm"></span><span class="mat"></span>';
+      el.addEventListener('click', function(){ open(); });
+      document.body.appendChild(el);
+    }
+    el.querySelector('.tm').textContent = _fmt(S.mode === 'timer' ? Math.max(0, (S.targetSec || 0) - _elapsedSec()) : _elapsedSec());
+    el.querySelector('.mat').textContent = (S.sigla || '') + (S.kind === 'auto' ? ' · auto' : '');
+  }
+
+  function _tickStart(){
+    _pillUpdate();                     // pill aparece JÁ, não no 1º tick
+    if(_tick) return;
+    _tick = setInterval(function(){
+      if(!S){ _tickStop(); return; }
+      // timer chegou ao fim → salva sozinho
+      if(S.kind === 'manual' && S.mode === 'timer' && S.running && _elapsedSec() >= (S.targetSec || 0)){
+        _finishAndSave();
+        return;
+      }
+      // auto: pausa por inatividade
+      if(S.kind === 'auto' && S.running && (now() - (S.lastActivityAt || now())) > IDLE_MS){
+        S.accSec = (S.accSec || 0) + Math.max(0, ((S.lastActivityAt || now()) - S.startedAt)/1000);
+        S.running = false; _save();
+      }
+      _pillUpdate();
+      const d = document.getElementById('stClock');
+      if(d) d.textContent = _fmt(S.mode === 'timer' ? Math.max(0, (S.targetSec || 0) - _elapsedSec()) : _elapsedSec());
+    }, 1000);
+  }
+  function _tickStop(){ if(_tick){ clearInterval(_tick); _tick = null; } _pillUpdate(); }
+
+  /* ── atividade (alimenta o anti-idle do auto) ── */
+  let _actBound = false;
+  function _bindActivity(){
+    if(_actBound) return; _actBound = true;
+    let last = 0;
+    const mark = function(){
+      const t = now();
+      if(t - last < 5000) return;   // throttle
+      last = t;
+      if(S && S.kind === 'auto'){
+        S.lastActivityAt = t;
+        if(!S.running){ S.running = true; S.startedAt = t; _save(); _tickStart(); }
+        _save();
+      }
+    };
+    ['pointermove','pointerdown','keydown','scroll','touchstart'].forEach(function(ev){
+      document.addEventListener(ev, mark, { passive: true });
+    });
+    document.addEventListener('visibilitychange', function(){
+      if(!S || S.kind !== 'auto') return;
+      if(document.hidden && S.running){
+        S.accSec = (S.accSec || 0) + Math.max(0, (now() - S.startedAt)/1000);
+        S.running = false; _save(); _pillUpdate();
+      } else if(!document.hidden && !S.running && String(window._currentUnitId || '') === String(S.unitId || '')){
+        S.running = true; S.startedAt = now(); S.lastActivityAt = now(); _save(); _tickStart();
+      }
+    });
+  }
+
+  /* ── toast pós-salvar (Editar / Apagar) ── */
+  function _toast(rowId, resumo, rowData){
+    document.querySelectorAll('.st-toast').forEach(function(t){ t.remove(); });
+    _ensureStyles();
+    const t = document.createElement('div');
+    t.className = 'st-toast';
+    t.innerHTML = '<b>Estudo registrado:</b> ' + _esc(resumo) + '.<br>' +
+      '<a data-st-act="edit">Editar</a><a data-st-act="del">Apagar</a>';
+    t.querySelector('[data-st-act="edit"]').addEventListener('click', function(){
+      t.remove(); _editRow = Object.assign({ id: rowId }, rowData); open('inserir');
+    });
+    t.querySelector('[data-st-act="del"]').addEventListener('click', async function(){
+      t.remove(); if(rowId) await _deleteSession(rowId);
+    });
+    document.body.appendChild(t);
+    setTimeout(function(){ if(t.isConnected) t.remove(); }, 15000);
+  }
+
+  /* ── finalizar sessão ativa (manual ou auto) e salvar ── */
+  async function _finishAndSave(){
+    if(!S) return;
+    const total = _elapsedSec();
+    const sess = S; S = null; _save(); _tickStop();
+    const box = _overlay && _overlay.querySelector('.st-body');
+    if(box) _renderModal(box);
+    const minSec = sess.kind === 'auto' ? MIN_AUTO_SEC : 30;
+    if(total < minSec) return;   // curto demais → descarta em silêncio
+    const row = {
+      dia: _diaLocal(sess.startedAt0 || sess.startedAt),
+      categoria: sess.categoria || 'materia',
+      subject_id: sess.subjectId != null ? String(sess.subjectId) : null,
+      assunto: (sess.assunto || '').slice(0, 200) || null,
+      unit_id: sess.unitId != null ? String(sess.unitId) : null,
+      duration_min: Math.max(1, Math.round(total / 60)),
+      source: sess.kind === 'auto' ? 'auto' : (sess.mode === 'timer' ? 'timer' : 'cronometro'),
+    };
+    const id = await _insertSession(row);
+    const resumo = _fmtMin(row.duration_min) + ' em ' + (sess.nome || 'Estudo') + (sess.unitLabel ? ' · ' + sess.unitLabel : '');
+    _toast(id, resumo, row);
+  }
+  function _discard(){
+    S = null; _save(); _tickStop();
+    const box = _overlay && _overlay.querySelector('.st-body');
+    if(box) _renderModal(box);
+  }
+
+  /* ── AUTO-TIMER: chamado pelo App.render quando a unidade muda ── */
+  function onUnitChange(unitId){
+    _bindActivity();
+    // sessão auto pendente de boot esperando o "dono" reaparecer?
+    if(_bootAuto){
+      if(unitId && String(_bootAuto.unitId) === String(unitId)){
+        S = _bootAuto; _bootAuto = null;
+        S.running = true; S.startedAt = now(); S.lastActivityAt = now();
+        _save(); _tickStart(); return;
+      }
+      _flushBootAuto();
+    }
+    // saiu da unidade da sessão auto corrente → finaliza e salva
+    if(S && S.kind === 'auto' && String(S.unitId || '') !== String(unitId || '')){
+      _finishAndSave();
+    }
+    // entrou numa unidade sem sessão ativa → dispara o auto
+    if(unitId && !S){
+      const meta = (typeof _unitMetaById === 'function') ? (_unitMetaById(unitId) || {}) : {};
+      S = {
+        kind: 'auto', mode: 'crono', running: true,
+        startedAt: now(), startedAt0: now(), accSec: 0, lastActivityAt: now(),
+        categoria: 'materia',
+        subjectId: meta.subjectId || null,
+        nome: meta.subjectFull || 'Estudo',
+        sigla: meta.sigla || '',
+        unitId: String(unitId),
+        unitLabel: ((meta.number ? meta.number + ' · ' : '') + (meta.title || '')).trim(),
+        assunto: '',
+      };
+      _save(); _tickStart();
+    }
+  }
+  // sessão auto órfã de uma visita anterior (aba fechada no meio): salva agora.
+  async function _flushBootAuto(){
+    const a = _bootAuto; _bootAuto = null;
+    if(!a) return;
+    const total = (a.accSec || 0) + (a.running ? Math.max(0, ((a.lastActivityAt || a.startedAt) - a.startedAt)/1000) : 0);
+    if(total < MIN_AUTO_SEC) return;
+    const row = {
+      dia: _diaLocal(a.startedAt0 || a.startedAt),
+      categoria: a.categoria || 'materia',
+      subject_id: a.subjectId != null ? String(a.subjectId) : null,
+      assunto: null,
+      unit_id: a.unitId != null ? String(a.unitId) : null,
+      duration_min: Math.max(1, Math.round(total / 60)),
+      source: 'auto',
+    };
+    const id = await _insertSession(row);
+    if(id) _toast(id, _fmtMin(row.duration_min) + ' em ' + (a.nome || 'Estudo') + ' (sessão anterior)', row);
+  }
+
+  /* ── modal ── */
+  function _dd(id, opts, cur, emptyLabel){
+    const sel = opts.find(function(o){ return String(cur || '') === String(o.id); });
+    return '<div class="st-dd" id="' + id + '">' +
+      '<button type="button" class="st-dd-btn"><span class="st-dd-lab' + (sel ? '' : ' is-empty') + '">' + _esc(sel ? sel.nome : emptyLabel) + '</span>' +
+      '<svg class="st-dd-caret" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></button>' +
+      '<div class="st-dd-menu"><button type="button" class="st-dd-item" data-v="">' + _esc(emptyLabel) + '</button>' +
+      opts.map(function(o){ return '<button type="button" class="st-dd-item' + (sel && String(sel.id) === String(o.id) ? ' is-selected' : '') + '" data-v="' + _esc(String(o.id)) + '">' + _esc(o.nome) + '</button>'; }).join('') +
+      '</div></div>';
+  }
+  function _bindDd(box, id, onPick){
+    const dd = box.querySelector('#' + id);
+    if(!dd) return;
+    dd.querySelector('.st-dd-btn').addEventListener('click', function(ev){
+      ev.stopPropagation();
+      const abrindo = !dd.classList.contains('is-open');
+      box.querySelectorAll('.st-dd.is-open').forEach(function(o){ o.classList.remove('is-open'); });
+      if(abrindo) dd.classList.add('is-open');
+    });
+    dd.querySelectorAll('.st-dd-item').forEach(function(it){
+      it.addEventListener('click', function(ev){ ev.stopPropagation(); dd.classList.remove('is-open'); onPick(it.getAttribute('data-v') || ''); });
+    });
+  }
+
+  // rascunho do formulário (contexto escolhido antes de iniciar / no inserir)
+  let F = { catKey: '', unitId: '', assunto: '', dia: '', durMin: '', timerMin: 25 };
+
+  function _renderModal(box){
+    // Com sessão ativa existe a aba "Em andamento" (view padrão); as outras
+    // continuam acessíveis — iniciar um manual FINALIZA a sessão corrente
+    // (1 por vez, nunca conta em dobro).
+    if(_view === 'sessao' && !S) _view = 'crono';
+    if(S && ['crono','timer','inserir'].indexOf(_view) < 0) _view = 'sessao';
+    const running = !!S && _view === 'sessao';
+    const cat = _catInfo(F.catKey);
+    const mats = _matOptions();
+    const units = (cat && cat.categoria === 'materia') ? _unitOptions(cat.subjectId) : [];
+    const abas = (S ? [['sessao','Em andamento']] : []).concat([['crono','Cronômetro'],['timer','Timer'],['inserir','Inserir']]);
+    let h = '<div class="st-pills">' +
+      abas.map(function(p){
+        return '<button type="button" class="st-pill' + (_view === p[0] ? ' on' : '') + '" data-st-view="' + p[0] + '">' + p[1] + '</button>';
+      }).join('') + '</div>';
+
+    if(running){
+      // sessão ativa (manual ou auto): mostra o relógio e os controles dela
+      h += '<div class="st-clock" id="stClock">' + _fmt(S.mode === 'timer' ? Math.max(0, (S.targetSec || 0) - _elapsedSec()) : _elapsedSec()) + '</div>' +
+        '<div class="st-ctx">' + _esc((S.nome || '') + (S.unitLabel ? ' · ' + S.unitLabel : '')) + (S.kind === 'auto' ? ' <span style="color:var(--text-mute)">(automático da unidade)</span>' : '') + '</div>' +
+        (S.kind !== 'auto' ? '<div class="st-field"><label>Assunto (opcional)</label><input class="st-input" id="stAssunto" value="' + _esc(S.assunto || '') + '" maxlength="200"></div>' : '') +
+        '<div class="st-btnrow">' +
+          (S.running ? '<button type="button" class="btn-ghost" id="stPause">Pausar</button>' : '<button type="button" class="btn-ghost" id="stResume">Retomar</button>') +
+          '<button type="button" class="btn-primary" id="stFinish">Encerrar e salvar</button>' +
+        '</div>' +
+        '<div class="st-btnrow"><button type="button" class="btn-ghost" id="stDiscard" style="font-size:.68rem;padding:.3rem .8rem;opacity:.7">Descartar sessão</button></div>';
+      box.innerHTML = h;
+      const pa = box.querySelector('#stPause');
+      if(pa) pa.addEventListener('click', function(){ S.accSec = _elapsedSec(); S.running = false; _save(); _pillUpdate(); _renderModal(box); });
+      const re = box.querySelector('#stResume');
+      if(re) re.addEventListener('click', function(){ S.startedAt = now(); S.running = true; S.lastActivityAt = now(); _save(); _tickStart(); _renderModal(box); });
+      box.querySelector('#stFinish').addEventListener('click', function(){
+        const a = box.querySelector('#stAssunto'); if(a && S) S.assunto = a.value;
+        _finishAndSave();
+      });
+      box.querySelector('#stDiscard').addEventListener('click', _discard);
+      const asn = box.querySelector('#stAssunto');
+      if(asn && S) asn.addEventListener('input', function(){ S.assunto = asn.value; _save(); });
+      return;
+    }
+
+    if(_view === 'inserir'){
+      const editando = !!_editRow;
+      h += '<div class="st-field"><label>Dia</label><input type="date" class="st-input" id="stDia" value="' + _esc(F.dia || _diaLocal()) + '"></div>' +
+        '<div class="st-field"><label>Matéria</label>' + _dd('stMat', mats, F.catKey, 'Escolha a matéria') + '</div>' +
+        (units.length ? '<div class="st-field"><label>Unidade (opcional)</label>' + _dd('stUni', units, F.unitId, 'Sem unidade específica') + '</div>' : '') +
+        '<div class="st-field"><label>Assunto (opcional)</label><input class="st-input" id="stAss" value="' + _esc(F.assunto) + '" maxlength="200" placeholder="ex.: Inconfidência Mineira"></div>' +
+        '<div class="st-field"><label>Duração (minutos)</label><input type="number" class="st-input" id="stDur" min="1" max="1440" value="' + _esc(F.durMin) + '" placeholder="ex.: 90"></div>' +
+        '<div class="st-btnrow"><button type="button" class="btn-primary" id="stSalvar">' + (editando ? 'Salvar alterações' : 'Salvar') + '</button></div>';
+      box.innerHTML = h;
+      _bindDd(box, 'stMat', function(v){ F.catKey = v; F.unitId = ''; _renderModal(box); });
+      _bindDd(box, 'stUni', function(v){ F.unitId = v; _renderModal(box); });
+      const sync = function(){ F.dia = box.querySelector('#stDia').value; F.assunto = box.querySelector('#stAss').value; F.durMin = box.querySelector('#stDur').value; };
+      box.querySelector('#stSalvar').addEventListener('click', async function(){
+        sync();
+        const c = _catInfo(F.catKey);
+        const dur = parseInt(F.durMin, 10);
+        if(!c || !F.dia || !dur || dur < 1){ box.querySelector('#stDur').focus(); return; }
+        const row = {
+          dia: F.dia, categoria: c.categoria,
+          subject_id: c.subjectId != null ? String(c.subjectId) : null,
+          assunto: (F.assunto || '').slice(0, 200) || null,
+          unit_id: F.unitId || null,
+          duration_min: Math.min(1440, dur),
+          source: editando ? (_editRow.source || 'manual') : 'manual',
+        };
+        if(editando){
+          await _updateSession(_editRow.id, row);
+          _editRow = null;
+        } else {
+          const id = await _insertSession(row);
+          _toast(id, _fmtMin(row.duration_min) + ' em ' + c.nome, row);
+        }
+        F = { catKey: '', unitId: '', assunto: '', dia: '', durMin: '', timerMin: F.timerMin };
+        _close();
+      });
+      return;
+    }
+
+    // crono/timer parados: contexto + iniciar
+    h += '<div class="st-field"><label>Matéria</label>' + _dd('stMat', mats, F.catKey, 'Escolha a matéria') + '</div>' +
+      (units.length ? '<div class="st-field"><label>Unidade (opcional)</label>' + _dd('stUni', units, F.unitId, 'Sem unidade específica') + '</div>' : '') +
+      '<div class="st-field"><label>Assunto (opcional)</label><input class="st-input" id="stAss" value="' + _esc(F.assunto) + '" maxlength="200"></div>' +
+      (_view === 'timer' ? '<div class="st-field"><label>Duração do timer (minutos)</label><input type="number" class="st-input" id="stTmin" min="1" max="480" value="' + _esc(F.timerMin) + '"></div>' : '') +
+      '<div class="st-btnrow"><button type="button" class="btn-primary" id="stStart">Iniciar ' + (_view === 'timer' ? 'timer' : 'cronômetro') + '</button></div>' +
+      '<div class="st-hint">Dentro de uma unidade o relógio já corre sozinho — este card serve para estudo fora da plataforma, Revisão e Simulado.</div>';
+    box.innerHTML = h;
+    _bindDd(box, 'stMat', function(v){ F.catKey = v; F.unitId = ''; _renderModal(box); });
+    _bindDd(box, 'stUni', function(v){ F.unitId = v; _renderModal(box); });
+    box.querySelector('#stStart').addEventListener('click', async function(){
+      const c = _catInfo(F.catKey);
+      if(!c) return;
+      const ass = box.querySelector('#stAss'); F.assunto = ass ? ass.value : '';
+      const modoEscolhido = _view;   // _finishAndSave pode re-renderizar; congela o modo
+      const tmin = _view === 'timer' ? Math.max(1, Math.min(480, parseInt((box.querySelector('#stTmin') || {}).value, 10) || 25)) : 0;
+      F.timerMin = tmin || F.timerMin;
+      // 1 sessão por vez: iniciar um manual FINALIZA a corrente (auto ou manual)
+      if(S) await _finishAndSave();
+      _view = modoEscolhido;
+      const uo = _unitOptions(c.subjectId).find(function(u){ return String(u.id) === String(F.unitId); });
+      S = {
+        kind: 'manual', mode: _view === 'timer' ? 'timer' : 'crono', running: true,
+        startedAt: now(), startedAt0: now(), accSec: 0,
+        targetSec: _view === 'timer' ? tmin * 60 : 0,
+        categoria: c.categoria, subjectId: c.subjectId, nome: c.nome, sigla: c.sigla,
+        unitId: F.unitId || null, unitLabel: uo ? uo.nome : '',
+        assunto: F.assunto || '',
+      };
+      _view = 'sessao';               // iniciou → cai na aba "Em andamento"
+      _save(); _tickStart(); _renderModal(box);
+    });
+  }
+
+  function _close(){
+    if(_overlay){ _overlay.remove(); _overlay = null; }
+    document.body.style.overflow = '';
+  }
+  function open(view){
+    _ensureStyles(); _bindActivity();
+    if(view) _view = view;
+    else if(S) _view = 'sessao';       // pill/reabertura caem na sessão ativa
+    if(_editRow){
+      _view = 'inserir';
+      F.catKey = _editRow.categoria === 'materia' ? ('m:' + _editRow.subject_id) : _editRow.categoria;
+      F.unitId = _editRow.unit_id || '';
+      F.assunto = _editRow.assunto || '';
+      F.dia = _editRow.dia || '';
+      F.durMin = _editRow.duration_min || '';
+    } else if(!S && window._currentUnitId){
+      // prefill pelo contexto da unidade aberta
+      const meta = (typeof _unitMetaById === 'function') ? (_unitMetaById(window._currentUnitId) || {}) : {};
+      if(meta.subjectId){ F.catKey = 'm:' + meta.subjectId; F.unitId = String(window._currentUnitId); }
+    }
+    if(_overlay) _overlay.remove();
+    _overlay = document.createElement('div');
+    _overlay.className = 'st-overlay';
+    _overlay.innerHTML = '<div class="st-modal"><button type="button" class="st-close" title="Fechar">×</button>' +
+      '<div class="st-title">Registrar estudo</div><div class="st-body"></div></div>';
+    _overlay.addEventListener('click', function(e){ if(e.target === _overlay) _close(); });
+    _overlay.querySelector('.st-close').addEventListener('click', _close);
+    document.body.appendChild(_overlay);
+    const box = _overlay.querySelector('.st-body');
+    _renderModal(box);
+    _overlay.querySelector('.st-modal').addEventListener('click', function(e){
+      const v = e.target.closest && e.target.closest('[data-st-view]');
+      if(v){ _view = v.getAttribute('data-st-view'); _renderModal(box); }
+      if(!e.target.closest('.st-dd')) _overlay.querySelectorAll('.st-dd.is-open').forEach(function(o){ o.classList.remove('is-open'); });
+    });
+  }
+
+  /* ── boot: retoma sessão persistida ── */
+  (function(){
+    const saved = _load();
+    if(!saved) return;
+    if(saved.kind === 'manual'){
+      S = saved; _tickStart();          // cronômetro/timer seguem através do reload
+    } else if(saved.kind === 'auto'){
+      _bootAuto = saved;                // espera a unidade reabrir; senão, salva o órfão
+      _bootClaimT = setTimeout(function(){ if(_bootAuto) _flushBootAuto(); }, 8000);
+    }
+  })();
+
+  return { open: open, onUnitChange: onUnitChange };
+})();
+window.StudyTimer = StudyTimer;
+
 /* ══ RAIO-X DO DESEMPENHO ═══════════════════════════════════════════════
    Diagnóstico QUALITATIVO do perfil de erro (ideia do Diego/chefe): a Edge
    Function `raiox` agrega os números em código, manda os agregados + amostra
@@ -42526,6 +43036,9 @@ Renderers.performance = function(route){
       <button type="button" class="btn-primary" id="raioxBtn" title="Diagnóstico por IA do seu perfil de erro nas questões de Certo/Errado — leitura, atenção, viés C×E e prioridades">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:.4rem"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>Raio-X do desempenho
       </button>
+      <button type="button" class="btn-ghost" id="studyTimerBtn" title="Cronômetro, timer ou inserir tempo de estudo manualmente — alimenta os gráficos da futura aba Rotina">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:.4rem"><circle cx="12" cy="13" r="8"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="9" y1="2" x2="15" y2="2"/></svg>Registrar estudo
+      </button>
       ${window.PERF_SHOW_CERT ? `<a class="btn-ghost" href="#/certificate">${Icons.download} Ver certificado</a>` : ''}
     </div>
   </div>
@@ -42578,6 +43091,10 @@ Renderers.performance.mount = function(stageEl, route){
   // Raio-X do desempenho (diagnóstico por IA) — abre o modal do módulo RaioX.
   const _rxBtn = stageEl.querySelector('#raioxBtn');
   if(_rxBtn) _rxBtn.addEventListener('click', function(){ if(window.RaioX) RaioX.open(); });
+
+  // Registrar estudo (Fase 1 do tempo de estudo) — abre o modal do StudyTimer.
+  const _stBtn = stageEl.querySelector('#studyTimerBtn');
+  if(_stBtn) _stBtn.addEventListener('click', function(){ if(window.StudyTimer) StudyTimer.open(); });
 
   // Avatar do radar: aplica a foto com o crop do usuário (photoTransform).
   const _radarAv = stageEl.querySelector('[data-radar-avatar]');
@@ -45371,6 +45888,9 @@ const App = {
       if(user && String(window._currentUnitId || '') !== String(_newUnit || '')){
         window._currentUnitId = _newUnit;
         if(typeof _onUnitChange === 'function') _onUnitChange(_newUnit);
+        // Auto-timer do tempo de estudo (Fase 1): entra na unidade → dispara;
+        // sai → finaliza e salva com toast Editar/Apagar.
+        if(window.StudyTimer) StudyTimer.onUnitChange(_newUnit);
       }
     }
     // Saiu da página de Salas com o chat aberto? Desliga a marca "estou vendo o
