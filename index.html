@@ -41314,6 +41314,9 @@ const RaioX = (function(){
       '.rx-per button.on{border-color:var(--accent);color:var(--accent)}',
       '.rx-per-custom{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin:0 0 .8rem;font-size:.75rem;color:var(--text-dim)}',
       '.rx-per-custom input{background:var(--bg-elevated);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:.3rem .45rem;font-size:.75rem;font-family:var(--sans);color-scheme:dark}',
+      '.rx-rec{display:flex;gap:.5rem;flex-wrap:wrap;margin:.1rem 0 .7rem}',
+      '.rx-rec select{background:var(--bg-elevated);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:.32rem .45rem;font-size:.74rem;font-family:var(--sans);max-width:100%;color-scheme:dark}',
+      '.rx-rec-hint{flex-basis:100%;font-size:.7rem;color:#e0b45a}',
       '.rx-hl{background:rgba(200,169,126,.22);color:var(--accent);font-style:normal;font-weight:600;padding:0 .15em;border-radius:2px}',
       '.rx-dica{margin-top:.45rem;font-size:.8rem;color:var(--accent);font-family:var(--sans)}',
       '.rx-chart{margin:.7rem 0 .2rem}',
@@ -41391,12 +41394,89 @@ const RaioX = (function(){
   // o aluno pode focar o Raio-X numa só. Default: todas.
   let _materia = 'todas';
 
+  // Recorte MICRO dentro da matéria (Etapa C): Estrutura (módulo→capítulo→
+  // unidade) ou Edital (tópico→subtópico). O CLIENTE resolve a seleção em
+  // listas (unidades = metadata.unit_id das respostas; questões etiquetadas
+  // no tópico) e a EF só filtra. null = matéria inteira.
+  let _recorte = null;
+
+  function _courseOfMateria(sid){
+    return ((window.COURSES || []).filter(Boolean)).find(function(c){ return String(c._subjectId) === String(sid); }) || null;
+  }
+  // Raiz do edital da matéria: o subject_id na raiz é a ponte oficial; sem
+  // ele, cai no voto por unidades (_bankSubjectIdOfMateria, o mesmo do Portal).
+  function _rootTopicOfMateria(sid){
+    const roots = (window.BankFilters && BankFilters.availableEditalTopics) ? BankFilters.availableEditalTopics(null, null) : [];
+    let r = roots.find(function(t){ return t.subject_id != null && String(t.subject_id) === String(sid); });
+    if(!r && typeof _bankSubjectIdOfMateria === 'function'){
+      r = roots.find(function(t){ return String(_bankSubjectIdOfMateria(t.id) || '') === String(sid); });
+    }
+    return r || null;
+  }
+  // Resolve a seleção atual no payload {modo, label, unit_ids, question_ids}
+  // que a EF entende — ou null (sem recorte / nada escolhido).
+  function _recortePayload(){
+    if(!_recorte || _materia === 'todas') return null;
+    if(_recorte.modo === 'estrutura'){
+      if(!_recorte.moduleId && !_recorte.chapterId && !_recorte.unitId) return null;
+      const course = _courseOfMateria(_materia);
+      if(!course) return null;
+      const entries = [];
+      (course.modules || []).forEach(function(m){
+        if(_recorte.moduleId && String(m.id) !== String(_recorte.moduleId)) return;
+        Util.unitsOfModule(m).forEach(function(e){
+          if(_recorte.chapterId && String(e.chapterId) !== String(_recorte.chapterId)) return;
+          if(_recorte.unitId && String(e.unit.id) !== String(_recorte.unitId)) return;
+          entries.push({ e: e, m: m });
+        });
+      });
+      const parts = [];
+      if(_recorte.moduleId){ const m = (course.modules || []).find(function(x){ return String(x.id) === String(_recorte.moduleId); }); if(m) parts.push(m.label || m.title || 'Módulo'); }
+      if(_recorte.chapterId){ const c = entries[0] && entries[0].e.chapter; parts.push((c && (c.label || c.title || c.name)) || 'Capítulo'); }
+      if(_recorte.unitId){ const en = entries.find(function(x){ return String(x.e.unit.id) === String(_recorte.unitId); }); if(en) parts.push(en.e.unit.title || 'Unidade'); }
+      return { modo: 'estrutura', label: parts.join(' › '),
+        unit_ids: entries.map(function(x){ return String(x.e.unit.id); }).slice(0, 2000), question_ids: [] };
+    }
+    if(_recorte.modo === 'edital'){
+      const topicId = _recorte.subId || _recorte.topicId;
+      if(!topicId) return null;
+      const desc = new Set(((typeof _bankEditalDescendants === 'function') ? _bankEditalDescendants(topicId) : [String(topicId)]).map(String));
+      const question_ids = [];
+      const tbq = (window._QBank && _QBank.topicsByQuestion) || {};
+      Object.keys(tbq).forEach(function(qid){
+        if((tbq[qid] || []).some(function(t){ return desc.has(String(t)); })) question_ids.push(String(qid));
+      });
+      // Unidades vinculadas ao tópico (vínculo indireto) — store id → id do app.
+      const unit_ids = [];
+      try{
+        const links = (typeof _expandTopicUnitLinks === 'function') ? _expandTopicUnitLinks() : {};
+        const storeIds = new Set();
+        Object.keys(links).forEach(function(t){ if(desc.has(String(t))) links[t].forEach(function(u){ storeIds.add(String(u)); }); });
+        if(storeIds.size){
+          const course = _courseOfMateria(_materia);
+          if(course) (course.modules || []).forEach(function(m){
+            Util.unitsOfModule(m).forEach(function(e){
+              if(e.unit && e.unit._storeId != null && storeIds.has(String(e.unit._storeId))) unit_ids.push(String(e.unit.id));
+            });
+          });
+        }
+      }catch(_){}
+      let label = 'Tópico do edital';
+      try{
+        const t = (UbiqueStore.edital_topics.list() || []).find(function(x){ return String(x.id) === String(topicId); });
+        if(t) label = ((t.code ? t.code + ' ' : '') + (t.title || 'Tópico')).trim();
+      }catch(_){}
+      return { modo: 'edital', label: label, unit_ids: unit_ids.slice(0, 2000), question_ids: question_ids.slice(0, 4000) };
+    }
+    return null;
+  }
+
   async function _preflight(body){
     body.innerHTML = '<div class="rx-spin"><div class="rx-dot"></div><div>Verificando sua amostra de questões…</div></div>';
     let pf = null;
     try{
       const r = await Promise.race([
-        window._sb.functions.invoke('raiox', { body: { mode: 'preflight', incluir_ubique: _incUbique, periodo: _periodo, materia: _materia } }),
+        window._sb.functions.invoke('raiox', { body: { mode: 'preflight', incluir_ubique: _incUbique, periodo: _periodo, materia: _materia, recorte: _recortePayload() } }),
         new Promise(function(res){ setTimeout(function(){ res({ error: { message: 'timeout' } }); }, 30000); }),
       ]);
       if(r && r.data && r.data.ok) pf = r.data;
@@ -41413,6 +41493,7 @@ const RaioX = (function(){
     _incUbique = false;
     _periodo = { tipo: 'total' };
     _materia = 'todas';
+    _recorte = null;
     await _preflight(body);
   }
 
@@ -41425,10 +41506,12 @@ const RaioX = (function(){
     const podeAmostra = !!pf.eligible;
     const podeSaldo = pf.ilimitado || (Number(pf.saldo) >= Number(pf.price));
     const perAtivo = _periodo.tipo !== 'total';
+    const rcAtivo = !!pf.recorte;
+    const minNeeded = pf.min_needed || pf.min_total;
     let aviso = '';
-    if(!podeAmostra) aviso = perAtivo
-      ? '<p class="rx-sub" style="color:#e0b45a">Poucas respostas no período escolhido (' + pf.total + ' de ' + pf.min_total + ' necessárias). Amplie o período ou responda mais questões.</p>'
-      : '<p class="rx-sub" style="color:#e0b45a">Responda pelo menos ' + pf.min_total + ' questões de Certo/Errado (faltam ' + (pf.min_total - pf.total) + ') para liberar o Raio-X — assim a análise é fiel, não chute. Uma unidade tem ~50 questões.</p>';
+    if(!podeAmostra) aviso = (perAtivo || rcAtivo)
+      ? '<p class="rx-sub" style="color:#e0b45a">Poucas respostas no ' + (rcAtivo ? 'recorte' : 'período') + ' escolhido (' + pf.total + ' de ' + minNeeded + ' necessárias). Amplie o ' + (rcAtivo ? 'recorte' : 'período') + ' ou responda mais questões.</p>'
+      : '<p class="rx-sub" style="color:#e0b45a">Responda pelo menos ' + minNeeded + ' questões de Certo/Errado (faltam ' + (minNeeded - pf.total) + ') para liberar o Raio-X — assim a análise é fiel, não chute. Uma unidade tem ~50 questões.</p>';
     else if(!podeSaldo) aviso = '<p class="rx-sub" style="color:#e0b45a">Saldo insuficiente (' + _ubt(pf.saldo) + '). Adicione UbiTokens na sua Carteira (Minha Conta).</p>';
     const perOpts = [['semana','Semana'],['mes','Mês'],['3m','3 meses'],['6m','6 meses'],['1a','1 ano'],['total','Total'],['custom','Personalizado']];
     const pills = '<div class="rx-per" id="rxPer">' + perOpts.map(function(o){
@@ -41444,12 +41527,62 @@ const RaioX = (function(){
           return '<button type="button" data-mat="' + _esc(String(s.id)) + '"' + (_materia === String(s.id) ? ' class="on"' : '') + '>' + _esc(s.nome) + '</button>';
         }).join('') + '</div>'
       : '';
+    // Recorte micro (só com matéria escolhida): Estrutura ou Edital, selects
+    // em cascata (cada nível filtra o de baixo, como no Portal).
+    const recorteUI = (_materia !== 'todas') ? (function(){
+      function _sel(id, opts, cur, emptyLabel){
+        return '<select id="' + id + '"><option value="">' + _esc(emptyLabel) + '</option>' +
+          opts.map(function(o){ return '<option value="' + _esc(String(o.id)) + '"' + (String(cur || '') === String(o.id) ? ' selected' : '') + '>' + _esc(o.nome) + '</option>'; }).join('') + '</select>';
+      }
+      const modo = (_recorte && _recorte.modo) || '';
+      let out = '<div class="rx-sec-h" style="margin:.5rem 0 .35rem">Recorte (opcional)</div>' +
+        '<div class="rx-per" id="rxRecModo">' +
+        [['', 'Matéria inteira'], ['estrutura', 'Estrutura'], ['edital', 'Edital']].map(function(o){
+          return '<button type="button" data-rec-modo="' + o[0] + '"' + (modo === o[0] ? ' class="on"' : '') + '>' + o[1] + '</button>';
+        }).join('') + '</div>';
+      if(modo === 'estrutura'){
+        const course = _courseOfMateria(_materia);
+        const mods = ((course && course.modules) || []).map(function(m){ return { id: m.id, nome: m.label || m.title || ('Módulo ' + m.id) }; });
+        const caps = [], unis = [];
+        if(_recorte.moduleId && course){
+          const m = (course.modules || []).find(function(x){ return String(x.id) === String(_recorte.moduleId); });
+          const seen = {};
+          if(m) Util.unitsOfModule(m).forEach(function(e){
+            if(e.chapterId != null && !seen[String(e.chapterId)]){ seen[String(e.chapterId)] = 1; caps.push({ id: e.chapterId, nome: (e.chapter && (e.chapter.label || e.chapter.title || e.chapter.name)) || 'Capítulo' }); }
+            if(_recorte.chapterId && String(e.chapterId) === String(_recorte.chapterId)) unis.push({ id: e.unit.id, nome: e.unit.title || 'Unidade' });
+          });
+        }
+        out += '<div class="rx-rec">' +
+          _sel('rxRecMod', mods, _recorte.moduleId, 'Todos os módulos') +
+          (_recorte.moduleId && caps.length ? _sel('rxRecCap', caps, _recorte.chapterId, 'Todos os capítulos') : '') +
+          (_recorte.chapterId && unis.length ? _sel('rxRecUni', unis, _recorte.unitId, 'Todas as unidades') : '') +
+          '</div>';
+      } else if(modo === 'edital'){
+        const root = _rootTopicOfMateria(_materia);
+        const asOpt = function(t){ return { id: t.id, nome: ((t.code ? t.code + ' ' : '') + t.title).trim() }; };
+        const tops = root ? BankFilters.availableEditalTopics(root.id, null).map(asOpt) : [];
+        const subs = _recorte.topicId ? BankFilters.availableEditalTopics(_recorte.topicId, null).map(asOpt) : [];
+        let hint = '';
+        if(_recorte.topicId){
+          const pl = _recortePayload();
+          if(pl && !pl.unit_ids.length && !pl.question_ids.length) hint = '<span class="rx-rec-hint">Esse tópico ainda não tem questões nem unidades vinculadas — a análise sairia vazia.</span>';
+        }
+        out += root
+          ? '<div class="rx-rec">' + _sel('rxRecTop', tops, _recorte.topicId, 'Escolha o tópico') +
+            (_recorte.topicId && subs.length ? _sel('rxRecSub', subs, _recorte.subId, 'Tópico inteiro') : '') + hint + '</div>'
+          : '<div class="rx-rec"><span class="rx-rec-hint">Esta matéria ainda não tem edital vinculado.</span></div>';
+      }
+      if(pf.recorte && pf.recorte.label){
+        out += '<div style="font-size:.72rem;color:var(--text-dim);margin:-.3rem 0 .6rem">No recorte <strong style="color:var(--text)">' + _esc(pf.recorte.label) + '</strong>: ' + pf.total + ' respondidas.</div>';
+      }
+      return out;
+    })() : '';
     body.innerHTML =
       '<span class="s-label">Diagnóstico</span>' +
       '<h2 class="rx-title">Raio-X do desempenho</h2>' +
       '<p class="rx-sub">Um treinador que olhou cada resposta sua: <strong>por que</strong> você erra (leitura, extrapolação, atenção, pegadinha, viés Certo×Errado), matéria por matéria, comparado com a média da plataforma e com o seu Raio-X anterior. Analisa suas questões de Certo/Errado do banco (simulados fora).</p>' +
       '<div class="rx-sec-h" style="margin-bottom:.35rem">Período da análise</div>' +
-      pills + customRow + matPills +
+      pills + customRow + matPills + recorteUI +
       '<table class="rx-table"><tbody>' + (linhas || '<tr><td>Nenhuma resposta' + (perAtivo ? ' nesse período' : ' ainda') + '.</td></tr>') + '</tbody></table>' +
       '<label style="display:flex;gap:.55rem;align-items:flex-start;font-size:.82rem;color:var(--text-dim);line-height:1.5;margin:.2rem 0 .4rem;cursor:pointer">' +
         '<input type="checkbox" id="rxIncUb"' + (pf.incluir_ubique ? ' checked' : '') + ' style="margin-top:.25rem">' +
@@ -41490,8 +41623,28 @@ const RaioX = (function(){
     // Matéria → refaz a pré-checagem focada nela (as pílulas listam o
     // universo completo do período; o servidor filtra o analisado).
     body.querySelectorAll('#rxMat button').forEach(function(b){
-      b.addEventListener('click', function(){ _materia = b.getAttribute('data-mat') || 'todas'; _preflight(body); });
+      b.addEventListener('click', function(){ _materia = b.getAttribute('data-mat') || 'todas'; _recorte = null; _preflight(body); });
     });
+    // Recorte micro: trocar o MODO sem seleção só re-renderiza (mostra os
+    // selects); se já havia recorte aplicado, refaz a pré-checagem. Cada
+    // select em cascata reseta os níveis abaixo e refaz a contagem.
+    body.querySelectorAll('#rxRecModo button').forEach(function(b){
+      b.addEventListener('click', function(){
+        const mo = b.getAttribute('data-rec-modo') || '';
+        const tinhaRecorte = !!_recortePayload();
+        _recorte = mo ? { modo: mo } : null;
+        if(tinhaRecorte) _preflight(body); else _renderPreflight(body, pf);
+      });
+    });
+    function _bindRecSel(id, apply){
+      const el = body.querySelector('#' + id);
+      if(el) el.addEventListener('change', function(){ apply(el.value); _preflight(body); });
+    }
+    _bindRecSel('rxRecMod', function(v){ _recorte = { modo: 'estrutura', moduleId: v || null }; });
+    _bindRecSel('rxRecCap', function(v){ _recorte = { modo: 'estrutura', moduleId: _recorte.moduleId, chapterId: v || null }; });
+    _bindRecSel('rxRecUni', function(v){ _recorte = { modo: 'estrutura', moduleId: _recorte.moduleId, chapterId: _recorte.chapterId, unitId: v || null }; });
+    _bindRecSel('rxRecTop', function(v){ _recorte = { modo: 'edital', topicId: v || null }; });
+    _bindRecSel('rxRecSub', function(v){ _recorte = { modo: 'edital', topicId: _recorte.topicId, subId: v || null }; });
     _loadHistory(body.querySelector('#rxHist'));
   }
 
@@ -41505,7 +41658,8 @@ const RaioX = (function(){
       host.innerHTML = '<div class="rx-sec-h">Meus Raio-X anteriores</div>' + data.map(function(r, i){
         const pl = (r.aggregates && r.aggregates.periodo && r.aggregates.periodo.label && r.aggregates.periodo.label !== 'todo o histórico') ? ' · ' + r.aggregates.periodo.label : '';
         const ml = (r.aggregates && r.aggregates.materia_filtro && r.aggregates.materia_filtro.nome) ? ' · ' + r.aggregates.materia_filtro.nome : '';
-        const nome = r.titulo ? r.titulo : ('Raio-X de ' + _fmtData(r.created_at) + pl + ml);
+        const rl = (r.aggregates && r.aggregates.recorte && r.aggregates.recorte.label) ? ' · ' + r.aggregates.recorte.label : '';
+        const nome = r.titulo ? r.titulo : ('Raio-X de ' + _fmtData(r.created_at) + pl + ml + rl);
         return '<div class="rx-hist-item" data-rx-idx="' + i + '">' +
           '<span class="rx-hist-name">' + _esc(nome) + '</span>' +
           '<span class="rx-hist-actions">' +
@@ -41593,7 +41747,7 @@ const RaioX = (function(){
       let out = null;
       try{
         const r = await Promise.race([
-          window._sb.functions.invoke('raiox', { body: { mode: 'generate', incluir_ubique: _incUbique, periodo: _periodo, materia: _materia } }),
+          window._sb.functions.invoke('raiox', { body: { mode: 'generate', incluir_ubique: _incUbique, periodo: _periodo, materia: _materia, recorte: _recortePayload() } }),
           new Promise(function(res){ setTimeout(function(){ res({ error: { message: 'timeout' } }); }, 300000); }),
         ]);
         out = r && r.data ? r.data : null;
@@ -41768,8 +41922,9 @@ const RaioX = (function(){
     const geral = ag.geral || {};
     const perLab = (ag.periodo && ag.periodo.label && ag.periodo.label !== 'todo o histórico') ? ' · ' + ag.periodo.label : '';
     const matLab = (ag.materia_filtro && ag.materia_filtro.nome) ? ' · ' + ag.materia_filtro.nome : '';
+    const rcLab = (ag.recorte && ag.recorte.label) ? ' · ' + ag.recorte.label : '';
     body.innerHTML =
-      '<span class="s-label">' + (report.titulo ? _esc(report.titulo) + ' · ' : '') + 'Raio-X de ' + _fmtData(report.created_at) + _esc(perLab) + _esc(matLab) + (fromHistory ? ' (arquivado)' : '') + '</span>' +
+      '<span class="s-label">' + (report.titulo ? _esc(report.titulo) + ' · ' : '') + 'Raio-X de ' + _fmtData(report.created_at) + _esc(perLab) + _esc(matLab) + _esc(rcLab) + (fromHistory ? ' (arquivado)' : '') + '</span>' +
       '<h2 class="rx-title">Seu perfil de erro</h2>' +
       (geral.n ? '<p class="rx-sub">' + geral.n + ' questões de Certo/Errado analisadas · ' + (geral.pct_acerto != null ? geral.pct_acerto + '% de acerto geral' : '') + '</p>' : '') +
       _boardFromReport(f, ag) +
@@ -41810,7 +41965,8 @@ const RaioX = (function(){
     const agD = report.aggregates || {};
     const perLabD = (agD.periodo && agD.periodo.label && agD.periodo.label !== 'todo o histórico') ? agD.periodo.label : '';
     const matLabD = (agD.materia_filtro && agD.materia_filtro.nome) ? agD.materia_filtro.nome : '';
-    const coverSub = [nome, _fmtData(report.created_at), perLabD, matLabD].filter(Boolean).join(' · ');
+    const rcLabD = (agD.recorte && agD.recorte.label) ? agD.recorte.label : '';
+    const coverSub = [nome, _fmtData(report.created_at), perLabD, matLabD, rcLabD].filter(Boolean).join(' · ');
     const ch = _chartsFromAgg(agD);
     const sec = function(t, x){ return x ? '<h2>' + _esc(t) + '</h2><p>' + _esc(x).replace(/\n/g, '<br>') + '</p>' : ''; };
     const list = function(t, arr, fmt){ return (Array.isArray(arr) && arr.length) ? '<h2>' + _esc(t) + '</h2><ul>' + arr.map(fmt).join('') + '</ul>' : ''; };
