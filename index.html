@@ -41400,8 +41400,26 @@ const RaioX = (function(){
   // no tópico) e a EF só filtra. null = matéria inteira.
   let _recorte = null;
 
+  // Incluir a análise das discursivas? Default SIM quando há amostra (3+
+  // corrigidas) — o preço sobe para o da acao raiox_discursivas. O aluno
+  // desliga se quiser só as objetivas (preço base).
+  let _incDisc = true;
+
   function _courseOfMateria(sid){
     return ((window.COURSES || []).filter(Boolean)).find(function(c){ return String(c._subjectId) === String(sid); }) || null;
+  }
+  // Todas as unidades (id do app) da matéria escolhida — é assim que a EF
+  // filtra as DISCURSIVAS por matéria (redação não tem subject_id no servidor;
+  // a resposta guarda o unit_id).
+  function _materiaUnitIds(){
+    if(_materia === 'todas') return [];
+    const course = _courseOfMateria(_materia);
+    if(!course) return [];
+    const out = [];
+    (course.modules || []).forEach(function(m){
+      Util.unitsOfModule(m).forEach(function(e){ if(e.unit && e.unit.id != null) out.push(String(e.unit.id)); });
+    });
+    return out.slice(0, 2000);
   }
   // Raiz do edital da matéria: o subject_id na raiz é a ponte oficial; sem
   // ele, cai no voto por unidades (_bankSubjectIdOfMateria, o mesmo do Portal).
@@ -41476,7 +41494,7 @@ const RaioX = (function(){
     let pf = null;
     try{
       const r = await Promise.race([
-        window._sb.functions.invoke('raiox', { body: { mode: 'preflight', incluir_ubique: _incUbique, periodo: _periodo, materia: _materia, recorte: _recortePayload() } }),
+        window._sb.functions.invoke('raiox', { body: { mode: 'preflight', incluir_ubique: _incUbique, periodo: _periodo, materia: _materia, recorte: _recortePayload(), incluir_discursivas: _incDisc, materia_unit_ids: _materiaUnitIds() } }),
         new Promise(function(res){ setTimeout(function(){ res({ error: { message: 'timeout' } }); }, 30000); }),
       ]);
       if(r && r.data && r.data.ok) pf = r.data;
@@ -41494,6 +41512,7 @@ const RaioX = (function(){
     _periodo = { tipo: 'total' };
     _materia = 'todas';
     _recorte = null;
+    _incDisc = true;
     await _preflight(body);
   }
 
@@ -41504,7 +41523,11 @@ const RaioX = (function(){
       return '<tr><td>' + _esc(s.nome) + '</td><td>' + s.n + ' respondidas</td><td>' + okTxt + '</td></tr>';
     }).join('');
     const podeAmostra = !!pf.eligible;
-    const podeSaldo = pf.ilimitado || (Number(pf.saldo) >= Number(pf.price));
+    // Preço efetivo: com a análise das discursivas ligada (e elegível), vale o
+    // preço da acao raiox_discursivas; senão, o base.
+    const discOk = !!(pf.essays && pf.essays.eligible);
+    const precoEfetivo = (discOk && _incDisc && pf.price_disc != null) ? pf.price_disc : pf.price;
+    const podeSaldo = pf.ilimitado || (Number(pf.saldo) >= Number(precoEfetivo));
     const perAtivo = _periodo.tipo !== 'total';
     const rcAtivo = !!pf.recorte;
     const minNeeded = pf.min_needed || pf.min_total;
@@ -41588,9 +41611,15 @@ const RaioX = (function(){
         '<input type="checkbox" id="rxIncUb"' + (pf.incluir_ubique ? ' checked' : '') + ' style="margin-top:.25rem">' +
         '<span><strong style="color:var(--text)">Incluir questões Ubique</strong> (inéditas da equipe) — soma ' + (pf.ubique_respondidas || 0) + ' respostas à amostra. Desligado, a análise usa só questões que já caíram em prova.</span>' +
       '</label>' +
+      (pf.essays ? (discOk
+        ? '<label style="display:flex;gap:.55rem;align-items:flex-start;font-size:.82rem;color:var(--text-dim);line-height:1.5;margin:.2rem 0 .4rem;cursor:pointer">' +
+            '<input type="checkbox" id="rxIncDisc"' + (_incDisc ? ' checked' : '') + ' style="margin-top:.25rem">' +
+            '<span><strong style="color:var(--text)">Incluir análise das discursivas</strong> (' + (pf.essays.n === 1 ? '1 corrigida' : pf.essays.n + ' corrigidas') + ') — o Raio-X ganha uma segunda parte, sobre a sua escrita, e passa a custar ' + _ubt(pf.price_disc) + '.</span>' +
+          '</label>'
+        : '<div style="font-size:.78rem;color:var(--text-mute);margin:.2rem 0 .5rem">Análise das discursivas: você tem ' + pf.essays.n + ' corrigida' + (pf.essays.n === 1 ? '' : 's') + ' — com ' + pf.essays.min + ' o Raio-X ganha uma segunda parte, sobre a sua escrita.</div>') : '') +
       aviso +
       '<div class="rx-row">' +
-        '<span class="rx-price">Custo: ' + _ubt(pf.price) + (pf.ilimitado ? ' (sua conta é ilimitada)' : ' · seu saldo: ' + _ubt(pf.saldo)) + '</span>' +
+        '<span class="rx-price">Custo: ' + _ubt(precoEfetivo) + (pf.ilimitado ? ' (sua conta é ilimitada)' : ' · seu saldo: ' + _ubt(pf.saldo)) + '</span>' +
         '<button type="button" class="btn-primary" id="rxGerar"' + ((podeAmostra && podeSaldo) ? '' : ' disabled style="opacity:.5;cursor:not-allowed"') + '>Gerar Raio-X</button>' +
       '</div>' +
       '<div class="rx-hist" id="rxHist"></div>';
@@ -41599,6 +41628,9 @@ const RaioX = (function(){
     // Toggle Ubique → refaz a pré-checagem com o novo recorte (contagens mudam).
     const tg = body.querySelector('#rxIncUb');
     if(tg) tg.addEventListener('change', function(){ _incUbique = !!tg.checked; _preflight(body); });
+    // Toggle discursivas → só o preço muda; re-render local, sem buscar.
+    const td = body.querySelector('#rxIncDisc');
+    if(td) td.addEventListener('change', function(){ _incDisc = !!td.checked; _renderPreflight(body, pf); });
     // Período → pílula fixa refaz a pré-checagem; Personalizado abre as datas
     // (sem buscar) e o Aplicar dispara com o intervalo escolhido.
     body.querySelectorAll('#rxPer button').forEach(function(b){
@@ -41747,7 +41779,7 @@ const RaioX = (function(){
       let out = null;
       try{
         const r = await Promise.race([
-          window._sb.functions.invoke('raiox', { body: { mode: 'generate', incluir_ubique: _incUbique, periodo: _periodo, materia: _materia, recorte: _recortePayload() } }),
+          window._sb.functions.invoke('raiox', { body: { mode: 'generate', incluir_ubique: _incUbique, periodo: _periodo, materia: _materia, recorte: _recortePayload(), incluir_discursivas: _incDisc, materia_unit_ids: _materiaUnitIds() } }),
           new Promise(function(res){ setTimeout(function(){ res({ error: { message: 'timeout' } }); }, 300000); }),
         ]);
         out = r && r.data ? r.data : null;
@@ -41787,8 +41819,9 @@ const RaioX = (function(){
   function _evHtml(arr){
     if(!Array.isArray(arr) || !arr.length) return '';
     return arr.map(function(e){
+      const met = e.materia || e.origem;   // objetivas: matéria; discursivas: qual redação
       return '<div class="rx-ev"><div class="rx-ev-t">&ldquo;' + _hlTrecho(e.trecho, e.destaque) + '&rdquo;</div>' +
-        (e.materia ? '<div class="rx-ev-m">' + _esc(e.materia) + '</div>' : '') +
+        (met ? '<div class="rx-ev-m">' + _esc(met) + '</div>' : '') +
         (e.o_que_houve ? '<div class="rx-ev-c">' + _esc(e.o_que_houve) + '</div>' : '') + '</div>';
     }).join('');
   }
@@ -41847,7 +41880,16 @@ const RaioX = (function(){
         return _barRow(lab, m.pct_acerto, m.respondidas + ' resp.');
       }).join('') + '</div>';
     }
-    return { vies: vies, dif: dif, ling: ling, evo: evo };
+    // Discursivas: nota média por mês (quando a Parte 2 existe).
+    let disc = '';
+    const dm = ((ag && ag.discursivas && ag.discursivas.evolucao_mensal) || []).slice(-8);
+    if(dm.length >= 2){
+      disc = '<div class="rx-chart">' + dm.map(function(m){
+        const lab = m.mes ? (m.mes.slice(5, 7) + '/' + m.mes.slice(0, 4)) : '';
+        return _barRow(lab, m.media_pct, m.n + (m.n === 1 ? ' discursiva' : ' discursivas'));
+      }).join('') + '</div>';
+    }
+    return { vies: vies, dif: dif, ling: ling, evo: evo, disc: disc };
   }
   // ── Quadro-resumo ──
   // Donut do acerto geral + cartões de achado. Regra do produto: cada cartão
@@ -41891,6 +41933,11 @@ const RaioX = (function(){
     if(Array.isArray(f.prioridades) && f.prioridades.length && f.prioridades[0].titulo){
       cards.push({ cls: 'warn', t: 'Prioridade nº 1', go: 'prioridades', v: _esc(f.prioridades[0].titulo) });
     }
+    const dg = ag && ag.discursivas;
+    if(dg && dg.media_pct != null){
+      cards.push({ cls: dg.media_pct >= 70 ? 'good' : (dg.media_pct >= 50 ? 'warn' : 'bad'), t: 'Discursivas', go: 'discursivas',
+        v: dg.media_pct + '% de média em ' + (dg.n_corrigidas === 1 ? '1 corrigida' : dg.n_corrigidas + ' corrigidas') });
+    }
     const pct = Math.max(0, Math.min(100, g.pct_acerto));
     return '<div class="rx-board">' +
       '<div class="rx-donut" style="--pct:' + pct + '"><div class="rx-donut-c"><strong>' + g.pct_acerto + '%</strong><small>acerto geral</small></div></div>' +
@@ -41898,6 +41945,30 @@ const RaioX = (function(){
         return '<div class="rx-card ' + c.cls + '" data-rx-goto="' + c.go + '"><div class="rx-card-t">' + c.t + '</div><div class="rx-card-v">' + c.v + '</div></div>';
       }).join('') + '</div>' : '') +
       '</div>';
+  }
+  // ── PARTE 2 · Discursivas ──
+  // Seção separada (decisão do dono), com o brainstorm como subseção. Mesmos
+  // princípios da Parte 1: padrões que se repetem ENTRE as correções, com
+  // trechos verbatim e dica acionável — nunca uma nova correção.
+  function _discHtml(d, ch){
+    if(!d || !d.resumo) return '';
+    const padroes = (Array.isArray(d.padroes) ? d.padroes : []).map(function(p){
+      return '<div class="rx-mat"><div class="rx-mat-h"><span>' + _esc(p.padrao) + '</span></div>' + _evHtml(p.evidencias) +
+        (p.dica ? '<div class="rx-dica">Para a próxima: ' + _esc(p.dica) + '</div>' : '') + '</div>';
+    }).join('');
+    const fortes = (Array.isArray(d.pontos_fortes) && d.pontos_fortes.length)
+      ? '<div class="rx-sec"><div class="rx-sec-h">O que manter</div><ul>' + d.pontos_fortes.map(function(x){ return '<li>' + _esc(x) + '</li>'; }).join('') + '</ul></div>' : '';
+    const bs = (d.brainstorm && d.brainstorm.diagnostico)
+      ? '<div class="rx-sec"><div class="rx-sec-h">Brainstorm (fase de ideias)</div><div class="rx-sec-b">' + _esc(d.brainstorm.diagnostico) + '</div>' + _evHtml(d.brainstorm.evidencias) + '</div>' : '';
+    const passos = (Array.isArray(d.proximos_passos) && d.proximos_passos.length)
+      ? '<div class="rx-sec"><div class="rx-sec-h">Próximos passos</div><ul>' + d.proximos_passos.map(function(x){ return '<li>' + _esc(x) + '</li>'; }).join('') + '</ul></div>' : '';
+    return '<div data-rx-sec="discursivas" style="margin-top:2.2rem;border-top:1px solid var(--border);padding-top:1.4rem">' +
+      '<span class="s-label">Parte 2</span>' +
+      '<h2 class="rx-title" style="font-size:1.25rem">Discursivas — seu perfil de escrita</h2>' +
+      _secTxt('Resumo', d.resumo) +
+      _secTxt('Evolução das notas', d.evolucao, ch.disc) +
+      (padroes ? '<div class="rx-sec"><div class="rx-sec-h">Padrões que se repetem entre as correções</div>' + padroes + '</div>' : '') +
+      fortes + bs + passos + '</div>';
   }
 
   function _renderReport(body, report, fromHistory){
@@ -41938,6 +42009,7 @@ const RaioX = (function(){
       _secList('Prioridades (onde sua nota mais cresce)', f.prioridades, function(p){ return '<li><strong>' + _esc(p.titulo) + '</strong> — ' + _esc(p.motivo) + '</li>'; }, 'prioridades') +
       _secList('Macetes de banca', f.macetes, function(m){ return '<li>' + _esc(m) + '</li>'; }) +
       _secList('Próximos passos', f.proximos_passos, function(p){ return '<li>' + _esc(p) + '</li>'; }) +
+      _discHtml(f.discursivas, ch) +
       '<div class="rx-row">' +
         '<button type="button" class="btn-ghost" id="rxVoltar">Voltar</button>' +
         '<button type="button" class="btn-primary" id="rxBaixar">Baixar / Imprimir</button>' +
@@ -41973,8 +42045,9 @@ const RaioX = (function(){
     const evDoc = function(arr){
       if(!Array.isArray(arr) || !arr.length) return '';
       return arr.map(function(e){
+        const met = e.materia || e.origem;
         return '<div class="ev"><i>&ldquo;' + _hlTrecho(e.trecho, e.destaque) + '&rdquo;</i>' +
-          (e.materia ? ' <span class="ev-m">— ' + _esc(e.materia) + '</span>' : '') +
+          (met ? ' <span class="ev-m">— ' + _esc(met) + '</span>' : '') +
           (e.o_que_houve ? '<div class="ev-c">' + _esc(e.o_que_houve) + '</div>' : '') + '</div>';
       }).join('');
     };
@@ -42025,6 +42098,8 @@ const RaioX = (function(){
       '.rx-card.good{border-left-color:#5db8a3}.rx-card.good .rx-card-t{color:#3f8a77}' +
       '.rx-card.bad{border-left-color:#d47973}.rx-card.bad .rx-card-t{color:#b05a54}' +
       '.rx-card.warn{border-left-color:#e0b45a}.rx-card.warn .rx-card-t{color:#9c7c2e}' +
+      // Parte 2 (discursivas): começa em página nova na impressão.
+      '.parte2{page-break-before:always;break-before:page;padding-top:6mm}' +
       '.wrap{max-width:820px;margin:0 auto}.sheet{width:100%;border-collapse:collapse}.sheet td{border:0;padding:0}.sheet>thead td>div,.sheet>tfoot td>div{height:14mm}.sheet>tbody>tr>td{padding:0 14mm}' +
       'h1{font-size:26px;margin:.2rem 0 .1rem}h2{font-size:15px;color:#8a6a24;margin:1.4rem 0 .4rem;letter-spacing:.04em;text-transform:uppercase;font-family:Arial,sans-serif}' +
       'p,li{font-size:14px;line-height:1.7}ul{margin:.3rem 0 .3rem 1.2rem}.eyebrow{font-family:Arial;font-size:10px;letter-spacing:.3em;text-transform:uppercase;color:#8a6a24}' +
@@ -42064,6 +42139,21 @@ const RaioX = (function(){
       list('Prioridades', f.prioridades, function(p){ return '<li><b>' + _esc(p.titulo) + '</b> — ' + _esc(p.motivo) + '</li>'; }) +
       list('Macetes de banca', f.macetes, function(m){ return '<li>' + _esc(m) + '</li>'; }) +
       list('Próximos passos', f.proximos_passos, function(p){ return '<li>' + _esc(p) + '</li>'; }) +
+      ((f.discursivas && f.discursivas.resumo) ? (function(){
+        const d = f.discursivas;
+        return '<div class="parte2">' +
+          '<div class="eyebrow">Grupo Ubique · Raio-X do desempenho · Parte 2</div>' +
+          '<h1>Discursivas — seu perfil de escrita</h1>' +
+          sec('Resumo', d.resumo) + sec('Evolução das notas', d.evolucao) + ch.disc +
+          ((Array.isArray(d.padroes) && d.padroes.length) ? '<h2>Padrões que se repetem entre as correções</h2>' + d.padroes.map(function(p){
+            return '<div class="mat"><b>' + _esc(p.padrao) + '</b>' + evDoc(p.evidencias) +
+              (p.dica ? '<div class="dica">Para a próxima: ' + _esc(p.dica) + '</div>' : '') + '</div>';
+          }).join('') : '') +
+          list('O que manter', d.pontos_fortes, function(x){ return '<li>' + _esc(x) + '</li>'; }) +
+          ((d.brainstorm && d.brainstorm.diagnostico) ? '<h2>Brainstorm (fase de ideias)</h2><p>' + _esc(d.brainstorm.diagnostico) + '</p>' + evDoc(d.brainstorm.evidencias) : '') +
+          list('Próximos passos', d.proximos_passos, function(x){ return '<li>' + _esc(x) + '</li>'; }) +
+          '</div>';
+      })() : '') +
       '<div class="meta">Gerado pelo Grupo Ubique a partir das respostas reais do aluno nas questões de Certo/Errado. ' + _esc((report.aggregates && report.aggregates.escopo) || 'Questões anuladas e simulados não entram na conta.') + '</div>' +
       '</td></tr></tbody></table></div></body></html>';
     try{
