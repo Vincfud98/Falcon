@@ -41834,6 +41834,8 @@ const RotinaTab = (function(){
   let _stackLinha = false;
   let _dDia = '', _dGen = 0, _dTimer = null, _dPend = false, _refreshT = null;
   let _metas = {}, _metasEdit = false; // tipo → valor (aluno.study_goals)
+  let _plans = [];                     // aluno.study_plans (últimos 60d + futuro)
+  let _cal = { ano: 0, mes: 0, sel: '' };
 
   /* ── datas: sempre o dia LOCAL (toISOString viraria o dia na madrugada);
         relógio via Date.now p/ os testes conseguirem congelar ── */
@@ -41919,6 +41921,15 @@ const RotinaTab = (function(){
     }, 10);
     _metas = {};
     gl.forEach(function(r){ if(r && r.tipo) _metas[r.tipo] = r.valor || 0; });
+    const desde = new Date(_hojeD());
+    desde.setDate(desde.getDate() - 60);
+    desde.setHours(0, 0, 0, 0);
+    _plans = await _fetchTudo(function(){
+      return window._sb.schema('aluno').from('study_plans')
+        .select('id, quando, categoria, subject_id, assunto, duracao_min, status, done_session_id')
+        .eq('user_id', uid).gte('quando', desde.toISOString())
+        .order('quando', { ascending: true });
+    }, 2000);
     _agrega();
   }
   function _agrega(){
@@ -42074,6 +42085,192 @@ const RotinaTab = (function(){
         '<div class="perf-summary-sub">' + _esc(edSub) + '</div></div>' +
     '</section>';
   }
+  /* ── Calendário (aluno.study_plans): histórico + planejar + tick + ICS ── */
+  function _planDia(p){ return _diaStr(new Date(p.quando)); }
+  function _planHora(p){
+    const d = new Date(p.quando);
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  function _catOptions(){
+    const out = [];
+    ((window.COURSES || []).filter(Boolean)).forEach(function(c){
+      if(c._subjectId != null) out.push({ id: 'm:' + c._subjectId, nome: c.title || ('Matéria ' + c._subjectId) });
+    });
+    out.push({ id: 'revisao', nome: 'Revisão' });
+    out.push({ id: 'simulado', nome: 'Simulado' });
+    return out;
+  }
+  function _catInfoKey(key){
+    if(key === 'revisao') return { categoria: 'revisao', subjectId: null };
+    if(key === 'simulado') return { categoria: 'simulado', subjectId: null };
+    return { categoria: 'materia', subjectId: String(key).replace(/^m:/, '') };
+  }
+  function _icsData(d){ return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, ''); }
+  function _icsTexto(){
+    const agora = new Date(Date.now());
+    const fut = _plans.filter(function(p){ return p.status !== 'feito' && new Date(p.quando) >= agora; });
+    const L = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Ubique//Rotina de estudo//PT', 'CALSCALE:GREGORIAN'];
+    fut.forEach(function(p){
+      const ini = new Date(p.quando);
+      const fim = new Date(ini.getTime() + (p.duracao_min || 60) * 60000);
+      const mi = _matInfo(p);
+      L.push('BEGIN:VEVENT');
+      L.push('UID:' + p.id + '@ubique');
+      L.push('DTSTAMP:' + _icsData(agora));
+      L.push('DTSTART:' + _icsData(ini));
+      L.push('DTEND:' + _icsData(fim));
+      L.push('SUMMARY:' + ('Estudo: ' + mi.nome + (p.assunto ? ' - ' + p.assunto : '')).replace(/[\r\n,;]+/g, ' '));
+      L.push('END:VEVENT');
+    });
+    L.push('END:VCALENDAR');
+    return L.join('\r\n');
+  }
+  function _icsBaixar(el){
+    const txt = _icsTexto();
+    if(txt.indexOf('BEGIN:VEVENT') < 0){
+      if(el){
+        const t0 = el.textContent;
+        el.textContent = 'Nada planejado pra exportar';
+        setTimeout(function(){ if(el.isConnected) el.textContent = t0; }, 2500);
+      }
+      return;
+    }
+    try{
+      const blob = new Blob([txt], { type: 'text/calendar' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'agenda-ubique.ics';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ try{ URL.revokeObjectURL(a.href); }catch(_){} }, 5000);
+    }catch(e){ console.warn('[rotina] ics:', e); }
+  }
+  function _gcalUrl(p){
+    const ini = new Date(p.quando), fim = new Date(ini.getTime() + (p.duracao_min || 60) * 60000);
+    const mi = _matInfo(p);
+    return 'https://calendar.google.com/calendar/render?action=TEMPLATE' +
+      '&text=' + encodeURIComponent('Estudo: ' + mi.nome + (p.assunto ? ' — ' + p.assunto : '')) +
+      '&dates=' + _icsData(ini) + '/' + _icsData(fim);
+  }
+  async function _planCriar(dia, hora, catKey, assunto, dur){
+    const uid = _uid();
+    if(!uid || !window._sb) return;
+    const hp = String(hora || '19:00').split(':');
+    const q = _dataDe(dia);
+    q.setHours(parseInt(hp[0], 10) || 0, parseInt(hp[1], 10) || 0, 0, 0);
+    const c = _catInfoKey(catKey);
+    const { error } = await window._sb.schema('aluno').from('study_plans').insert({
+      user_id: uid, quando: q.toISOString(), categoria: c.categoria,
+      subject_id: c.subjectId, assunto: (assunto || '').slice(0, 200) || null,
+      duracao_min: Math.min(1440, Math.max(5, dur || 60)),
+    });
+    if(error){ console.warn('[rotina] planejar:', error.message); return; }
+    try{ document.dispatchEvent(new CustomEvent('ubq:plans-changed')); }catch(_){}
+    await refresh();
+  }
+  // Tick "Feito": vira sessão de verdade (entra nos gráficos) e marca o plano.
+  async function _planFeito(id){
+    const p = _plans.find(function(x){ return String(x.id) === String(id); });
+    const uid = _uid();
+    if(!p || !uid || !window._sb) return;
+    const ins = await window._sb.schema('aluno').from('study_sessions').insert({
+      user_id: uid, dia: _planDia(p), categoria: p.categoria || 'materia',
+      subject_id: p.subject_id != null ? String(p.subject_id) : null,
+      assunto: p.assunto || null, unit_id: null,
+      duration_min: Math.max(1, p.duracao_min || 60), source: 'manual',
+    }).select('id').single();
+    if(ins.error){ console.warn('[rotina] plano feito:', ins.error.message); return; }
+    const up = await window._sb.schema('aluno').from('study_plans')
+      .update({ status: 'feito', done_session_id: (ins.data && ins.data.id) || null })
+      .eq('id', p.id);
+    if(up.error) console.warn('[rotina] plano status:', up.error.message);
+    try{ document.dispatchEvent(new CustomEvent('ubq:plans-changed')); }catch(_){}
+    await refresh();
+  }
+  function _htmlCalPanel(){
+    const hoje = _diaStr(_hojeD());
+    const dia = _cal.sel || hoje;
+    const pls = _plans.filter(function(p){ return _planDia(p) === dia; });
+    let linhas = pls.map(function(p){
+      const mi = _matInfo(p);
+      const perdida = p.status !== 'feito' && dia < hoje;
+      let acao;
+      if(p.status === 'feito') acao = '<span class="rt-plan-badge ok">feita</span>';
+      else acao = (perdida ? '<span class="rt-plan-badge perdida">perdida</span>' : '') +
+        '<a data-rt-plan-done="' + _esc(p.id) + '">Feito</a>';
+      return '<div class="rt-plan-row">' +
+        '<span class="rt-plan-hora">' + _planHora(p) + '</span>' +
+        '<span class="rt-plan-info">' + _esc(mi.nome) + (p.assunto ? ' — ' + _esc(p.assunto) : '') +
+          ' <span>' + _fmtMin(p.duracao_min || 60) + '</span></span>' +
+        '<span class="rt-plan-acts">' + acao +
+          '<a href="' + _esc(_gcalUrl(p)) + '" target="_blank" rel="noopener">Google</a>' +
+          '<a data-rt-plan-del="' + _esc(p.id) + '">Apagar</a></span>' +
+      '</div>';
+    }).join('');
+    if(!pls.length) linhas = '<div class="rt-meta-sub" style="margin:0">Nada planejado para este dia.</div>';
+    let form = '';
+    if(dia >= hoje){
+      const ops = _catOptions().map(function(o){
+        return '<option value="' + _esc(o.id) + '">' + _esc(o.nome) + '</option>';
+      }).join('');
+      form = '<div class="rt-plan-form">' +
+        '<input type="time" class="rt-meta-inp" id="rtPlHora" value="19:00" style="max-width:7.5rem">' +
+        '<select class="rt-meta-inp" id="rtPlCat" style="max-width:14rem">' + ops + '</select>' +
+        '<input type="text" class="rt-meta-inp" id="rtPlAss" placeholder="Assunto (opcional)" style="flex:1;min-width:9rem">' +
+        '<input type="number" class="rt-meta-inp" id="rtPlDur" value="60" min="5" max="1440" style="max-width:6rem" title="Duração prevista em minutos">' +
+        '<button type="button" class="rt-btn" data-rt-plan-add>Planejar</button>' +
+      '</div>';
+    }
+    const titulo = (dia === hoje ? 'Hoje · ' : '') + _diaBR(dia, { weekday:'long', day:'2-digit', month:'long' });
+    return '<div class="rt-cal-panel">' +
+      '<div class="rt-meta-rot" style="margin-bottom:.55rem">' + _esc(titulo) + '</div>' +
+      linhas + form + '</div>';
+  }
+  function _htmlCalCard(){
+    const hj = _hojeD();
+    if(!_cal.ano){ _cal.ano = hj.getFullYear(); _cal.mes = hj.getMonth(); _cal.sel = _diaStr(hj); }
+    const hoje = _diaStr(hj);
+    const rotulo = _diaBR(_diaStr(new Date(_cal.ano, _cal.mes, 1)), { month:'long', year:'numeric' });
+    const prim = new Date(_cal.ano, _cal.mes, 1);
+    const nDias = new Date(_cal.ano, _cal.mes + 1, 0).getDate();
+    const off = (prim.getDay() + 6) % 7;
+    const DIAS = ['seg','ter','qua','qui','sex','sáb','dom'];
+    let grid = DIAS.map(function(x){ return '<span class="rt-hm-wd">' + x + '</span>'; }).join('');
+    for(let i = 0; i < off; i++) grid += '<span class="rt-cal-c rt-vazio"></span>';
+    for(let dia = 1; dia <= nDias; dia++){
+      const ds = _diaStr(new Date(_cal.ano, _cal.mes, dia));
+      const tudo = [];
+      _sess.forEach(function(r){
+        if(String(r.dia).slice(0, 10) !== ds) return;
+        const mi = _matInfo(r);
+        tudo.push('<span class="rt-chip rt-chip-sess">' + _esc(mi.sigla || mi.nome) + ' ' + _fmtMin(r.duration_min) + '</span>');
+      });
+      _plans.forEach(function(p){
+        if(_planDia(p) !== ds) return;
+        const mi = _matInfo(p);
+        const perdida = p.status !== 'feito' && ds < hoje;
+        tudo.push('<span class="rt-chip rt-chip-plano' + (p.status === 'feito' ? ' ok' : '') + (perdida ? ' perdida' : '') + '">' +
+          (p.status === 'feito' ? '&#10003; ' : '') + _planHora(p) + ' ' + _esc(mi.sigla || mi.nome) + '</span>');
+      });
+      let chips = tudo.slice(0, 3).join('');
+      if(tudo.length > 3) chips += '<span class="rt-chip rt-chip-mais">+' + (tudo.length - 3) + '</span>';
+      grid += '<span class="rt-cal-c' + (ds === hoje ? ' hoje' : '') + (ds === _cal.sel ? ' sel' : '') +
+        '" data-rt-cal-dia="' + ds + '"><i>' + dia + '</i>' + chips + '</span>';
+    }
+    return '<div class="perf-chart-card">' +
+      '<div class="rt-head">' +
+        '<div class="perf-chart-title" style="margin-bottom:0">Calendário</div>' +
+        '<div class="rt-ctrls">' +
+          '<a class="rt-link" data-rt-cal-ics>Exportar agenda (.ics)</a>' +
+          '<span class="rt-nav"><button type="button" class="rt-nav-btn" data-rt-cal-nav="-1">&#8249;</button>' +
+          '<span class="rt-nav-lbl">' + _esc(rotulo) + '</span>' +
+          '<button type="button" class="rt-nav-btn" data-rt-cal-nav="1">&#8250;</button></span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="rt-cal-grid">' + grid + '</div>' +
+      _htmlCalPanel() +
+    '</div>';
+  }
+
   /* ── Metas (aluno.study_goals): hoje + semana-calendário (desde segunda) ── */
   function _htmlMetas(){
     const hoje = _diaStr(_hojeD());
@@ -42472,6 +42669,7 @@ const RotinaTab = (function(){
       _htmlCards() +
       _htmlMetas() +
       _htmlHeatCard() +
+      _htmlCalCard() +
       _htmlLinhaCard() +
       '<div class="rt-2col">' + _htmlMatCard() + _htmlStackCard() + '</div>' +
       _htmlSessoesCard() +
@@ -42532,6 +42730,53 @@ const RotinaTab = (function(){
     });
     const ta = _host.querySelector('#rtDiarioTxt');
     if(ta) ta.addEventListener('input', _agendaSalvarDiario);
+    _host.querySelectorAll('[data-rt-cal-dia]').forEach(function(cel){
+      cel.addEventListener('click', function(){
+        _cal.sel = cel.getAttribute('data-rt-cal-dia');
+        _render();
+      });
+    });
+    _host.querySelectorAll('[data-rt-cal-nav]').forEach(function(b){
+      b.addEventListener('click', function(){
+        const dir = parseInt(b.getAttribute('data-rt-cal-nav'), 10) || 0;
+        let a = _cal.ano, m = _cal.mes + dir;
+        if(m < 0){ m = 11; a--; }
+        if(m > 11){ m = 0; a++; }
+        _cal.ano = a; _cal.mes = m;
+        _render();
+      });
+    });
+    const bIcs = _host.querySelector('[data-rt-cal-ics]');
+    if(bIcs) bIcs.addEventListener('click', function(){ _icsBaixar(bIcs); });
+    const bPl = _host.querySelector('[data-rt-plan-add]');
+    if(bPl) bPl.addEventListener('click', function(){
+      const hora = (_host.querySelector('#rtPlHora') || {}).value || '19:00';
+      const cat = (_host.querySelector('#rtPlCat') || {}).value || 'revisao';
+      const ass = (_host.querySelector('#rtPlAss') || {}).value || '';
+      const dur = parseInt((_host.querySelector('#rtPlDur') || {}).value, 10) || 60;
+      bPl.textContent = 'Salvando…';
+      _planCriar(_cal.sel || _diaStr(_hojeD()), hora, cat, ass, dur);
+    });
+    _host.querySelectorAll('[data-rt-plan-done]').forEach(function(b){
+      b.addEventListener('click', function(){ _planFeito(b.getAttribute('data-rt-plan-done')); });
+    });
+    _host.querySelectorAll('[data-rt-plan-del]').forEach(function(b){
+      b.addEventListener('click', async function(){
+        if(!b._arm){
+          b._arm = true; b.textContent = 'Confirmar?';
+          setTimeout(function(){ b._arm = false; if(b.isConnected) b.textContent = 'Apagar'; }, 4000);
+          return;
+        }
+        try{
+          const { error } = await window._sb.schema('aluno').from('study_plans')
+            .delete().eq('id', b.getAttribute('data-rt-plan-del'));
+          if(!error){
+            try{ document.dispatchEvent(new CustomEvent('ubq:plans-changed')); }catch(_){}
+            refresh();
+          }
+        }catch(_){}
+      });
+    });
     const bMe = _host.querySelector('[data-rt-metas-editar]');
     if(bMe) bMe.addEventListener('click', function(){ _metasEdit = true; _render(); });
     const bMc = _host.querySelector('[data-rt-metas-cancelar]');
@@ -42681,6 +42926,36 @@ const RotinaTab = (function(){
 '.rt-leg{display:flex;gap:1rem;flex-wrap:wrap;margin-top:.6rem}' +
 '.rt-leg-item{display:inline-flex;align-items:center;gap:.4rem;font-family:var(--sans);font-weight:300;font-size:.66rem;color:var(--text-dim)}' +
 '.rt-leg-cor{width:10px;height:10px;border-radius:2px;flex:0 0 auto}' +
+'.rt-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}' +
+'.rt-cal-c{position:relative;min-height:74px;border:1px solid var(--border);border-radius:3px;padding:1.35rem .35rem .3rem;cursor:pointer;display:flex;flex-direction:column;gap:3px;background:var(--bg-elevated,#181a20)}' +
+'.rt-cal-c:hover{border-color:var(--accent)}' +
+'.rt-cal-c.rt-vazio{background:transparent;border:none;cursor:default}' +
+'.rt-cal-c i{position:absolute;top:4px;left:6px;font-style:normal;font-family:var(--sans);font-weight:300;font-size:.6rem;color:var(--text-dim)}' +
+'.rt-cal-c.hoje i{color:var(--accent)}' +
+'.rt-cal-c.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}' +
+'.rt-chip{font-family:var(--sans);font-weight:300;font-size:.56rem;letter-spacing:.02em;border-radius:2px;padding:.1rem .3rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+'.rt-chip-sess{background:var(--accent);color:var(--bg-card)}' +
+'.rt-chip-plano{border:1px solid var(--accent);color:var(--accent)}' +
+'.rt-chip-plano.ok{border-color:var(--green,#5dd49f);color:var(--green,#5dd49f)}' +
+'.rt-chip-plano.perdida{border-color:var(--border);color:var(--text-mute)}' +
+'.rt-chip-mais{color:var(--text-mute)}' +
+'.rt-cal-panel{border-top:1px solid var(--border);margin-top:1rem;padding-top:.9rem}' +
+'.rt-plan-row{display:flex;align-items:center;gap:.8rem;padding:.4rem 0;font-family:var(--sans);font-weight:300;font-size:.78rem;color:var(--text);border-bottom:1px solid var(--border)}' +
+'.rt-plan-row:last-of-type{border-bottom:none}' +
+'.rt-plan-hora{font-family:var(--mono,monospace);font-size:.72rem;color:var(--accent);flex:0 0 auto}' +
+'.rt-plan-info{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
+'.rt-plan-info span{color:var(--text-mute);font-size:.68rem}' +
+'.rt-plan-acts{display:flex;gap:.7rem;align-items:center;flex:0 0 auto}' +
+'.rt-plan-acts a{font-family:var(--sans);font-size:.68rem;color:var(--text-dim);cursor:pointer;text-decoration:underline;text-underline-offset:3px}' +
+'.rt-plan-acts a:hover{color:var(--accent)}' +
+'.rt-plan-badge{font-family:var(--sans);font-size:.6rem;border:1px solid var(--border);border-radius:2px;padding:.1rem .35rem;color:var(--text-mute)}' +
+'.rt-plan-badge.ok{color:var(--green,#5dd49f);border-color:var(--green,#5dd49f)}' +
+'.rt-plan-badge.perdida{color:#d47973;border-color:#d47973}' +
+'.rt-plan-form{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.9rem;align-items:center}' +
+'.rt-lembrete{position:fixed;right:18px;bottom:18px;z-index:9999;max-width:340px;background:var(--bg-elevated,#181a20);border:1px solid var(--accent);border-radius:4px;padding:.9rem 1rem;font-family:var(--sans);font-weight:300;font-size:.8rem;color:var(--text);line-height:1.6;box-shadow:0 8px 30px rgba(0,0,0,.5)}' +
+'.rt-lembrete b{color:var(--accent);font-weight:400}' +
+'.rt-lembrete span{color:var(--text-dim);font-size:.72rem}' +
+'.rt-lembrete a{margin-right:1rem;color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:3px;font-size:.74rem}' +
 '.rt-sess{display:flex;align-items:center;gap:1rem;padding:.6rem 0;border-bottom:1px solid var(--border)}' +
 '.rt-sess:last-child{border-bottom:none}' +
 '.rt-sess-info{flex:1;min-width:0}' +
@@ -42694,6 +42969,64 @@ const RotinaTab = (function(){
 '.rt-sess-acts a:hover{color:var(--accent)}';
     document.head.appendChild(css);
   }
+
+  /* ── Lembrete in-app (decisão do dono: SEM e-mail) — agenda um aviso pra
+        cada plano de HOJE ainda não notificado; roda desde o boot do app,
+        independente da aba Rotina ter sido aberta. ── */
+  const _NOT_KEY = 'ubq_plan_not_v1';
+  let _notTimers = [];
+  function _notJa(){ try{ return JSON.parse(localStorage.getItem(_NOT_KEY) || '{}'); }catch(_){ return {}; } }
+  function _notMarca(id){
+    try{
+      const m = _notJa(); m[id] = 1;
+      localStorage.setItem(_NOT_KEY, JSON.stringify(m));
+    }catch(_){}
+  }
+  function _lembreteToast(p){
+    _ensureStyles();
+    document.querySelectorAll('.rt-lembrete').forEach(function(x){ x.remove(); });
+    const mi = _matInfo(p);
+    const t = document.createElement('div');
+    t.className = 'rt-lembrete';
+    t.innerHTML = '<b>Hora de estudar:</b> ' + _esc(mi.nome + (p.assunto ? ' — ' + p.assunto : '')) +
+      ' <span>(planejado para ' + _planHora(p) + ', ' + _fmtMin(p.duracao_min || 60) + ')</span><br>' +
+      '<a data-rt-le="abrir">Abrir relógio</a><a data-rt-le="fechar">Fechar</a>';
+    t.querySelector('[data-rt-le="abrir"]').addEventListener('click', function(){
+      t.remove(); if(window.StudyTimer) StudyTimer.open();
+    });
+    t.querySelector('[data-rt-le="fechar"]').addEventListener('click', function(){ t.remove(); });
+    document.body.appendChild(t);
+    setTimeout(function(){ if(t.isConnected) t.remove(); }, 60000);
+  }
+  async function _lembreteBoot(){
+    _notTimers.forEach(clearTimeout);
+    _notTimers = [];
+    const uid = _uid();
+    if(!uid || !window._sb){                      // auth ainda hidratando: tenta de novo
+      _notTimers.push(setTimeout(_lembreteBoot, 30000));
+      return;
+    }
+    const d0 = new Date(Date.now()); d0.setHours(0, 0, 0, 0);
+    const d1 = new Date(d0); d1.setDate(d1.getDate() + 1);
+    let rows = [];
+    try{
+      const r = await window._sb.schema('aluno').from('study_plans')
+        .select('id, quando, categoria, subject_id, assunto, duracao_min, status')
+        .eq('user_id', uid).eq('status', 'planejado')
+        .gte('quando', d0.toISOString()).lt('quando', d1.toISOString())
+        .order('quando', { ascending: true }).range(0, 199);
+      rows = (r && r.data) || [];
+    }catch(_){}
+    const ja = _notJa();
+    rows.forEach(function(p){
+      if(!p || !p.id || ja[p.id] || p.status === 'feito') return;
+      const delay = new Date(p.quando).getTime() - Date.now();
+      if(delay < -10 * 60 * 1000) return;         // passou faz tempo: deixa quieto
+      _notTimers.push(setTimeout(function(){ _notMarca(p.id); _lembreteToast(p); }, Math.max(0, delay)));
+    });
+  }
+  document.addEventListener('ubq:plans-changed', function(){ setTimeout(_lembreteBoot, 500); });
+  setTimeout(_lembreteBoot, 9000);
 
   async function build(host){
     if(host) _host = host;
