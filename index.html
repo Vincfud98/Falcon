@@ -42301,10 +42301,16 @@ const RotinaTab = (function(){
   let _minDia = {}, _minDiaMat = {};   // dia → minutos; dia → { matKey → minutos }
   let _mats = {};                      // matKey → { nome, sigla }
   let _hm = { mode: 'ambos', view: 'ano', ano: 0, mes: 0 };
-  let _per = 'mes';                    // período COMPARTILHADO: semana|mes|3m|6m|ano|custom
-  let _perCustom = { ini: '', fim: '' };
+  // Período INDEPENDENTE por gráfico (decisão do dono: cada bloco filtra só a
+  // si mesmo, pra ver os mesmos dados organizados de formas diferentes).
+  const _perSt = {
+    linha: { per: 'mes', custom: { ini: '', fim: '' } },
+    mat:   { per: 'mes', custom: { ini: '', fim: '' } },
+    stack: { per: 'mes', custom: { ini: '', fim: '' } },
+  };
   let _stackLinha = false;
-  let _stackFiltro = null;             // Distribuição: isolar 1 matéria (matKey) ou null
+  const _stackHidden = {};             // Distribuição: matérias ocultas (toggle na legenda)
+  let _picking = false;                // seletor de cor aberto → não re-renderizar (fecharia o picker)
   let _dDia = '', _dGen = 0, _dTimer = null, _dPend = false, _refreshT = null;
   let _metas = {}, _metasEdit = false; // tipo → valor (aluno.study_goals)
   let _plans = [];                     // aluno.study_plans (últimos 60d + futuro)
@@ -42964,20 +42970,19 @@ const RotinaTab = (function(){
   // Período do gráfico de linha (combinado com o dono): semana, mês atual
   // (dia 1→hoje), 3/6 meses, ano (jan→hoje) e personalizado. Fim sempre em
   // HOJE (dia sem dado ainda não entra e não distorce a média).
-  function _perRange(){
+  function _perRangeOf(per, custom){
     const hoje = _diaStr(_hojeD());
     const hj = _hojeD();
-    if(_per === 'semana'){ const dow = (hj.getDay() + 6) % 7; return { ini: _addDias(hoje, -dow), fim: hoje }; }
-    if(_per === '3m') return { ini: _addDias(hoje, -89), fim: hoje };
-    if(_per === '6m') return { ini: _addDias(hoje, -179), fim: hoje };
-    if(_per === 'ano') return { ini: _diaStr(new Date(hj.getFullYear(), 0, 1)), fim: hoje };
-    if(_per === 'custom' && _perCustom.ini && _perCustom.fim){
-      let a = _perCustom.ini, b = _perCustom.fim;
+    if(per === 'semana'){ const dow = (hj.getDay() + 6) % 7; return { ini: _addDias(hoje, -dow), fim: hoje }; }
+    if(per === '3m') return { ini: _addDias(hoje, -89), fim: hoje };
+    if(per === '6m') return { ini: _addDias(hoje, -179), fim: hoje };
+    if(per === 'ano') return { ini: _diaStr(new Date(hj.getFullYear(), 0, 1)), fim: hoje };
+    if(per === 'custom' && custom && custom.ini && custom.fim){
+      let a = custom.ini, b = custom.fim;
       if(a > b){ const t = a; a = b; b = t; }
       if(b > hoje) b = hoje;
       if(a > hoje) a = hoje;
-      // teto de segurança: no máximo ~2 anos de células no SVG
-      if(_diasEntre(a, b) > 731) a = _addDias(b, -731);
+      if(_diasEntre(a, b) > 731) a = _addDias(b, -731);   // teto ~2 anos no SVG
       return { ini: a, fim: b };
     }
     return { ini: _diaStr(new Date(hj.getFullYear(), hj.getMonth(), 1)), fim: hoje };  // 'mes'
@@ -42997,7 +43002,7 @@ const RotinaTab = (function(){
     return s;
   }
   function _svgLinha(){
-    const r = _perRange();
+    const r = _perRangeOf(_perSt.linha.per, _perSt.linha.custom);
     const dias = [];
     for(let d = r.ini; d <= r.fim; d = _addDias(d, 1)){ dias.push(d); if(dias.length > 900) break; }
     const vals = dias.map(function(d){ return _minDia[d] || 0; });
@@ -43057,29 +43062,29 @@ const RotinaTab = (function(){
       metaSvg + xl + dots + hits +
     '</svg>';
   }
-  /* ── período COMPARTILHADO entre os 3 gráficos temporais (linha, matéria,
-        distribuição): analisar sempre na MESMA variável (pedido do dono) ── */
-  function _perPills(){
+  /* ── período INDEPENDENTE por gráfico (`kind` = linha|mat|stack) ── */
+  function _perPills(kind){
+    const cur = _perSt[kind].per;
     const opts = [['semana','Semana'],['mes','Mês'],['3m','3 meses'],['6m','6 meses'],['ano','Ano'],['custom','Personalizado']];
     return '<span class="rt-pills rt-pills-wrap">' + opts.map(function(p){
-      return '<button type="button" class="rt-pill' + (_per === p[0] ? ' active' : '') + '" data-rt-per="' + p[0] + '">' + p[1] + '</button>';
+      return '<button type="button" class="rt-pill' + (cur === p[0] ? ' active' : '') + '" data-rt-per="' + p[0] + '">' + p[1] + '</button>';
     }).join('') + '</span>';
   }
-  function _perCustomRow(){
-    if(_per !== 'custom') return '';
-    const hoje = _diaStr(_hojeD());
+  function _perCustomRow(kind){
+    if(_perSt[kind].per !== 'custom') return '';
+    const c = _perSt[kind].custom, hoje = _diaStr(_hojeD());
     return '<div class="rt-custom">' +
-      '<label>De <input type="date" class="rt-meta-inp rt-per-de" max="' + hoje + '" value="' + _esc(_perCustom.ini || '') + '"></label>' +
-      '<label>até <input type="date" class="rt-meta-inp rt-per-ate" max="' + hoje + '" value="' + _esc(_perCustom.fim || hoje) + '"></label>' +
+      '<label>De <input type="date" class="rt-meta-inp rt-per-de" max="' + hoje + '" value="' + _esc(c.ini || '') + '"></label>' +
+      '<label>até <input type="date" class="rt-meta-inp rt-per-ate" max="' + hoje + '" value="' + _esc(c.fim || hoje) + '"></label>' +
     '</div>';
   }
-  function _setPer(p){ _per = p; _renderLinha(); _renderMat(); _renderStack(); }
-  function _bindPer(scope){
+  // vincula as pílulas/datas de UM gráfico ao SEU período; re-renderiza SÓ ele.
+  function _bindPer(scope, kind, rerender){
     scope.querySelectorAll('[data-rt-per]').forEach(function(b){
-      b.addEventListener('click', function(){ _setPer(b.getAttribute('data-rt-per')); });
+      b.addEventListener('click', function(){ _perSt[kind].per = b.getAttribute('data-rt-per'); rerender(); });
     });
     const de = scope.querySelector('.rt-per-de'), ate = scope.querySelector('.rt-per-ate');
-    function aplica(){ if(de) _perCustom.ini = de.value; if(ate) _perCustom.fim = ate.value; _setPer('custom'); }
+    function aplica(){ if(de) _perSt[kind].custom.ini = de.value; if(ate) _perSt[kind].custom.fim = ate.value; rerender(); }
     if(de) de.addEventListener('change', aplica);
     if(ate) ate.addEventListener('change', aplica);
   }
@@ -43100,15 +43105,15 @@ const RotinaTab = (function(){
   // ── LINHA (Tempo de estudo por dia) ──
   function _linhaInner(){
     return '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Tempo de estudo por dia</div>' +
-      _perPills() + '</div>' + _perCustomRow() + _svgLinha();
+      _perPills('linha') + '</div>' + _perCustomRow('linha') + _svgLinha();
   }
   function _htmlLinhaCard(){ return '<div class="perf-chart-card" id="rtLinhaCard">' + _linhaInner() + '</div>'; }
   function _renderLinha(){ const c = _host && _host.querySelector('#rtLinhaCard'); if(c){ c.innerHTML = _linhaInner(); _bindLinha(c); } }
-  function _bindLinha(scope){ _bindPer(scope); }
+  function _bindLinha(scope){ _bindPer(scope, 'linha', _renderLinha); }
 
   // ── POR MATÉRIA (barras coloridas + pizza no espaço morto) ──
   function _agregaMat(){
-    const r = _perRange();
+    const r = _perRangeOf(_perSt.mat.per, _perSt.mat.custom);
     const por = {}, dias = {};
     for(let d = r.ini; d <= r.fim; d = _addDias(d, 1)){
       const m = _minDiaMat[d] || {};
@@ -43181,42 +43186,53 @@ const RotinaTab = (function(){
       corpo = '<div class="rt-mat-bars">' + barras + '</div>' + _svgPizza(a.por, a.dias, a.ord);
     }
     return '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Por matéria</div>' +
-      _perPills() + '</div>' + _perCustomRow() + corpo;
+      _perPills('mat') + '</div>' + _perCustomRow('mat') + corpo;
   }
   function _htmlMatCard(){ return '<div class="perf-chart-card" id="rtMatCard">' + _matInner() + '</div>'; }
   function _renderMat(){ const c = _host && _host.querySelector('#rtMatCard'); if(c){ c.innerHTML = _matInner(); _bindMat(c); } }
   function _bindMat(scope){
-    _bindPer(scope);
+    _bindPer(scope, 'mat', _renderMat);
     scope.querySelectorAll('[data-rt-cor]').forEach(function(inp){
+      // CAUSA-RAIZ do picker sumir: re-renderizar o card no 'input' destrói o
+      // <input> e fecha o seletor nativo no meio do arrasto. Enquanto o picker
+      // está aberto (_picking) NÃO re-renderiza — só faz preview vivo da barra;
+      // ao fechar ('change') aí sim re-renderiza tudo (pizza + distribuição).
       inp.addEventListener('input', function(){
+        _picking = true;
         if(window.SubjectColors) SubjectColors.set(inp.getAttribute('data-rt-cor'), inp.value);
-        // o evento ubq:subject-colors-changed redesenha os cards coloridos
+        const row = inp.closest('.rt-bar-row');
+        const fill = row && row.querySelector('.rt-bar-fill');
+        if(fill) fill.style.background = inp.value;      // preview vivo, sem re-render
       });
+      inp.addEventListener('change', function(){ _picking = false; _renderMat(); _renderStack(); });
     });
   }
 
   // ── DISTRIBUIÇÃO POR DIA (barras empilhadas arredondadas | linhas) ──
   function _svgStack(){
-    const r = _perRange();
+    const r = _perRangeOf(_perSt.stack.per, _perSt.stack.custom);
     const dias = [];
     for(let d = r.ini; d <= r.fim; d = _addDias(d, 1)){ dias.push(d); if(dias.length > 370) break; }
     const tot = {};
     dias.forEach(function(d){ const m = _minDiaMat[d] || {}; Object.keys(m).forEach(function(k){ tot[k] = (tot[k] || 0) + m[k]; }); });
     let chaves = Object.keys(tot).sort(function(a, b){ return tot[b] - tot[a]; });
     if(!chaves.length) return '<div class="perf-chart-empty">Nenhum registro no período.</div>';
-    let series;
-    if(_stackFiltro && tot[_stackFiltro] != null){ series = [_stackFiltro]; }   // isolar 1 matéria
-    else { const t5 = chaves.slice(0, 5); series = t5.concat(chaves.length > 5 ? ['__outras'] : []); }
-    const top = series.filter(function(s){ return s !== '__outras'; });
+    // conjunto COMPLETO de séries (top 5 + Outras) — a base da legenda e do eixo Y
+    const t5 = chaves.slice(0, 5);
+    const series = t5.concat(chaves.length > 5 ? ['__outras'] : []);
+    const top = t5;
     const valor = function(d, s){
       const m = _minDiaMat[d] || {};
       if(s !== '__outras') return m[s] || 0;
       let v = 0; Object.keys(m).forEach(function(k){ if(top.indexOf(k) < 0) v += m[k]; }); return v;
     };
+    // as visíveis = série menos as ocultas (toggle na legenda)
+    const vis = series.filter(function(s){ return !_stackHidden[s]; });
+    // Y FIXO: sempre o máximo com TODAS as séries (ocultar não muda a escala —
+    // pedido do dono: a altura de cada barra/linha fica comparável).
     const totDia = dias.map(function(d){ return series.reduce(function(a, s){ return a + valor(d, s); }, 0); });
     const max = Math.max.apply(null, totDia.concat([1]));
     const yMax = Math.max(30, Math.ceil(max / 30) * 30);
-    // viewBox ≈ largura real do card (meia coluna) → fontes proporcionais.
     const W = 640, H = 300, L = 44, R = 12, T = 16, B = 34;
     const pw = W - L - R, ph = H - T - B;
     const cw = pw / dias.length;
@@ -43226,7 +43242,7 @@ const RotinaTab = (function(){
       dias.forEach(function(d, i){
         let yTopo = T + ph;
         const cx = L + cw * i + cw / 2;
-        series.forEach(function(s){
+        vis.forEach(function(s){
           const v = valor(d, s); if(!v) return;
           const h = ph * v / yMax; yTopo -= h;
           const hr = Math.max(1.5, h - 1.6);          // gapzinho entre segmentos = pílulas
@@ -43237,7 +43253,7 @@ const RotinaTab = (function(){
         });
       });
     } else {
-      series.forEach(function(s){
+      vis.forEach(function(s){
         let p = '';
         dias.forEach(function(d, i){ p += (i ? 'L' : 'M') + (L + cw * i + cw / 2).toFixed(1) + ',' + (T + ph - ph * valor(d, s) / yMax).toFixed(1); });
         corpo += '<path d="' + p + '" fill="none" stroke="' + _serieCor(s) + '" stroke-width="2" stroke-linejoin="round"/>';
@@ -43254,13 +43270,11 @@ const RotinaTab = (function(){
     for(let i = 0; i < dias.length; i += passo){
       xl += '<text x="' + (L + cw * i + cw / 2).toFixed(1) + '" y="' + (H - 10) + '" class="rt-tx" text-anchor="middle">' + _diaBR(dias[i], { day:'2-digit', month:'2-digit' }) + '</text>';
     }
-    // legenda clicável: isola/desisola a matéria (nas duas visões)
-    const legKeys = _stackFiltro ? chaves.slice(0, 5).concat(chaves.length > 5 ? ['__outras'] : []) : series;
-    const leg = legKeys.map(function(s){
-      const on = _stackFiltro === s;
-      const dim = _stackFiltro && !on ? ' rt-leg-dim' : '';
-      const iso = s === '__outras' ? '' : ' data-rt-stack-iso="' + _esc(s) + '"';
-      return '<button type="button" class="rt-leg-item rt-leg-btn' + (on ? ' rt-leg-on' : '') + dim + '"' + iso + '><span class="rt-leg-cor" style="background:' + _serieCor(s) + '"></span>' + _esc(_nomeSerie(s)) + '</button>';
+    // legenda clicável (toggle): mostra/oculta cada matéria — dá pra tirar
+    // algumas OU isolar uma tirando as outras (pedido do dono).
+    const leg = series.map(function(s){
+      const off = !!_stackHidden[s];
+      return '<button type="button" class="rt-leg-item rt-leg-btn' + (off ? ' rt-leg-dim' : '') + '" data-rt-stack-iso="' + _esc(s) + '"><span class="rt-leg-cor" style="background:' + _serieCor(s) + '"></span>' + _esc(_nomeSerie(s)) + '</button>';
     }).join('');
     return '<svg class="rt-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet">' + grid + corpo + xl + '</svg>' +
       '<div class="rt-leg">' + leg + '</div>';
@@ -43271,20 +43285,20 @@ const RotinaTab = (function(){
       return '<button type="button" class="rt-pill' + (on ? ' active' : '') + '" data-rt-stack="' + p[0] + '">' + p[1] + '</button>';
     }).join('');
     return '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Distribuição por dia</div>' +
-      '<div class="rt-ctrls">' + _perPills() + '<span class="rt-pills">' + pills + '</span></div></div>' +
-      _perCustomRow() + _svgStack();
+      '<div class="rt-ctrls">' + _perPills('stack') + '<span class="rt-pills">' + pills + '</span></div></div>' +
+      _perCustomRow('stack') + _svgStack();
   }
   function _htmlStackCard(){ return '<div class="perf-chart-card" id="rtStackCard">' + _stackInner() + '</div>'; }
   function _renderStack(){ const c = _host && _host.querySelector('#rtStackCard'); if(c){ c.innerHTML = _stackInner(); _bindStack(c); } }
   function _bindStack(scope){
-    _bindPer(scope);
+    _bindPer(scope, 'stack', _renderStack);
     scope.querySelectorAll('[data-rt-stack]').forEach(function(b){
       b.addEventListener('click', function(){ _stackLinha = b.getAttribute('data-rt-stack') === 'lin'; _renderStack(); });
     });
     scope.querySelectorAll('[data-rt-stack-iso]').forEach(function(b){
       b.addEventListener('click', function(){
         const k = b.getAttribute('data-rt-stack-iso');
-        _stackFiltro = (_stackFiltro === k) ? null : k;   // clicar de novo = mostrar todas
+        if(_stackHidden[k]) delete _stackHidden[k]; else _stackHidden[k] = true;   // toggle mostrar/ocultar
         _renderStack();
       });
     });
@@ -43740,7 +43754,10 @@ const RotinaTab = (function(){
 '.rt-custom{display:flex;gap:1rem;flex-wrap:wrap;margin:.2rem 0 .9rem}' +
 '.rt-custom label{display:inline-flex;align-items:center;gap:.4rem;font-family:var(--sans);font-weight:300;font-size:.72rem;color:var(--text-dim)}' +
 '.rt-custom .rt-meta-inp{max-width:9.5rem}' +
-'.rt-2col{display:grid;grid-template-columns:1fr 1fr;gap:1rem}' +
+// align-items:start → cada card tem a altura do próprio conteúdo (o "Por
+// matéria" não estica mais pra acompanhar a "Distribuição" → fim do espaço
+// morto embaixo do donut).
+'.rt-2col{display:grid;grid-template-columns:1fr 1fr;gap:1rem;align-items:start}' +
 '@media(max-width:860px){.rt-2col{grid-template-columns:1fr}}' +
 '.rt-bar-row{display:flex;align-items:center;gap:.7rem;padding:.32rem 0;font-family:var(--sans);font-weight:300}' +
 '.rt-bar-lbl{flex:0 0 3.6rem;font-size:.7rem;color:var(--text);letter-spacing:.04em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
@@ -43911,8 +43928,10 @@ const RotinaTab = (function(){
     pop.hidden = true;
   });
   // Cor de matéria mudou (aqui ou na aba Conexões) → repinta os cards coloridos.
+  // Com o seletor aberto (_picking) NÃO re-renderiza (fecharia o picker no meio
+  // do arrasto — o preview vivo já cuida da barra; o 'change' repinta o resto).
   document.addEventListener('ubq:subject-colors-changed', function(){
-    if(!_pronto || !_host) return;
+    if(!_pronto || !_host || _picking) return;
     _renderMat(); _renderStack();
   });
 
