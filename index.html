@@ -6583,6 +6583,13 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
 .upm-mat{display:flex;flex-direction:column;gap:.3rem}
 .upm-mat-nome{font-family:var(--serif);font-size:.85rem;color:var(--text)}
 
+/* Atividade dos colegas (Fase 5A) */
+.peers-ativ-list{display:flex;flex-direction:column}
+.peers-ativ-row{display:flex;flex-direction:column;gap:.15rem;padding:.5rem 0;border-bottom:1px solid var(--border);font-family:var(--sans);font-weight:300}
+.peers-ativ-row:last-child{border-bottom:none}
+.peers-ativ-row strong{font-weight:400;color:var(--text);font-size:.82rem;font-family:var(--serif-stable)}
+.peers-ativ-row span{color:var(--text-dim);font-size:.7rem}
+
 /* Opt-out do compartilhamento, no fim da aba Colegas. */
 .peers-share{
   margin-top:1.6rem;padding-top:1rem;border-top:1px solid var(--border);
@@ -22059,6 +22066,12 @@ Renderers.account = function(route){
         <h3 class="peers-recs-title">Sugestões para você</h3>
         <div class="peers-recs-strip" id="peersRecsStrip"></div>
       </section>
+      <!-- Atividade dos colegas (Fase 5A): vem de RPC no servidor que já
+           respeita o opt-out stats_publicas — quem desligou não aparece. -->
+      <section class="peers-recs" id="peersAtiv" hidden>
+        <h3 class="peers-recs-title">Atividade dos colegas — últimos 7 dias</h3>
+        <div class="peers-ativ-list" id="peersAtivList"></div>
+      </section>
       <div class="peers-pane-wrap" data-peers-pane="colegas"></div>
       <div class="peers-pane-wrap" data-peers-pane="seguindo" hidden></div>
       <div class="peers-pane-wrap" data-peers-pane="seguidores" hidden></div>
@@ -22455,6 +22468,46 @@ Renderers.account.mount = function(stageEl){
           .select('stats_publicas').eq('user_id', me.id).maybeSingle();
         if(!error && data) _shareChk.checked = data.stats_publicas !== false;
       }catch(_){}
+    })();
+    // Atividade dos colegas (Fase 5A): a RPC devolve só os mutuais que não
+    // desligaram o compartilhamento — o filtro de privacidade é do SERVIDOR.
+    (async () => {
+      try{
+        if(!window._sb) return;
+        const { data, error } = await window._sb.schema('aluno').rpc('atividade_colegas');
+        if(error || !data || !data.length) return;
+        const sec = stageEl.querySelector('#peersAtiv'), list = stageEl.querySelector('#peersAtivList');
+        if(!sec || !list) return;
+        const por = {};
+        data.forEach(r => {
+          const k = String(r.user_id);
+          const p = (por[k] = por[k] || { min: 0, q: 0, dias: 0, top: r.top_subject_id });
+          p.min += (r.minutos || 0);
+          p.q += (r.questoes || 0);
+          if((r.minutos || 0) > 0 || (r.questoes || 0) > 0) p.dias++;
+        });
+        const ids = Object.keys(por).filter(k => por[k].dias > 0);
+        if(!ids.length) return;
+        if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(ids);
+        const fmtMin = (min) => { min = Math.round(min); const h = Math.floor(min/60), m = min%60; return h ? (h + 'h' + (m ? String(m).padStart(2,'0') : '')) : (m + 'min'); };
+        const sigla = (sid) => { const c = ((window.COURSES || []).filter(Boolean)).find(x => String(x._subjectId) === String(sid)); return c ? (c.sigla || c.title) : ''; };
+        list.innerHTML = ids
+          .sort((a, b) => (por[b].min + por[b].q) - (por[a].min + por[a].q))
+          .slice(0, 12)
+          .map(k => {
+            const a = por[k];
+            const u = (window.UserDirectory && UserDirectory.getById) ? (UserDirectory.getById(k) || {}) : {};
+            const nome = u.nickname || u.handle || 'Colega';
+            const partes = [];
+            if(a.min > 0) partes.push(fmtMin(a.min) + ' de estudo');
+            if(a.q > 0) partes.push(a.q + (a.q === 1 ? ' questão' : ' questões'));
+            partes.push(a.dias + (a.dias === 1 ? ' dia ativo' : ' dias ativos'));
+            const s = a.top != null ? sigla(a.top) : '';
+            if(s) partes.push('mais tempo em ' + s);
+            return '<div class="peers-ativ-row"><strong>' + Util.esc(nome) + '</strong><span>' + Util.esc(partes.join(' · ')) + '</span></div>';
+          }).join('');
+        sec.hidden = false;
+      }catch(e){ console.warn('[peers ativ]', e); }
     })();
     _shareChk.addEventListener('change', async () => {
       const valor = !!_shareChk.checked;
@@ -23202,6 +23255,9 @@ function _notifRenderItem(n){
     }
   } else if(n.type === 'room_invite'){
     line = `<strong>${Util.esc(fromName)}</strong> te convidou para a sala de estudos${p.room_name ? ' <strong>' + Util.esc(p.room_name) + '</strong>' : ''}.`;
+    if(Number(p.prenda_valor) > 0){
+      line += ` Atenção: a sala tem <strong>prenda de ${Util.esc(String(Number(p.prenda_valor)).replace('.', ','))} UbiToken(s)</strong> por dia de meta não cumprida.`;
+    }
     if(p.room_id){
       const _st = (window._salasMyMemberships || {})[p.room_id];
       if(_st === 'member'){
@@ -27369,11 +27425,35 @@ function _salasMetaInjectStyles(){
   `;
   document.head.appendChild(st);
 }
+// Acerto da prenda (Fase 5B): roda TODO no servidor (RPC idempotente e
+// transacional — aluno.prenda_acertar_minhas_salas). Uma chamada por sessão.
+function _prendaAcertar(){
+  if(window._prendaAcertoPromise) return window._prendaAcertoPromise;
+  if(!window._sb) return Promise.resolve();
+  window._prendaAcertoPromise = window._sb.schema('aluno').rpc('prenda_acertar_minhas_salas')
+    .then(function(r){ if(r && r.error) console.warn('[prenda acerto]', r.error.message); })
+    .catch(function(e){ console.warn('[prenda acerto ex]', e); });
+  return window._prendaAcertoPromise;
+}
+function _prendaInjectStyles(){
+  if(document.getElementById('prendaCss')) return;
+  const css = document.createElement('style');
+  css.id = 'prendaCss';
+  css.textContent =
+'.smeta-prenda{margin-top:1.2rem;border-top:1px solid var(--border);padding-top:1rem}' +
+'.smeta-prenda-tit{font-family:var(--sans);font-weight:300;font-size:.56rem;letter-spacing:.22em;text-transform:uppercase;color:var(--accent);margin-bottom:.5rem}' +
+'.smeta-prenda-regra{font-family:var(--sans);font-weight:300;font-size:.78rem;color:var(--text-dim);line-height:1.55;margin-bottom:.6rem}' +
+'.smeta-prenda-linha{font-family:var(--sans);font-weight:300;font-size:.74rem;color:var(--text);padding:.3rem 0;border-bottom:1px dashed var(--border)}' +
+'.smeta-prenda-linha:last-child{border-bottom:none}' +
+'.smeta-prenda-dia{color:var(--accent);font-family:var(--mono,monospace);font-size:.68rem;margin-right:.45rem}';
+  document.head.appendChild(css);
+}
 async function _salasRenderMeta(drawer){
   const pane = drawer.querySelector('[data-spane="meta"]'); if(!pane) return;
   const roomId = _salasCurrentId;
   if(!roomId){ pane.innerHTML = '<p class="salas-soon">Selecione uma sala.</p>'; return; }
   _salasMetaInjectStyles();
+  _prendaInjectStyles();
   const room = _salasRooms.find(r => String(r.id) === String(roomId)) || {};
   const isOwner = String(room.creator_id) === String(_salasMyUid());
   const goal = room.daily_goal || 0;
@@ -27402,6 +27482,44 @@ async function _salasRenderMeta(drawer){
     const q = qOf(m); const mpct = goal > 0 ? Math.min(100, Math.round(q / goal * 100)) : 0; const hit = goal > 0 && q >= goal;
     return `<div class="smeta-mem${hit ? ' is-hit' : ''}"><div class="smeta-mem-top"><span class="smeta-mem-name">${Util.esc(name)}</span><span class="smeta-mem-q">${q}${goal > 0 ? ' / ' + goal : ''}${hit ? ' · meta batida' : ''}</span></div>${goal > 0 ? `<div class="smeta-bar sm"><div class="smeta-bar-fill" style="width:${mpct}%"></div></div>` : ''}</div>`;
   }).join('')}</div>`;
+
+  // ── Prenda da sala (Fase 5B): regra + últimos acertos do servidor ──
+  if(Number(room.prenda_valor) > 0){
+    await _prendaAcertar();              // garante que os dias pendentes fecharam
+    let acertos = [];
+    try{
+      const { data } = await window._sb.schema('aluno').from('room_prenda_acertos')
+        .select('dia, detalhe').eq('room_id', roomId).order('dia', { ascending: false }).limit(7);
+      acertos = data || [];
+    }catch(_){}
+    const fmtU = (v) => String(Math.round(Number(v) * 100) / 100).replace('.', ',') + ' UBT';
+    const metaTxt = room.prenda_tipo === 'minutos' ? ((room.prenda_meta || 1) + ' min de estudo/dia')
+      : room.prenda_tipo === 'atividade' ? 'dia ativo (estudo ou questões)'
+      : ((room.prenda_meta || 1) + ' questões/dia');
+    const DIAS_N = { '1':'seg', '2':'ter', '3':'qua', '4':'qui', '5':'sex', '6':'sáb', '7':'dom' };
+    const diasCfg = String(room.prenda_dias || '1234567').split('').map(d => DIAS_N[d]).filter(Boolean).join(', ');
+    const nomeDe = (id) => { const u = _salasResolveUser(id); return u.nickname || u.handle || 'Aluno'; };
+    html += `<div class="smeta-prenda"><div class="smeta-prenda-tit">Prenda da sala</div>`;
+    html += `<div class="smeta-prenda-regra">Quem não cumprir <strong>${Util.esc(metaTxt)}</strong> paga <strong>${Util.esc(fmtU(room.prenda_valor))}</strong>, dividido entre quem cumpriu no dia. Todos cumprem (ou ninguém) = ninguém paga. Dias que contam: ${Util.esc(diasCfg)}.</div>`;
+    if(!acertos.length){
+      html += `<div class="smeta-prenda-linha">Nenhum acerto ainda — o primeiro dia fecha à meia-noite.</div>`;
+    } else {
+      acertos.forEach(a => {
+        const det = a.detalhe || {};
+        let diaTxt = a.dia;
+        try{ const p = String(a.dia).split('-'); diaTxt = p[2] + '/' + p[1]; }catch(_){}
+        let t;
+        if(det.obs === 'todos') t = 'todos cumpriram — ninguém pagou';
+        else if(det.obs === 'ninguem') t = 'ninguém cumpriu — ninguém pagou';
+        else if(Array.isArray(det.movs) && det.movs.length){
+          t = det.movs.map(mv => Util.esc(nomeDe(mv.u)) + (Number(mv.d) < 0 ? ' pagou ' + fmtU(-mv.d) : ' recebeu ' + fmtU(mv.d))).join(' · ');
+        } else t = 'sem participantes avaliáveis no dia';
+        html += `<div class="smeta-prenda-linha"><span class="smeta-prenda-dia">${Util.esc(diaTxt)}</span>${t}</div>`;
+      });
+    }
+    html += `</div>`;
+  }
+
   html += `</div>`;
   pane.innerHTML = html;
 }
@@ -27794,7 +27912,10 @@ async function _salasFetchRooms(){
     const { data, error } = await window._sb.schema('aluno').from('room_members')
       .select('role, status, room:study_rooms(*)').eq('user_id', _salasMyUid()).eq('status', 'member');
     if(error){ console.warn('[salas rooms]', error.message); return []; }
-    return (data||[]).map(r => Object.assign({}, r.room, { _role:r.role })).filter(r => r && r.id);
+    const _rooms = (data||[]).map(r => Object.assign({}, r.room, { _role:r.role })).filter(r => r && r.id);
+    // Dispara o acerto da prenda em segundo plano assim que se sabe das salas.
+    if(_rooms.some(r => Number(r.prenda_valor) > 0)) _prendaAcertar();
+    return _rooms;
   }catch(e){ console.warn('[salas rooms ex]', e); return []; }
 }
 async function _salasFetchMembers(roomId){
@@ -27813,6 +27934,13 @@ async function _salasCreate(payload){
       ranking_mode: payload.ranking_mode || 'endless', end_date: payload.end_date || null,
       daily_goal: payload.daily_goal || 0, goal_type: payload.goal_type || 'questions_per_day'
     };
+    // Prenda diária (Fase 5B): fixa na criação — só entra no insert se ligada.
+    if(payload.prenda_valor > 0){
+      ins.prenda_valor = payload.prenda_valor;
+      ins.prenda_tipo = payload.prenda_tipo || 'questoes';
+      ins.prenda_meta = payload.prenda_meta;
+      ins.prenda_dias = payload.prenda_dias || '1234567';
+    }
     if(roomId) ins.id = roomId;
     const q = window._sb.schema('aluno').from('study_rooms').insert(ins);
     const { data, error } = roomId ? await q : await q.select('id');
@@ -27831,7 +27959,9 @@ async function _salasInvite(roomId, roomName, partner){
     const { error } = await window._sb.schema('aluno').from('room_members')
       .upsert({ room_id: roomId, user_id: partner.id, role:'member', status:'invited' }, { onConflict:'room_id,user_id', ignoreDuplicates:true });
     if(error){ if(window.ueToast) ueToast('Erro ao convidar: ' + error.message, 'error'); return; }
-    if(typeof _coopCreateNotif === 'function') await _coopCreateNotif(partner.id, 'room_invite', { from_user_id: uid, room_id: roomId, room_name: roomName });
+    // A prenda vai no payload pra o convidado ser avisado ANTES de aceitar.
+    const _prRoom = (_salasRooms || []).find(r => String(r.id) === String(roomId));
+    if(typeof _coopCreateNotif === 'function') await _coopCreateNotif(partner.id, 'room_invite', { from_user_id: uid, room_id: roomId, room_name: roomName, prenda_valor: (_prRoom && Number(_prRoom.prenda_valor) > 0) ? Number(_prRoom.prenda_valor) : null });
     if(window.ueToast) ueToast('Convite enviado para ' + (partner.nickname || 'seu colega') + '.', 'success');
   }catch(e){ console.warn('[salas invite]', e); }
 }
@@ -27850,6 +27980,20 @@ async function _salasDelete(roomId){
 async function _salasAcceptInvite(roomId){
   const uid = _salasMyUid(); if(!uid || !window._sb) return;
   try{
+    // Consentimento da prenda: entrar na sala = aceitar a regra, então o aceite
+    // mostra a regra completa antes (o convidado tem linha 'invited', a RLS deixa ler).
+    try{
+      const { data: _r } = await window._sb.schema('aluno').from('study_rooms')
+        .select('prenda_valor, prenda_tipo, prenda_meta').eq('id', roomId).maybeSingle();
+      if(_r && Number(_r.prenda_valor) > 0){
+        const _met = _r.prenda_tipo === 'minutos' ? ((_r.prenda_meta || 1) + ' minutos de estudo por dia')
+          : _r.prenda_tipo === 'atividade' ? 'um dia ativo (estudar ou responder questões)'
+          : ((_r.prenda_meta || 1) + ' questões por dia');
+        const _v = String(Number(_r.prenda_valor)).replace('.', ',');
+        if(!window.confirm('Esta sala tem PRENDA: quem não cumprir a meta do dia (' + _met + ') paga ' + _v +
+          ' UbiToken(s), divididos entre quem cumpriu. O valor sai da sua carteira no dia da falha. Entrar mesmo assim?')) return;
+      }
+    }catch(_){}
     // upsert (não update) — robusto mesmo se a linha tiver sumido; idempotente.
     const { error } = await window._sb.schema('aluno').from('room_members')
       .upsert({ room_id: roomId, user_id: uid, role:'member', status:'member', joined_at:new Date().toISOString() }, { onConflict:'room_id,user_id' });
@@ -27896,6 +28040,22 @@ function _salasOpenCreateModal(onDone){
       <div class="sr-field"><label class="sr-label" for="srGoal">Meta diária <span class="forum-opt">(opcional)</span></label><input type="number" class="sr-input" id="srGoal" min="0" step="5" placeholder="Ex.: 30"><div class="sr-help">Cada integrante busca essa meta por dia. A sala mostra um medidor coletivo somando as questões de todos.</div></div>
       <div class="sr-field"><label class="sr-label" for="srMode">Tipo de ranking</label><select class="sr-select" id="srMode"><option value="endless">Sem data de término (dia / semana / mês / ano)</option><option value="dated">Com data final (define um vencedor)</option></select></div>
       <div class="sr-field" id="srDateWrap" hidden><label class="sr-label" for="srDate">Data final</label><input type="date" class="sr-input" id="srDate"></div>
+      <div class="sr-field"><label class="sr-label" style="display:flex;align-items:center;gap:.5rem;cursor:pointer"><input type="checkbox" id="srPrenda" style="accent-color:var(--accent)"> Prenda diária (UbiTokens)</label>
+        <div class="sr-help">Quem não cumprir a meta do dia paga o valor, dividido entre os que cumpriram naquele dia. Todos cumprem (ou ninguém cumpre) = ninguém paga. A prenda é fixa: não dá pra mudar depois de criada — e quem aceitar o convite topa a regra.</div></div>
+      <div id="srPrendaWrap" hidden>
+        <div class="sr-field"><label class="sr-label" for="srPrValor">Valor por falha (em UbiTokens)</label><input type="number" class="sr-input" id="srPrValor" min="0.1" step="0.1" value="1"></div>
+        <div class="sr-field"><label class="sr-label" for="srPrTipo">Meta da prenda</label><select class="sr-select" id="srPrTipo"><option value="questoes">Questões respondidas no dia</option><option value="minutos">Minutos de estudo no dia</option><option value="atividade">Dia ativo (estudou ou respondeu questão)</option></select></div>
+        <div class="sr-field" id="srPrMetaWrap"><label class="sr-label" for="srPrMeta">Quantidade por dia</label><input type="number" class="sr-input" id="srPrMeta" min="1" step="1" value="30"></div>
+        <div class="sr-field"><label class="sr-label">Dias que contam</label><div id="srPrDias" style="display:flex;gap:.7rem;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" value="1" checked> seg</label>
+          <label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" value="2" checked> ter</label>
+          <label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" value="3" checked> qua</label>
+          <label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" value="4" checked> qui</label>
+          <label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" value="5" checked> sex</label>
+          <label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" value="6" checked> sáb</label>
+          <label style="display:flex;align-items:center;gap:.3rem;cursor:pointer"><input type="checkbox" value="7" checked> dom</label>
+        </div></div>
+      </div>
       <div class="coop-modal-err" id="srErr" hidden></div>
       <div class="coop-modal-actions"><button class="coop-btn-ghost" id="srCancel" type="button">Cancelar</button><button class="coop-btn-primary" id="srCreate" type="button">Criar sala</button></div></div>`;
     document.body.appendChild(el);
@@ -27903,11 +28063,24 @@ function _salasOpenCreateModal(onDone){
     el.querySelector('.coop-modal-x').addEventListener('click', () => el.classList.remove('open'));
     el.querySelector('#srCancel').addEventListener('click', () => el.classList.remove('open'));
     el.querySelector('#srMode').addEventListener('change', e => { el.querySelector('#srDateWrap').hidden = e.target.value !== 'dated'; });
+    el.querySelector('#srPrenda').addEventListener('change', e => { el.querySelector('#srPrendaWrap').hidden = !e.target.checked; });
+    el.querySelector('#srPrTipo').addEventListener('change', e => { el.querySelector('#srPrMetaWrap').hidden = e.target.value === 'atividade'; });
     el.querySelector('#srCreate').addEventListener('click', async () => {
       const name = (el.querySelector('#srName').value || '').trim(); const err = el.querySelector('#srErr');
       if(!name){ err.textContent = 'Dê um nome à sala.'; err.hidden = false; return; }
       const mode = el.querySelector('#srMode').value;
       const payload = { name, description:(el.querySelector('#srDesc').value||'').trim(), goal_type: el.querySelector('#srGoalType').value||'questions_per_day', daily_goal: parseInt(el.querySelector('#srGoal').value,10)||0, ranking_mode: mode, end_date: mode==='dated' ? (el.querySelector('#srDate').value||null) : null };
+      if(el.querySelector('#srPrenda').checked){
+        const tipo = el.querySelector('#srPrTipo').value || 'questoes';
+        const dias = Array.from(el.querySelectorAll('#srPrDias input:checked')).map(c => c.value).join('');
+        if(!dias){ err.textContent = 'Marque pelo menos um dia pra prenda valer.'; err.hidden = false; return; }
+        const valor = Math.round((parseFloat(el.querySelector('#srPrValor').value) || 0) * 100) / 100;
+        if(!(valor > 0)){ err.textContent = 'Defina o valor da prenda (em UbiTokens).'; err.hidden = false; return; }
+        payload.prenda_valor = valor;
+        payload.prenda_tipo = tipo;
+        payload.prenda_meta = tipo === 'atividade' ? null : Math.max(1, parseInt(el.querySelector('#srPrMeta').value, 10) || 1);
+        payload.prenda_dias = dias;
+      }
       const btn = el.querySelector('#srCreate'); btn.disabled = true; btn.textContent = 'Criando…';
       const id = await _salasCreate(payload); btn.disabled = false; btn.textContent = 'Criar sala';
       if(id){ el.classList.remove('open'); _salasCurrentId = id; if(onDone) onDone(); }
@@ -27916,6 +28089,13 @@ function _salasOpenCreateModal(onDone){
   }
   ['#srName','#srDesc','#srGoal'].forEach(s => { el.querySelector(s).value = ''; });
   el.querySelector('#srGoalType').value = 'questions_per_day';
+  el.querySelector('#srPrenda').checked = false;
+  el.querySelector('#srPrendaWrap').hidden = true;
+  el.querySelector('#srPrValor').value = '1';
+  el.querySelector('#srPrTipo').value = 'questoes';
+  el.querySelector('#srPrMetaWrap').hidden = false;
+  el.querySelector('#srPrMeta').value = '30';
+  el.querySelectorAll('#srPrDias input').forEach(c => { c.checked = true; });
   el.querySelector('#srMode').value = 'endless'; el.querySelector('#srDateWrap').hidden = true;
   const er = el.querySelector('#srErr'); er.hidden = true; er.textContent = '';
   el.classList.add('open');
