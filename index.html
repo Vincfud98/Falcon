@@ -42314,7 +42314,9 @@ const RotinaTab = (function(){
   let _dDia = '', _dGen = 0, _dTimer = null, _dPend = false, _refreshT = null;
   let _metas = {}, _metasEdit = false; // tipo → valor (aluno.study_goals)
   let _plans = [];                     // aluno.study_plans (últimos 60d + futuro)
-  let _cal = { ano: 0, mes: 0, sel: '' };
+  let _cal = { ano: 0, mes: 0 };
+  let _calPopAno = 0;                  // popover de trocar mês do calendário
+  let _sessTudo = false;               // Sessões recentes: mostrar além do mês atual
 
   /* ── datas: sempre o dia LOCAL (toISOString viraria o dia na madrugada);
         relógio via Date.now p/ os testes conseguirem congelar ── */
@@ -42671,89 +42673,339 @@ const RotinaTab = (function(){
     try{ document.dispatchEvent(new CustomEvent('ubq:plans-changed')); }catch(_){}
     await refresh();
   }
-  function _htmlCalPanel(){
-    const hoje = _diaStr(_hojeD());
-    const dia = _cal.sel || hoje;
-    const pls = _plans.filter(function(p){ return _planDia(p) === dia; });
-    let linhas = pls.map(function(p){
+  // ── Calendário no visual do MOCKUP: dom-first, dias vizinhos esmaecidos,
+  //    hoje em pílula dourada, chips por estado (sessão dourada, planejada
+  //    tracejada, feita verde com marca, perdida apagada). Clicar num dia abre
+  //    um MODAL com timeline de horas (estilo Notion Calendar) + lista; o
+  //    "+ Planejar estudo" abre um modal de evento (início/fim, não minutos). ──
+  function _calChipsDoDia(ds, hoje){
+    const tudo = [];
+    _sess.forEach(function(r){
+      if(String(r.dia).slice(0, 10) !== ds) return;
+      const mi = _matInfo(r);
+      tudo.push('<span class="rt-chip rt-chip-sess">' + _esc(mi.sigla || mi.nome) + ' · ' + _fmtMin(r.duration_min) + '</span>');
+    });
+    _plans.forEach(function(p){
+      if(_planDia(p) !== ds) return;
       const mi = _matInfo(p);
-      const perdida = p.status !== 'feito' && dia < hoje;
-      let acao;
-      if(p.status === 'feito') acao = '<span class="rt-plan-badge ok">feita</span>';
-      else acao = (perdida ? '<span class="rt-plan-badge perdida">perdida</span>' : '') +
-        '<a data-rt-plan-done="' + _esc(p.id) + '">Feito</a>';
-      return '<div class="rt-plan-row">' +
-        '<span class="rt-plan-hora">' + _planHora(p) + '</span>' +
-        '<span class="rt-plan-info">' + _esc(mi.nome) + (p.assunto ? ' — ' + _esc(p.assunto) : '') +
-          ' <span>' + _fmtMin(p.duracao_min || 60) + '</span></span>' +
-        '<span class="rt-plan-acts">' + acao +
-          '<a href="' + _esc(_gcalUrl(p)) + '" target="_blank" rel="noopener">Google</a>' +
-          '<a data-rt-plan-del="' + _esc(p.id) + '">Apagar</a></span>' +
-      '</div>';
-    }).join('');
-    if(!pls.length) linhas = '<div class="rt-meta-sub" style="margin:0">Nada planejado para este dia.</div>';
-    let form = '';
-    if(dia >= hoje){
-      const ops = _catOptions().map(function(o){
-        return '<option value="' + _esc(o.id) + '">' + _esc(o.nome) + '</option>';
-      }).join('');
-      form = '<div class="rt-plan-form">' +
-        '<input type="time" class="rt-meta-inp" id="rtPlHora" value="19:00" style="max-width:7.5rem">' +
-        '<select class="rt-meta-inp" id="rtPlCat" style="max-width:14rem">' + ops + '</select>' +
-        '<input type="text" class="rt-meta-inp" id="rtPlAss" placeholder="Assunto (opcional)" style="flex:1;min-width:9rem">' +
-        '<input type="number" class="rt-meta-inp" id="rtPlDur" value="60" min="5" max="1440" style="max-width:6rem" title="Duração prevista em minutos">' +
-        '<button type="button" class="rt-btn" data-rt-plan-add>Planejar</button>' +
-      '</div>';
-    }
-    const titulo = (dia === hoje ? 'Hoje · ' : '') + _diaBR(dia, { weekday:'long', day:'2-digit', month:'long' });
-    return '<div class="rt-cal-panel">' +
-      '<div class="rt-meta-rot" style="margin-bottom:.55rem">' + _esc(titulo) + '</div>' +
-      linhas + form + '</div>';
+      const perdida = p.status !== 'feito' && ds < hoje;
+      tudo.push('<span class="rt-chip rt-chip-plano' + (p.status === 'feito' ? ' ok' : '') + (perdida ? ' perdida' : '') + '">' +
+        (p.status === 'feito' ? '&#10003; ' : '') + _esc(mi.sigla || mi.nome) + ' · ' + (p.status === 'feito' ? 'feita' : _planHora(p)) + '</span>');
+    });
+    let chips = tudo.slice(0, 3).join('');
+    if(tudo.length > 3) chips += '<span class="rt-chip rt-chip-mais">+' + (tudo.length - 3) + '</span>';
+    return chips;
   }
-  function _htmlCalCard(){
+  function _calInner(){
     const hj = _hojeD();
-    if(!_cal.ano){ _cal.ano = hj.getFullYear(); _cal.mes = hj.getMonth(); _cal.sel = _diaStr(hj); }
+    if(!_cal.ano){ _cal.ano = hj.getFullYear(); _cal.mes = hj.getMonth(); }
     const hoje = _diaStr(hj);
-    const rotulo = _diaBR(_diaStr(new Date(_cal.ano, _cal.mes, 1)), { month:'long', year:'numeric' });
+    const mesNome = _diaBR(_diaStr(new Date(_cal.ano, _cal.mes, 1)), { month:'long' });
+    const rotulo = mesNome + (_cal.ano !== hj.getFullYear() ? ' de ' + _cal.ano : '');
     const prim = new Date(_cal.ano, _cal.mes, 1);
     const nDias = new Date(_cal.ano, _cal.mes + 1, 0).getDate();
-    const off = (prim.getDay() + 6) % 7;
-    const DIAS = ['seg','ter','qua','qui','sex','sáb','dom'];
-    let grid = DIAS.map(function(x){ return '<span class="rt-hm-wd">' + x + '</span>'; }).join('');
-    for(let i = 0; i < off; i++) grid += '<span class="rt-cal-c rt-vazio"></span>';
+    const off = prim.getDay();                       // dom-first, como o mockup
+    const DIAS = ['dom','seg','ter','qua','qui','sex','sáb'];
+    let grid = DIAS.map(function(x){ return '<span class="rt-cal-wd">' + x + '</span>'; }).join('');
+    // dias do mês ANTERIOR (esmaecidos, não clicáveis) preenchendo a 1ª linha
+    const prevUlt = new Date(_cal.ano, _cal.mes, 0).getDate();
+    for(let i = off - 1; i >= 0; i--){
+      grid += '<span class="rt-cal-c rt-cal-out"><i>' + (prevUlt - i) + '</i></span>';
+    }
     for(let dia = 1; dia <= nDias; dia++){
       const ds = _diaStr(new Date(_cal.ano, _cal.mes, dia));
-      const tudo = [];
-      _sess.forEach(function(r){
-        if(String(r.dia).slice(0, 10) !== ds) return;
-        const mi = _matInfo(r);
-        tudo.push('<span class="rt-chip rt-chip-sess">' + _esc(mi.sigla || mi.nome) + ' ' + _fmtMin(r.duration_min) + '</span>');
-      });
-      _plans.forEach(function(p){
-        if(_planDia(p) !== ds) return;
-        const mi = _matInfo(p);
-        const perdida = p.status !== 'feito' && ds < hoje;
-        tudo.push('<span class="rt-chip rt-chip-plano' + (p.status === 'feito' ? ' ok' : '') + (perdida ? ' perdida' : '') + '">' +
-          (p.status === 'feito' ? '&#10003; ' : '') + _planHora(p) + ' ' + _esc(mi.sigla || mi.nome) + '</span>');
-      });
-      let chips = tudo.slice(0, 3).join('');
-      if(tudo.length > 3) chips += '<span class="rt-chip rt-chip-mais">+' + (tudo.length - 3) + '</span>';
-      grid += '<span class="rt-cal-c' + (ds === hoje ? ' hoje' : '') + (ds === _cal.sel ? ' sel' : '') +
-        '" data-rt-cal-dia="' + ds + '"><i>' + dia + '</i>' + chips + '</span>';
+      grid += '<span class="rt-cal-c' + (ds === hoje ? ' hoje' : '') + '" data-rt-cal-dia="' + ds + '">' +
+        '<i>' + dia + '</i>' + _calChipsDoDia(ds, hoje) + '</span>';
     }
-    return '<div class="perf-chart-card">' +
-      '<div class="rt-head">' +
-        '<div class="perf-chart-title" style="margin-bottom:0">Calendário</div>' +
+    // dias do mês SEGUINTE completando a última linha
+    const resto = (off + nDias) % 7;
+    if(resto){ for(let d = 1; d <= 7 - resto; d++) grid += '<span class="rt-cal-c rt-cal-out"><i>' + d + '</i></span>'; }
+    return '<div class="rt-head">' +
+        '<div class="perf-chart-title" style="margin-bottom:0">Calendário · ' + _esc((mesNome + ' de ' + _cal.ano)) + '</div>' +
         '<div class="rt-ctrls">' +
           '<a class="rt-link" data-rt-cal-ics>Exportar agenda (.ics)</a>' +
           '<span class="rt-nav"><button type="button" class="rt-nav-btn" data-rt-cal-nav="-1">&#8249;</button>' +
-          '<span class="rt-nav-lbl">' + _esc(rotulo) + '</span>' +
+          '<button type="button" class="rt-cal-meslbl" data-rt-cal-mespop>' + _esc(rotulo) + '</button>' +
           '<button type="button" class="rt-nav-btn" data-rt-cal-nav="1">&#8250;</button></span>' +
+          '<button type="button" class="rt-btn rt-btn-ghost" data-rt-cal-hoje>Hoje</button>' +
+          '<button type="button" class="rt-btn" data-rt-cal-plan>+ Planejar estudo</button>' +
         '</div>' +
       '</div>' +
+      '<div class="rt-cal-mespop" id="rtCalMesPop" hidden></div>' +
       '<div class="rt-cal-grid">' + grid + '</div>' +
-      _htmlCalPanel() +
-    '</div>';
+      '<div class="rt-strip-hint">Sessões registradas em dourado · planejadas em tracejado (&#10003; = cumprida, entra nos gráficos) · perdidas apagadas. Clique num dia para ver a linha do tempo.</div>';
+  }
+  function _htmlCalCard(){ return '<div class="perf-chart-card" id="rtCalCard">' + _calInner() + '</div>'; }
+  function _renderCal(){ const c = _host && _host.querySelector('#rtCalCard'); if(c){ c.innerHTML = _calInner(); _bindCal(c); } }
+  function _htmlCalMesPop(){
+    if(!_calPopAno) _calPopAno = _cal.ano;
+    const MES3 = ['jan','fev','mar','abr','mai','jun','jul','ago','set','out','nov','dez'];
+    let g = '';
+    for(let m = 0; m < 12; m++){
+      const on = _calPopAno === _cal.ano && m === _cal.mes;
+      g += '<button type="button" class="rt-di-day' + (on ? ' is-sel' : '') + '" data-rt-cal-vaimes="' + m + '">' + MES3[m] + '</button>';
+    }
+    return '<div class="rt-di-pop-head">' +
+      '<button type="button" class="rt-nav-btn" data-rt-cal-popano="-1">&#8249;</button>' +
+      '<span class="rt-di-pop-lbl">' + _calPopAno + '</span>' +
+      '<button type="button" class="rt-nav-btn" data-rt-cal-popano="1">&#8250;</button></div>' +
+      '<div class="rt-cal-mespop-grid">' + g + '</div>';
+  }
+  function _bindCal(scope){
+    scope.querySelectorAll('[data-rt-cal-dia]').forEach(function(cel){
+      cel.addEventListener('click', function(){ _calAbrirDia(cel.getAttribute('data-rt-cal-dia')); });
+    });
+    scope.querySelectorAll('[data-rt-cal-nav]').forEach(function(b){
+      b.addEventListener('click', function(){
+        const dir = parseInt(b.getAttribute('data-rt-cal-nav'), 10) || 0;
+        let m = _cal.mes + dir;
+        if(m < 0){ m = 11; _cal.ano--; } else if(m > 11){ m = 0; _cal.ano++; }
+        _cal.mes = m; _calPopAno = 0;
+        _renderCal();
+      });
+    });
+    const bHj = scope.querySelector('[data-rt-cal-hoje]');
+    if(bHj) bHj.addEventListener('click', function(){
+      const hj = _hojeD();
+      _cal.ano = hj.getFullYear(); _cal.mes = hj.getMonth(); _calPopAno = 0;
+      _renderCal();
+    });
+    const bMes = scope.querySelector('[data-rt-cal-mespop]');
+    if(bMes) bMes.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      const pop = scope.querySelector('#rtCalMesPop');
+      if(!pop) return;
+      if(pop.hidden){ _calPopAno = _cal.ano; pop.innerHTML = _htmlCalMesPop(); pop.hidden = false; _bindCalMesPop(scope); }
+      else pop.hidden = true;
+    });
+    const bIcs = scope.querySelector('[data-rt-cal-ics]');
+    if(bIcs) bIcs.addEventListener('click', function(){ _icsBaixar(bIcs); });
+    const bPl = scope.querySelector('[data-rt-cal-plan]');
+    if(bPl) bPl.addEventListener('click', function(){ _calAbrirPlanejar(null); });
+  }
+  function _bindCalMesPop(scope){
+    const pop = scope.querySelector('#rtCalMesPop');
+    if(!pop) return;
+    pop.querySelectorAll('[data-rt-cal-popano]').forEach(function(b){
+      b.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        _calPopAno += parseInt(b.getAttribute('data-rt-cal-popano'), 10) || 0;
+        pop.innerHTML = _htmlCalMesPop(); _bindCalMesPop(scope);
+      });
+    });
+    pop.querySelectorAll('[data-rt-cal-vaimes]').forEach(function(b){
+      b.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        _cal.ano = _calPopAno; _cal.mes = parseInt(b.getAttribute('data-rt-cal-vaimes'), 10) || 0;
+        _renderCal();
+      });
+    });
+  }
+
+  /* ── modais do calendário (overlay próprio, vive no body — sobrevive ao
+        refresh() da aba) ── */
+  function _rtModal(id, extraCls){
+    const velho = document.getElementById(id);
+    if(velho) velho.remove();
+    const ov = document.createElement('div');
+    ov.id = id; ov.className = 'rt-modal-ov';
+    ov.innerHTML = '<div class="rt-modal' + (extraCls ? ' ' + extraCls : '') + '"></div>';
+    ov.addEventListener('click', function(ev){ if(ev.target === ov) ov.remove(); });
+    document.body.appendChild(ov);
+    return ov;
+  }
+  // Itens do dia com horário: planos têm hora real (quando); sessões de relógio
+  // (crono/timer/auto) têm início ESTIMADO = created_at − duração. Inserções
+  // manuais não têm horário honesto → só aparecem na lista, não na timeline.
+  function _calItensDoDia(ds){
+    const itens = [];
+    _sess.forEach(function(r){
+      if(String(r.dia).slice(0, 10) !== ds) return;
+      let ini = null;
+      if(r.source !== 'manual' && r.created_at){
+        const fim = new Date(r.created_at);
+        if(!isNaN(fim)){
+          ini = new Date(fim.getTime() - (r.duration_min || 0) * 60000);
+          const d0 = _dataDe(ds);
+          if(ini < d0) ini = d0;
+          if(_diaStr(ini) !== ds) ini = null;   // salvo noutro dia → sem horário
+        }
+      }
+      itens.push({ tipo: 'sessao', r: r, mi: _matInfo(r), ini: ini, dur: r.duration_min || 0 });
+    });
+    _plans.forEach(function(p){
+      if(_planDia(p) !== ds) return;
+      itens.push({ tipo: 'plano', p: p, mi: _matInfo(p), ini: new Date(p.quando), dur: p.duracao_min || 60 });
+    });
+    return itens;
+  }
+  function _calTimelineHtml(ds){
+    const hoje = _diaStr(_hojeD());
+    const comHora = _calItensDoDia(ds).filter(function(it){ return it.ini; });
+    let h0 = 7, h1 = 22;
+    comHora.forEach(function(it){
+      const a = it.ini.getHours() + it.ini.getMinutes() / 60;
+      const b = a + it.dur / 60;
+      if(Math.floor(a) < h0) h0 = Math.floor(a);
+      if(Math.ceil(b) > h1) h1 = Math.min(24, Math.ceil(b));
+    });
+    const HP = 44;                                  // px por hora
+    let linhas = '';
+    for(let h = h0; h <= h1; h++){
+      linhas += '<div class="rt-tl-hora" style="top:' + ((h - h0) * HP) + 'px"><span>' + String(h).padStart(2, '0') + ':00</span></div>';
+    }
+    const ord = comHora.slice().sort(function(a, b){ return a.ini - b.ini; });
+    const laneEnd = [0, 0];
+    let blocos = '';
+    ord.forEach(function(it){
+      const start = it.ini.getTime(), end = start + it.dur * 60000;
+      const overlap = ord.some(function(o){
+        if(o === it) return false;
+        const s2 = o.ini.getTime(), e2 = s2 + o.dur * 60000;
+        return s2 < end && e2 > start;
+      });
+      let lane = start >= laneEnd[0] ? 0 : 1;
+      laneEnd[lane] = end;
+      const top = ((it.ini.getHours() + it.ini.getMinutes() / 60) - h0) * HP;
+      const alt = Math.max(20, it.dur / 60 * HP - 2);
+      let cls = 'rt-tl-bloco';
+      let rot;
+      if(it.tipo === 'sessao'){
+        cls += ' sess';
+        rot = (it.mi.sigla || it.mi.nome) + (it.r.assunto ? ' — ' + it.r.assunto : '');
+      } else {
+        if(it.p.status === 'feito') cls += ' ok';
+        else if(ds < hoje) cls += ' perdida';
+        rot = (it.mi.sigla || it.mi.nome) + (it.p.assunto ? ' — ' + it.p.assunto : '');
+      }
+      blocos += '<div class="' + cls + '" style="top:' + top.toFixed(0) + 'px;height:' + alt.toFixed(0) +
+        'px;left:' + (overlap ? (lane === 0 ? '0%' : '51%') : '0%') + ';width:' + (overlap ? '48%' : '98%') +
+        '" data-tip="' + _esc(rot + ' · ' + _fmtMin(it.dur)) + '">' + _esc(rot) + '</div>';
+    });
+    const nota = comHora.length ? '' :
+      '<div class="rt-tl-vazia">Sem horários neste dia — veja a lista abaixo.</div>';
+    return '<div class="rt-tl-scroll"><div class="rt-tl" style="height:' + ((h1 - h0 + 1) * HP) + 'px">' +
+      linhas + '<div class="rt-tl-lane">' + blocos + '</div>' + nota + '</div></div>';
+  }
+  function _calDiaHtml(ds){
+    const hoje = _diaStr(_hojeD());
+    const titulo = (ds === hoje ? 'Hoje · ' : '') + _diaBR(ds, { weekday:'long', day:'2-digit', month:'long', year:'numeric' });
+    const ORIG = { cronometro: 'cronômetro', timer: 'timer', manual: 'manual', auto: 'automática' };
+    let lista = '';
+    _calItensDoDia(ds).forEach(function(it){
+      if(it.tipo === 'sessao'){
+        const r = it.r;
+        lista += '<div class="rt-plan-row">' +
+          '<span class="rt-plan-hora">' + (it.ini ? String(it.ini.getHours()).padStart(2, '0') + ':' + String(it.ini.getMinutes()).padStart(2, '0') : '—') + '</span>' +
+          '<span class="rt-plan-info">' + _esc(it.mi.nome) + (r.assunto ? ' — ' + _esc(r.assunto) : '') +
+            ' <span>' + _fmtMin(r.duration_min) + ' · ' + (ORIG[r.source] || _esc(r.source)) + '</span></span>' +
+          '<span class="rt-plan-badge sess">registrada</span>' +
+        '</div>';
+      } else {
+        const p = it.p;
+        const perdida = p.status !== 'feito' && ds < hoje;
+        let acao;
+        if(p.status === 'feito') acao = '<span class="rt-plan-badge ok">feita</span>';
+        else acao = (perdida ? '<span class="rt-plan-badge perdida">perdida</span>' : '') +
+          '<a data-rt-plan-done="' + _esc(p.id) + '">Feito</a>';
+        lista += '<div class="rt-plan-row">' +
+          '<span class="rt-plan-hora">' + _planHora(p) + '</span>' +
+          '<span class="rt-plan-info">' + _esc(it.mi.nome) + (p.assunto ? ' — ' + _esc(p.assunto) : '') +
+            ' <span>' + _fmtMin(p.duracao_min || 60) + ' · planejada</span></span>' +
+          '<span class="rt-plan-acts">' + acao +
+            '<a href="' + _esc(_gcalUrl(p)) + '" target="_blank" rel="noopener">Google</a>' +
+            '<a data-rt-plan-del="' + _esc(p.id) + '">Apagar</a></span>' +
+        '</div>';
+      }
+    });
+    if(!lista) lista = '<div class="rt-meta-sub" style="margin:0">Nada registrado nem planejado neste dia.</div>';
+    return '<div class="rt-modal-head"><span class="rt-modal-tit">' + _esc(titulo) + '</span>' +
+      '<span class="rt-modal-hacts">' +
+        (ds >= hoje ? '<button type="button" class="rt-btn rt-btn-ghost" data-rt-cal-plan-dia>+ Planejar neste dia</button>' : '') +
+        '<button type="button" class="rt-modal-x" data-rt-mx aria-label="Fechar">&times;</button>' +
+      '</span></div>' +
+      _calTimelineHtml(ds) +
+      '<div class="rt-tl-lista">' + lista + '</div>';
+  }
+  function _calAbrirDia(ds){
+    const ov = _rtModal('rtCalDiaModal');
+    const box = ov.querySelector('.rt-modal');
+    const pinta = function(){
+      box.innerHTML = _calDiaHtml(ds);
+      box.querySelector('[data-rt-mx]').addEventListener('click', function(){ ov.remove(); });
+      const bP = box.querySelector('[data-rt-cal-plan-dia]');
+      if(bP) bP.addEventListener('click', function(){ _calAbrirPlanejar(ds); });
+      box.querySelectorAll('[data-rt-plan-done]').forEach(function(b){
+        b.addEventListener('click', async function(){
+          b.textContent = 'Salvando…';
+          await _planFeito(b.getAttribute('data-rt-plan-done'));
+          if(ov.isConnected) pinta();
+        });
+      });
+      box.querySelectorAll('[data-rt-plan-del]').forEach(function(b){
+        b.addEventListener('click', async function(){
+          if(!b._arm){
+            b._arm = true; b.textContent = 'Confirmar?';
+            setTimeout(function(){ b._arm = false; if(b.isConnected) b.textContent = 'Apagar'; }, 4000);
+            return;
+          }
+          try{
+            const { error } = await window._sb.schema('aluno').from('study_plans')
+              .delete().eq('id', b.getAttribute('data-rt-plan-del'));
+            if(!error){
+              try{ document.dispatchEvent(new CustomEvent('ubq:plans-changed')); }catch(_){}
+              await refresh();
+              if(ov.isConnected) pinta();
+            }
+          }catch(_){}
+        });
+      });
+      if(typeof setupQuickTooltips === 'function') setupQuickTooltips(box);
+    };
+    pinta();
+  }
+  // Modal de planejar no formato de EVENTO (Google Agenda/Notion): matéria,
+  // assunto, dia, hora de INÍCIO e hora de FIM — a duração sai da diferença.
+  function _calAbrirPlanejar(diaPre){
+    const ov = _rtModal('rtCalPlanModal', 'rt-modal-sm');
+    const box = ov.querySelector('.rt-modal');
+    const hoje = _diaStr(_hojeD());
+    const dia = (diaPre && diaPre >= hoje) ? diaPre : hoje;
+    const ops = _catOptions().map(function(o){
+      return '<option value="' + _esc(o.id) + '">' + _esc(o.nome) + '</option>';
+    }).join('');
+    box.innerHTML = '<div class="rt-modal-head"><span class="rt-modal-tit">Planejar estudo</span>' +
+      '<button type="button" class="rt-modal-x" data-rt-mx aria-label="Fechar">&times;</button></div>' +
+      '<div class="rt-field"><label>Matéria</label><select class="rt-meta-inp" id="rtPlCat">' + ops + '</select></div>' +
+      '<div class="rt-field"><label>Assunto (opcional)</label><input class="rt-meta-inp" id="rtPlAss" maxlength="200" placeholder="ex.: Fazer a unidade HB 02"></div>' +
+      '<div class="rt-field-row">' +
+        '<div class="rt-field"><label>Dia</label><input type="date" class="rt-meta-inp" id="rtPlDia" min="' + hoje + '" value="' + dia + '"></div>' +
+        '<div class="rt-field"><label>Início</label><input type="time" class="rt-meta-inp" id="rtPlIni" value="19:00"></div>' +
+        '<div class="rt-field"><label>Fim</label><input type="time" class="rt-meta-inp" id="rtPlFim" value="20:00"></div>' +
+      '</div>' +
+      '<div class="rt-modal-err" id="rtPlErr" hidden></div>' +
+      '<div class="rt-metas-btns"><button type="button" class="rt-btn" id="rtPlSalvar">Planejar</button>' +
+      '<button type="button" class="rt-btn rt-btn-ghost" data-rt-mx>Cancelar</button></div>';
+    box.querySelectorAll('[data-rt-mx]').forEach(function(x){ x.addEventListener('click', function(){ ov.remove(); }); });
+    box.querySelector('#rtPlSalvar').addEventListener('click', async function(){
+      const err = box.querySelector('#rtPlErr');
+      const d = box.querySelector('#rtPlDia').value;
+      const ini = box.querySelector('#rtPlIni').value;
+      const fim = box.querySelector('#rtPlFim').value;
+      const cat = box.querySelector('#rtPlCat').value || 'revisao';
+      const ass = box.querySelector('#rtPlAss').value || '';
+      if(!d || d < hoje){ err.textContent = 'Escolha um dia de hoje em diante.'; err.hidden = false; return; }
+      const pIni = ini.split(':'), pFim = fim.split(':');
+      const minIni = (parseInt(pIni[0], 10) || 0) * 60 + (parseInt(pIni[1], 10) || 0);
+      const minFim = (parseInt(pFim[0], 10) || 0) * 60 + (parseInt(pFim[1], 10) || 0);
+      if(minFim <= minIni){ err.textContent = 'O fim precisa ser depois do início.'; err.hidden = false; return; }
+      const btn = box.querySelector('#rtPlSalvar');
+      btn.disabled = true; btn.textContent = 'Salvando…';
+      await _planCriar(d, ini, cat, ass, minFim - minIni);
+      ov.remove();
+      const diaModal = document.getElementById('rtCalDiaModal');
+      if(diaModal) _calAbrirDia(d);                  // modal do dia aberto → atualiza
+    });
   }
 
   /* ── Metas (aluno.study_goals): hoje + semana-calendário (desde segunda) ── */
@@ -43303,13 +43555,21 @@ const RotinaTab = (function(){
       });
     });
   }
-  function _htmlSessoesCard(){
+  // Sessões recentes: por padrão SÓ o mês atual; o resto fica atrás de um
+  // "Ver mais" (sem lista infinita). Lista com rolagem interna pra o card
+  // ficar na proporção do card Metas ao lado.
+  function _sessInner(){
     if(!_sess.length){
-      return '<div class="perf-chart-card"><div class="perf-chart-title">Sessões recentes</div>' +
-        '<div class="perf-chart-empty">Nenhuma sessão registrada ainda. O relógio automático registra sozinho quando você estuda uma unidade.</div></div>';
+      return '<div class="perf-chart-title">Sessões recentes</div>' +
+        '<div class="perf-chart-empty">Nenhuma sessão registrada ainda. O relógio automático registra sozinho quando você estuda uma unidade.</div>';
     }
+    const hj = _hojeD();
+    const iniMes = _diaStr(new Date(hj.getFullYear(), hj.getMonth(), 1));
+    const doMes = _sess.filter(function(r){ return String(r.dia).slice(0, 10) >= iniMes; });
+    const antigas = _sess.length - doMes.length;
+    const mostrar = _sessTudo ? _sess : doMes;
     const ORIG = { cronometro: 'cronômetro', timer: 'timer', manual: 'manual', auto: 'automática' };
-    const linhas = _sess.slice(0, 12).map(function(r){
+    const linhas = mostrar.map(function(r){
       const mi = _matInfo(r);
       const sub = [_diaBR(r.dia, { weekday:'short', day:'2-digit', month:'short' }), _unitNome(r.unit_id), r.assunto ? String(r.assunto) : '']
         .filter(Boolean).map(_esc).join(' · ');
@@ -43323,7 +43583,43 @@ const RotinaTab = (function(){
         '<div class="rt-sess-acts"><a data-rt-edit>Editar</a><a data-rt-del>Apagar</a></div>' +
       '</div>';
     }).join('');
-    return '<div class="perf-chart-card"><div class="perf-chart-title">Sessões recentes</div>' + linhas + '</div>';
+    const vazio = (!mostrar.length) ? '<div class="perf-chart-empty">Nenhuma sessão neste mês ainda.</div>' : '';
+    let rodape = '';
+    if(antigas > 0){
+      rodape = '<div class="rt-sess-mais"><a class="rt-link" data-rt-sess-mais>' +
+        (_sessTudo ? 'Ver menos (só este mês)' : 'Ver mais (' + antigas + ' anterior' + (antigas === 1 ? '' : 'es') + ')') +
+      '</a></div>';
+    }
+    return '<div class="perf-chart-title">Sessões recentes</div>' +
+      '<div class="rt-sess-list">' + linhas + vazio + '</div>' + rodape;
+  }
+  function _htmlSessoesCard(){ return '<div class="perf-chart-card rt-sess-card" id="rtSessCard">' + _sessInner() + '</div>'; }
+  function _renderSess(){ const c = _host && _host.querySelector('#rtSessCard'); if(c){ c.innerHTML = _sessInner(); _bindSess(c); } }
+  function _bindSess(scope){
+    const bMais = scope.querySelector('[data-rt-sess-mais]');
+    if(bMais) bMais.addEventListener('click', function(){ _sessTudo = !_sessTudo; _renderSess(); });
+    scope.querySelectorAll('.rt-sess').forEach(function(el){
+      const id = el.getAttribute('data-rt-sid');
+      const row = _sess.find(function(r){ return String(r.id) === String(id); });
+      const bE = el.querySelector('[data-rt-edit]'), bD = el.querySelector('[data-rt-del]');
+      if(bE) bE.addEventListener('click', function(){
+        if(row && window.StudyTimer && StudyTimer.edit) StudyTimer.edit({
+          id: row.id, dia: row.dia, categoria: row.categoria, subject_id: row.subject_id,
+          assunto: row.assunto, unit_id: row.unit_id, duration_min: row.duration_min, source: row.source
+        });
+      });
+      if(bD) bD.addEventListener('click', async function(){
+        if(!bD._arm){
+          bD._arm = true; bD.textContent = 'Confirmar?';
+          setTimeout(function(){ bD._arm = false; if(bD.isConnected) bD.textContent = 'Apagar'; }, 4000);
+          return;
+        }
+        try{
+          const { error } = await window._sb.schema('aluno').from('study_sessions').delete().eq('id', id);
+          if(!error) refresh();
+        }catch(_){}
+      });
+    });
   }
 
   /* ── Diário do dia (aluno.study_notes; richtext + autosave debounce) ── */
@@ -43529,53 +43825,8 @@ const RotinaTab = (function(){
     const _stk = _host.querySelector('#rtStackCard'); if(_stk) _bindStack(_stk);
     const bEd = _host.querySelector('[data-rt-ir-edital]');
     if(bEd) bEd.addEventListener('click', function(){ location.hash = '#/edital'; });
-    _host.querySelectorAll('[data-rt-cal-dia]').forEach(function(cel){
-      cel.addEventListener('click', function(){
-        _cal.sel = cel.getAttribute('data-rt-cal-dia');
-        _render();
-      });
-    });
-    _host.querySelectorAll('[data-rt-cal-nav]').forEach(function(b){
-      b.addEventListener('click', function(){
-        const dir = parseInt(b.getAttribute('data-rt-cal-nav'), 10) || 0;
-        let a = _cal.ano, m = _cal.mes + dir;
-        if(m < 0){ m = 11; a--; }
-        if(m > 11){ m = 0; a++; }
-        _cal.ano = a; _cal.mes = m;
-        _render();
-      });
-    });
-    const bIcs = _host.querySelector('[data-rt-cal-ics]');
-    if(bIcs) bIcs.addEventListener('click', function(){ _icsBaixar(bIcs); });
-    const bPl = _host.querySelector('[data-rt-plan-add]');
-    if(bPl) bPl.addEventListener('click', function(){
-      const hora = (_host.querySelector('#rtPlHora') || {}).value || '19:00';
-      const cat = (_host.querySelector('#rtPlCat') || {}).value || 'revisao';
-      const ass = (_host.querySelector('#rtPlAss') || {}).value || '';
-      const dur = parseInt((_host.querySelector('#rtPlDur') || {}).value, 10) || 60;
-      bPl.textContent = 'Salvando…';
-      _planCriar(_cal.sel || _diaStr(_hojeD()), hora, cat, ass, dur);
-    });
-    _host.querySelectorAll('[data-rt-plan-done]').forEach(function(b){
-      b.addEventListener('click', function(){ _planFeito(b.getAttribute('data-rt-plan-done')); });
-    });
-    _host.querySelectorAll('[data-rt-plan-del]').forEach(function(b){
-      b.addEventListener('click', async function(){
-        if(!b._arm){
-          b._arm = true; b.textContent = 'Confirmar?';
-          setTimeout(function(){ b._arm = false; if(b.isConnected) b.textContent = 'Apagar'; }, 4000);
-          return;
-        }
-        try{
-          const { error } = await window._sb.schema('aluno').from('study_plans')
-            .delete().eq('id', b.getAttribute('data-rt-plan-del'));
-          if(!error){
-            try{ document.dispatchEvent(new CustomEvent('ubq:plans-changed')); }catch(_){}
-            refresh();
-          }
-        }catch(_){}
-      });
-    });
+    const _calC = _host.querySelector('#rtCalCard'); if(_calC) _bindCal(_calC);
+    const _sesC = _host.querySelector('#rtSessCard'); if(_sesC) _bindSess(_sesC);
     const bMe = _host.querySelector('[data-rt-metas-editar]');
     if(bMe) bMe.addEventListener('click', function(){ _metasEdit = true; _render(); });
     const bMc = _host.querySelector('[data-rt-metas-cancelar]');
@@ -43602,28 +43853,6 @@ const RotinaTab = (function(){
       try{ await Promise.all(ops); }catch(e){ console.warn('[rotina] metas:', e); }
       _metasEdit = false;
       await refresh();               // relê as metas do banco e repinta tudo
-    });
-    _host.querySelectorAll('.rt-sess').forEach(function(el){
-      const id = el.getAttribute('data-rt-sid');
-      const row = _sess.find(function(r){ return String(r.id) === String(id); });
-      const bE = el.querySelector('[data-rt-edit]'), bD = el.querySelector('[data-rt-del]');
-      if(bE) bE.addEventListener('click', function(){
-        if(row && window.StudyTimer && StudyTimer.edit) StudyTimer.edit({
-          id: row.id, dia: row.dia, categoria: row.categoria, subject_id: row.subject_id,
-          assunto: row.assunto, unit_id: row.unit_id, duration_min: row.duration_min, source: row.source
-        });
-      });
-      if(bD) bD.addEventListener('click', async function(){
-        if(!bD._arm){
-          bD._arm = true; bD.textContent = 'Confirmar?';
-          setTimeout(function(){ bD._arm = false; if(bD.isConnected) bD.textContent = 'Apagar'; }, 4000);
-          return;
-        }
-        try{
-          const { error } = await window._sb.schema('aluno').from('study_sessions').delete().eq('id', id);
-          if(!error) refresh();
-        }catch(_){}
-      });
     });
   }
 
@@ -43757,7 +43986,9 @@ const RotinaTab = (function(){
 // align-items:start → cada card tem a altura do próprio conteúdo (o "Por
 // matéria" não estica mais pra acompanhar a "Distribuição" → fim do espaço
 // morto embaixo do donut).
-'.rt-2col{display:grid;grid-template-columns:1fr 1fr;gap:1rem;align-items:start}' +
+// stretch (padrão): os dois cards da linha ficam da MESMA altura, alinhados;
+// o espaço interno sobrando é resolvido DENTRO do card (pizza centralizada).
+'.rt-2col{display:grid;grid-template-columns:1fr 1fr;gap:1rem}' +
 '@media(max-width:860px){.rt-2col{grid-template-columns:1fr}}' +
 '.rt-bar-row{display:flex;align-items:center;gap:.7rem;padding:.32rem 0;font-family:var(--sans);font-weight:300}' +
 '.rt-bar-lbl{flex:0 0 3.6rem;font-size:.7rem;color:var(--text);letter-spacing:.04em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}' +
@@ -43767,20 +43998,57 @@ const RotinaTab = (function(){
 '.rt-leg{display:flex;gap:1rem;flex-wrap:wrap;margin-top:.6rem}' +
 '.rt-leg-item{display:inline-flex;align-items:center;gap:.4rem;font-family:var(--sans);font-weight:300;font-size:.66rem;color:var(--text-dim)}' +
 '.rt-leg-cor{width:10px;height:10px;border-radius:2px;flex:0 0 auto}' +
-'.rt-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}' +
-'.rt-cal-c{position:relative;min-height:74px;border:1px solid var(--border);border-radius:3px;padding:1.35rem .35rem .3rem;cursor:pointer;display:flex;flex-direction:column;gap:3px;background:var(--bg-elevated,#181a20)}' +
-'.rt-cal-c:hover{border-color:var(--accent)}' +
-'.rt-cal-c.rt-vazio{background:transparent;border:none;cursor:default}' +
-'.rt-cal-c i{position:absolute;top:4px;left:6px;font-style:normal;font-family:var(--sans);font-weight:300;font-size:.6rem;color:var(--text-dim)}' +
-'.rt-cal-c.hoje i{color:var(--accent)}' +
-'.rt-cal-c.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}' +
-'.rt-chip{font-family:var(--sans);font-weight:300;font-size:.56rem;letter-spacing:.02em;border-radius:2px;padding:.1rem .3rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
-'.rt-chip-sess{background:var(--accent);color:var(--bg-card)}' +
-'.rt-chip-plano{border:1px solid var(--accent);color:var(--accent)}' +
-'.rt-chip-plano.ok{border-color:var(--green,#5dd49f);color:var(--green,#5dd49f)}' +
-'.rt-chip-plano.perdida{border-color:var(--border);color:var(--text-mute)}' +
+// ── Calendário no visual do mockup: grade colada (linhas finas), dom-first,
+//    células altas, dias vizinhos esmaecidos, hoje em pílula dourada ──
+'.rt-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);border-top:1px solid var(--border);border-left:1px solid var(--border);margin-top:.4rem}' +
+'.rt-cal-wd{font-family:var(--sans);font-weight:300;font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute);text-align:center;padding:.55rem 0;border-right:1px solid var(--border);border-bottom:1px solid var(--border)}' +
+'.rt-cal-c{position:relative;min-height:92px;border-right:1px solid var(--border);border-bottom:1px solid var(--border);padding:1.65rem .4rem .35rem;cursor:pointer;display:flex;flex-direction:column;gap:3px;transition:background .15s}' +
+'.rt-cal-c:hover{background:var(--accent-xlo,rgba(200,169,126,.05))}' +
+'.rt-cal-c i{position:absolute;top:6px;left:8px;font-style:normal;font-family:var(--mono,monospace);font-size:.68rem;color:var(--text-dim)}' +
+'.rt-cal-c.hoje i{background:var(--accent);color:var(--bg-card,#13151a);border-radius:99px;padding:.12rem .48rem;top:4px;left:5px}' +
+'.rt-cal-out{cursor:default;background:rgba(0,0,0,.14)}' +
+'.rt-cal-out:hover{background:rgba(0,0,0,.14)}' +
+'.rt-cal-out i{color:var(--text-faint,rgba(240,236,228,.16))}' +
+'.rt-chip{font-family:var(--sans);font-weight:300;font-size:.6rem;letter-spacing:.02em;border-radius:3px;padding:.16rem .4rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+// registrada: caixinha escura com fio dourado à esquerda (como o mock)
+'.rt-chip-sess{background:var(--bg-elevated,#181a20);border:1px solid var(--border);border-left:2px solid var(--accent);color:var(--text)}' +
+// planejada: tracejada; feita: verde com marca; perdida: apagada
+'.rt-chip-plano{border:1px dashed var(--accent-border,rgba(200,169,126,.3));color:var(--text-dim)}' +
+'.rt-chip-plano.ok{border:1px solid rgba(93,212,159,.4);border-left:2px solid var(--green,#5dd49f);background:rgba(93,212,159,.08);color:var(--green,#5dd49f)}' +
+'.rt-chip-plano.perdida{opacity:.45}' +
 '.rt-chip-mais{color:var(--text-mute)}' +
-'.rt-cal-panel{border-top:1px solid var(--border);margin-top:1rem;padding-top:.9rem}' +
+'.rt-cal-meslbl{background:none;border:none;font-family:var(--mono,monospace);font-size:.8rem;color:var(--text);cursor:pointer;padding:.2rem .55rem;min-width:5.2rem;text-align:center}' +
+'.rt-cal-meslbl:hover{color:var(--accent)}' +
+'.rt-cal-mespop{position:absolute;z-index:60;right:1.5rem;top:3.4rem;width:230px;background:var(--bg-elevated,#181a20);border:1px solid var(--accent-border,var(--border));border-radius:6px;padding:.6rem;box-shadow:0 12px 34px -14px rgba(0,0,0,.6)}' +
+'.rt-cal-mespop[hidden]{display:none}' +
+'.rt-cal-mespop-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:2px}' +
+// ── modal genérico da Rotina (dia do calendário / planejar) ──
+'.rt-modal-ov{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.62);display:flex;align-items:center;justify-content:center;padding:1.5rem;backdrop-filter:blur(2px)}' +
+'.rt-modal{width:min(680px,96vw);max-height:88vh;overflow-y:auto;background:var(--bg-card,#13151a);border:1px solid var(--accent-border,var(--border));border-radius:8px;box-shadow:0 30px 80px -24px rgba(0,0,0,.7);padding:1.1rem 1.3rem 1.2rem;position:relative}' +
+'.rt-modal-sm{width:min(430px,96vw)}' +
+'.rt-modal-head{display:flex;align-items:center;justify-content:space-between;gap:.8rem;margin-bottom:.9rem}' +
+'.rt-modal-tit{font-family:var(--serif);font-weight:300;font-size:1.1rem;color:var(--text)}' +
+'.rt-modal-tit:first-letter{text-transform:uppercase}' +
+'.rt-modal-hacts{display:flex;align-items:center;gap:.6rem}' +
+'.rt-modal-x{flex-shrink:0;width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;background:transparent;border:1px solid var(--border);border-radius:6px;color:var(--text-mute);cursor:pointer;font-size:.95rem}' +
+'.rt-modal-x:hover{color:var(--accent);border-color:var(--accent)}' +
+'.rt-modal-err{font-family:var(--sans);font-weight:300;font-size:.74rem;color:#d47973;margin-top:.6rem}' +
+'.rt-field{display:flex;flex-direction:column;gap:.3rem;margin-bottom:.7rem;flex:1}' +
+'.rt-field label{font-family:var(--sans);font-weight:300;font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}' +
+'.rt-field-row{display:flex;gap:.7rem;flex-wrap:wrap}' +
+// ── timeline de horas do dia (estilo Notion Calendar) ──
+'.rt-tl-scroll{max-height:44vh;overflow-y:auto;border:1px solid var(--border);border-radius:4px;background:var(--bg-elevated,#181a20)}' +
+'.rt-tl{position:relative;margin:.4rem .5rem}' +
+'.rt-tl-hora{position:absolute;left:0;right:0;border-top:1px dashed var(--border);pointer-events:none}' +
+'.rt-tl-hora span{position:absolute;left:2px;top:-8px;font-family:var(--mono,monospace);font-size:.62rem;color:var(--text-mute);background:var(--bg-elevated,#181a20);padding-right:4px}' +
+'.rt-tl-lane{position:absolute;left:52px;right:6px;top:0;bottom:0}' +
+'.rt-tl-bloco{position:absolute;box-sizing:border-box;border-radius:4px;padding:.15rem .45rem;font-family:var(--sans);font-weight:300;font-size:.64rem;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border:1px dashed var(--accent-border,rgba(200,169,126,.3));color:var(--text-dim)}' +
+'.rt-tl-bloco.sess{background:var(--accent-lo,rgba(200,169,126,.12));border:1px solid var(--accent-border,rgba(200,169,126,.25));border-left:2px solid var(--accent);color:var(--text)}' +
+'.rt-tl-bloco.ok{background:rgba(93,212,159,.1);border:1px solid rgba(93,212,159,.4);border-left:2px solid var(--green,#5dd49f);color:var(--green,#5dd49f)}' +
+'.rt-tl-bloco.perdida{opacity:.4}' +
+'.rt-tl-vazia{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--sans);font-weight:300;font-size:.76rem;color:var(--text-mute)}' +
+'.rt-tl-lista{margin-top:.9rem}' +
+'.rt-plan-badge.sess{color:var(--accent);border-color:var(--accent-border,var(--border))}' +
 '.rt-plan-row{display:flex;align-items:center;gap:.8rem;padding:.4rem 0;font-family:var(--sans);font-weight:300;font-size:.78rem;color:var(--text);border-bottom:1px solid var(--border)}' +
 '.rt-plan-row:last-of-type{border-bottom:none}' +
 '.rt-plan-hora{font-family:var(--mono,monospace);font-size:.72rem;color:var(--accent);flex:0 0 auto}' +
@@ -43792,11 +44060,15 @@ const RotinaTab = (function(){
 '.rt-plan-badge{font-family:var(--sans);font-size:.6rem;border:1px solid var(--border);border-radius:2px;padding:.1rem .35rem;color:var(--text-mute)}' +
 '.rt-plan-badge.ok{color:var(--green,#5dd49f);border-color:var(--green,#5dd49f)}' +
 '.rt-plan-badge.perdida{color:#d47973;border-color:#d47973}' +
-'.rt-plan-form{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.9rem;align-items:center}' +
+'#rtCalCard{position:relative}' +
 '.rt-lembrete{position:fixed;right:18px;bottom:18px;z-index:9999;max-width:340px;background:var(--bg-elevated,#181a20);border:1px solid var(--accent);border-radius:4px;padding:.9rem 1rem;font-family:var(--sans);font-weight:300;font-size:.8rem;color:var(--text);line-height:1.6;box-shadow:0 8px 30px rgba(0,0,0,.5)}' +
 '.rt-lembrete b{color:var(--accent);font-weight:400}' +
 '.rt-lembrete span{color:var(--text-dim);font-size:.72rem}' +
 '.rt-lembrete a{margin-right:1rem;color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:3px;font-size:.74rem}' +
+// lista com rolagem interna: o card fica na proporção do card Metas ao lado
+'.rt-sess-card{display:flex;flex-direction:column}' +
+'.rt-sess-list{flex:1 1 auto;min-height:0;max-height:420px;overflow-y:auto;padding-right:.3rem}' +
+'.rt-sess-mais{margin-top:.6rem;text-align:center}' +
 '.rt-sess{display:flex;align-items:center;gap:1rem;padding:.6rem 0;border-bottom:1px solid var(--border)}' +
 '.rt-sess:last-child{border-bottom:none}' +
 '.rt-sess-info{flex:1;min-width:0}' +
@@ -43815,7 +44087,9 @@ const RotinaTab = (function(){
 '.rt-swatch::-webkit-color-swatch{border:none;border-radius:3px}' +
 '.rt-swatch-ro{cursor:default}' +
 // Pizza (donut) do impacto por matéria — hover via data-tip
-'.rt-pie-wrap{display:flex;align-items:center;gap:1.4rem;flex-wrap:wrap;justify-content:center;padding-top:.4rem;border-top:1px solid var(--border);margin-top:.2rem}' +
+// flex:1 → a pizza ocupa o espaço que sobrar no card e se CENTRALIZA nele
+// (o card acompanha a altura do vizinho; nada de vazio no rodapé).
+'.rt-pie-wrap{flex:1;display:flex;align-items:center;gap:1.4rem;flex-wrap:wrap;justify-content:center;padding-top:.4rem;border-top:1px solid var(--border);margin-top:.2rem}' +
 '.rt-pie{position:relative;width:128px;height:128px;flex:0 0 auto}' +
 '.rt-pie-disc{position:absolute;inset:0;border-radius:50%}' +
 '.rt-pie-hit{position:absolute;inset:0;width:128px;height:128px}' +
