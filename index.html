@@ -4602,6 +4602,15 @@ body.gallery-detail-open{overflow:hidden}
   font-family:var(--sans);font-weight:300;font-size:.86rem;color:var(--text);margin-right:auto;
 }
 .qz-verify-summary[hidden]{display:none}
+/* Barra de verificar POR GRUPO (fica dentro do grupo): mais compacta e o
+   botão menos proeminente que o global do fim, que segue sendo o principal. */
+.qz-verify-group{margin-top:.9rem;padding-top:.9rem}
+.qz-verify-group .qz-verify-btn{
+  background:transparent;color:var(--accent);border:1px solid var(--accent-border,var(--accent));
+  padding:.4rem .9rem;font-size:.82rem;font-weight:400;
+}
+.qz-verify-group .qz-verify-btn:hover{background:var(--accent);color:var(--bg,#0b0c0f)}
+.qz-verify-group .qz-verify-summary{font-size:.8rem}
 /* Garante que o botão "Estatísticas" do topo respeite o atributo hidden */
 .icon-btn[hidden]{display:none}
 /* Modal de estatísticas da unidade */
@@ -16417,11 +16426,23 @@ Blocks.quiz = {
           ${g.description ? `<div class="q-group-enunciado">${g.description}</div>` : ''}
         </div>`;
       }
+      // Botão de VERIFICAR SÓ ESTE GRUPO (pedido do dono): quando há vários
+      // grupos e é modo adiado, cada grupo ganha a própria barra de verificar,
+      // pra o aluno conferir o grupo que fez sem descer até o botão global (que
+      // continua existindo e verifica tudo). Nasce escondida (igual à global):
+      // aparece quando o aluno marca algo no grupo.
+      const groupVerify = (defer && groups.length > 1 && !g._synthetic)
+        ? `<div class="qz-verify-bar qz-verify-group" data-qz-verify-group="${g.idx}" hidden>
+            <div class="qz-verify-summary" data-qz-group-summary="${g.idx}" hidden></div>
+            <button type="button" class="btn-primary qz-verify-btn" data-qz-verify-group-btn="${g.idx}">Verificar este grupo</button>
+          </div>`
+        : '';
       return `<div class="q-group${singleFlat?' q-group-flat':''}${g._synthetic?' q-group-synth':''}" data-group-idx="${g.idx}">
         ${tagRow}
         ${renderQuizReference(g)}
         ${command}
         <div class="q-group-items">${itemsHTML}</div>
+        ${groupVerify}
       </div>`;
     }).join('');
     const satellite = !isSimulado ? `<aside class="qz-satellite">
@@ -16779,9 +16800,12 @@ Blocks.quiz = {
         const verifyBtn = stageEl.querySelector('[data-qz-verify-btn]');
         const summaryEl = stageEl.querySelector('[data-qz-summary]');
 
-        function readStates(){
+        // Estados de UM SUBCONJUNTO de itens (o bloco todo OU um grupo). É o que
+        // permite o botão por grupo reusar a MESMA lógica do global, só mudando
+        // a lista de itens.
+        function readStatesOf(items){
           let selected = 0, unverified = 0, verifiedCount = 0, verifiedCorrect = 0;
-          allItems.forEach(it => {
+          items.forEach(it => {
             const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
             if(!p) return;
             // ANULADA: continua respondível e é revelada normalmente, mas não
@@ -16818,79 +16842,92 @@ Blocks.quiz = {
           const sk = itemEl.querySelector('.q-show-key'); if(sk) sk.style.display = 'none';
           _deferWhyClear(itemEl);   // tira o campo do "porquê" e o comentário da IA
         }
-        function syncVerifyBar(){
-          if(!verifyBar || !verifyBtn) return;
-          const s = readStates();
-          if(s.selected === 0 && s.verifiedCount === 0){ verifyBar.hidden = true; return; }
-          verifyBar.hidden = false;
-          // "Verificar" se há marcação nova a conferir; senão "Tentar novamente".
-          if(s.unverified > 0){ verifyBtn.textContent = 'Verificar respostas'; verifyBtn.dataset.mode = 'verify'; }
-          else { verifyBtn.textContent = 'Tentar novamente'; verifyBtn.dataset.mode = 'retry'; }
-          // Resumo: % medido SÓ sobre as respondidas verificadas.
-          if(summaryEl){
+        // Sincroniza UMA barra de verificar (global OU de grupo) sobre a sua
+        // lista de itens. verifyLabel muda só o texto do botão.
+        function syncOneBar(barEl, btnEl, sumEl, items, verifyLabel){
+          if(!barEl || !btnEl) return;
+          const s = readStatesOf(items);
+          if(s.selected === 0 && s.verifiedCount === 0){ barEl.hidden = true; return; }
+          barEl.hidden = false;
+          if(s.unverified > 0){ btnEl.textContent = verifyLabel; btnEl.dataset.mode = 'verify'; }
+          else { btnEl.textContent = 'Tentar novamente'; btnEl.dataset.mode = 'retry'; }
+          if(sumEl){
             if(s.verifiedCount > 0){
               const pct = Math.round(s.verifiedCorrect / s.verifiedCount * 100);
-              summaryEl.hidden = false;
-              summaryEl.textContent = 'Você acertou ' + s.verifiedCorrect + ' de ' + s.verifiedCount + ' (' + pct + '%)';
-            } else { summaryEl.hidden = true; }
+              sumEl.hidden = false;
+              sumEl.textContent = 'Você acertou ' + s.verifiedCorrect + ' de ' + s.verifiedCount + ' (' + pct + '%)';
+            } else { sumEl.hidden = true; }
           }
+        }
+        // Grupos com barra própria (só quando há vários) → mapeados por idx.
+        const groupBars = groups.map(g => ({
+          items: g.items,
+          bar: stageEl.querySelector('[data-qz-verify-group="' + g.idx + '"]'),
+          btn: stageEl.querySelector('[data-qz-verify-group-btn="' + g.idx + '"]'),
+          sum: stageEl.querySelector('[data-qz-group-summary="' + g.idx + '"]'),
+        })).filter(x => x.bar && x.btn);
+        // syncVerifyBar (mesmo nome de antes, usado por __quizSyncVerifyBar):
+        // agora atualiza a barra GLOBAL e TODAS as barras de grupo de uma vez.
+        function syncVerifyBar(){
+          syncOneBar(verifyBar, verifyBtn, summaryEl, allItems, 'Verificar respostas');
+          groupBars.forEach(gb => syncOneBar(gb.bar, gb.btn, gb.sum, gb.items, 'Verificar este grupo'));
         }
         stageEl.__quizSyncVerifyBar = syncVerifyBar;
 
-        if(verifyBtn){
-          verifyBtn.addEventListener('click', () => {
-            const mode = verifyBtn.dataset.mode || 'verify';
-            if(mode === 'retry'){
-              // Decisão do usuário: "Tentar novamente" LIMPA as marcações —
-              // remove a resposta de vez (local + Supabase), pra não voltar
-              // após reload nem continuar contando na estatística global.
-              allItems.forEach(it => {
-                const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
-                if(p && p.verified){
-                  ctx.store.clearQuizAnswer(ctx.unitId, block.id, it.id);
-                  const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
-                  if(itemEl) unrevealItem(itemEl);
-                }
-              });
-            } else {
-              // Verifica TODAS as respondidas ainda não verificadas (parcial).
-              const _whyBatch = [];
-              allItems.forEach(it => {
-                const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
-                if(p && p.selected != null && !p.verified){
-                  const norm = normalizeOptions(it.options);
-                  const keyIdx = quizItemKeyIndex(it, norm);
-                  const selIdx = norm.values.findIndex(v => String(v) === String(p.selected));
-                  const correct = selIdx === keyIdx;
-                  // Verifica + SINCRONIZA (só agora conta na estatística global).
-                  ctx.store.updateQuizAnswer(ctx.unitId, block.id, it.id,
-                    { selected:p.selected, correct, verified:true, doubt:!!p.doubt });
-                  // ANULADA não alimenta (nem quebra) a sequência de acertos.
-                  if(window._recordPractice && !(it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)))) window._recordPractice(ctx.unitId, correct);
-                  const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
-                  if(itemEl){
-                    revealItem(itemEl, selIdx, correct);
-                    const spec = _deferWhySpec(itemEl, it, norm, keyIdx, correct);
-                    if(spec){
-                      // Persiste motivo + comentário na resposta da questão (volta ao recarregar).
-                      const _p = p, _it = it, _correct = correct;
-                      spec.onDone = function(md){ ctx.store.updateQuizAnswer(ctx.unitId, block.id, _it.id, { selected:_p.selected, correct:_correct, verified:true, doubt:!!_p.doubt, why: spec.reason, ai: md }); };
-                      _whyBatch.push(spec);
-                    }
+        // Verifica/limpa um SUBCONJUNTO de itens (o bloco todo ou um grupo).
+        // É a MESMA lógica de antes, só parametrizada pela lista — o botão global
+        // passa allItems (comportamento idêntico ao de hoje), o de grupo passa
+        // os itens do grupo.
+        function runVerify(items, mode){
+          if(mode === 'retry'){
+            // "Tentar novamente" LIMPA as marcações (local + Supabase), pra não
+            // voltar após reload nem continuar contando na estatística global.
+            items.forEach(it => {
+              const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
+              if(p && p.verified){
+                ctx.store.clearQuizAnswer(ctx.unitId, block.id, it.id);
+                const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
+                if(itemEl) unrevealItem(itemEl);
+              }
+            });
+          } else {
+            // Verifica as respondidas ainda não verificadas dessa lista.
+            const _whyBatch = [];
+            items.forEach(it => {
+              const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
+              if(p && p.selected != null && !p.verified){
+                const norm = normalizeOptions(it.options);
+                const keyIdx = quizItemKeyIndex(it, norm);
+                const selIdx = norm.values.findIndex(v => String(v) === String(p.selected));
+                const correct = selIdx === keyIdx;
+                ctx.store.updateQuizAnswer(ctx.unitId, block.id, it.id,
+                  { selected:p.selected, correct, verified:true, doubt:!!p.doubt });
+                // ANULADA não alimenta (nem quebra) a sequência de acertos.
+                if(window._recordPractice && !(it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)))) window._recordPractice(ctx.unitId, correct);
+                const itemEl = stageEl.querySelector('.q-item[data-item-id="'+CSS.escape(String(it.id))+'"]');
+                if(itemEl){
+                  revealItem(itemEl, selIdx, correct);
+                  const spec = _deferWhySpec(itemEl, it, norm, keyIdx, correct);
+                  if(spec){
+                    const _p = p, _it = it, _correct = correct;
+                    spec.onDone = function(md){ ctx.store.updateQuizAnswer(ctx.unitId, block.id, _it.id, { selected:_p.selected, correct:_correct, verified:true, doubt:!!_p.doubt, why: spec.reason, ai: md }); };
+                    _whyBatch.push(spec);
                   }
                 }
-              });
-              // Comentário da IA (só pros itens com motivo escrito) — 1 chamada.
-              if(_whyBatch.length && window.TutorIA && TutorIA.commentBatch) TutorIA.commentBatch(_whyBatch);
-            }
-            syncVerifyBar();
-            updateSatellite(null);
-            // Botão "Estatísticas" do topo: aparece quando há ≥1 questão
-            // verificada na unidade; some se "Tentar novamente" zerou tudo.
-            const _usb = document.getElementById('unitStatsBtn');
-            if(_usb && ctx.unit) _usb.hidden = !getUnitQuizStats(ctx.unit).hasVerified;
-          });
+              }
+            });
+            if(_whyBatch.length && window.TutorIA && TutorIA.commentBatch) TutorIA.commentBatch(_whyBatch);
+          }
+          syncVerifyBar();
+          updateSatellite(null);
+          // Botão "Estatísticas" do topo: aparece quando há ≥1 questão
+          // verificada na unidade; some se "Tentar novamente" zerou tudo.
+          const _usb = document.getElementById('unitStatsBtn');
+          if(_usb && ctx.unit) _usb.hidden = !getUnitQuizStats(ctx.unit).hasVerified;
         }
+
+        if(verifyBtn) verifyBtn.addEventListener('click', () => runVerify(allItems, verifyBtn.dataset.mode || 'verify'));
+        groupBars.forEach(gb => gb.btn.addEventListener('click', () => runVerify(gb.items, gb.btn.dataset.mode || 'verify')));
         syncVerifyBar(); // estado inicial (aluno pode já ter marcações salvas)
       }
       // Initial state
