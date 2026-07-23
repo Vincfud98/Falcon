@@ -11773,6 +11773,60 @@ window._authUserId = function(){
   }catch(_){ return null; }
 };
 
+// ── Cor por MATÉRIA: FONTE ÚNICA compartilhada (grafo/Conexões + Rotina) ──
+// A aba Conexões já tinha paleta + cor por matéria persistida em
+// aluno.graph_prefs (prefs.colors). Este módulo passa a SER o dono dessas
+// cores: o grafo e a aba Rotina leem/escrevem por aqui, então a cor é a
+// MESMA nos dois e o seletor de um reflete no outro. Base = índice na paleta
+// pela ordem alfabética dos subject_ids (determinístico, sem depender do
+// modelo do grafo). O objeto _colors é mutado NO LUGAR (nunca reatribuído)
+// pra quem guardar a referência (o grafo) não ficar com cópia velha.
+window.SubjectColors = (function(){
+  const PALETTE = ['#c8a97e','#7ea9c8','#86c88a','#c87e9e','#b59ad6','#d6b85a','#69b9a8','#d68a6a','#9aa0d6','#c86a6a','#7ec8c0'];
+  const _colors = {};
+  let _loaded = false, _saveT = null;
+  function _hash(s){ let h = 0; for(let i = 0; i < s.length; i++){ h = (h * 31 + s.charCodeAt(i)) >>> 0; } return h; }
+  function _ids(){
+    try{ return ((window.UbiqueStore && UbiqueStore.subjects && UbiqueStore.subjects.list()) || []).map(function(s){ return String(s.id); }).sort(); }
+    catch(_){ return []; }
+  }
+  function baseFor(id){
+    id = String(id);
+    const ids = _ids(), i = ids.indexOf(id);
+    return PALETTE[(i >= 0 ? i : _hash(id)) % PALETTE.length];
+  }
+  function get(id){ id = String(id); return _colors[id] || baseFor(id) || '#888'; }
+  function map(){ return _colors; }
+  async function ensureLoaded(){
+    if(_loaded) return;
+    const uid = (window._authUserId && window._authUserId()); if(!uid || !window._sb){ return; }
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('graph_prefs').select('prefs').eq('user_id', uid).maybeSingle();
+      if(!error){
+        if(data && data.prefs && data.prefs.colors) Object.assign(_colors, data.prefs.colors);   // muta NO LUGAR
+        _loaded = true;
+      }
+    }catch(e){ console.warn('[subjcolors load]', e); }
+  }
+  function set(id, hex){
+    _colors[String(id)] = hex;
+    try{ document.dispatchEvent(new CustomEvent('ubq:subject-colors-changed')); }catch(_){}
+    if(_saveT) clearTimeout(_saveT);
+    _saveT = setTimeout(async function(){
+      _saveT = null;
+      const uid = (window._authUserId && window._authUserId()); if(!uid || !window._sb) return;
+      try{
+        // read-modify-write: preserva forces/display do grafo no mesmo prefs
+        const { data } = await window._sb.schema('aluno').from('graph_prefs').select('prefs').eq('user_id', uid).maybeSingle();
+        const prefs = (data && data.prefs) || {};
+        prefs.colors = _colors;
+        await window._sb.schema('aluno').from('graph_prefs').upsert({ user_id: uid, prefs: prefs, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+      }catch(e){ console.warn('[subjcolors save]', e); }
+    }, 800);
+  }
+  return { get: get, set: set, map: map, baseFor: baseFor, ensureLoaded: ensureLoaded, PALETTE: PALETTE };
+})();
+
 Object.entries({
   'curso-historia-brasil': {
     contractIncluded: true,
@@ -34512,7 +34566,12 @@ window.TutorIA = (function(){
   // ── Estado do grafo (3B) ──
   let _grafoModel = null, _grafoNodeObj = {}, _grafoCollapsed = {}, _grafoActive = null, _grafoPrefsTimer = null;
   const _grafoPrefs = { colors: {}, forces: { charge: -95, linkDist: 72, linkStr: 0.16, center: 0.06 }, display: { sizeByDegree: true, linkWidth: 1.3, arrows: true, labels: true } };
-  function _grafoColor(s){ return (_grafoPrefs.colors && _grafoPrefs.colors[s]) || (_grafoModel && _grafoModel.colorBase[s]) || '#888'; }
+  // Cor da matéria vem da FONTE ÚNICA (window.SubjectColors) — a MESMA que a
+  // Rotina usa; assim grafo e Rotina mostram a mesma cor e o seletor conversa.
+  function _grafoColor(s){
+    if(window.SubjectColors) return SubjectColors.get(s);
+    return (_grafoPrefs.colors && _grafoPrefs.colors[s]) || (_grafoModel && _grafoModel.colorBase[s]) || '#888';
+  }
   let _grafoPrefsLoaded = false;
   async function _grafoPrefsLoad(){
     if(_grafoPrefsLoaded) return; // já carregou nesta sessão → não rebusca
@@ -34522,10 +34581,13 @@ window.TutorIA = (function(){
       if(!error){
         if(data && data.prefs){
           const p = data.prefs;
-          if(p.colors) _grafoPrefs.colors = p.colors;
           if(p.forces) Object.assign(_grafoPrefs.forces, p.forces);
           if(p.display) Object.assign(_grafoPrefs.display, p.display);
         }
+        // As cores são donas do SubjectColors (fonte única); compartilha a
+        // MESMA referência do mapa pra grafo e Rotina não divergirem.
+        if(window.SubjectColors){ await SubjectColors.ensureLoaded(); _grafoPrefs.colors = SubjectColors.map(); }
+        else if(data && data.prefs && data.prefs.colors) _grafoPrefs.colors = data.prefs.colors;
         _grafoPrefsLoaded = true;
       }
     } catch(e){ console.warn('[grafo prefs load]', e); }
@@ -34647,7 +34709,11 @@ window.TutorIA = (function(){
         _grafoActive = (on.length === ids.length) ? null : new Set(on);
         _grafoApply();
       });
-      col.addEventListener('input', function(){ _grafoPrefs.colors[s.id] = col.value; _grafoApply(); _grafoPrefsSave(); });
+      col.addEventListener('input', function(){
+        if(window.SubjectColors) SubjectColors.set(s.id, col.value);   // fonte única (grava + avisa a Rotina)
+        else { _grafoPrefs.colors[s.id] = col.value; _grafoPrefsSave(); }
+        _grafoApply();
+      });
     });
     // Exibição
     const sD = sec('Exibição');
@@ -42235,9 +42301,10 @@ const RotinaTab = (function(){
   let _minDia = {}, _minDiaMat = {};   // dia → minutos; dia → { matKey → minutos }
   let _mats = {};                      // matKey → { nome, sigla }
   let _hm = { mode: 'ambos', view: 'ano', ano: 0, mes: 0 };
-  let _per = 'mes';                    // linha: semana|mes|3m|6m|ano|custom
+  let _per = 'mes';                    // período COMPARTILHADO: semana|mes|3m|6m|ano|custom
   let _perCustom = { ini: '', fim: '' };
   let _stackLinha = false;
+  let _stackFiltro = null;             // Distribuição: isolar 1 matéria (matKey) ou null
   let _dDia = '', _dGen = 0, _dTimer = null, _dPend = false, _refreshT = null;
   let _metas = {}, _metasEdit = false; // tipo → valor (aluno.study_goals)
   let _plans = [];                     // aluno.study_plans (últimos 60d + futuro)
@@ -42304,6 +42371,7 @@ const RotinaTab = (function(){
   async function _carrega(){
     const uid = _uid();
     if(!uid || !window._sb){ _sess = []; _xpDias = {}; _agrega(); return; }
+    if(window.SubjectColors) SubjectColors.ensureLoaded();   // cores salvas (compartilhadas c/ Conexões)
     _sess = await _fetchTudo(function(){
       return window._sb.schema('aluno').from('study_sessions')
         .select('id, dia, categoria, subject_id, assunto, unit_id, duration_min, source, created_at')
@@ -42989,153 +43057,237 @@ const RotinaTab = (function(){
       metaSvg + xl + dots + hits +
     '</svg>';
   }
-  function _linhaInner(){
+  /* ── período COMPARTILHADO entre os 3 gráficos temporais (linha, matéria,
+        distribuição): analisar sempre na MESMA variável (pedido do dono) ── */
+  function _perPills(){
     const opts = [['semana','Semana'],['mes','Mês'],['3m','3 meses'],['6m','6 meses'],['ano','Ano'],['custom','Personalizado']];
-    const pills = opts.map(function(p){
+    return '<span class="rt-pills rt-pills-wrap">' + opts.map(function(p){
       return '<button type="button" class="rt-pill' + (_per === p[0] ? ' active' : '') + '" data-rt-per="' + p[0] + '">' + p[1] + '</button>';
-    }).join('');
-    let custom = '';
-    if(_per === 'custom'){
-      const hoje = _diaStr(_hojeD());
-      custom = '<div class="rt-custom">' +
-        '<label>De <input type="date" class="rt-meta-inp" id="rtPerDe" max="' + hoje + '" value="' + _esc(_perCustom.ini || '') + '"></label>' +
-        '<label>até <input type="date" class="rt-meta-inp" id="rtPerAte" max="' + hoje + '" value="' + _esc(_perCustom.fim || hoje) + '"></label>' +
-      '</div>';
-    }
-    return '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Tempo de estudo por dia</div>' +
-      '<span class="rt-pills rt-pills-wrap">' + pills + '</span></div>' +
-      custom +
-      _svgLinha();
+    }).join('') + '</span>';
   }
-  function _htmlLinhaCard(){
-    return '<div class="perf-chart-card" id="rtLinhaCard">' + _linhaInner() + '</div>';
+  function _perCustomRow(){
+    if(_per !== 'custom') return '';
+    const hoje = _diaStr(_hojeD());
+    return '<div class="rt-custom">' +
+      '<label>De <input type="date" class="rt-meta-inp rt-per-de" max="' + hoje + '" value="' + _esc(_perCustom.ini || '') + '"></label>' +
+      '<label>até <input type="date" class="rt-meta-inp rt-per-ate" max="' + hoje + '" value="' + _esc(_perCustom.fim || hoje) + '"></label>' +
+    '</div>';
   }
-  function _renderLinha(){
-    const c = _host && _host.querySelector('#rtLinhaCard');
-    if(!c) return;
-    c.innerHTML = _linhaInner();
-    _bindLinha(c);
-  }
-  function _bindLinha(scope){
-    (scope || _host).querySelectorAll('[data-rt-per]').forEach(function(b){
-      b.addEventListener('click', function(){ _per = b.getAttribute('data-rt-per'); _renderLinha(); });
+  function _setPer(p){ _per = p; _renderLinha(); _renderMat(); _renderStack(); }
+  function _bindPer(scope){
+    scope.querySelectorAll('[data-rt-per]').forEach(function(b){
+      b.addEventListener('click', function(){ _setPer(b.getAttribute('data-rt-per')); });
     });
-    const de = (scope || _host).querySelector('#rtPerDe'), ate = (scope || _host).querySelector('#rtPerAte');
-    function aplica(){
-      if(de) _perCustom.ini = de.value;
-      if(ate) _perCustom.fim = ate.value;
-      _renderLinha();
-    }
+    const de = scope.querySelector('.rt-per-de'), ate = scope.querySelector('.rt-per-ate');
+    function aplica(){ if(de) _perCustom.ini = de.value; if(ate) _perCustom.fim = ate.value; _setPer('custom'); }
     if(de) de.addEventListener('change', aplica);
     if(ate) ate.addEventListener('change', aplica);
   }
-  function _htmlMatCard(){
-    const hoje = _diaStr(_hojeD());
-    const por = {};
-    for(let d = _addDias(hoje, -29); d <= hoje; d = _addDias(d, 1)){
-      const m = _minDiaMat[d] || {};
-      Object.keys(m).forEach(function(k){ por[k] = (por[k] || 0) + m[k]; });
-    }
-    const ord = Object.keys(por).sort(function(a, b){ return por[b] - por[a]; }).slice(0, 8);
-    let corpo;
-    if(!ord.length){
-      corpo = '<div class="perf-chart-empty">Nenhum registro nos últimos 30 dias.</div>';
-    } else {
-      const max = por[ord[0]];
-      corpo = ord.map(function(k){
-        const mi = _mats[k] || { nome: k, sigla: '' };
-        return '<div class="rt-bar-row" title="' + _esc(mi.nome) + '">' +
-          '<span class="rt-bar-lbl">' + _esc(mi.sigla || mi.nome) + '</span>' +
-          '<span class="rt-bar-track"><span class="rt-bar-fill" style="width:' + Math.max(2, Math.round(por[k] / max * 100)) + '%"></span></span>' +
-          '<span class="rt-bar-val">' + _fmtMin(por[k]) + '</span>' +
-        '</div>';
-      }).join('');
-    }
-    return '<div class="perf-chart-card">' +
-      '<div class="perf-chart-title">Por matéria</div>' +
-      '<div class="perf-chart-sub">Últimos 30 dias</div>' + corpo + '</div>';
+  // Cor da série: matéria vem da FONTE ÚNICA (SubjectColors, = aba Conexões);
+  // Revisão/Simulado/Outras não são matérias do grafo → cor fixa.
+  function _serieCor(k){
+    if(k === '__outras') return '#8a8f98';
+    if(k === 'revisao') return '#9aa0d6';
+    if(k === 'simulado') return '#d6b85a';
+    const sid = String(k).indexOf('m:') === 0 ? String(k).slice(2) : String(k);
+    return window.SubjectColors ? SubjectColors.get(sid) : 'var(--accent)';
   }
   function _nomeSerie(s){
     if(s === '__outras') return 'Outras';
     const mi = _mats[s];
     return (mi && (mi.sigla || mi.nome)) || s;
   }
-  function _svgStack(){
-    const hoje = _diaStr(_hojeD());
-    const dias = [];
-    for(let i = 13; i >= 0; i--) dias.push(_addDias(hoje, -i));
-    const tot = {};
-    dias.forEach(function(d){
+  // ── LINHA (Tempo de estudo por dia) ──
+  function _linhaInner(){
+    return '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Tempo de estudo por dia</div>' +
+      _perPills() + '</div>' + _perCustomRow() + _svgLinha();
+  }
+  function _htmlLinhaCard(){ return '<div class="perf-chart-card" id="rtLinhaCard">' + _linhaInner() + '</div>'; }
+  function _renderLinha(){ const c = _host && _host.querySelector('#rtLinhaCard'); if(c){ c.innerHTML = _linhaInner(); _bindLinha(c); } }
+  function _bindLinha(scope){ _bindPer(scope); }
+
+  // ── POR MATÉRIA (barras coloridas + pizza no espaço morto) ──
+  function _agregaMat(){
+    const r = _perRange();
+    const por = {}, dias = {};
+    for(let d = r.ini; d <= r.fim; d = _addDias(d, 1)){
       const m = _minDiaMat[d] || {};
-      Object.keys(m).forEach(function(k){ tot[k] = (tot[k] || 0) + m[k]; });
+      Object.keys(m).forEach(function(k){ if(m[k] > 0){ por[k] = (por[k] || 0) + m[k]; dias[k] = (dias[k] || 0) + 1; } });
+    }
+    const ord = Object.keys(por).sort(function(a, b){ return por[b] - por[a]; });
+    return { por: por, dias: dias, ord: ord };
+  }
+  // Pizza (donut) do impacto de cada matéria no ciclo, dentro do período. Hover
+  // via data-tip (tooltip rápido): horas + % + dias estudados — como o LB de
+  // Estatísticas. Agrupa acima do top 6 em "Outras".
+  function _svgPizza(por, dias, ord){
+    const total = ord.reduce(function(s, k){ return s + por[k]; }, 0);
+    if(!total) return '';
+    const top = ord.slice(0, 6);
+    const fatias = top.map(function(k){ return { k: k, v: por[k], d: dias[k] || 0 }; });
+    if(ord.length > 6){
+      let vv = 0, dd = 0;
+      ord.slice(6).forEach(function(k){ vv += por[k]; if((dias[k] || 0) > dd) dd = dias[k]; });
+      fatias.push({ k: '__outras', v: vv, d: dd });
+    }
+    const R = 64, cx = 64, cy = 64;
+    let acc = 0, stops = [], wedges = '';
+    fatias.forEach(function(f){
+      const frac = f.v / total, p0 = acc * 100, p1 = (acc + frac) * 100;
+      stops.push(_serieCor(f.k) + ' ' + p0.toFixed(2) + '% ' + p1.toFixed(2) + '%');
+      const tip = _nomeSerie(f.k) + ' — ' + _fmtMin(f.v) + ' · ' + Math.round(frac * 100) + '% · ' +
+        f.d + ' dia' + (f.d === 1 ? '' : 's');
+      if(frac >= 0.999){
+        wedges += '<circle cx="' + cx + '" cy="' + cy + '" r="' + R + '" data-tip="' + _esc(tip) + '"/>';
+      } else {
+        const a0 = acc * 2 * Math.PI - Math.PI / 2, a1 = (acc + frac) * 2 * Math.PI - Math.PI / 2;
+        const x0 = (cx + R * Math.cos(a0)).toFixed(2), y0 = (cy + R * Math.sin(a0)).toFixed(2);
+        const x1 = (cx + R * Math.cos(a1)).toFixed(2), y1 = (cy + R * Math.sin(a1)).toFixed(2);
+        const large = (a1 - a0) > Math.PI ? 1 : 0;
+        wedges += '<path d="M' + cx + ',' + cy + ' L' + x0 + ',' + y0 + ' A' + R + ',' + R + ' 0 ' + large + ' 1 ' + x1 + ',' + y1 + ' Z" data-tip="' + _esc(tip) + '"/>';
+      }
+      acc += frac;
     });
-    const chaves = Object.keys(tot).sort(function(a, b){ return tot[b] - tot[a]; });
-    if(!chaves.length) return '<div class="perf-chart-empty">Nenhum registro nos últimos 14 dias.</div>';
-    const top = chaves.slice(0, 4);
-    const series = top.concat(chaves.length > 4 ? ['__outras'] : []);
-    const CORES = ['var(--accent)', '#7fa6c9', '#5db8a3', '#d47973', '#8a8f98'];
+    const leg = fatias.map(function(f){
+      return '<span class="rt-leg-item"><span class="rt-leg-cor" style="background:' + _serieCor(f.k) + '"></span>' + _esc(_nomeSerie(f.k)) + '</span>';
+    }).join('');
+    return '<div class="rt-pie-wrap">' +
+      '<div class="rt-pie"><div class="rt-pie-disc" style="background:conic-gradient(' + stops.join(',') + ')"></div>' +
+      '<svg class="rt-pie-hit" viewBox="0 0 128 128">' + wedges + '</svg>' +
+      '<div class="rt-pie-hole"></div></div>' +
+      '<div class="rt-leg rt-leg-pie">' + leg + '</div></div>';
+  }
+  function _matInner(){
+    const a = _agregaMat();
+    let corpo;
+    if(!a.ord.length){
+      corpo = '<div class="perf-chart-empty">Nenhum registro no período.</div>';
+    } else {
+      const max = a.por[a.ord[0]];
+      const barras = a.ord.slice(0, 10).map(function(k){
+        const mi = _mats[k] || { nome: k, sigla: '' };
+        const cor = _serieCor(k);
+        const sid = String(k).indexOf('m:') === 0 ? String(k).slice(2) : null;
+        // matéria de verdade → seletor de cor (input color); Revisão/Simulado → bolinha fixa
+        const sw = sid
+          ? '<input type="color" class="rt-swatch" data-rt-cor="' + _esc(sid) + '" value="' + _esc(cor) + '" title="Cor de ' + _esc(mi.nome) + '" aria-label="Cor de ' + _esc(mi.nome) + '">'
+          : '<span class="rt-swatch rt-swatch-ro" style="background:' + cor + '"></span>';
+        return '<div class="rt-bar-row" title="' + _esc(mi.nome) + '">' + sw +
+          '<span class="rt-bar-lbl">' + _esc(mi.sigla || mi.nome) + '</span>' +
+          '<span class="rt-bar-track"><span class="rt-bar-fill" style="width:' + Math.max(2, Math.round(a.por[k] / max * 100)) + '%;background:' + cor + '"></span></span>' +
+          '<span class="rt-bar-val">' + _fmtMin(a.por[k]) + '</span>' +
+        '</div>';
+      }).join('');
+      corpo = '<div class="rt-mat-bars">' + barras + '</div>' + _svgPizza(a.por, a.dias, a.ord);
+    }
+    return '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Por matéria</div>' +
+      _perPills() + '</div>' + _perCustomRow() + corpo;
+  }
+  function _htmlMatCard(){ return '<div class="perf-chart-card" id="rtMatCard">' + _matInner() + '</div>'; }
+  function _renderMat(){ const c = _host && _host.querySelector('#rtMatCard'); if(c){ c.innerHTML = _matInner(); _bindMat(c); } }
+  function _bindMat(scope){
+    _bindPer(scope);
+    scope.querySelectorAll('[data-rt-cor]').forEach(function(inp){
+      inp.addEventListener('input', function(){
+        if(window.SubjectColors) SubjectColors.set(inp.getAttribute('data-rt-cor'), inp.value);
+        // o evento ubq:subject-colors-changed redesenha os cards coloridos
+      });
+    });
+  }
+
+  // ── DISTRIBUIÇÃO POR DIA (barras empilhadas arredondadas | linhas) ──
+  function _svgStack(){
+    const r = _perRange();
+    const dias = [];
+    for(let d = r.ini; d <= r.fim; d = _addDias(d, 1)){ dias.push(d); if(dias.length > 370) break; }
+    const tot = {};
+    dias.forEach(function(d){ const m = _minDiaMat[d] || {}; Object.keys(m).forEach(function(k){ tot[k] = (tot[k] || 0) + m[k]; }); });
+    let chaves = Object.keys(tot).sort(function(a, b){ return tot[b] - tot[a]; });
+    if(!chaves.length) return '<div class="perf-chart-empty">Nenhum registro no período.</div>';
+    let series;
+    if(_stackFiltro && tot[_stackFiltro] != null){ series = [_stackFiltro]; }   // isolar 1 matéria
+    else { const t5 = chaves.slice(0, 5); series = t5.concat(chaves.length > 5 ? ['__outras'] : []); }
+    const top = series.filter(function(s){ return s !== '__outras'; });
     const valor = function(d, s){
       const m = _minDiaMat[d] || {};
       if(s !== '__outras') return m[s] || 0;
-      let v = 0;
-      Object.keys(m).forEach(function(k){ if(top.indexOf(k) < 0) v += m[k]; });
-      return v;
+      let v = 0; Object.keys(m).forEach(function(k){ if(top.indexOf(k) < 0) v += m[k]; }); return v;
     };
     const totDia = dias.map(function(d){ return series.reduce(function(a, s){ return a + valor(d, s); }, 0); });
     const max = Math.max.apply(null, totDia.concat([1]));
     const yMax = Math.max(30, Math.ceil(max / 30) * 30);
-    const W = 480, H = 240, L = 44, R = 10, T = 16, B = 32;
+    // viewBox ≈ largura real do card (meia coluna) → fontes proporcionais.
+    const W = 640, H = 300, L = 44, R = 12, T = 16, B = 34;
     const pw = W - L - R, ph = H - T - B;
     const cw = pw / dias.length;
+    const bw = Math.min(cw * 0.62, 26);
     let corpo = '';
     if(!_stackLinha){
       dias.forEach(function(d, i){
         let yTopo = T + ph;
-        series.forEach(function(s, si){
-          const v = valor(d, s);
-          if(!v) return;
-          const h = ph * v / yMax;
-          yTopo -= h;
-          corpo += '<rect x="' + (L + cw * i + cw * 0.18).toFixed(1) + '" y="' + yTopo.toFixed(1) +
-            '" width="' + (cw * 0.64).toFixed(1) + '" height="' + h.toFixed(1) + '" fill="' + CORES[si] + '">' +
-            '<title>' + _esc(_diaBR(d) + ' — ' + _nomeSerie(s) + ': ' + _fmtMin(v)) + '</title></rect>';
+        const cx = L + cw * i + cw / 2;
+        series.forEach(function(s){
+          const v = valor(d, s); if(!v) return;
+          const h = ph * v / yMax; yTopo -= h;
+          const hr = Math.max(1.5, h - 1.6);          // gapzinho entre segmentos = pílulas
+          const rx = Math.min(3, bw / 2, hr / 2);
+          corpo += '<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + yTopo.toFixed(1) + '" width="' + bw.toFixed(1) +
+            '" height="' + hr.toFixed(1) + '" rx="' + rx.toFixed(1) + '" fill="' + _serieCor(s) + '" data-tip="' +
+            _esc(_diaBR(d, { day:'2-digit', month:'short' }) + ' — ' + _nomeSerie(s) + ': ' + _fmtMin(v)) + '"/>';
         });
       });
     } else {
-      series.forEach(function(s, si){
+      series.forEach(function(s){
         let p = '';
-        dias.forEach(function(d, i){
-          p += (i ? 'L' : 'M') + (L + cw * i + cw / 2).toFixed(1) + ',' + (T + ph - ph * valor(d, s) / yMax).toFixed(1);
-        });
-        corpo += '<path d="' + p + '" fill="none" stroke="' + CORES[si] + '" stroke-width="2" stroke-linejoin="round"/>';
+        dias.forEach(function(d, i){ p += (i ? 'L' : 'M') + (L + cw * i + cw / 2).toFixed(1) + ',' + (T + ph - ph * valor(d, s) / yMax).toFixed(1); });
+        corpo += '<path d="' + p + '" fill="none" stroke="' + _serieCor(s) + '" stroke-width="2" stroke-linejoin="round"/>';
       });
     }
     let grid = '';
     [0, yMax / 2, yMax].forEach(function(v){
       const yy = T + ph - ph * v / yMax;
       grid += '<line x1="' + L + '" y1="' + yy.toFixed(1) + '" x2="' + (W - R) + '" y2="' + yy.toFixed(1) + '" class="rt-gl"/>' +
-        '<text x="' + (L - 6) + '" y="' + (yy + 4).toFixed(1) + '" class="rt-tx" text-anchor="end">' + _fmtMin(v) + '</text>';
+        '<text x="' + (L - 6) + '" y="' + (yy + 3.5).toFixed(1) + '" class="rt-tx" text-anchor="end">' + _fmtMin(v) + '</text>';
     });
+    const passo = Math.max(1, Math.ceil(dias.length / 11));
     let xl = '';
-    for(let i = 0; i < dias.length; i += 2){
-      xl += '<text x="' + (L + cw * i + cw / 2).toFixed(1) + '" y="' + (H - 8) + '" class="rt-tx" text-anchor="middle">' + _diaBR(dias[i], { day:'2-digit' }) + '</text>';
+    for(let i = 0; i < dias.length; i += passo){
+      xl += '<text x="' + (L + cw * i + cw / 2).toFixed(1) + '" y="' + (H - 10) + '" class="rt-tx" text-anchor="middle">' + _diaBR(dias[i], { day:'2-digit', month:'2-digit' }) + '</text>';
     }
-    const leg = series.map(function(s, si){
-      return '<span class="rt-leg-item"><span class="rt-leg-cor" style="background:' + CORES[si] + '"></span>' + _esc(_nomeSerie(s)) + '</span>';
+    // legenda clicável: isola/desisola a matéria (nas duas visões)
+    const legKeys = _stackFiltro ? chaves.slice(0, 5).concat(chaves.length > 5 ? ['__outras'] : []) : series;
+    const leg = legKeys.map(function(s){
+      const on = _stackFiltro === s;
+      const dim = _stackFiltro && !on ? ' rt-leg-dim' : '';
+      const iso = s === '__outras' ? '' : ' data-rt-stack-iso="' + _esc(s) + '"';
+      return '<button type="button" class="rt-leg-item rt-leg-btn' + (on ? ' rt-leg-on' : '') + dim + '"' + iso + '><span class="rt-leg-cor" style="background:' + _serieCor(s) + '"></span>' + _esc(_nomeSerie(s)) + '</button>';
     }).join('');
-    return '<svg class="rt-svg" viewBox="0 0 ' + W + ' ' + H + '">' + grid + corpo + xl + '</svg>' +
+    return '<svg class="rt-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet">' + grid + corpo + xl + '</svg>' +
       '<div class="rt-leg">' + leg + '</div>';
   }
-  function _htmlStackCard(){
+  function _stackInner(){
     const pills = [['bar','Barras'],['lin','Linhas']].map(function(p){
       const on = (_stackLinha ? 'lin' : 'bar') === p[0];
       return '<button type="button" class="rt-pill' + (on ? ' active' : '') + '" data-rt-stack="' + p[0] + '">' + p[1] + '</button>';
     }).join('');
-    return '<div class="perf-chart-card">' +
-      '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Distribuição por dia</div>' +
-      '<span class="rt-pills">' + pills + '</span></div>' +
-      '<div class="perf-chart-sub" style="margin:.4rem 0 .9rem">Últimos 14 dias, por matéria</div>' +
-      _svgStack() + '</div>';
+    return '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Distribuição por dia</div>' +
+      '<div class="rt-ctrls">' + _perPills() + '<span class="rt-pills">' + pills + '</span></div></div>' +
+      _perCustomRow() + _svgStack();
+  }
+  function _htmlStackCard(){ return '<div class="perf-chart-card" id="rtStackCard">' + _stackInner() + '</div>'; }
+  function _renderStack(){ const c = _host && _host.querySelector('#rtStackCard'); if(c){ c.innerHTML = _stackInner(); _bindStack(c); } }
+  function _bindStack(scope){
+    _bindPer(scope);
+    scope.querySelectorAll('[data-rt-stack]').forEach(function(b){
+      b.addEventListener('click', function(){ _stackLinha = b.getAttribute('data-rt-stack') === 'lin'; _renderStack(); });
+    });
+    scope.querySelectorAll('[data-rt-stack-iso]').forEach(function(b){
+      b.addEventListener('click', function(){
+        const k = b.getAttribute('data-rt-stack-iso');
+        _stackFiltro = (_stackFiltro === k) ? null : k;   // clicar de novo = mostrar todas
+        _renderStack();
+      });
+    });
   }
   function _htmlSessoesCard(){
     if(!_sess.length){
@@ -43356,10 +43508,11 @@ const RotinaTab = (function(){
     if(typeof setupQuickTooltips === 'function') setupQuickTooltips(_host);
     _bindHeat(_host);                            // mapa (mode/view/nav)
     _bindDiario();                               // diário (nav/calendário/richtext)
-    _bindLinha(_host);                            // tempo/dia (período + custom)
-    _host.querySelectorAll('[data-rt-stack]').forEach(function(b){
-      b.addEventListener('click', function(){ _stackLinha = b.getAttribute('data-rt-stack') === 'lin'; _render(); });
-    });
+    // cada gráfico temporal vincula pelo PRÓPRIO card (período compartilhado,
+    // sem bind duplicado das pílulas de período)
+    const _lin = _host.querySelector('#rtLinhaCard'); if(_lin) _bindLinha(_lin);
+    const _mat = _host.querySelector('#rtMatCard'); if(_mat) _bindMat(_mat);
+    const _stk = _host.querySelector('#rtStackCard'); if(_stk) _bindStack(_stk);
     const bEd = _host.querySelector('[data-rt-ir-edital]');
     if(bEd) bEd.addEventListener('click', function(){ location.hash = '#/edital'; });
     _host.querySelectorAll('[data-rt-cal-dia]').forEach(function(cel){
@@ -43637,7 +43790,28 @@ const RotinaTab = (function(){
 '.rt-sess-dur{font-family:var(--serif);font-weight:300;font-size:1.05rem;color:var(--text);flex:0 0 auto}' +
 '.rt-sess-acts{display:flex;gap:.7rem;flex:0 0 auto}' +
 '.rt-sess-acts a{font-family:var(--sans);font-weight:300;font-size:.68rem;color:var(--text-dim);cursor:pointer;text-decoration:underline;text-underline-offset:3px}' +
-'.rt-sess-acts a:hover{color:var(--accent)}';
+'.rt-sess-acts a:hover{color:var(--accent)}' +
+// Por matéria: seletor de cor por matéria (input color) + barra colorida
+'.rt-mat-bars{margin-bottom:1rem}' +
+'.rt-swatch{flex:0 0 auto;width:16px;height:16px;border-radius:4px;border:1px solid var(--border);padding:0;background:transparent;cursor:pointer}' +
+'.rt-swatch::-webkit-color-swatch-wrapper{padding:0}' +
+'.rt-swatch::-webkit-color-swatch{border:none;border-radius:3px}' +
+'.rt-swatch-ro{cursor:default}' +
+// Pizza (donut) do impacto por matéria — hover via data-tip
+'.rt-pie-wrap{display:flex;align-items:center;gap:1.4rem;flex-wrap:wrap;justify-content:center;padding-top:.4rem;border-top:1px solid var(--border);margin-top:.2rem}' +
+'.rt-pie{position:relative;width:128px;height:128px;flex:0 0 auto}' +
+'.rt-pie-disc{position:absolute;inset:0;border-radius:50%}' +
+'.rt-pie-hit{position:absolute;inset:0;width:128px;height:128px}' +
+'.rt-pie-hit path,.rt-pie-hit circle{fill:transparent;cursor:pointer;transition:fill .12s ease}' +
+'.rt-pie-hit path:hover,.rt-pie-hit circle:hover{fill:rgba(255,255,255,.10)}' +
+'html[data-theme="light"] .rt-pie-hit path:hover,html[data-theme="light"] .rt-pie-hit circle:hover{fill:rgba(0,0,0,.06)}' +
+'.rt-pie-hole{position:absolute;inset:34px;border-radius:50%;background:var(--bg-card);pointer-events:none}' +
+'.rt-leg-pie{flex-direction:column;gap:.4rem;align-items:flex-start;margin-top:0}' +
+// legenda clicável (isolar matéria na Distribuição)
+'.rt-leg-btn{background:none;border:none;cursor:pointer;padding:.1rem .2rem;border-radius:3px}' +
+'.rt-leg-btn:hover{color:var(--text)}' +
+'.rt-leg-on{color:var(--accent)}' +
+'.rt-leg-dim{opacity:.4}';
     document.head.appendChild(css);
   }
 
@@ -43735,6 +43909,11 @@ const RotinaTab = (function(){
     if(!pop || pop.hidden) return;
     if(pop.contains(ev.target) || (ev.target.closest && ev.target.closest('[data-rt-di-cal]'))) return;
     pop.hidden = true;
+  });
+  // Cor de matéria mudou (aqui ou na aba Conexões) → repinta os cards coloridos.
+  document.addEventListener('ubq:subject-colors-changed', function(){
+    if(!_pronto || !_host) return;
+    _renderMat(); _renderStack();
   });
 
   return { build: build, refresh: refresh };
