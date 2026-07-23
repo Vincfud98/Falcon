@@ -42235,7 +42235,8 @@ const RotinaTab = (function(){
   let _minDia = {}, _minDiaMat = {};   // dia → minutos; dia → { matKey → minutos }
   let _mats = {};                      // matKey → { nome, sigla }
   let _hm = { mode: 'ambos', view: 'ano', ano: 0, mes: 0 };
-  let _per = 30;                       // gráfico de linha: 7 | 30 | 90 dias
+  let _per = 'mes';                    // linha: semana|mes|3m|6m|ano|custom
+  let _perCustom = { ini: '', fim: '' };
   let _stackLinha = false;
   let _dDia = '', _dGen = 0, _dTimer = null, _dPend = false, _refreshT = null;
   let _metas = {}, _metasEdit = false; // tipo → valor (aluno.study_goals)
@@ -42892,17 +42893,54 @@ const RotinaTab = (function(){
       '</div>' +
       '<div class="rt-di-grid">' + g + '</div>';
   }
-  function _svgLinha(){
+  // Período do gráfico de linha (combinado com o dono): semana, mês atual
+  // (dia 1→hoje), 3/6 meses, ano (jan→hoje) e personalizado. Fim sempre em
+  // HOJE (dia sem dado ainda não entra e não distorce a média).
+  function _perRange(){
     const hoje = _diaStr(_hojeD());
+    const hj = _hojeD();
+    if(_per === 'semana'){ const dow = (hj.getDay() + 6) % 7; return { ini: _addDias(hoje, -dow), fim: hoje }; }
+    if(_per === '3m') return { ini: _addDias(hoje, -89), fim: hoje };
+    if(_per === '6m') return { ini: _addDias(hoje, -179), fim: hoje };
+    if(_per === 'ano') return { ini: _diaStr(new Date(hj.getFullYear(), 0, 1)), fim: hoje };
+    if(_per === 'custom' && _perCustom.ini && _perCustom.fim){
+      let a = _perCustom.ini, b = _perCustom.fim;
+      if(a > b){ const t = a; a = b; b = t; }
+      if(b > hoje) b = hoje;
+      if(a > hoje) a = hoje;
+      // teto de segurança: no máximo ~2 anos de células no SVG
+      if(_diasEntre(a, b) > 731) a = _addDias(b, -731);
+      return { ini: a, fim: b };
+    }
+    return { ini: _diaStr(new Date(hj.getFullYear(), hj.getMonth(), 1)), fim: hoje };  // 'mes'
+  }
+  function _diasEntre(a, b){ return Math.round((_dataDe(b) - _dataDe(a)) / 86400000); }
+  // Tooltip de um dia: data + tempo total + reparte por matéria (o combinado).
+  function _tipLinha(dia){
+    const min = _minDia[dia] || 0;
+    let s = _diaBR(dia, { weekday:'short', day:'2-digit', month:'short' }) + ' — ' + _fmtMin(min);
+    const mm = _minDiaMat[dia] || {};
+    const keys = Object.keys(mm).sort(function(a, b){ return mm[b] - mm[a]; });
+    if(keys.length){
+      s += ' · ' + keys.slice(0, 4).map(function(k){ const mi = _mats[k] || {}; return (mi.sigla || mi.nome || k) + ' ' + _fmtMin(mm[k]); }).join(' · ');
+    }
+    const q = (_xpDias[dia] || {}).q || 0;
+    if(q) s += ' · ' + q + ' quest' + (q === 1 ? 'ão' : 'ões');
+    return s;
+  }
+  function _svgLinha(){
+    const r = _perRange();
     const dias = [];
-    for(let i = _per - 1; i >= 0; i--) dias.push(_addDias(hoje, -i));
+    for(let d = r.ini; d <= r.fim; d = _addDias(d, 1)){ dias.push(d); if(dias.length > 900) break; }
     const vals = dias.map(function(d){ return _minDia[d] || 0; });
     if(!vals.some(function(v){ return v > 0; })){
       return '<div class="perf-chart-empty">Nenhum tempo registrado no período. Use o botão Registrar estudo ou abra uma unidade — o relógio automático cuida do resto.</div>';
     }
     const max = Math.max.apply(null, vals);
     const metaDia = _metas.tempo_diario || 0;        // threshold da meta diária
-    const W = 960, H = 240, L = 48, R = 16, T = 18, B = 32;
+    // viewBox largo (≈ largura real do card) pra as fontes NÃO escalarem —
+    // eram grandes porque um viewBox 960 esticava num card ~1290 (1.34×).
+    const W = 1280, H = 300, L = 46, R = 18, T = 16, B = 34;
     const pw = W - L - R, ph = H - T - B;
     const yMax = Math.max(30, Math.ceil(Math.max(max, metaDia) / 30) * 30);
     const x = function(i){ return L + (dias.length === 1 ? pw / 2 : pw * i / (dias.length - 1)); };
@@ -42918,41 +42956,78 @@ const RotinaTab = (function(){
     let grid = '';
     [0, yMax / 2, yMax].forEach(function(v){
       grid += '<line x1="' + L + '" y1="' + y(v).toFixed(1) + '" x2="' + (W - R) + '" y2="' + y(v).toFixed(1) + '" class="rt-gl"/>' +
-        '<text x="' + (L - 8) + '" y="' + (y(v) + 4).toFixed(1) + '" class="rt-tx" text-anchor="end">' + _fmtMin(v) + '</text>';
+        '<text x="' + (L - 8) + '" y="' + (y(v) + 3.5).toFixed(1) + '" class="rt-tx" text-anchor="end">' + _fmtMin(v) + '</text>';
     });
-    const passo = Math.max(1, Math.round(dias.length / 6));
+    // ~11 rótulos no eixo X (intervalo curto, como pedido)
+    const passo = Math.max(1, Math.ceil(dias.length / 11));
     let xl = '';
     for(let i = 0; i < dias.length; i += passo){
-      xl += '<text x="' + x(i).toFixed(1) + '" y="' + (H - 8) + '" class="rt-tx" text-anchor="middle">' + _diaBR(dias[i], { day:'2-digit', month:'short' }) + '</text>';
+      const fmt = dias.length > 120 ? { day:'2-digit', month:'2-digit' } : { day:'2-digit', month:'short' };
+      xl += '<text x="' + x(i).toFixed(1) + '" y="' + (H - 10) + '" class="rt-tx" text-anchor="middle">' + _diaBR(dias[i], fmt) + '</text>';
     }
     let dots = '';
-    if(dias.length <= 31){
-      vals.forEach(function(v, i){
-        dots += '<circle cx="' + x(i).toFixed(1) + '" cy="' + y(v).toFixed(1) + '" r="3" class="rt-pt"><title>' + _esc(_diaBR(dias[i]) + ' — ' + _fmtMin(v)) + '</title></circle>';
-      });
+    if(dias.length <= 45){
+      vals.forEach(function(v, i){ dots += '<circle cx="' + x(i).toFixed(1) + '" cy="' + y(v).toFixed(1) + '" r="2.6" class="rt-pt"/>'; });
     }
     let metaSvg = '';
     if(metaDia){
       metaSvg = '<line x1="' + L + '" y1="' + y(metaDia).toFixed(1) + '" x2="' + (W - R) + '" y2="' + y(metaDia).toFixed(1) + '" class="rt-meta-linha"/>' +
         '<text x="' + (L + 4) + '" y="' + (y(metaDia) - 6).toFixed(1) + '" class="rt-tx rt-tx-meta">meta ' + _fmtMin(metaDia) + '</text>';
     }
-    return '<svg class="rt-svg" viewBox="0 0 ' + W + ' ' + H + '">' + grid +
+    // faixas de hover invisíveis (uma por dia) — alvo generoso pro tooltip
+    // rápido da plataforma (data-tip); some o title nativo lento.
+    let hits = '';
+    const bw = dias.length > 1 ? pw / (dias.length - 1) : pw;
+    dias.forEach(function(d, i){
+      hits += '<rect x="' + (x(i) - bw / 2).toFixed(1) + '" y="' + T + '" width="' + bw.toFixed(1) + '" height="' + ph + '" fill="transparent" data-tip="' + _esc(_tipLinha(d)) + '"/>';
+    });
+    return '<svg class="rt-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="xMidYMid meet">' + grid +
       '<path d="' + area + '" class="rt-area"/>' +
       '<path d="' + path + '" class="rt-line"/>' +
       '<line x1="' + L + '" y1="' + y(med).toFixed(1) + '" x2="' + (W - R) + '" y2="' + y(med).toFixed(1) + '" class="rt-med"/>' +
       '<text x="' + (W - R) + '" y="' + (y(med) - 6).toFixed(1) + '" class="rt-tx" text-anchor="end">média ' + _fmtMin(med) + '</text>' +
-      metaSvg + xl + dots +
+      metaSvg + xl + dots + hits +
     '</svg>';
   }
-  function _htmlLinhaCard(){
-    const pills = [[7,'7 dias'],[30,'30 dias'],[90,'90 dias']].map(function(p){
+  function _linhaInner(){
+    const opts = [['semana','Semana'],['mes','Mês'],['3m','3 meses'],['6m','6 meses'],['ano','Ano'],['custom','Personalizado']];
+    const pills = opts.map(function(p){
       return '<button type="button" class="rt-pill' + (_per === p[0] ? ' active' : '') + '" data-rt-per="' + p[0] + '">' + p[1] + '</button>';
     }).join('');
-    return '<div class="perf-chart-card">' +
-      '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Tempo de estudo por dia</div>' +
-      '<span class="rt-pills">' + pills + '</span></div>' +
-      _svgLinha() +
-    '</div>';
+    let custom = '';
+    if(_per === 'custom'){
+      const hoje = _diaStr(_hojeD());
+      custom = '<div class="rt-custom">' +
+        '<label>De <input type="date" class="rt-meta-inp" id="rtPerDe" max="' + hoje + '" value="' + _esc(_perCustom.ini || '') + '"></label>' +
+        '<label>até <input type="date" class="rt-meta-inp" id="rtPerAte" max="' + hoje + '" value="' + _esc(_perCustom.fim || hoje) + '"></label>' +
+      '</div>';
+    }
+    return '<div class="rt-head"><div class="perf-chart-title" style="margin-bottom:0">Tempo de estudo por dia</div>' +
+      '<span class="rt-pills rt-pills-wrap">' + pills + '</span></div>' +
+      custom +
+      _svgLinha();
+  }
+  function _htmlLinhaCard(){
+    return '<div class="perf-chart-card" id="rtLinhaCard">' + _linhaInner() + '</div>';
+  }
+  function _renderLinha(){
+    const c = _host && _host.querySelector('#rtLinhaCard');
+    if(!c) return;
+    c.innerHTML = _linhaInner();
+    _bindLinha(c);
+  }
+  function _bindLinha(scope){
+    (scope || _host).querySelectorAll('[data-rt-per]').forEach(function(b){
+      b.addEventListener('click', function(){ _per = b.getAttribute('data-rt-per'); _renderLinha(); });
+    });
+    const de = (scope || _host).querySelector('#rtPerDe'), ate = (scope || _host).querySelector('#rtPerAte');
+    function aplica(){
+      if(de) _perCustom.ini = de.value;
+      if(ate) _perCustom.fim = ate.value;
+      _renderLinha();
+    }
+    if(de) de.addEventListener('change', aplica);
+    if(ate) ate.addEventListener('change', aplica);
   }
   function _htmlMatCard(){
     const hoje = _diaStr(_hojeD());
@@ -43281,9 +43356,7 @@ const RotinaTab = (function(){
     if(typeof setupQuickTooltips === 'function') setupQuickTooltips(_host);
     _bindHeat(_host);                            // mapa (mode/view/nav)
     _bindDiario();                               // diário (nav/calendário/richtext)
-    _host.querySelectorAll('[data-rt-per]').forEach(function(b){
-      b.addEventListener('click', function(){ _per = parseInt(b.getAttribute('data-rt-per'), 10) || 30; _render(); });
-    });
+    _bindLinha(_host);                            // tempo/dia (período + custom)
     _host.querySelectorAll('[data-rt-stack]').forEach(function(b){
       b.addEventListener('click', function(){ _stackLinha = b.getAttribute('data-rt-stack') === 'lin'; _render(); });
     });
@@ -43497,13 +43570,23 @@ const RotinaTab = (function(){
 '.rt-diario-ed h3{font-family:var(--serif);font-size:1.02rem;color:var(--text);margin:.5rem 0 .3rem}' +
 '.rt-svg{width:100%;height:auto;display:block}' +
 '.rt-gl{stroke:var(--border);stroke-width:1}' +
+// viewBox largo (1280) ≈ largura real do card → font-size em px quase não
+// escala; 11px sai ~11px, no padrão dos rótulos da página.
 '.rt-tx{fill:var(--text-mute);font-family:var(--sans);font-size:11px;font-weight:300}' +
 '.rt-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round}' +
 '.rt-area{fill:var(--accent);opacity:.1}' +
 '.rt-med{stroke:var(--text-mute);stroke-width:1;stroke-dasharray:4 4}' +
-'.rt-meta-linha{stroke:var(--green,#5dd49f);stroke-width:1.5;stroke-dasharray:6 4;opacity:.75}' +
-'.rt-tx-meta{fill:var(--green,#5dd49f)}' +
+// meta discreta: verde ESCURO no escuro (não estoura); no claro, verde mais
+// claro (o escuro contrastaria demais sobre o fundo bege) — "o contrário".
+'.rt-meta-linha{stroke:#3f8f6b;stroke-width:1.5;stroke-dasharray:6 4}' +
+'.rt-tx-meta{fill:#3f8f6b}' +
+'html[data-theme="light"] .rt-meta-linha{stroke:#6cbf98}' +
+'html[data-theme="light"] .rt-tx-meta{fill:#6cbf98}' +
 '.rt-pt{fill:var(--accent)}' +
+'.rt-pills-wrap{flex-wrap:wrap}' +
+'.rt-custom{display:flex;gap:1rem;flex-wrap:wrap;margin:.2rem 0 .9rem}' +
+'.rt-custom label{display:inline-flex;align-items:center;gap:.4rem;font-family:var(--sans);font-weight:300;font-size:.72rem;color:var(--text-dim)}' +
+'.rt-custom .rt-meta-inp{max-width:9.5rem}' +
 '.rt-2col{display:grid;grid-template-columns:1fr 1fr;gap:1rem}' +
 '@media(max-width:860px){.rt-2col{grid-template-columns:1fr}}' +
 '.rt-bar-row{display:flex;align-items:center;gap:.7rem;padding:.32rem 0;font-family:var(--sans);font-weight:300}' +
