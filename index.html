@@ -11056,6 +11056,19 @@ function activeExamId(){
 }
 window.activeExamId = activeExamId;
 
+// Matérias do concurso ATIVO (o "universo" da sessão, como no fórum).
+// Devolve array de subject_ids como String, ou null quando não há relação
+// registrada (aí quem chama NÃO filtra — gracioso, igual ao glossário).
+window._subjectIdsDoExameAtivo = function(){
+  try{
+    const ex = activeExamId();
+    if(!ex || !window.UbiqueStore || !UbiqueStore.exam_subjects || !UbiqueStore.exam_subjects.list) return null;
+    const rel = UbiqueStore.exam_subjects.list() || [];
+    const ids = rel.filter(es => String(es.exam_id) === String(ex)).map(es => String(es.subject_id));
+    return ids.length ? ids : null;
+  }catch(_){ return null; }
+};
+
 /* Sigla curta do CONCURSO ativo pra topbar (ex.: cacd→CACD, ofchan→OFCHAN,
    pf→PF). Prefere exams.sigla quando é curta e sem espaço; senão o id em
    maiúsculas (o id já é o código curto e é a fonte confiável — o campo sigla
@@ -14185,6 +14198,90 @@ const Store = (function(){
   };
 })();
 window.Store = Store;
+
+// ── Edital: auto-marcação por unidades concluídas (pedido do dono, 2026-07-23).
+// Quando o aluno conclui uma unidade, cada tópico do edital ligado a ela é
+// verificado: se TODAS as unidades vinculadas ao tópico estão concluídas, o
+// tópico é marcado sozinho no progresso do edital (e o pai também, quando os
+// irmãos já estão todos marcados). É só um empurrão no momento da conclusão —
+// o aluno pode DESMARCAR depois no Edital e a escolha dele fica valendo.
+window._editalAutoMarcaPorUnidade = async function(storeUnitId){
+  try{
+    const userId = window.MOCK_USER ? window.MOCK_USER.id : null;
+    if(!userId || storeUnitId == null) return;
+    const links = (typeof window._expandTopicUnitLinks === 'function') ? window._expandTopicUnitLinks() : null;
+    const St = window.UbiqueStore;
+    if(!links || !St || !St.edital_progress || !St.edital_topics) return;
+    // store unit id → course unit id (a conclusão vive em unitViews[courseId])
+    const s2c = {};
+    ((window.COURSES_ALL || window.COURSES || []).filter(Boolean)).forEach(c => {
+      (c.modules || []).forEach(m => {
+        ((typeof Util !== 'undefined' && Util.unitsOfModule) ? Util.unitsOfModule(m) : []).forEach(e2 => {
+          if(e2.unit && e2.unit._storeId != null) s2c[String(e2.unit._storeId)] = e2.unit.id;
+        });
+      });
+    });
+    const views = (window.Store && Store.getState) ? (Store.getState().unitViews || {}) : {};
+    const concluida = sid => {
+      const cid = s2c[String(sid)];
+      return !!(cid != null && (views[cid] || {}).completed);
+    };
+    const marcados = new Set((St.edital_progress.list() || [])
+      .filter(p => p.user_id === userId).map(p => String(p.topic_id)));
+    const alvo = String(storeUnitId);
+    const novos = [];
+    Object.keys(links).forEach(tid => {
+      const set = links[tid];
+      if(!set || !set.size || !set.has(alvo) || marcados.has(String(tid))) return;
+      let todas = true;
+      set.forEach(sid => { if(!concluida(sid)) todas = false; });
+      if(todas) novos.push(String(tid));
+    });
+    if(!novos.length) return;
+    // cascata pra cima: pai com todos os filhos marcados (e as próprias
+    // unidades diretas concluídas, se tiver) também marca
+    const topics = St.edital_topics.list() || [];
+    const filhosDe = {};
+    topics.forEach(t => {
+      const pai = t.parent_id == null ? null : String(t.parent_id);
+      if(pai) (filhosDe[pai] = filhosDe[pai] || []).push(String(t.id));
+    });
+    const agora = new Set(marcados);
+    novos.forEach(id => agora.add(id));
+    let mudou = true;
+    while(mudou){
+      mudou = false;
+      Object.keys(filhosDe).forEach(pai => {
+        if(agora.has(pai)) return;
+        if(!filhosDe[pai].every(f => agora.has(f))) return;
+        const diretas = links[pai];
+        if(diretas && diretas.size){
+          let ok = true;
+          diretas.forEach(sid => { if(!concluida(sid)) ok = false; });
+          if(!ok) return;
+        }
+        agora.add(pai); novos.push(pai); mudou = true;
+      });
+    }
+    novos.forEach(tid => {
+      St.edital_progress.add({ user_id: userId, topic_id: tid, viewed_at: new Date().toISOString() });
+    });
+    if(window._sb && /^[0-9a-f-]{36}$/i.test(String(userId))){
+      const rows = novos.filter(tid => /^[0-9a-f-]{36}$/i.test(tid))
+        .map(tid => ({ user_id: userId, topic_id: tid }));
+      if(rows.length){
+        try{
+          const { error } = await window._sb.schema('aluno').from('edital_progress')
+            .upsert(rows, { onConflict: 'user_id,topic_id' });
+          if(error) console.warn('[edital auto-marca]', error.message);
+        }catch(_){}
+      }
+    }
+    if(window.ueToast) ueToast(novos.length === 1
+      ? 'Tópico do edital marcado como concluído.'
+      : novos.length + ' tópicos do edital marcados como concluídos.', 'success');
+  }catch(e){ console.warn('[edital auto-marca ex]', e); }
+};
 
 /* ───────── Router ───────── */
 const Router = (function(){
@@ -28568,35 +28665,71 @@ Renderers.edital.mount = function(stage){
       if(chevron) chevron.textContent = willOpen ? '▾' : '▸';
     });
   });
-  // Progresso (checkboxes) — local + Supabase
+  // Progresso (checkboxes) — local + Supabase, com CASCATA (pedido do dono,
+  // 2026-07-23): marcar um pai marca TODOS os descendentes; completar o
+  // último filho marca o pai sozinho; desmarcar um nó desmarca os
+  // descendentes e "descompleta" os ancestrais.
+  const _epTopics = ((window.UbiqueStore && UbiqueStore.edital_topics && UbiqueStore.edital_topics.list) ? UbiqueStore.edital_topics.list() : []) || [];
+  const _epFilhos = {}, _epPai = {};
+  _epTopics.forEach(t => {
+    const id = String(t.id), pai = t.parent_id == null ? null : String(t.parent_id);
+    _epPai[id] = pai;
+    if(pai) (_epFilhos[pai] = _epFilhos[pai] || []).push(id);
+  });
   stage.querySelectorAll('[data-progress]').forEach(cb => {
     cb.addEventListener('change', async e => {
-      // ⚠️ tid agora é UUID string (topic_id em concursos.edital_topics é UUID)
-      const tid = cb.getAttribute('data-progress');
+      // ⚠️ tid é UUID string (topic_id em concursos.edital_topics é UUID)
+      const tid = String(cb.getAttribute('data-progress'));
       const userId = window.MOCK_USER ? window.MOCK_USER.id : 'guest';
-      const existing = (window.UbiqueStore && window.UbiqueStore.edital_progress.list().find(p => p.user_id === userId && p.topic_id === tid));
-      const isUserUUID = typeof userId === 'string' && /^[0-9a-f-]{36}$/i.test(userId);
-      const isTopicUUID = typeof tid === 'string' && /^[0-9a-f-]{36}$/i.test(tid);
-      if(cb.checked && !existing){
-        window.UbiqueStore.edital_progress.add({ user_id: userId, topic_id: tid, viewed_at: new Date().toISOString() });
-        // Fase 4j — sync Supabase (só se ambos IDs forem UUID válidos)
-        if(window._sb && isUserUUID && isTopicUUID){
-          try{
-            const { error } = await window._sb.schema('aluno').from('edital_progress')
-              .upsert({ user_id: userId, topic_id: tid }, { onConflict: 'user_id,topic_id' });
-            if(error) console.warn('[edital_progress insert]', error);
-          }catch(_){}
+      const marcar = cb.checked;
+      const St = window.UbiqueStore;
+      const atuais = new Set((St.edital_progress.list() || []).filter(p => p.user_id === userId).map(p => String(p.topic_id)));
+      // o nó + todos os descendentes vão pro estado escolhido
+      const mudancas = new Map();
+      const desce = (id) => {
+        mudancas.set(id, marcar);
+        (_epFilhos[id] || []).forEach(desce);
+      };
+      desce(tid);
+      // ancestrais: marcando, sobe enquanto TODOS os filhos ficarem marcados;
+      // desmarcando, os ancestrais deixam de estar completos → desmarca todos
+      const estado = (id) => mudancas.has(id) ? mudancas.get(id) : atuais.has(id);
+      let pai = _epPai[tid];
+      while(pai){
+        if(marcar){
+          const filhos = _epFilhos[pai] || [];
+          if(!filhos.length || !filhos.every(estado)) break;
+          mudancas.set(pai, true);
+        } else {
+          mudancas.set(pai, false);
         }
-      } else if(!cb.checked && existing){
-        window.UbiqueStore.edital_progress.remove(existing.id);
-        // Fase 4j — sync Supabase
-        if(window._sb && isUserUUID && isTopicUUID){
-          try{
-            const { error } = await window._sb.schema('aluno').from('edital_progress')
-              .delete().eq('user_id', userId).eq('topic_id', tid);
-            if(error) console.warn('[edital_progress delete]', error);
-          }catch(_){}
+        pai = _epPai[pai];
+      }
+      // aplica só o que muda de verdade (Store + checkboxes na tela)
+      const inserir = [], remover = [];
+      mudancas.forEach((alvo, id) => {
+        const tem = atuais.has(id);
+        if(alvo && !tem){
+          St.edital_progress.add({ user_id: userId, topic_id: id, viewed_at: new Date().toISOString() });
+          inserir.push(id);
+        } else if(!alvo && tem){
+          const row = St.edital_progress.list().find(x => x.user_id === userId && String(x.topic_id) === id);
+          if(row) St.edital_progress.remove(row.id);
+          remover.push(id);
         }
+        const el2 = stage.querySelector('[data-progress="' + id + '"]');
+        if(el2) el2.checked = alvo;
+      });
+      // sync Supabase em LOTE (só UUIDs válidos)
+      const okU = typeof userId === 'string' && /^[0-9a-f-]{36}$/i.test(userId);
+      const soUuid = (arr) => arr.filter(id => /^[0-9a-f-]{36}$/i.test(id));
+      if(window._sb && okU){
+        try{
+          const rows = soUuid(inserir).map(id => ({ user_id: userId, topic_id: id }));
+          if(rows.length) await window._sb.schema('aluno').from('edital_progress').upsert(rows, { onConflict: 'user_id,topic_id' });
+          const dels = soUuid(remover);
+          if(dels.length) await window._sb.schema('aluno').from('edital_progress').delete().eq('user_id', userId).in('topic_id', dels);
+        }catch(err){ console.warn('[edital_progress lote]', err); }
       }
     });
   });
@@ -36135,6 +36268,10 @@ Renderers.unit.mount = function(stageEl, route){
       Store.completeUnit(unit.id); // cascades bookmarks internally
       btn.classList.add('on');
       btn.innerHTML = Icons.check + ' Unidade concluída';
+      // Tópico do edital com TODAS as unidades concluídas → marca sozinho.
+      if(typeof window._editalAutoMarcaPorUnidade === 'function' && unit._storeId != null){
+        window._editalAutoMarcaPorUnidade(unit._storeId);
+      }
     }
     // Reflect on sidebar rows
     stageEl.querySelectorAll('.side-block').forEach(sb => {
@@ -41515,11 +41652,16 @@ const StudyTimer = (function(){
     return (S.accSec || 0) + (S.running ? (now() - S.startedAt)/1000 : 0);
   }
 
-  /* ── catálogo: matérias do aluno + categorias Revisão/Simulado ── */
+  /* ── catálogo: matérias do CONCURSO ATIVO + categorias Revisão/Simulado.
+        Um concurso é um universo (decisão do dono, como no fórum): matéria
+        de outro concurso só aparece trocando o concurso na topbar. ── */
   function _matOptions(){
     const out = [];
+    const doExame = (typeof window._subjectIdsDoExameAtivo === 'function') ? window._subjectIdsDoExameAtivo() : null;
     ((window.COURSES || []).filter(Boolean)).forEach(function(c){
-      if(c._subjectId != null) out.push({ id: 'm:' + c._subjectId, nome: c.title || ('Matéria ' + c._subjectId), sigla: c.sigla || '' });
+      if(c._subjectId == null) return;
+      if(doExame && doExame.indexOf(String(c._subjectId)) < 0) return;
+      out.push({ id: 'm:' + c._subjectId, nome: c.title || ('Matéria ' + c._subjectId), sigla: c.sigla || '' });
     });
     out.push({ id: 'revisao', nome: 'Revisão', sigla: 'REV' });
     out.push({ id: 'simulado', nome: 'Simulado', sigla: 'SIM' });
@@ -41619,6 +41761,7 @@ const StudyTimer = (function(){
       // pill flutuante (só com sessão rodando)
       '.st-float{position:fixed;right:1.3rem;bottom:1.3rem;z-index:910;background:var(--bg-elevated);border:1px solid var(--accent-border,rgba(200,169,126,.3));border-radius:99px;padding:.5rem .95rem .5rem .75rem;display:flex;align-items:center;gap:.55rem;box-shadow:0 18px 44px -18px rgba(0,0,0,.7);cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}',
       '.st-float .dot{width:8px;height:8px;border-radius:50%;background:#5dd49f;animation:stpulse 1.6s infinite}',
+      '.st-float.paused .dot{animation:none;background:var(--text-mute,rgba(240,236,228,.32))}',
       '@keyframes stpulse{0%,100%{opacity:1}50%{opacity:.35}}',
       '.st-float .tm{font-family:var(--mono);font-size:.84rem;color:var(--text)}',
       '.st-float .mat{font-size:.64rem;color:var(--text-mute)}',
@@ -41691,8 +41834,10 @@ const StudyTimer = (function(){
   }
   function _pillUpdate(){
     let el = document.getElementById('stFloat');
-    const on = !!(S && S.running);
-    if(!on){ if(el) el.remove(); return; }
+    // Pausou ≠ sumiu (pedido do dono): a pill fica com o tempo congelado e o
+    // ponto sem pulsar — senão o aluno teria que voltar ao Desempenho só pra
+    // retomar. Ela só sai quando a sessão acaba (salva ou descartada).
+    if(!S){ if(el) el.remove(); return; }
     _ensureStyles();
     if(!el){
       el = document.createElement('div');
@@ -41709,6 +41854,7 @@ const StudyTimer = (function(){
     const matEl = el.querySelector('.mat');
     matEl.textContent = rot;
     matEl.style.display = rot ? '' : 'none';
+    el.classList.toggle('paused', !S.running);
     _pillAplicaPos(el);
   }
 
@@ -41939,9 +42085,17 @@ const StudyTimer = (function(){
         '<div class="st-field"><label>Duração (minutos)</label><input type="number" class="st-input" id="stDur" min="1" max="1440" value="' + _esc(F.durMin) + '" placeholder="ex.: 90"></div>' +
         '<div class="st-btnrow"><button type="button" class="btn-primary" id="stSalvar">' + (editando ? 'Salvar alterações' : 'Salvar') + '</button></div>';
       box.innerHTML = h;
-      _bindDd(box, 'stMat', function(v){ F.catKey = v; F.unitId = ''; _renderModal(box); });
-      _bindDd(box, 'stUni', function(v){ F.unitId = v; _renderModal(box); });
-      const sync = function(){ F.dia = box.querySelector('#stDia').value; F.assunto = box.querySelector('#stAss').value; F.durMin = box.querySelector('#stDur').value; };
+      // Os campos livres são sincronizados ANTES de re-renderizar: escolher a
+      // matéria/unidade redesenha o modal e, sem isso, o dia digitado voltava
+      // pro padrão de hoje em silêncio (bug que fazia registrar no dia errado).
+      const sync = function(){
+        const d = box.querySelector('#stDia'), a = box.querySelector('#stAss'), du = box.querySelector('#stDur');
+        if(d) F.dia = d.value;
+        if(a) F.assunto = a.value;
+        if(du) F.durMin = du.value;
+      };
+      _bindDd(box, 'stMat', function(v){ sync(); F.catKey = v; F.unitId = ''; _renderModal(box); });
+      _bindDd(box, 'stUni', function(v){ sync(); F.unitId = v; _renderModal(box); });
       box.querySelector('#stSalvar').addEventListener('click', async function(){
         sync();
         const c = _catInfo(F.catKey);
@@ -41976,8 +42130,14 @@ const StudyTimer = (function(){
       '<div class="st-btnrow"><button type="button" class="btn-primary" id="stStart">Iniciar ' + (_view === 'timer' ? 'timer' : 'cronômetro') + '</button></div>' +
       '<div class="st-hint">Dentro de uma unidade o relógio já corre sozinho — este card serve para estudo fora da plataforma, Revisão e Simulado.</div>';
     box.innerHTML = h;
-    _bindDd(box, 'stMat', function(v){ F.catKey = v; F.unitId = ''; _renderModal(box); });
-    _bindDd(box, 'stUni', function(v){ F.unitId = v; _renderModal(box); });
+    // Mesma lição do Inserir: sincroniza o que foi digitado antes do re-render.
+    const syncLivres = function(){
+      const a = box.querySelector('#stAss'), t = box.querySelector('#stTmin');
+      if(a) F.assunto = a.value;
+      if(t) F.timerMin = t.value;
+    };
+    _bindDd(box, 'stMat', function(v){ syncLivres(); F.catKey = v; F.unitId = ''; _renderModal(box); });
+    _bindDd(box, 'stUni', function(v){ syncLivres(); F.unitId = v; _renderModal(box); });
     box.querySelector('#stStart').addEventListener('click', async function(){
       const c = _catInfo(F.catKey);
       if(!c) return;
@@ -42325,7 +42485,8 @@ const RotinaTab = (function(){
       '<div class="perf-summary-card"><div class="perf-summary-label">Mais estudada — 30 dias</div>' +
         '<div class="perf-summary-value rt-vsm">' + _esc(topNome) + '</div>' +
         '<div class="perf-summary-sub">' + _esc(topSub) + '</div></div>' +
-      '<div class="perf-summary-card"><div class="perf-summary-label">Progresso no edital</div>' +
+      '<div class="perf-summary-card rt-card-link" data-rt-ir-edital title="Abrir a página do Edital">' +
+        '<div class="perf-summary-label">Progresso no edital</div>' +
         '<div class="perf-summary-value">' + edVal + '</div>' +
         '<div class="perf-summary-sub">' + _esc(edSub) + '</div></div>' +
     '</section>';
@@ -42337,9 +42498,13 @@ const RotinaTab = (function(){
     return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
   }
   function _catOptions(){
+    // Só matérias do concurso ATIVO (universo da sessão, como no StudyTimer).
     const out = [];
+    const doExame = (typeof window._subjectIdsDoExameAtivo === 'function') ? window._subjectIdsDoExameAtivo() : null;
     ((window.COURSES || []).filter(Boolean)).forEach(function(c){
-      if(c._subjectId != null) out.push({ id: 'm:' + c._subjectId, nome: c.title || ('Matéria ' + c._subjectId) });
+      if(c._subjectId == null) return;
+      if(doExame && doExame.indexOf(String(c._subjectId)) < 0) return;
+      out.push({ id: 'm:' + c._subjectId, nome: c.title || ('Matéria ' + c._subjectId) });
     });
     out.push({ id: 'revisao', nome: 'Revisão' });
     out.push({ id: 'simulado', nome: 'Simulado' });
@@ -42976,6 +43141,8 @@ const RotinaTab = (function(){
     });
     const ta = _host.querySelector('#rtDiarioTxt');
     if(ta) ta.addEventListener('input', _agendaSalvarDiario);
+    const bEd = _host.querySelector('[data-rt-ir-edital]');
+    if(bEd) bEd.addEventListener('click', function(){ location.hash = '#/edital'; });
     _host.querySelectorAll('[data-rt-cal-dia]').forEach(function(cel){
       cel.addEventListener('click', function(){
         _cal.sel = cel.getAttribute('data-rt-cal-dia');
@@ -43082,6 +43249,8 @@ const RotinaTab = (function(){
 '.rt-wrap{display:flex;flex-direction:column;gap:1rem;margin:2rem 0 1.5rem}' +
 '.rt-loading{font-family:var(--sans);font-weight:300;color:var(--text-mute);font-size:.85rem;padding:2.4rem 0;text-align:center}' +
 '.rt-cards{margin:0}' +
+'.rt-card-link{cursor:pointer;transition:border-color .15s}' +
+'.rt-card-link:hover{border-color:var(--accent)}' +
 '.rt-vsm{font-size:1.15rem;line-height:1.3;padding-top:.35rem}' +
 '.rt-up{color:#5db8a3}.rt-down{color:#d47973}.rt-neutro{color:var(--text-mute)}' +
 '.rt-strip-row{display:flex;align-items:center;justify-content:space-between;gap:1.2rem;flex-wrap:wrap}' +
