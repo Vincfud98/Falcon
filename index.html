@@ -11741,6 +11741,18 @@ const Auth = (function(){
 })();
 window.Auth = Auth;
 
+// Id do usuário logado (uuid do Supabase Auth) pra módulos FORA do Store.
+// O Store tem um _currentSupaUserId privado — ele NÃO é visível aqui fora;
+// quem precisar do id em outro módulo usa este helper (mesma fonte que
+// grava o daily_xp: Auth.getUser().id).
+window._authUserId = function(){
+  try{
+    const u = (window.Auth && typeof Auth.getUser === 'function') ? Auth.getUser() : null;
+    const id = u && u.id ? String(u.id) : '';
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+  }catch(_){ return null; }
+};
+
 Object.entries({
   'curso-historia-brasil': {
     contractIncluded: true,
@@ -41360,7 +41372,9 @@ const StudyTimer = (function(){
 
   /* ── gravação no banco ── */
   async function _insertSession(row){
-    const uid = (typeof _currentSupaUserId === 'function') ? _currentSupaUserId() : null;
+    // _currentSupaUserId é PRIVADA do Store (não existe neste escopo) —
+    // o id vem do helper global (senão o uid fica nulo e nada é salvo).
+    const uid = (typeof window._authUserId === 'function') ? window._authUserId() : null;
     if(!uid || !window._sb) return null;
     try{
       const { data, error } = await window._sb.schema('aluno').from('study_sessions')
@@ -41504,6 +41518,13 @@ const StudyTimer = (function(){
     _ensureStyles();
     const t = document.createElement('div');
     t.className = 'st-toast';
+    if(!rowId){
+      // O insert falhou (sem login, RLS, rede) — não fingir que salvou.
+      t.innerHTML = '<b>Não foi possível salvar o estudo.</b> Tente registrar de novo em instantes.';
+      document.body.appendChild(t);
+      setTimeout(function(){ if(t.isConnected) t.remove(); }, 15000);
+      return;
+    }
     t.innerHTML = '<b>Estudo registrado:</b> ' + _esc(resumo) + '.<br>' +
       '<a data-st-act="edit">Editar</a><a data-st-act="del">Apagar</a>';
     t.querySelector('[data-st-act="edit"]').addEventListener('click', function(){
@@ -41829,7 +41850,9 @@ const RotinaTab = (function(){
     const h = Math.floor(min/60), m = min % 60;
     return h ? (h + 'h' + (m ? String(m).padStart(2,'0') : '')) : (m + 'min');
   }
-  function _uid(){ return (typeof _currentSupaUserId === 'function') ? _currentSupaUserId() : null; }
+  // _currentSupaUserId é privada do Store — usa o helper global (mesma
+  // fonte que grava o daily_xp; com uid nulo as buscas voltariam vazias).
+  function _uid(){ return (typeof window._authUserId === 'function') ? window._authUserId() : null; }
 
   /* ── catálogo (armadilha nº2: ids com tipos diferentes — String nos 2 lados) ── */
   function _matInfo(row){
@@ -42101,19 +42124,23 @@ const RotinaTab = (function(){
     const legenda = '<div class="rt-hm-leg">Menos ' +
       '<span class="rt-hm-c rt-l0"></span><span class="rt-hm-c rt-l1"></span><span class="rt-hm-c rt-l2"></span>' +
       '<span class="rt-hm-c rt-l3"></span><span class="rt-hm-c rt-l4"></span> Mais</div>';
-    return '<div class="perf-chart-card">' +
-      '<div class="rt-head">' +
-        '<div class="perf-chart-title" style="margin-bottom:0">Mapa de estudo</div>' +
-        '<div class="rt-ctrls">' +
-          '<span class="rt-pills">' + pills + '</span>' +
-          '<span class="rt-pills">' + vw + '</span>' +
-          '<span class="rt-nav"><button type="button" class="rt-nav-btn" data-rt-hm-nav="-1">&#8249;</button>' +
-          '<span class="rt-nav-lbl">' + _esc(rotulo) + '</span>' +
-          '<button type="button" class="rt-nav-btn" data-rt-hm-nav="1">&#8250;</button></span>' +
+    // Mapa (3/4) e Diário (1/4) lado a lado — decisão do dono, mata o
+    // espaço morto do card único (principalmente na visão por mês).
+    return '<div class="rt-hm-row">' +
+      '<div class="perf-chart-card">' +
+        '<div class="rt-head">' +
+          '<div class="perf-chart-title" style="margin-bottom:0">Mapa de estudo</div>' +
+          '<div class="rt-ctrls">' +
+            '<span class="rt-pills">' + pills + '</span>' +
+            '<span class="rt-pills">' + vw + '</span>' +
+            '<span class="rt-nav"><button type="button" class="rt-nav-btn" data-rt-hm-nav="-1">&#8249;</button>' +
+            '<span class="rt-nav-lbl">' + _esc(rotulo) + '</span>' +
+            '<button type="button" class="rt-nav-btn" data-rt-hm-nav="1">&#8250;</button></span>' +
+          '</div>' +
         '</div>' +
+        (_hm.view === 'ano' ? _htmlHmAno() : _htmlHmMes()) +
+        legenda +
       '</div>' +
-      (_hm.view === 'ano' ? _htmlHmAno() : _htmlHmMes()) +
-      legenda +
       _htmlDiario() +
     '</div>';
   }
@@ -42121,15 +42148,17 @@ const RotinaTab = (function(){
     const hoje = _diaStr(_hojeD());
     if(!_dDia) _dDia = hoje;
     const rot = (_dDia === hoje ? 'Hoje · ' : '') + _diaBR(_dDia, { weekday:'short', day:'2-digit', month:'long' });
-    return '<div class="rt-diario">' +
-      '<div class="rt-diario-head">' +
+    return '<div class="perf-chart-card rt-diario-card">' +
+      '<div class="rt-head" style="margin-bottom:.7rem">' +
         '<div class="perf-chart-title" style="margin-bottom:0">Diário do dia</div>' +
-        '<span class="rt-nav"><button type="button" class="rt-nav-btn" data-rt-di-nav="-1">&#8249;</button>' +
-        '<span class="rt-nav-lbl" style="min-width:8.5rem">' + _esc(rot) + '</span>' +
-        '<button type="button" class="rt-nav-btn" data-rt-di-nav="1"' + (_dDia >= hoje ? ' disabled' : '') + '>&#8250;</button></span>' +
         '<span class="rt-diario-st" id="rtDiarioSt"></span>' +
       '</div>' +
-      '<textarea class="rt-diario-txt" id="rtDiarioTxt" rows="3" disabled ' +
+      '<div class="rt-diario-nav">' +
+        '<span class="rt-nav"><button type="button" class="rt-nav-btn" data-rt-di-nav="-1">&#8249;</button>' +
+        '<span class="rt-nav-lbl" style="flex:1">' + _esc(rot) + '</span>' +
+        '<button type="button" class="rt-nav-btn" data-rt-di-nav="1"' + (_dDia >= hoje ? ' disabled' : '') + '>&#8250;</button></span>' +
+      '</div>' +
+      '<textarea class="rt-diario-txt" id="rtDiarioTxt" rows="4" disabled ' +
         'placeholder="Como foi o estudo do dia? Anote o que quiser lembrar."></textarea>' +
     '</div>';
   }
@@ -42493,24 +42522,30 @@ const RotinaTab = (function(){
 '.rt-hm-meses{display:grid;gap:3px;margin-bottom:.3rem}' +
 '.rt-hm-meses span{font-family:var(--sans);font-weight:300;font-size:.6rem;color:var(--text-mute);white-space:nowrap;overflow:visible}' +
 '.rt-hm-grid{display:grid;grid-auto-flow:column;grid-template-rows:repeat(7,var(--rt-cel));grid-auto-columns:var(--rt-cel);gap:3px;width:max-content}' +
-'.rt-hm-c{width:var(--rt-cel);height:var(--rt-cel);border-radius:2px;background:var(--bg-elevated,#181a20)}' +
+'.rt-hm-c{width:var(--rt-cel);height:var(--rt-cel);border-radius:2px}' +
+/* Cor da célula SÓ aqui (fonte única): as bases .rt-hm-c/.rt-hm-m vêm sem
+   background pra nunca disputarem com o nível na ordem do stylesheet. */
+'.rt-l0{background:var(--bg-elevated,#181a20)}' +
 '.rt-l1{background:var(--accent);background:color-mix(in srgb,var(--accent) 28%,var(--bg-elevated,#181a20))}' +
 '.rt-l2{background:var(--accent);background:color-mix(in srgb,var(--accent) 50%,var(--bg-elevated,#181a20))}' +
 '.rt-l3{background:var(--accent);background:color-mix(in srgb,var(--accent) 74%,var(--bg-elevated,#181a20))}' +
 '.rt-l4{background:var(--accent)}' +
 '.rt-fut{opacity:.35}' +
 '.rt-vazio{background:transparent!important}' +
-'.rt-hm-mgrid{display:grid;grid-template-columns:repeat(7,minmax(30px,46px));gap:4px}' +
+'.rt-hm-row{display:grid;grid-template-columns:3fr 1fr;gap:1rem;align-items:stretch}' +
+'@media(max-width:900px){.rt-hm-row{grid-template-columns:1fr}}' +
+'.rt-hm-mgrid{display:grid;grid-template-columns:repeat(7,minmax(30px,1fr));gap:5px}' +
 '.rt-hm-wd{font-family:var(--sans);font-weight:300;font-size:.6rem;color:var(--text-mute);text-align:center;padding-bottom:.15rem}' +
-'.rt-hm-m{position:relative;aspect-ratio:1.3;border-radius:3px;background:var(--bg-elevated,#181a20)}' +
+'.rt-hm-m{position:relative;aspect-ratio:1.5;border-radius:3px}' +
 '.rt-hm-m i{position:absolute;top:3px;left:5px;font-style:normal;font-family:var(--sans);font-weight:300;font-size:.58rem;color:var(--text-dim)}' +
 '.rt-hm-m.rt-l3 i,.rt-hm-m.rt-l4 i{color:rgba(0,0,0,.55)}' +
 '.rt-hm-leg{display:flex;align-items:center;gap:4px;justify-content:flex-end;margin-top:.6rem;font-family:var(--sans);font-weight:300;font-size:.62rem;color:var(--text-mute)}' +
 '.rt-hm-leg .rt-hm-c{width:10px;height:10px}' +
-'.rt-diario{border-top:1px solid var(--border);margin-top:1.1rem;padding-top:1rem}' +
-'.rt-diario-head{display:flex;align-items:center;gap:.9rem;flex-wrap:wrap;margin-bottom:.6rem}' +
+'.rt-diario-card{display:flex;flex-direction:column}' +
+'.rt-diario-nav{margin-bottom:.7rem}' +
+'.rt-diario-nav .rt-nav{display:flex;width:100%}' +
 '.rt-diario-st{font-family:var(--sans);font-weight:300;font-size:.66rem;color:var(--text-mute);margin-left:auto}' +
-'.rt-diario-txt{width:100%;resize:vertical;min-height:64px;background:var(--bg-elevated,#181a20);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--sans);font-weight:300;font-size:.82rem;line-height:1.55;padding:.65rem .8rem}' +
+'.rt-diario-txt{width:100%;flex:1;box-sizing:border-box;resize:vertical;min-height:96px;background:var(--bg-elevated,#181a20);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--sans);font-weight:300;font-size:.82rem;line-height:1.55;padding:.65rem .8rem}' +
 '.rt-diario-txt:focus{outline:none;border-color:var(--accent)}' +
 '.rt-diario-txt:disabled{opacity:.55}' +
 '.rt-svg{width:100%;height:auto;display:block}' +
