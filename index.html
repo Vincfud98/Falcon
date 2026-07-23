@@ -41833,6 +41833,7 @@ const RotinaTab = (function(){
   let _per = 30;                       // gráfico de linha: 7 | 30 | 90 dias
   let _stackLinha = false;
   let _dDia = '', _dGen = 0, _dTimer = null, _dPend = false, _refreshT = null;
+  let _metas = {}, _metasEdit = false; // tipo → valor (aluno.study_goals)
 
   /* ── datas: sempre o dia LOCAL (toISOString viraria o dia na madrugada);
         relógio via Date.now p/ os testes conseguirem congelar ── */
@@ -41912,6 +41913,12 @@ const RotinaTab = (function(){
       const d = String(r.day || '').slice(0, 10);
       if(d) _xpDias[d] = { q: r.total_count || 0, ok: r.correct_count || 0 };
     });
+    const gl = await _fetchTudo(function(){
+      return window._sb.schema('aluno').from('study_goals')
+        .select('tipo, valor').eq('user_id', uid).order('tipo');
+    }, 10);
+    _metas = {};
+    gl.forEach(function(r){ if(r && r.tipo) _metas[r.tipo] = r.valor || 0; });
     _agrega();
   }
   function _agrega(){
@@ -42004,10 +42011,12 @@ const RotinaTab = (function(){
   /* ── HTML das seções ── */
   function _htmlStrip(st){
     const hoje = _diaStr(_hojeD());
+    const metaDia = _metas.tempo_diario || 0;
     let dots = '';
     for(let i = 29; i >= 0; i--){
       const d = _addDias(hoje, -i);
-      dots += '<span class="rt-dot' + (_ativo(d) ? ' on' : '') + (d === hoje ? ' today' : '') +
+      const bateuMeta = metaDia && (_minDia[d] || 0) >= metaDia;
+      dots += '<span class="rt-dot' + (_ativo(d) ? ' on' : '') + (bateuMeta ? ' meta' : '') + (d === hoje ? ' today' : '') +
         '" title="' + _esc(_tipDia(d)) + '"></span>';
     }
     return '<div class="perf-chart-card">' +
@@ -42017,7 +42026,8 @@ const RotinaTab = (function(){
         '<div class="rt-strip-sub">Recorde: ' + st.recorde + ' · ' + st.total + ' dia' + (st.total === 1 ? '' : 's') + ' de estudo no total</div></div>' +
         '<div class="rt-dots">' + dots + '</div>' +
       '</div>' +
-      '<div class="rt-strip-hint">Um dia conta quando você registra tempo de estudo ou responde questões. Os pontos são os últimos 30 dias.</div>' +
+      '<div class="rt-strip-hint">Um dia conta quando você registra tempo de estudo ou responde questões. Os pontos são os últimos 30 dias.' +
+        (metaDia ? ' Ponto verde = dia com a meta de tempo batida.' : '') + '</div>' +
     '</div>';
   }
   function _htmlCards(){
@@ -42064,6 +42074,57 @@ const RotinaTab = (function(){
         '<div class="perf-summary-sub">' + _esc(edSub) + '</div></div>' +
     '</section>';
   }
+  /* ── Metas (aluno.study_goals): hoje + semana-calendário (desde segunda) ── */
+  function _htmlMetas(){
+    const hoje = _diaStr(_hojeD());
+    const dow = (_hojeD().getDay() + 6) % 7;         // seg=0 … dom=6
+    const segunda = _addDias(hoje, -dow);
+    const minHoje = _minDia[hoje] || 0;
+    const minSem = _somaMin(segunda, hoje);
+    let qSem = 0;
+    for(let d = segunda; d <= hoje; d = _addDias(d, 1)) qSem += (_xpDias[d] || {}).q || 0;
+    const fmtQ = function(v){ return String(Math.max(0, Math.round(v))); };
+    const blocos = [
+      { tipo: 'tempo_diario',     rot: 'Tempo de estudo · hoje',   atual: minHoje, fmt: _fmtMin, un: 'minutos por dia' },
+      { tipo: 'tempo_semanal',    rot: 'Tempo de estudo · semana', atual: minSem,  fmt: _fmtMin, un: 'minutos por semana' },
+      { tipo: 'questoes_semanal', rot: 'Questões · semana',        atual: qSem,    fmt: fmtQ,    un: 'questões por semana' },
+    ];
+    let corpo;
+    if(_metasEdit){
+      corpo = '<div class="rt-metas-grid">' + blocos.map(function(b){
+        const v = _metas[b.tipo] || '';
+        return '<div><div class="rt-meta-rot">' + b.rot + '</div>' +
+          '<input type="number" min="0" step="1" class="rt-meta-inp" data-rt-meta-inp="' + b.tipo + '" value="' + v + '" placeholder="sem meta">' +
+          '<div class="rt-meta-sub">' + b.un + ' · vazio = sem meta</div></div>';
+      }).join('') + '</div>' +
+      '<div class="rt-metas-btns">' +
+        '<button type="button" class="rt-btn" data-rt-metas-salvar>Salvar</button>' +
+        '<button type="button" class="rt-btn rt-btn-ghost" data-rt-metas-cancelar>Cancelar</button>' +
+      '</div>';
+    } else {
+      corpo = '<div class="rt-metas-grid">' + blocos.map(function(b){
+        const meta = _metas[b.tipo] || 0;
+        if(!meta){
+          return '<div><div class="rt-meta-rot">' + b.rot + '</div>' +
+            '<div class="rt-meta-val">&#8212;</div>' +
+            '<div class="rt-meta-sub">Sem meta definida</div></div>';
+        }
+        const pct = Math.min(100, Math.round(b.atual / meta * 100));
+        const ok = b.atual >= meta;
+        return '<div><div class="rt-meta-rot">' + b.rot + '</div>' +
+          '<div class="rt-meta-val">' + b.fmt(b.atual) + '<span> de ' + b.fmt(meta) + '</span></div>' +
+          '<div class="rt-meta-track"><span class="rt-meta-fill' + (ok ? ' ok' : '') + '" style="width:' + pct + '%"></span></div>' +
+          '<div class="rt-meta-sub">' + (ok ? 'Meta cumprida' : (pct + '% · falta ' + b.fmt(meta - b.atual))) + '</div></div>';
+      }).join('') + '</div>' +
+      '<div class="rt-strip-hint">A semana das metas começa na segunda-feira.</div>';
+    }
+    return '<div class="perf-chart-card">' +
+      '<div class="rt-head" style="margin-bottom:.9rem">' +
+        '<div class="perf-chart-title" style="margin-bottom:0">Metas</div>' +
+        (_metasEdit ? '' : '<a class="rt-link" data-rt-metas-editar>Editar</a>') +
+      '</div>' + corpo + '</div>';
+  }
+
   function _htmlHmAno(){
     const hoje = _diaStr(_hojeD());
     const ini = new Date(_hm.ano, 0, 1), fim = new Date(_hm.ano, 11, 31);
@@ -42171,9 +42232,10 @@ const RotinaTab = (function(){
       return '<div class="perf-chart-empty">Nenhum tempo registrado no período. Use o botão Registrar estudo ou abra uma unidade — o relógio automático cuida do resto.</div>';
     }
     const max = Math.max.apply(null, vals);
+    const metaDia = _metas.tempo_diario || 0;        // threshold da meta diária
     const W = 960, H = 240, L = 48, R = 16, T = 18, B = 32;
     const pw = W - L - R, ph = H - T - B;
-    const yMax = Math.max(30, Math.ceil(max / 30) * 30);
+    const yMax = Math.max(30, Math.ceil(Math.max(max, metaDia) / 30) * 30);
     const x = function(i){ return L + (dias.length === 1 ? pw / 2 : pw * i / (dias.length - 1)); };
     const y = function(v){ return T + ph - ph * v / yMax; };
     let path = '', area = 'M' + x(0).toFixed(1) + ',' + (T + ph);
@@ -42200,12 +42262,17 @@ const RotinaTab = (function(){
         dots += '<circle cx="' + x(i).toFixed(1) + '" cy="' + y(v).toFixed(1) + '" r="3" class="rt-pt"><title>' + _esc(_diaBR(dias[i]) + ' — ' + _fmtMin(v)) + '</title></circle>';
       });
     }
+    let metaSvg = '';
+    if(metaDia){
+      metaSvg = '<line x1="' + L + '" y1="' + y(metaDia).toFixed(1) + '" x2="' + (W - R) + '" y2="' + y(metaDia).toFixed(1) + '" class="rt-meta-linha"/>' +
+        '<text x="' + (L + 4) + '" y="' + (y(metaDia) - 6).toFixed(1) + '" class="rt-tx rt-tx-meta">meta ' + _fmtMin(metaDia) + '</text>';
+    }
     return '<svg class="rt-svg" viewBox="0 0 ' + W + ' ' + H + '">' + grid +
       '<path d="' + area + '" class="rt-area"/>' +
       '<path d="' + path + '" class="rt-line"/>' +
       '<line x1="' + L + '" y1="' + y(med).toFixed(1) + '" x2="' + (W - R) + '" y2="' + y(med).toFixed(1) + '" class="rt-med"/>' +
       '<text x="' + (W - R) + '" y="' + (y(med) - 6).toFixed(1) + '" class="rt-tx" text-anchor="end">média ' + _fmtMin(med) + '</text>' +
-      xl + dots +
+      metaSvg + xl + dots +
     '</svg>';
   }
   function _htmlLinhaCard(){
@@ -42403,6 +42470,7 @@ const RotinaTab = (function(){
     _host.innerHTML = '<div class="rt-wrap">' +
       _htmlStrip(_streaks()) +
       _htmlCards() +
+      _htmlMetas() +
       _htmlHeatCard() +
       _htmlLinhaCard() +
       '<div class="rt-2col">' + _htmlMatCard() + _htmlStackCard() + '</div>' +
@@ -42464,6 +42532,33 @@ const RotinaTab = (function(){
     });
     const ta = _host.querySelector('#rtDiarioTxt');
     if(ta) ta.addEventListener('input', _agendaSalvarDiario);
+    const bMe = _host.querySelector('[data-rt-metas-editar]');
+    if(bMe) bMe.addEventListener('click', function(){ _metasEdit = true; _render(); });
+    const bMc = _host.querySelector('[data-rt-metas-cancelar]');
+    if(bMc) bMc.addEventListener('click', function(){ _metasEdit = false; _render(); });
+    const bMs = _host.querySelector('[data-rt-metas-salvar]');
+    if(bMs) bMs.addEventListener('click', async function(){
+      const uid = _uid();
+      if(!uid || !window._sb) return;
+      const ops = [];
+      ['tempo_diario', 'tempo_semanal', 'questoes_semanal'].forEach(function(tipo){
+        const inp = _host.querySelector('[data-rt-meta-inp="' + tipo + '"]');
+        if(!inp) return;
+        const v = parseInt(inp.value, 10);
+        if(v > 0){
+          ops.push(window._sb.schema('aluno').from('study_goals')
+            .upsert({ user_id: uid, tipo: tipo, valor: v }, { onConflict: 'user_id,tipo' }));
+        } else if(_metas[tipo]){
+          // campo esvaziado = tirar a meta (apaga a linha)
+          ops.push(window._sb.schema('aluno').from('study_goals')
+            .delete().eq('user_id', uid).eq('tipo', tipo));
+        }
+      });
+      bMs.textContent = 'Salvando…';
+      try{ await Promise.all(ops); }catch(e){ console.warn('[rotina] metas:', e); }
+      _metasEdit = false;
+      await refresh();               // relê as metas do banco e repinta tudo
+    });
     _host.querySelectorAll('.rt-sess').forEach(function(el){
       const id = el.getAttribute('data-rt-sid');
       const row = _sess.find(function(r){ return String(r.id) === String(id); });
@@ -42506,7 +42601,26 @@ const RotinaTab = (function(){
 '.rt-dots{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;max-width:100%}' +
 '.rt-dot{width:11px;height:11px;border-radius:50%;background:var(--bg-elevated,#181a20);border:1px solid var(--border);flex:0 0 auto}' +
 '.rt-dot.on{background:var(--accent);border-color:var(--accent)}' +
+'.rt-dot.meta{background:var(--green,#5dd49f);border-color:var(--green,#5dd49f)}' +
 '.rt-dot.today{box-shadow:0 0 0 2px var(--bg-card),0 0 0 3px var(--accent)}' +
+'.rt-link{font-family:var(--sans);font-weight:300;font-size:.7rem;color:var(--text-dim);cursor:pointer;text-decoration:underline;text-underline-offset:3px}' +
+'.rt-link:hover{color:var(--accent)}' +
+'.rt-metas-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.4rem}' +
+'@media(max-width:860px){.rt-metas-grid{grid-template-columns:1fr}}' +
+'.rt-meta-rot{font-family:var(--sans);font-weight:300;font-size:.7rem;color:var(--text-dim);margin-bottom:.35rem}' +
+'.rt-meta-val{font-family:var(--serif);font-weight:300;font-size:1.35rem;color:var(--text);line-height:1.1}' +
+'.rt-meta-val span{font-family:var(--sans);font-size:.72rem;color:var(--text-dim)}' +
+'.rt-meta-track{height:8px;border-radius:4px;background:var(--bg-elevated,#181a20);overflow:hidden;margin-top:.5rem}' +
+'.rt-meta-fill{display:block;height:100%;border-radius:4px;background:var(--accent)}' +
+'.rt-meta-fill.ok{background:var(--green,#5dd49f)}' +
+'.rt-meta-sub{font-family:var(--sans);font-weight:300;font-size:.66rem;color:var(--text-mute);margin-top:.35rem}' +
+'.rt-meta-inp{width:100%;box-sizing:border-box;background:var(--bg-elevated,#181a20);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--sans);font-weight:300;font-size:.85rem;padding:.45rem .6rem}' +
+'.rt-meta-inp:focus{outline:none;border-color:var(--accent)}' +
+'.rt-metas-btns{display:flex;gap:.6rem;margin-top:1.1rem}' +
+'.rt-btn{background:var(--bg-elevated,#181a20);border:1px solid var(--accent);border-radius:3px;color:var(--accent);font-family:var(--sans);font-weight:300;font-size:.74rem;letter-spacing:.04em;padding:.45rem 1rem;cursor:pointer}' +
+'.rt-btn:hover{background:var(--accent);color:var(--bg-card)}' +
+'.rt-btn-ghost{border-color:var(--border);color:var(--text-dim)}' +
+'.rt-btn-ghost:hover{background:none;border-color:var(--accent);color:var(--accent)}' +
 '.rt-pills{display:inline-flex;gap:.25rem;border:1px solid var(--border);border-radius:3px;padding:.15rem}' +
 '.rt-pill{background:none;border:none;border-radius:2px;color:var(--text-dim);font-family:var(--sans);font-weight:300;font-size:.68rem;letter-spacing:.04em;padding:.3rem .6rem;cursor:pointer}' +
 '.rt-pill:hover{color:var(--text)}' +
@@ -42554,6 +42668,8 @@ const RotinaTab = (function(){
 '.rt-line{fill:none;stroke:var(--accent);stroke-width:2;stroke-linejoin:round}' +
 '.rt-area{fill:var(--accent);opacity:.1}' +
 '.rt-med{stroke:var(--text-mute);stroke-width:1;stroke-dasharray:4 4}' +
+'.rt-meta-linha{stroke:var(--green,#5dd49f);stroke-width:1.5;stroke-dasharray:6 4;opacity:.75}' +
+'.rt-tx-meta{fill:var(--green,#5dd49f)}' +
 '.rt-pt{fill:var(--accent)}' +
 '.rt-2col{display:grid;grid-template-columns:1fr 1fr;gap:1rem}' +
 '@media(max-width:860px){.rt-2col{grid-template-columns:1fr}}' +
