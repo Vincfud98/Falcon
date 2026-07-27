@@ -10228,25 +10228,11 @@ window.TAG_REGISTRY = {
         UbiqueStore.unit_downloads.replaceAll(dlR.data || []);
       }
 
-      // Fase 4m — hidrata banco de avatares (admin gerencia, aluno escolhe em /conta)
-      try {
-        const crmSb = window._sb.schema('crm');
-        const [catR, avR] = await Promise.all([
-          crmSb.from('avatar_categories').select('*').order('position'),
-          crmSb.from('avatars').select('*'),
-        ]);
-        const aErrs = [catR.error, avR.error].filter(Boolean);
-        if(!aErrs.length){
-          if(UbiqueStore.avatar_categories) UbiqueStore.avatar_categories.replaceAll(catR.data || []);
-          if(UbiqueStore.avatars)           UbiqueStore.avatars.replaceAll(avR.data || []);
-          console.log('[hydrate avatares] ✅', {
-            categorias: catR.data?.length || 0,
-            avatares: avR.data?.length || 0,
-          });
-        } else {
-          console.warn('[hydrate avatares] erros:', aErrs);
-        }
-      } catch(e){ console.warn('[hydrate avatares] exception:', e); }
+      // Fase 4m — banco de avatares (admin gerencia, aluno escolhe em /conta).
+      // SAIU DO BOOT: era uma ida-e-volta inteira no meio da fila de hidratação
+      // para dados que só o seletor de foto usa — e esse seletor só abre por
+      // clique explícito do aluno, na página Conta. Agora carrega sob demanda
+      // (window._hydrateAvatares, definida abaixo).
 
       // Fase Q2 — banco de questões REAL (questoes.*) num store SEPARADO (window._QBank),
       // só para resolver referências {bank_question_id}. NÃO toca em UbiqueStore.questions
@@ -10791,6 +10777,38 @@ window.TAG_REGISTRY = {
   // rodar ANTES da sessão restaurar (corrida), e aí o conteúdo protegido (blocos,
   // que exigem login) vem vazio. O login (onAuthStateChange) chama isto de novo.
   window._hydrateContent = hydrateFromSupabase;
+
+  /* Banco de avatares SOB DEMANDA (saiu do boot — ver comentário lá em cima).
+     Só o seletor de foto da página Conta usa, e ele abre por clique.
+     Guarda a PROMESSA (não um booleano): dois cliques rápidos compartilham a
+     mesma busca em vez de disparar duas. Em caso de erro, zera a promessa pra
+     a próxima tentativa poder buscar de novo. */
+  let _avatarsP = null;
+  window._hydrateAvatares = function(){
+    if(_avatarsP) return _avatarsP;
+    _avatarsP = (async function(){
+      if(!window._sb) return false;
+      const crmSb = window._sb.schema('crm');
+      const [catR, avR] = await Promise.all([
+        crmSb.from('avatar_categories').select('*').order('position'),
+        crmSb.from('avatars').select('*'),
+      ]);
+      const aErrs = [catR.error, avR.error].filter(Boolean);
+      if(aErrs.length){ console.warn('[avatares] erros:', aErrs); throw new Error(aErrs[0].message || 'falha'); }
+      if(UbiqueStore.avatar_categories) UbiqueStore.avatar_categories.replaceAll(catR.data || []);
+      if(UbiqueStore.avatars)           UbiqueStore.avatars.replaceAll(avR.data || []);
+      console.log('[avatares] carregados sob demanda', {
+        categorias: (catR.data || []).length, avatares: (avR.data || []).length,
+      });
+      return true;
+    })().catch(function(e){
+      _avatarsP = null;             // permite tentar de novo no próximo clique
+      console.warn('[avatares] exception:', e);
+      return false;
+    });
+    return _avatarsP;
+  };
+
   // Dispara hydrate em paralelo. Quando termina, re-popula e re-renderiza.
   hydrateFromSupabase().then(ok => {
     if(ok){
@@ -23027,7 +23045,32 @@ Renderers.account.mount = function(stageEl){
   // Lê UbiqueStore.avatar_categories + UbiqueStore.avatars, agrupa por
   // categoria e renderiza no #avatarPickerModal. Click num avatar aplica
   // como pendingPhoto + pendingTransform (não persiste — espera "Salvar").
-  function _openAvatarBankPicker(){
+  // Abre o modal JÁ (resposta imediata ao clique) e busca os avatares sob
+  // demanda — eles não vêm mais no boot. Se já estiverem em memória, o
+  // _hydrateAvatares resolve na hora e o "Carregando" nem pisca.
+  async function _openAvatarBankPicker(){
+    const modal0 = document.getElementById('avatarPickerModal');
+    const body0 = document.getElementById('avatarPickerBody');
+    if(!modal0 || !body0) return;
+    const jaTem = window.UbiqueStore && UbiqueStore.avatar_categories
+      && UbiqueStore.avatar_categories.list().length > 0;
+    if(!jaTem){
+      body0.innerHTML = '<div class="empty" style="text-align:left"><div class="empty-body">Carregando avatares…</div></div>';
+    }
+    modal0.classList.add('active');
+    let ok = true;
+    try { ok = await window._hydrateAvatares(); } catch(_){ ok = false; }
+    // Fechou o modal enquanto carregava → não pinta por cima.
+    if(!modal0.classList.contains('active')) return;
+    if(!ok && !jaTem){
+      body0.innerHTML = '<div class="empty" style="text-align:left">'
+        + '<div class="empty-title">Não consegui carregar</div>'
+        + '<div class="empty-body">Falha ao buscar o banco de avatares. Feche e tente de novo, ou use <strong>Carregar imagem</strong> / <strong>Por URL</strong>.</div></div>';
+      return;
+    }
+    _renderAvatarBankPicker();
+  }
+  function _renderAvatarBankPicker(){
     const modal = document.getElementById('avatarPickerModal');
     const body = document.getElementById('avatarPickerBody');
     if(!modal || !body) return;
