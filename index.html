@@ -10345,6 +10345,12 @@ window.TAG_REGISTRY = {
           (_qet[k] = _qet[k] || []).push(String(l.edital_topic_id));
         });
         window._QBank.topicsByQuestion = _qet;
+        // COMPLETO = este banco tem a plataforma inteira, e não só as questões
+        // de uma unidade. As telas que CONTAM (Edital, Banco, Desempenho,
+        // Simulados) só podem calcular com o banco completo — com um parcial
+        // elas exibiriam números menores SEM ERRO NENHUM, que é o pior tipo de
+        // bug. Quem só precisa resolver uma questão específica não liga.
+        window._QBank.completo = true;
         console.log('[hydrate qbank] ✅', {
           questions: (qR.data||[]).length, tf_items: (tfR.data||[]).length,
           tf_item_comments: (tfcR.data||[]).length,
@@ -10412,10 +10418,48 @@ window.TAG_REGISTRY = {
         return _qbankRehydrateInFlight;
       };
 
-      // Hidratação INICIAL — usa a mesma função; comportamento idêntico ao anterior.
-      try {
-        await window._hydrateQBank();
-      } catch(e){ console.warn('[hydrate qbank] exception:', e && e.message || e); }
+      /* PORTA ÚNICA pro banco COMPLETO. Devolve sempre a MESMA promessa, então
+         as telas que precisam de tudo (Banco, Edital, Simulados, Desempenho)
+         podem chamar à vontade — na primeira vez espera, nas seguintes resolve
+         na hora. É isto que evita "toda página carregando de novo", que é o
+         risco de experiência desta mudança.
+         Se falhar, zera a promessa pra a próxima tentativa poder buscar. */
+      let _qbankP = null;
+      window._ensureQBank = function(){
+        if(window._QBank && window._QBank.completo) return Promise.resolve(true);
+        if(_qbankP) return _qbankP;
+        _qbankP = window._hydrateQBank()
+          .then(function(){ return !!(window._QBank && window._QBank.completo); })
+          .catch(function(e){
+            _qbankP = null;
+            console.warn('[qbank] carga falhou:', e && e.message || e);
+            return false;
+          });
+        return _qbankP;
+      };
+
+      /* ── FASE 1: o banco de questões SAI do caminho crítico do boot ──
+         Ele é o maior volume do carregamento (~1,45 MB, sendo 1062 kB só de
+         tf_items) e cresce a cada questão cadastrada. Esperar por ele aqui
+         atrasava TUDO que vem depois, mesmo pro aluno que só ia ler um texto.
+
+         Agora começa AGORA, mas em segundo plano — a diferença é essencial pra
+         experiência: a espera não muda de lugar, ela some. Quando o aluno
+         chegar no Banco/Edital/Desempenho, o banco já estará na memória; ele
+         não vai encontrar uma tela "carregando" em cada página.
+
+         Seguro porque o app JÁ foi desenhado pra isso: as contagens de questões
+         são provisórias enquanto o banco não chegou e se recalculam sozinhas
+         (o cache é chaveado pela IDENTIDADE do window._QBank, e a hidratação
+         troca o objeto). Ao terminar, refazemos COURSES + render pra os números
+         se corrigirem sem o aluno precisar fazer nada. */
+      window._ensureQBank().then(function(ok){
+        if(!ok) return;
+        try{
+          if(typeof window.rebuildCourses === 'function') window.rebuildCourses();
+          if(window.App && App.render) App.render();
+        }catch(e){ console.warn('[qbank] re-render pós-carga falhou:', e); }
+      });
 
       // S1 — hidrata SIMULADOS reais do banco (substitui a lista fake). Cada seção
       // vira um bloco de questões que referencia o banco (resolveBankGroup monta tudo).
