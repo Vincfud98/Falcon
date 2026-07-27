@@ -16226,6 +16226,42 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const conteudo = () => supabase.schema('conteudo');
   const questoes = () => supabase.schema('questoes');
+
+  /* ── ARMADILHA Nº3: PostgREST corta em 1000 linhas SEM AVISO ──
+     Pedir a tabela inteira devolve só as 1000 primeiras e NENHUM erro. No app
+     do aluno isso já foi corrigido; aqui é MAIS grave, porque o admin EDITA:
+     trabalhar com uma lista truncada leva a decisões erradas sobre o que
+     existe. Medido em 27/07/2026: tf_items estava em 913 de 1000, subindo.
+
+     Mesma assinatura e mesmo contrato do helper do index.html:
+     - `monta` CRIA a query a cada página (builder do supabase-js não se
+       reexecuta);
+     - ORDEM é obrigatória (sem ORDER BY a paginação repete ou pula linha);
+     - se a coluna de ordem não existir, avisa e cai na busca única de antes —
+       nunca deixa pior do que estava;
+     - devolve { data, error } pra ser troca direta. */
+  const _PAG_ADM = 1000;
+  async function _fetchAllRowsAdm(monta, ordem, rotulo){
+    const col = ordem || 'id';
+    const out = [];
+    for(let de = 0; ; de += _PAG_ADM){
+      const { data, error } = await monta().order(col, { ascending: true }).range(de, de + _PAG_ADM - 1);
+      if(error){
+        if(de === 0){
+          console.warn('[fetchAll adm] ordem "' + col + '" falhou em ' + (rotulo || '?') + ' (' + error.message + ') — busca única');
+          return await monta();
+        }
+        console.warn('[fetchAll adm] ' + (rotulo || '?') + ' falhou na página ' + de + ':', error.message);
+        return { data: out, error: error };
+      }
+      const lote = data || [];
+      out.push.apply(out, lote);
+      if(lote.length < _PAG_ADM) break;
+      if(de >= 500000){ console.warn('[fetchAll adm] teto de segurança em ' + (rotulo || '?')); break; }
+    }
+    return { data: out, error: null };
+  }
+  window._fetchAllRowsAdm = _fetchAllRowsAdm;
   const crm = () => supabase.schema('crm');
   const catalogo = () => supabase.schema('catalogo');
   const vendas = () => supabase.schema('vendas');
@@ -21977,14 +22013,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // QUESTIONS — LIST + FILTERS + PAGINATION
   // ═══════════════════════════════════════════════════════════
   async function loadQuestions(){
-    const { data, error } = await questoes()
-      .from('questions').select('*').order('id', { ascending: false });
+    // Paginado: a lista de questões é a razão de ser desta tela — truncar em
+    // 1000 esconderia questões do admin sem dar erro nenhum.
+    const { data, error } = await _fetchAllRowsAdm(
+      () => questoes().from('questions').select('*'), 'id', 'questions');
     if(error){
       document.getElementById('questionsList').innerHTML =
         `<div class="message error">Erro: ${esc(error.message)}</div>`;
       return;
     }
-    questionsCache = data || [];
+    // A busca era .order('id', desc) e a paginação exige ordem CRESCENTE
+    // estável — sem reordenar aqui, a lista do admin apareceria invertida
+    // (mais antigas primeiro).
+    questionsCache = (data || []).slice().sort(function(a, b){
+      return String(b && b.id) < String(a && a.id) ? -1 : (String(b && b.id) > String(a && a.id) ? 1 : 0);
+    });
     if(window._qSearchInvalidate) window._qSearchInvalidate();
   }
 
@@ -24167,10 +24210,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // LOADERS AUXILIARES (reference_texts, question_*)
   // ═══════════════════════════════════════════════════════════
   async function loadReferenceTexts(){
-    const { data, error } = await questoes()
-      .from('reference_texts').select('*').order('id', { ascending: false });
+    const { data, error } = await _fetchAllRowsAdm(() => questoes().from('reference_texts').select('*'), 'id', 'reference_texts');
     if(error){ console.error('reference_texts:', error); return; }
-    referenceTextsCache = data || [];
+    // Idem questions: a busca era decrescente; a paginação é crescente.
+    referenceTextsCache = (data || []).slice().sort(function(a, b){
+      return String(b && b.id) < String(a && a.id) ? -1 : (String(b && b.id) > String(a && a.id) ? 1 : 0);
+    });
   }
   async function loadQuestionTopics(){
     const { data, error } = await questoes()
@@ -24180,8 +24225,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
   // E6 — tópicos do edital por questão (substitui question_topics nos filtros).
   async function loadQuestionEditalTopics(){
-    const { data, error } = await questoes()
-      .from('question_edital_topics').select('*');
+    const { data, error } = await _fetchAllRowsAdm(() => questoes().from('question_edital_topics').select('*'), 'question_id', 'question_edital_topics');
     if(error){ console.error('question_edital_topics:', error); return; }
     questionEditalTopicsCache = data || [];
   }
@@ -25215,19 +25259,19 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // LOADERS DE CONTEÚDO (TF items, MC options, Essay criteria/models)
   // ═══════════════════════════════════════════════════════════
   async function loadTfItems(){
-    const { data, error } = await questoes().from('tf_items').select('*');
+    const { data, error } = await _fetchAllRowsAdm(() => questoes().from('tf_items').select('*'), 'id', 'tf_items');
     if(error){ console.error('tf_items:', error); return; }
     tfItemsCache = data || [];
     if(window._qSearchInvalidate) window._qSearchInvalidate();
   }
   async function loadTfItemComments(){
-    const { data, error } = await questoes().from('tf_item_comments').select('*');
+    const { data, error } = await _fetchAllRowsAdm(() => questoes().from('tf_item_comments').select('*'), 'id', 'tf_item_comments');
     if(error){ console.error('tf_item_comments:', error); return; }
     tfItemCommentsCache = data || [];
     if(window._qSearchInvalidate) window._qSearchInvalidate();
   }
   async function loadTfItemTopics(){
-    const { data, error } = await questoes().from('tf_item_topics').select('*');
+    const { data, error } = await _fetchAllRowsAdm(() => questoes().from('tf_item_topics').select('*'), 'tf_item_id', 'tf_item_topics');
     if(error){ console.error('tf_item_topics:', error); return; }
     tfItemTopicsCache = data || [];
   }
@@ -25237,7 +25281,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     tfItemTagsCache = data || [];
   }
   async function loadMcOptions(){
-    const { data, error } = await questoes().from('mc_options').select('*');
+    const { data, error } = await _fetchAllRowsAdm(() => questoes().from('mc_options').select('*'), 'id', 'mc_options');
     if(error){ console.error('mc_options:', error); return; }
     mcOptionsCache = data || [];
     if(window._qSearchInvalidate) window._qSearchInvalidate();
@@ -40604,7 +40648,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     _safe(renderDashboardChurnRisk, 'churnRisk');
     _safe(renderDashboardFunnel, 'funnel');
     _safe(renderDashboardTokens, 'tokens');
-    _safe(renderDashboardPedagogical, 'pedagogical');
+    // renderDashboardPedagogical DESLIGADO (27/07/2026): o markup do painel
+    // pedagógico não existe mais no HTML — os 9 elementos que ele preenche
+    // (kpi-attempts, dash-attempts-chart, dash-top-mockexams, dash-worst-*)
+    // foram removidos, e as 5 funções dele quebravam em CADA render do
+    // dashboard ("Cannot set properties of null"). O _safe engolia o erro, mas
+    // ele aparecia no console a cada carga. Nada se perde: as estatísticas
+    // pedagógicas migraram pro initFalconStats (ver comentário no topo desta
+    // função). As funções órfãs ficam pra remoção em tarefa separada.
     _safe(updateDashboardPeriodLabel, 'periodLabel');
   }
 
