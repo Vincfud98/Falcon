@@ -34717,6 +34717,32 @@ window.TutorIA = (function(){
     const links = [];
     m.units.forEach(function(u){ if(vis.has(u.id) && sunSubj.has(u.subjectId)) links.push({ source: 'subj:' + u.subjectId, target: u.id, kind: 'member' }); });
     m.refs.forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: 'ref', sentence: e.sentence }); });
+    // Par RECÍPROCO (A cita B e B cita A): as duas arestas têm os mesmos
+    // extremos e, retas (curvatura 0), caem UMA EM CIMA DA OUTRA — some uma
+    // seta e o tooltip de uma das frases fica inalcançável. Solução do
+    // Obsidian: arquear cada direção pra um lado. A chave é NÃO-ordenada
+    // (menor\x01maior) pra achar o par; o SINAL vem da comparação source<target,
+    // que é estável — a mesma aresta arqueia sempre pro mesmo lado entre
+    // re-renders. Mão única continua reta (curvature 0).
+    // Chave com o TAMANHO na frente: só concatenar com separador deixaria
+    // ("a\x01b","c") e ("a","b\x01c") com a mesma chave — dois pares distintos
+    // virariam "recíprocos" e arqueariam à toa. Com o tamanho, a leitura é
+    // única. (Ids de unidade não têm esse byte hoje; a chave é à prova disso.)
+    function _parKey(a, b){
+      const x = (a < b ? a : b), y = (a < b ? b : a);
+      return x.length + '\x01' + x + '\x01' + y;
+    }
+    const _pares = Object.create(null);
+    links.forEach(function(l){
+      if(l.kind !== 'ref') return;
+      const k = _parKey(String(l.source), String(l.target));
+      _pares[k] = (_pares[k] || 0) + 1;
+    });
+    links.forEach(function(l){
+      if(l.kind !== 'ref') return;
+      const a = String(l.source), b = String(l.target);
+      l.curvature = (_pares[_parKey(a, b)] > 1) ? (a < b ? 0.22 : -0.22) : 0;
+    });
     _fg.graphData({ nodes: nodes, links: links });
     const statusEl = document.getElementById('grafoStatus'); if(statusEl) statusEl.textContent = sunSubj.size + ' matéria(s) · ' + vis.size + ' unidades · passe o mouse nas linhas';
     _grafoLegend(m.subjects.filter(function(s){ return sunSubj.has(s.id); }).map(function(s){ return { sigla: s.sigla, color: _grafoColor(s.id) }; }));
@@ -34837,6 +34863,10 @@ window.TutorIA = (function(){
       .nodeLabel(function(n){ return n.name; })
       .linkColor(_grafoLinkColor)
       .linkWidth(function(l){ return l.kind === 'member' ? 0.4 : _grafoPrefs.display.linkWidth; })
+      // Curvatura vem pronta do _grafoApply (só o par recíproco arqueia). A lib
+      // deriva daqui os pontos de controle e REUSA nos 3: ponta da seta,
+      // partículas e hit-test do tooltip — por isso tudo segue a curva sozinho.
+      .linkCurvature(function(l){ return l.curvature || 0; })
       .linkLabel(function(l){ return l.sentence ? ('“' + _esc(l.sentence) + '”') : ''; })
       .linkDirectionalArrowLength(function(l){ return (_grafoPrefs.display.arrows && l.kind === 'ref') ? 3 : 0; })
       .linkDirectionalArrowRelPos(1)
@@ -39077,11 +39107,8 @@ const TextCompiler = (function(){
       '<meta name="x-codigo" content="' + esc(_cid) + '">' +
       '<meta name="x-verificado" content="' + (_verified ? '1' : '0') + '">' +
       '<meta name="x-emitido-em" content="' + esc(_issuedAt) + '">';
-    const infoBits = [
-      meta.materia ? ('Matéria: ' + esc(meta.materia)) : '',
-      meta.modulo ? ('Módulo: ' + esc(meta.modulo)) : '',
-      meta.dateStr ? ('Emitido em ' + esc(meta.dateStr)) : ''
-    ].filter(Boolean);
+    // Matéria/módulo saem no `.cover-sub` e a data no `.cover-date` (abaixo) —
+    // não há bloco de "infos" separado nesta capa.
     // Capa: imagem da unidade (saneada p/ não quebrar url()/atributo) + subtítulo
     const coverBg = String(meta.coverUrl || '').replace(/["'()\\<>]/g, '').trim();
     const coverSub = [meta.materia, meta.modulo].filter(Boolean).join('  ·  ');
@@ -39115,6 +39142,9 @@ const TextCompiler = (function(){
       '.cover-eyebrow{font:400 .74rem sans-serif;letter-spacing:.3em;text-transform:uppercase;color:rgba(245,239,226,.82);margin-bottom:.6rem}' +
       '.cover-title{font:700 2.7rem/1.12 \'Cardo\',Georgia,serif;color:#fff;margin:0}' +
       '.cover-sub{font:400 1.02rem sans-serif;color:rgba(245,239,226,.86);margin-top:.6rem}' +
+      // Data de emissão: degrau intermediário entre o subtítulo e a linha de
+      // licença (menor/mais apagada que o sub, maior que a lic).
+      '.cover-date{font:400 .72rem sans-serif;letter-spacing:.08em;color:rgba(245,239,226,.7);margin-top:.5rem}' +
       '.cover-lic{font:400 .62rem sans-serif;color:rgba(245,239,226,.6);margin-top:1rem}' +
       // capa de reserva (sem imagem): fundo sólido no tom da marca
       '.cover-page.no-img{background:linear-gradient(135deg,#2a2212,#4a3a1e)}' +
@@ -39193,6 +39223,7 @@ const TextCompiler = (function(){
           '<div class="cover-eyebrow">Texto para estudo</div>' +
           '<h1 class="cover-title">' + esc(meta.unitTitle || 'Unidade') + '</h1>' +
           (coverSub ? '<div class="cover-sub">' + esc(coverSub) + '</div>' : '') +
+          (meta.dateStr ? '<div class="cover-date">Emitido em ' + esc(meta.dateStr) + '</div>' : '') +
           (licLine ? '<div class="cover-lic">' + esc(licLine) + '</div>' : '') +
         '</div>' +
       '</section>' +
