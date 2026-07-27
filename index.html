@@ -10153,6 +10153,50 @@ window.TAG_REGISTRY = {
   // ────────────────────────────────────────────────────────────────────────
   // Fase 2: Hidratação do UbiqueStore a partir do Supabase (fonte de verdade)
   // ────────────────────────────────────────────────────────────────────────
+  /* ── ARMADILHA Nº3: PostgREST corta em 1000 linhas SEM AVISO ──
+     Pedir a tabela inteira devolve só as 1000 primeiras e NENHUM erro — o app
+     acha que recebeu tudo. Este helper busca em PÁGINAS até a tabela acabar.
+
+     - `monta` precisa CRIAR a query a cada chamada: um builder do supabase-js
+       não pode ser reexecutado depois de resolvido.
+     - ORDEM é obrigatória pra paginar com segurança: sem ORDER BY o banco pode
+       repetir uma linha em duas páginas (ou pular). Padrão 'id'; quem não tem
+       id (tabelas de junção) passa a sua própria chave.
+     - Se a coluna de ordem não existir, NÃO perde tudo: avisa e cai na busca
+       única de antes (que trunca, mas é o comportamento atual — nunca pior).
+     - Devolve { data, error } igual a uma query normal, pra ser troca direta.
+
+     ONDE FOI APLICADO: tudo que cresce com o CONTEÚDO ou com o USO — banco de
+     questões (tf_items já em 913/1000 em 27/07/2026), blocos/unidades/seções,
+     glossário, tópicos do edital, questões de simulado, tags e as respostas do
+     aluno (student_responses, que alimenta o Desempenho).
+     DELIBERADAMENTE FORA: professors, professor_works, source_author_links,
+     glossary_word_classes, exams, exam_subjects, editais, mock_exam_sections e
+     mock_exam_files — são tabelas de estrutura, limitadas por natureza (dezenas
+     de linhas). Se alguma dessas passar de ~500, paginar também. */
+  const _PAG = 1000;
+  window._fetchAllRows = async function(monta, ordem, rotulo){
+    const col = ordem || 'id';
+    const out = [];
+    for(let de = 0; ; de += _PAG){
+      const { data, error } = await monta().order(col, { ascending: true }).range(de, de + _PAG - 1);
+      if(error){
+        if(de === 0){
+          // Provável coluna de ordem inexistente → tenta do jeito antigo.
+          console.warn('[fetchAll] ordem "' + col + '" falhou em ' + (rotulo || '?') + ' (' + error.message + ') — caindo pra busca única');
+          return await monta();
+        }
+        console.warn('[fetchAll] ' + (rotulo || '?') + ' falhou na página ' + de + ':', error.message);
+        return { data: out, error: error };
+      }
+      const lote = data || [];
+      out.push.apply(out, lote);
+      if(lote.length < _PAG) break;
+      if(de >= 500000){ console.warn('[fetchAll] teto de segurança em ' + (rotulo || '?')); break; }
+    }
+    return { data: out, error: null };
+  };
+
   async function hydrateFromSupabase(){
     if(!window.UBIQUE_USE_SUPABASE || !window._sb){
       return false;
@@ -10183,13 +10227,13 @@ window.TAG_REGISTRY = {
         window.__BOOKS = bm;                                        // source_id → dados do livro
       }).catch(() => {});
       const [subjR, modR, chR, unR, secR, blkR, dlR] = await Promise.all([
-        sb.from('subjects').select('*').order('position', { nullsFirst:false }).order('id'),
-        sb.from('modules').select('*').order('position').order('id'),
-        sb.from('course_chapters').select('*').order('position').order('id'),
-        sb.from('units').select('*').order('position').order('id'),
-        sb.from('unit_sections').select('*').order('position').order('id'),
-        sb.from('unit_blocks').select('*').order('position').order('id'),
-        sb.from('unit_downloads').select('*').order('position').order('id'),
+        _fetchAllRows(() => sb.from('subjects').select('*').order('position', { nullsFirst:false }), 'id', 'subjects'),
+        _fetchAllRows(() => sb.from('modules').select('*').order('position'), 'id', 'modules'),
+        _fetchAllRows(() => sb.from('course_chapters').select('*').order('position'), 'id', 'course_chapters'),
+        _fetchAllRows(() => sb.from('units').select('*').order('position'), 'id', 'units'),
+        _fetchAllRows(() => sb.from('unit_sections').select('*').order('position'), 'id', 'unit_sections'),
+        _fetchAllRows(() => sb.from('unit_blocks').select('*').order('position'), 'id', 'unit_blocks'),
+        _fetchAllRows(() => sb.from('unit_downloads').select('*').order('position'), 'id', 'unit_downloads'),
       ]);
 
       // Carga RESILIENTE: um erro numa tabela (ex.: uma sessão que expirou no
@@ -10244,14 +10288,14 @@ window.TAG_REGISTRY = {
       window._hydrateQBank = async function _hydrateQBank(){
         const qsb = window._sb.schema('questoes');
         const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR, qetR] = await Promise.all([
-          qsb.from('questions').select('*'),
-          qsb.from('tf_items').select('*'),
-          qsb.from('tf_item_comments').select('*'),
-          qsb.from('mc_options').select('*'),
-          qsb.from('reference_texts').select('*'),
-          qsb.from('question_reference_texts').select('*'),
-          qsb.from('essay_criteria').select('*'),
-          qsb.from('essay_answer_models').select('*'),
+          _fetchAllRows(() => qsb.from('questions').select('*'), 'id', 'questions'),
+          _fetchAllRows(() => qsb.from('tf_items').select('*'), 'id', 'tf_items'),
+          _fetchAllRows(() => qsb.from('tf_item_comments').select('*'), 'id', 'tf_item_comments'),
+          _fetchAllRows(() => qsb.from('mc_options').select('*'), 'id', 'mc_options'),
+          _fetchAllRows(() => qsb.from('reference_texts').select('*'), 'id', 'reference_texts'),
+          _fetchAllRows(() => qsb.from('question_reference_texts').select('*'), 'question_id', 'question_reference_texts'),
+          _fetchAllRows(() => qsb.from('essay_criteria').select('*'), 'id', 'essay_criteria'),
+          _fetchAllRows(() => qsb.from('essay_answer_models').select('*'), 'id', 'essay_answer_models'),
           // A ETIQUETA questão→tópico do edital. É o que o admin grava quando a
           // questão entra numa unidade (_ueLinkQuestionsToUnitTopics) — e que o
           // filtro do Banco IGNORAVA: ele só olhava o caminho indireto
@@ -10259,7 +10303,7 @@ window.TAG_REGISTRY = {
           // questões de HB tinham a etiqueta do Período Colonial e ZERO unidades
           // tinham o vínculo indireto — o trabalho do admin era jogado fora e o
           // aluno via 13 de 25.
-          qsb.from('question_edital_topics').select('question_id, edital_topic_id'),
+          _fetchAllRows(() => qsb.from('question_edital_topics').select('question_id, edital_topic_id'), 'question_id', 'question_edital_topics'),
         ]);
         // tf_item_comments, essay_criteria e essay_answer_models são EXTRAS:
         // se falharem, NÃO derrubam o banco — só ficam sem os dados extras.
@@ -10375,7 +10419,7 @@ window.TAG_REGISTRY = {
         const [meR, secR, mqR, filesR] = await Promise.all([
           csb2.from('mock_exams').select('*').eq('is_published', true),
           csb2.from('mock_exam_sections').select('*'),
-          csb2.from('mock_exam_questions').select('*'),
+          _fetchAllRows(() => csb2.from('mock_exam_questions').select('*'), 'id', 'mock_exam_questions'),
           // S9 — arquivos PDF do simulado (pode não existir a tabela ainda)
           csb2.from('mock_exam_files').select('*').order('position').then(r => r, () => ({ data: [] })),
         ]);
@@ -10508,7 +10552,7 @@ window.TAG_REGISTRY = {
       // Fase 4n — hidrata catálogo de tags (admin gerencia, aluno usa pra renderizar chips)
       try {
         const csb = window._sb.schema('conteudo');
-        const { data, error } = await csb.from('tags').select('*').order('id');
+        const { data, error } = await _fetchAllRows(() => csb.from('tags').select('*'), 'id', 'tags');
         if(!error){
           if(UbiqueStore.tags) UbiqueStore.tags.replaceAll(data || []);
           console.log('[hydrate tags] ✅', { tags: data?.length || 0 });
@@ -10522,8 +10566,8 @@ window.TAG_REGISTRY = {
         const csb = window._sb.schema('conteudo');
         const [wcR, gtR, vbR] = await Promise.all([
           csb.from('glossary_word_classes').select('*'),
-          csb.from('glossary_terms').select('*'),
-          csb.from('verbetes').select('*'),
+          _fetchAllRows(() => csb.from('glossary_terms').select('*'), 'id', 'glossary_terms'),
+          _fetchAllRows(() => csb.from('verbetes').select('*'), 'id', 'verbetes'),
         ]);
         const gErrs = [wcR.error, gtR.error, vbR.error].filter(Boolean);
         if(!gErrs.length){
@@ -10706,8 +10750,8 @@ window.TAG_REGISTRY = {
           csb.from('exams').select('*'),
           csb.from('exam_subjects').select('*'),
           csb.from('editais').select('*'),
-          csb.from('edital_topics').select('*'),
-          csb.from('edital_topic_units').select('*'),
+          _fetchAllRows(() => csb.from('edital_topics').select('*'), 'id', 'edital_topics'),
+          _fetchAllRows(() => csb.from('edital_topic_units').select('*'), 'id', 'edital_topic_units'),
         ]);
         // Carrega cada tabela de forma INDEPENDENTE: se uma falhar (ex.: RLS em
         // exams), as outras (edital_topics/links) ainda carregam. Antes era
@@ -12757,8 +12801,14 @@ const Store = (function(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state) return;
     try{
-      const { data, error } = await window._sb.schema('aluno').from('student_responses')
-        .select('question_type, answer_value, metadata, created_at, updated_at').eq('user_id', userId);
+      // Paginado: um aluno aplicado passa de 1000 respostas e o corte
+      // silencioso sumiria com o histórico — direto nas estatísticas do
+      // Desempenho, sem erro nenhum na tela.
+      const { data, error } = await window._fetchAllRows(
+        () => window._sb.schema('aluno').from('student_responses')
+          .select('question_type, answer_value, metadata, created_at, updated_at, question_ref')
+          .eq('user_id', userId),
+        'question_ref', 'student_responses');
       if(error){ console.warn('[hydrate answers]', error); return; }
       let qCount = 0, eCount = 0;
       (data || []).forEach(row => {
