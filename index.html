@@ -9807,6 +9807,14 @@ window.TAG_REGISTRY = {
   function _qbankItemCounts(){
     const bank = window._QBank;
     if(!bank) return null;
+    // TRAVA DA FASE 2: com banco PARCIAL (só as questões da unidade aberta),
+    // esta contagem daria o número certo pras questões carregadas e 1 pras
+    // demais — ou seja, um total MENOR, sem erro nenhum na tela. É o mesmo
+    // tipo de bug do corte em 1000 linhas. Enquanto não estiver completo,
+    // devolve null e o chamador usa a contagem provisória de sempre, que se
+    // corrige sozinha quando o banco completo chega (cache é por identidade
+    // do objeto, e a hidratação troca o objeto).
+    if(!bank.completo) return null;
     if(_qbankCountCache && _qbankCountCache._ref === bank) return _qbankCountCache;
     const typeById = {}; (bank.questions || []).forEach(q => { typeById[String(q.id)] = q.type; });
     const tfByQ = {}; (bank.tfItems || []).forEach(t => { const k = String(t.question_id); tfByQ[k] = (tfByQ[k] || 0) + 1; });
@@ -10436,6 +10444,109 @@ window.TAG_REGISTRY = {
             return false;
           });
         return _qbankP;
+      };
+
+      /* ── FASE 2: carga ENXUTA pra UMA unidade ──
+         Busca só as questões que os blocos daquela unidade referenciam (dezenas)
+         em vez das ~913 assertivas da plataforma. Serve pra questão aparecer
+         rápido enquanto o banco completo ainda está vindo em segundo plano —
+         faz diferença de verdade em conexão lenta e no celular.
+
+         MESCLA no _QBank e NÃO marca `completo`: é parcial de propósito. Quem
+         conta (contadores do catálogo, matérias do simulado, Edital, Banco) é
+         travado por `completo` e continua esperando o banco inteiro — senão
+         exibiria número MENOR sem erro nenhum.
+
+         Idempotente: guarda as unidades já buscadas, então o re-render que ela
+         mesma dispara não vira laço. */
+      const _qbankUnidadesFeitas = new Set();
+      window._hydrateQBankForUnit = async function(unitId){
+        if(unitId == null || !window._sb) return false;
+        if(window._QBank && window._QBank.completo) return false;   // já tem tudo
+        const chave = String(unitId);
+        if(_qbankUnidadesFeitas.has(chave)) return false;
+        // Ids que ESTA unidade referencia — objetivas (content.groups[]) e
+        // discursivas (content.items[]). Blocos vivem no UbiqueStore, não na
+        // unidade (o `unit.blocks` é campo fantasma).
+        const ids = new Set();
+        const blocos = (window.UbiqueStore && UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.list()) || [];
+        blocos.forEach(function(b){
+          if(!b || String(b.unit_id) !== chave || !b.content) return;
+          (Array.isArray(b.content.groups) ? b.content.groups : []).forEach(function(g){
+            if(g && g.bank_question_id != null) ids.add(String(g.bank_question_id));
+          });
+          (Array.isArray(b.content.items) ? b.content.items : []).forEach(function(it){
+            if(it && it.bank_question_id != null) ids.add(String(it.bank_question_id));
+          });
+        });
+        _qbankUnidadesFeitas.add(chave);
+        if(!ids.size) return false;                                  // unidade sem questões
+        const lista = Array.from(ids);
+        try{
+          const qsb = window._sb.schema('questoes');
+          const [qR, tfR, mcR, qrtR, ecR, eamR, qetR] = await Promise.all([
+            qsb.from('questions').select('*').in('id', lista),
+            qsb.from('tf_items').select('*').in('question_id', lista),
+            qsb.from('mc_options').select('*').in('question_id', lista),
+            qsb.from('question_reference_texts').select('*').in('question_id', lista),
+            qsb.from('essay_criteria').select('*').in('question_id', lista),
+            qsb.from('essay_answer_models').select('*').in('question_id', lista),
+            qsb.from('question_edital_topics').select('question_id, edital_topic_id').in('question_id', lista),
+          ]);
+          if(qR.error) throw qR.error;
+          // Textos de referência: só os que estas questões usam (a tabela
+          // inteira é 76 kB, mas o princípio é o mesmo — pede o necessário).
+          const rtIds = Array.from(new Set((qrtR.data || []).map(function(r){ return String(r.reference_text_id); }).filter(Boolean)));
+          // Comentários são por ITEM (tf_item_id), não por questão — só dá pra
+          // filtrar depois de saber os itens. Puxar a tabela toda aqui (149 kB)
+          // desfaria metade do ganho.
+          const itemIds = (tfR.data || []).map(function(t){ return String(t && t.id); }).filter(Boolean);
+          const [rtR, tfcR] = await Promise.all([
+            rtIds.length ? qsb.from('reference_texts').select('*').in('id', rtIds) : Promise.resolve({ data: [], error: null }),
+            itemIds.length ? qsb.from('tf_item_comments').select('*').in('tf_item_id', itemIds) : Promise.resolve({ data: [], error: null }),
+          ]);
+          // Se o banco completo chegou enquanto buscávamos, ele manda — não
+          // sobrescrevemos o todo com o pedaço.
+          if(window._QBank && window._QBank.completo) return false;
+          const base = window._QBank || {
+            questions:[], tfItems:[], tfItemComments:[], mcOptions:[], referenceTexts:[],
+            questionRefTexts:[], essayCriteria:[], essayAnswerModels:[], questionEditalTopics:[],
+            topicsByQuestion:{}, completo:false
+          };
+          function junta(atual, novos, chaveDe){
+            const vistos = new Set((atual || []).map(chaveDe));
+            const out = (atual || []).slice();
+            (novos || []).forEach(function(x){ const k = chaveDe(x); if(!vistos.has(k)){ vistos.add(k); out.push(x); } });
+            return out;
+          }
+          const porId = function(x){ return String(x && x.id); };
+          const novo = {
+            questions:        junta(base.questions,        qR.data,   porId),
+            tfItems:          junta(base.tfItems,          tfR.data,  porId),
+            tfItemComments:   junta(base.tfItemComments,   tfcR.data, porId),
+            mcOptions:        junta(base.mcOptions,        mcR.data,  porId),
+            referenceTexts:   junta(base.referenceTexts,   rtR.data,  porId),
+            questionRefTexts: junta(base.questionRefTexts, qrtR.data, function(x){ return String(x.question_id)+'|'+String(x.reference_text_id); }),
+            essayCriteria:    junta(base.essayCriteria,    ecR.data,  porId),
+            essayAnswerModels:junta(base.essayAnswerModels,eamR.data, porId),
+            questionEditalTopics: junta(base.questionEditalTopics, qetR.data, function(x){ return String(x.question_id)+'|'+String(x.edital_topic_id); }),
+            completo: false                     // PARCIAL — a trava depende disto
+          };
+          const tbq = {};
+          (novo.questionEditalTopics || []).forEach(function(l){
+            if(!l || l.question_id == null || l.edital_topic_id == null) return;
+            const k = String(l.question_id);
+            (tbq[k] = tbq[k] || []).push(String(l.edital_topic_id));
+          });
+          novo.topicsByQuestion = tbq;
+          window._QBank = novo;               // objeto NOVO → caches se invalidam
+          console.log('[qbank unidade] ✅', { unidade: chave, questoes: (qR.data||[]).length, afirmativas: (tfR.data||[]).length });
+          return true;
+        }catch(e){
+          _qbankUnidadesFeitas.delete(chave);  // deixa tentar de novo
+          console.warn('[qbank unidade] falhou:', e && e.message || e);
+          return false;
+        }
       };
 
       /* ── FASE 1: o banco de questões SAI do caminho crítico do boot ──
@@ -29074,6 +29185,10 @@ window._ensureSimSubjectIds = function(sims){
   if(!pend.length) return;
   const Q = (window._QBank && _QBank.questions) || [];
   if(!Q.length) return; // banco de questões ainda não carregou — tenta no próximo render
+  // TRAVA DA FASE 2: com banco PARCIAL, um simulado ficaria sem as matérias
+  // cujas questões ainda não foram carregadas — e ficaria assim de forma
+  // definitiva (o resultado é memorizado em s.subjectIds). Espera o completo.
+  if(!window._QBank.completo) return;
   const qById = {}; Q.forEach(q => { qById[String(q.id)] = q; });
   const S = window.UbiqueStore;
   const topics = (S && S.edital_topics && S.edital_topics.list) ? (S.edital_topics.list() || []) : [];
@@ -36287,6 +36402,16 @@ Renderers.unit.mount = function(stageEl, route){
   // de groups/blocks que foi renderizado.
   const unit = _unitWithStoreOverride(found.unit);
   Store.markUnitView(unit.id);
+
+  // FASE 2: enquanto o banco COMPLETO ainda vem em 2º plano, busca só as
+  // questões DESTA unidade pra elas aparecerem já (em conexão lenta é a
+  // diferença entre ver a questão e ver um espaço vazio). É idempotente e
+  // devolve false quando não há nada novo, então o re-render não vira laço.
+  if(typeof window._hydrateQBankForUnit === 'function'){
+    window._hydrateQBankForUnit(unit.id).then(function(mudou){
+      if(mudou && window.App && App.render) App.render();
+    }).catch(function(){});
+  }
 
   const blockStage = stageEl.querySelector('#blockStage');
   const groups = unit.groups||[];
