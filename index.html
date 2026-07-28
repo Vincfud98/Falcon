@@ -6753,6 +6753,16 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   transition:all .2s ease;
 }
 .avbank-thumb:hover{border-color:var(--accent);transform:scale(1.05)}
+.avbank-load{max-width:300px;margin:2.6rem auto;text-align:left}
+.avbank-load-top{
+  display:flex;justify-content:space-between;align-items:baseline;gap:1rem;
+  font-family:var(--sans);font-weight:300;font-size:.62rem;
+  letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute);
+  margin-bottom:.55rem;
+}
+.avbank-load-pct{font-variant-numeric:tabular-nums;color:var(--text-dim)}
+.avbank-load-track{height:2px;border-radius:2px;background:var(--border);overflow:hidden}
+.avbank-load-fill{height:100%;width:0;background:var(--accent);border-radius:2px;transition:width .4s var(--ease)}
 .avbank-thumb img{
   position:absolute;left:50%;top:50%;display:block;
   user-select:none;pointer-events:none;
@@ -10982,14 +10992,24 @@ window.TAG_REGISTRY = {
      mesma busca em vez de disparar duas. Em caso de erro, zera a promessa pra
      a próxima tentativa poder buscar de novo. */
   let _avatarsP = null;
-  window._hydrateAvatares = function(){
+  let _avatarsProg = null;                  // quem quer acompanhar o progresso
+  window._hydrateAvatares = function(aoAndar){
+    _avatarsProg = aoAndar || null;
     if(_avatarsP) return _avatarsP;
     _avatarsP = (async function(){
       if(!window._sb) return false;
       const crmSb = window._sb.schema('crm');
+      // Cada consulta que volta é um MARCO real avisado ao seletor (a barrinha
+      // não inventa progresso: só sobe o teto quando algo de fato chegou).
+      let _feitos = 0;
+      const _marco = function(r){
+        _feitos++;
+        if(_avatarsProg){ try { _avatarsProg(_feitos / 2); } catch(_){} }
+        return r;
+      };
       const [catR, avR] = await Promise.all([
-        crmSb.from('avatar_categories').select('*').order('position'),
-        crmSb.from('avatars').select('*'),
+        crmSb.from('avatar_categories').select('*').order('position').then(_marco),
+        crmSb.from('avatars').select('*').then(_marco),
       ]);
       const aErrs = [catR.error, avR.error].filter(Boolean);
       if(aErrs.length){ console.warn('[avatares] erros:', aErrs); throw new Error(aErrs[0].message || 'falha'); }
@@ -22113,7 +22133,7 @@ window.Follows = Follows;
    Uso: renderAvatarInto(el, url, transform)
    `el` deve estar com position:relative + overflow:hidden + border-radius
    (o helper só popula o <img> interno com o transform correto).        */
-function renderAvatarInto(targetEl, url, transform){
+function renderAvatarInto(targetEl, url, transform, opts){
   if(!targetEl) return;
   if(!url){
     // Sem foto — remove o <img> mas preserva outros filhos (botões etc)
@@ -22138,6 +22158,10 @@ function renderAvatarInto(targetEl, url, transform){
     img.style.top = '50%';
     img.style.userSelect = 'none';
     img.style.pointerEvents = 'none';
+    // Preguiçosa SÓ onde foi pedido (grades de 100+ avatares). Nos avatares
+    // soltos da interface — topbar, comentário, colega — o carregamento
+    // continua imediato, como sempre foi.
+    if(opts && opts.preguicosa){ img.loading = 'lazy'; img.decoding = 'async'; }
     // Insere como PRIMEIRO filho pra ficar atrás de botões (edit etc)
     if(targetEl.firstChild) targetEl.insertBefore(img, targetEl.firstChild);
     else targetEl.appendChild(img);
@@ -23487,18 +23511,50 @@ Renderers.account.mount = function(stageEl){
   // Abre o modal JÁ (resposta imediata ao clique) e busca os avatares sob
   // demanda — eles não vêm mais no boot. Se já estiverem em memória, o
   // _hydrateAvatares resolve na hora e o "Carregando" nem pisca.
+  // Barrinha do seletor. O TETO é sempre o próximo marco real (cada consulta do
+  // banco vale metade); entre um marco e outro ela se aproxima do teto sem
+  // passar dele. Assim o aluno vê que está andando e o número não promete mais
+  // do que já chegou de verdade.
+  function _avbankBarra(root){
+    const fill = root.querySelector('.avbank-load-fill');
+    const pct  = root.querySelector('.avbank-load-pct');
+    if(!fill) return { passo(){}, fim(){} };
+    let atual = 6, teto = 34, timer = 0;
+    function pinta(){
+      const n = Math.round(atual);
+      fill.style.width = n + '%';
+      if(pct) pct.textContent = n + '%';
+    }
+    pinta();
+    timer = setInterval(function(){
+      if(!fill.isConnected){ clearInterval(timer); return; }
+      atual += (teto - atual) * 0.16;
+      pinta();
+    }, 200);
+    return {
+      passo(frac){ teto = 34 + Math.max(0, Math.min(1, frac || 0)) * 58; },
+      fim(){ clearInterval(timer); atual = 100; pinta(); },
+    };
+  }
   async function _openAvatarBankPicker(){
     const modal0 = document.getElementById('avatarPickerModal');
     const body0 = document.getElementById('avatarPickerBody');
     if(!modal0 || !body0) return;
     const jaTem = window.UbiqueStore && UbiqueStore.avatar_categories
       && UbiqueStore.avatar_categories.list().length > 0;
+    let barra = null;
     if(!jaTem){
-      body0.innerHTML = '<div class="empty" style="text-align:left"><div class="empty-body">Carregando avatares…</div></div>';
+      body0.innerHTML = '<div class="avbank-load">'
+        + '<div class="avbank-load-top"><span>Carregando avatares</span>'
+        + '<span class="avbank-load-pct">0%</span></div>'
+        + '<div class="avbank-load-track"><div class="avbank-load-fill"></div></div>'
+        + '</div>';
+      barra = _avbankBarra(body0);
     }
     modal0.classList.add('active');
     let ok = true;
-    try { ok = await window._hydrateAvatares(); } catch(_){ ok = false; }
+    try { ok = await window._hydrateAvatares(barra ? barra.passo : null); } catch(_){ ok = false; }
+    if(barra) barra.fim();
     // Fechou o modal enquanto carregava → não pinta por cima.
     if(!modal0.classList.contains('active')) return;
     if(!ok && !jaTem){
@@ -23510,6 +23566,17 @@ Renderers.account.mount = function(stageEl){
     _renderAvatarBankPicker();
   }
   let _avbankPintura = 0;
+  // Desenha as fotos de uma seção recém-inserida com o helper oficial.
+  function _avbankPintarFotos(escopo){
+    (escopo || document).querySelectorAll('.avbank-thumb[data-url]:not([data-av-ok])').forEach(function(btn){
+      btn.setAttribute('data-av-ok', '1');
+      renderAvatarInto(btn, btn.getAttribute('data-url') || '', {
+        x: parseFloat(btn.getAttribute('data-tx')) || 0,
+        y: parseFloat(btn.getAttribute('data-ty')) || 0,
+        scale: parseFloat(btn.getAttribute('data-ts')) || 1,
+      }, { preguicosa: true });
+    });
+  }
   function _renderAvatarBankPicker(){
     const modal = document.getElementById('avatarPickerModal');
     const body = document.getElementById('avatarPickerBody');
@@ -23532,19 +23599,21 @@ Renderers.account.mount = function(stageEl){
     const secHtml = (c) => {
       const list = avs.filter(a => String(a.category_id) === String(c.id));
       if(!list.length) return '';
+      // SEM <img> no HTML: quem desenha é o renderAvatarInto (o mesmo helper da
+      // topbar, comentários, fórum e colegas). A conta antiga aqui era ingênua
+      // — width:escala% + height:auto NÃO cobre a moldura quando a imagem não
+      // é quadrada, e o deslocamento em % era do tamanho da IMAGEM, não da
+      // moldura. Resultado: foto quadrada num campo redondo, ignorando o
+      // enquadramento feito no admin. O helper calcula o preenchimento pelo
+      // tamanho REAL da imagem, então o crop fica idêntico em toda a plataforma.
       const thumbs = list.map(av => {
         const t = av.transform || {x:0,y:0,scale:1};
-        const tx = (t.x || 0) + '%';
-        const ty = (t.y || 0) + '%';
-        const scalePct = ((t.scale || 1) * 100) + '%';
         return `<button type="button" class="avbank-thumb"
                   data-url="${Util.attr(av.url)}"
                   data-tx="${Util.attr(t.x||0)}"
                   data-ty="${Util.attr(t.y||0)}"
                   data-ts="${Util.attr(t.scale||1)}"
-                  title="${Util.attr(av.name||'')}">
-          <img src="${Util.attr(av.url)}" alt="${Util.attr(av.name||'')}" loading="lazy" decoding="async" style="width:${scalePct};height:auto;transform:translate(-50%, -50%) translate(${tx}, ${ty})">
-        </button>`;
+                  data-tip="${Util.attr(av.name||'')}"></button>`;
       }).join('');
       return `<section class="avbank-section">
         <header class="avbank-section-head"><span class="avbank-section-name">${Util.esc(c.name)}</span>
@@ -23561,6 +23630,7 @@ Renderers.account.mount = function(stageEl){
       </div>`;
     } else {
       body.innerHTML = secHtml(comAv[0]);
+      _avbankPintarFotos(body);
       const marca = ++_avbankPintura;                 // abriu de novo → para a fila antiga
       let i = 1;
       // Agenda a 2ª seção pro PRÓXIMO quadro (chamar direto pintaria duas de
@@ -23569,6 +23639,7 @@ Renderers.account.mount = function(stageEl){
         if(marca !== _avbankPintura || !body.isConnected) return;
         if(i >= comAv.length) return;
         body.insertAdjacentHTML('beforeend', secHtml(comAv[i++]));
+        _avbankPintarFotos(body);
         requestAnimationFrame(proxima);
       });
     }
@@ -23588,6 +23659,9 @@ Renderers.account.mount = function(stageEl){
         if(window.ueToast) window.ueToast('Avatar selecionado. Clique em "Salvar perfil" pra confirmar.', 'info');
       });
     }
+    // Nome do avatar no tooltip DA PLATAFORMA (data-tip). O title= do navegador
+    // demora ~1s pra aparecer e não dá pra estilizar.
+    if(typeof setupQuickTooltips === 'function') setupQuickTooltips(body);
     modal.classList.add('active');
   }
 
