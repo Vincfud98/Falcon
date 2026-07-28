@@ -12119,6 +12119,10 @@ const Commerce = (function(){
     try{ localStorage.setItem(KEY, JSON.stringify(owned)); }catch(_){}
   }
   function isOwned(courseId){
+    // MODO-VITRINE do tour (passo Banco em diante): a conta nova VÊ as páginas
+    // destrancadas — só ver; o passo do Banco põe um escudo de clique. A flag
+    // morre quando o tour fecha; nenhuma compra/acesso real é alterado.
+    if(window.__tourPreviewAll) return true;
     const course = (window.COURSES || []).find(item => item.id === courseId);
     if(!course) return false;
     // Admin enxerga tudo.
@@ -14144,6 +14148,20 @@ const Store = (function(){
       return map.size;
     },
     getQuizAnswer(unitId, blockId, itemId){
+      const real = this._getQuizAnswerReal(unitId, blockId, itemId);
+      if(real || !window.__tourMockStats) return real;
+      // MODO-VITRINE do tour: resposta FICTÍCIA e determinística pra uma conta
+      // nova ver os gráficos do Desempenho/Edital vivos. SÓ LEITURA — nada é
+      // gravado. A unidade-vitrine fica de fora (a demo de "marcar uma
+      // alternativa" não pode nascer respondida).
+      if(window.__tourMockSkipUnit != null && String(unitId) === String(window.__tourMockSkipUnit)) return null;
+      const chave = String(unitId) + '|' + String(blockId) + '|' + String(itemId);
+      let h = 0;
+      for(let i = 0; i < chave.length; i++) h = (h * 31 + chave.charCodeAt(i)) | 0;
+      h = Math.abs(h);
+      return { selected: (h % 2) ? 'C' : 'E', correct: (h % 10) < 7, verified: true, doubt: (h % 8) === 0 };
+    },
+    _getQuizAnswerReal(unitId, blockId, itemId){
       // Defensive: _state pode ser null se Store.init ainda não rodou
       // (ex.: Banco renderiza questões antes da hidratação completar).
       // Mesmo contrato de unitProgress() — sem state, ninguém respondeu nada.
@@ -17677,36 +17695,57 @@ function _mapClaudeEssayPayload(claude, item, text){
 // ──────────────────────────────────────────────────────────────────────
 // Aba "Brainstorm" da discursiva: o aluno lista ideias por item; a IA avalia
 // cobertura/ordem/esqueleto (EF correct-brainstorm) e pode gerar um exemplo.
-// ── DEMO DO TOUR (avaliação de brainstorm) ──
-// Pinta uma avaliação DE EXEMPLO no bloco discursivo REAL, usando o MESMO
-// renderizador do recurso de verdade (_bsRenderFeedback, hoisted neste escopo).
-// Regras: (a) se o aluno JÁ tem avaliação real na tela, não encosta; (b) nada
-// é persistido — saveGerado é noop e o botão "Ver um texto ideal" fica
-// desativado no exemplo; (c) _tourDemoBrainstormClear desfaz tudo ao fechar.
+// ── DEMOS DO TOUR (discursiva) ──
+// Pintam avaliações DE EXEMPLO no bloco discursivo REAL, usando os MESMOS
+// renderizadores do recurso (_bsRenderFeedback e injectEssayAIFeedback, ambos
+// hoisted neste escopo). Regras: não encostam se o aluno já tem avaliação real
+// na tela; nada é persistido; _tourDemoBrainstormClear desfaz tudo.
+function _tourEssayPane(itemEl, k){
+  // Troca de aba SEM depender dos listeners (o mount pode não ter rodado ainda).
+  itemEl.querySelectorAll('.essay-tab').forEach(function(t){ t.classList.toggle('is-active', t.getAttribute('data-essay-tab') === k); });
+  itemEl.querySelectorAll('.essay-tabpane').forEach(function(pn){ pn.hidden = (pn.getAttribute('data-essay-pane') !== k); });
+  const lay = itemEl.querySelector('.essay-layout');
+  if(lay) lay.classList.toggle('essay-bs-on', k === 'brainstorm');
+}
 window._tourDemoBrainstorm = function(){
   const bs = document.querySelector('.essay-bs');
   if(!bs) return false;
   const fb = bs.querySelector('.essay-bs-feedback');
   if(!fb) return false;
-  if(fb.getAttribute('data-tour-demo') !== '1' && fb.innerHTML.trim()) return true; // avaliação REAL na tela
   const itemEl = bs.closest('.essay-item') || bs.closest('.block-section') || document.body;
-  const tab = itemEl.querySelector('[data-essay-tab="brainstorm"]');
-  if(tab) tab.click();                                     // a avaliação mora na aba brainstorm
+  if(fb.getAttribute('data-tour-demo') !== '1' && fb.innerHTML.trim()){
+    _tourEssayPane(itemEl, 'brainstorm');            // avaliação REAL: só garante a aba visível
+    return true;
+  }
+  _tourEssayPane(itemEl, 'brainstorm');
   const R = {
     nota: { valor: 7.5 },
-    pronto: 'Exemplo ilustrativo do tour — é assim que a avaliação do seu brainstorm aparece.',
+    pronto: 'Exemplo ilustrativo do tour — é assim que a avaliação do seu brainstorm chega.',
     cobertura: [
-      { item: 'Causas econômicas da expansão', cobriu: ['crise do século XIV', 'retração comercial'], faltou: ['o papel da burguesia mercantil'] },
-      { item: 'Papel do Estado português', cobriu: ['centralização precoce'], faltou: ['a marinha e o financiamento régio'] },
+      { item: 'A crise do século XIV como catalisadora',
+        cobriu: ['peste negra e colapso demográfico', 'retração do comércio e da produção agrícola', 'desorganização da ordem feudal'],
+        faltou: ['a fome de metais preciosos', 'o renascimento urbano como contraponto'] },
+      { item: 'O papel do Estado português',
+        cobriu: ['centralização precoce da monarquia', 'a Revolução de Avis', 'aliança com a burguesia mercantil'],
+        faltou: ['o caráter patrimonialista do Estado', 'o financiamento régio das navegações'] },
+      { item: 'As motivações da expansão',
+        cobriu: ['busca de rotas alternativas às especiarias', 'espírito de Cruzada', 'inovações técnicas (caravela, astrolábio)'],
+        faltou: ['a mentalidade renascentista', 'a posição atlântica de Portugal'] },
     ],
-    ordem: 'A ordem está lógica; considere abrir pela crise antes das especiarias.',
+    ordem: 'A sequência está lógica (crise → Estado → motivações); só considere abrir pela crise antes de citar as especiarias, para o nexo causal ficar explícito desde a primeira frase.',
     esqueleto: [
-      { titulo: '§1 — A crise e a ruptura', topico_frasal: 'A expansão nasce da crise do século XIV.',
-        pontos: [ { texto: 'peste e retração' }, { texto: 'desorganização feudal' }, { texto: 'burguesia mercantil', origem: 'adicao' } ] },
-      { titulo: '§2 — O Estado pioneiro', topico_frasal: 'A centralização precoce explica o pioneirismo.',
-        pontos: [ { texto: 'centralização precoce' }, { texto: 'financiamento régio', origem: 'adicao' } ],
-        gancho: 'Feche ligando o pioneirismo às rotas atlânticas.' },
+      { titulo: '§1 — A crise e a ruptura', linhas: 6,
+        topico_frasal: 'A expansão marítima nasce da crise que desorganizou a Europa do século XIV.',
+        pontos: [ { texto: 'peste negra' }, { texto: 'retração comercial' }, { texto: 'desorganização feudal' }, { texto: 'fome de metais', origem: 'adicao' }, { texto: 'renascimento urbano', origem: 'adicao', prioridade: 'bonus' } ] },
+      { titulo: '§2 — O Estado pioneiro', linhas: 6,
+        topico_frasal: 'A centralização precoce da monarquia portuguesa explica o pioneirismo.',
+        pontos: [ { texto: 'Revolução de Avis' }, { texto: 'centralização precoce' }, { texto: 'burguesia mercantil' }, { texto: 'financiamento régio', origem: 'adicao' } ] },
+      { titulo: '§3 — As motivações e os meios', linhas: 5,
+        topico_frasal: 'Motivações econômicas, religiosas e técnicas convergem no projeto expansionista.',
+        pontos: [ { texto: 'rotas das especiarias' }, { texto: 'espírito de Cruzada' }, { texto: 'caravela e astrolábio' }, { texto: 'posição atlântica', origem: 'adicao' } ],
+        gancho: 'Feche ligando o pioneirismo às rotas atlânticas e ao Tratado de Tordesilhas.' },
     ],
+    cortado: ['a comparação com a expansão castelhana'],
   };
   try{
     _bsRenderFeedback(fb, itemEl, R, {}, async function(){ return { data: null, error: 'demo' }; }, 0, function(){}, null);
@@ -17716,10 +17755,42 @@ window._tourDemoBrainstorm = function(){
   if(ger){ ger.disabled = true; ger.title = 'Disponível fora do exemplo do tour'; }
   return true;
 };
+window._tourDemoRedacao = function(){
+  const pane = document.querySelector('.essay-tabpane[data-essay-pane="redacao"]');
+  if(!pane) return false;
+  const panel = pane.closest('.essay-panel');
+  const itemEl = panel ? panel.parentElement : (pane.closest('.essay-item') || pane.closest('.block-section'));
+  if(!itemEl) return false;
+  _tourEssayPane(itemEl, 'redacao');
+  if(pane.querySelector('.essay-ai-feedback')) return true;      // já há correção (real ou demo)
+  const payload = {
+    score: 8, maxScore: 10, ratio: 0.8, wordCount: 418, isMocked: false,
+    overallComment: 'Exemplo ilustrativo do tour. Bom domínio do nexo causal entre a crise do século XIV e o pioneirismo português; a estrutura em três blocos sustenta bem a argumentação. Para subir de faixa, aprofunde o papel da burguesia mercantil e feche com o desdobramento diplomático (Tordesilhas).',
+    strengths: ['Nexo causal claro entre crise e expansão', 'Uso preciso de marcos (Avis, Ceuta, Bojador)', 'Coesão entre os parágrafos'],
+    weaknesses: ['O papel da burguesia mercantil ficou apenas citado', 'Conclusão não retoma a tese'],
+    excerpts: [
+      { trecho: 'Portugal expandiu porque tinha um Estado forte.',
+        problema: 'Afirmação genérica — não diz POR QUE o Estado era forte nem desde quando.',
+        criterio: 'Argumentação',
+        sugestao: 'Especifique: "a centralização precoce, consolidada na Revolução de Avis (1383-85), deu à Coroa capacidade de financiar e coordenar o projeto expansionista".' },
+      { trecho: 'As especiarias eram muito valiosas na época.',
+        problema: 'Senso comum sem função argumentativa no parágrafo.',
+        criterio: 'Conteúdo',
+        sugestao: 'Amarre ao mecanismo: o encarecimento das rotas orientais tornou racional o investimento régio no périplo africano.' },
+    ],
+  };
+  try{
+    injectEssayAIFeedback(itemEl, {}, payload);
+  }catch(e){ console.warn('[tour demo redacao]', e); return false; }
+  const card = pane.querySelector('.essay-ai-feedback');
+  if(card) card.setAttribute('data-tour-demo', '1');
+  return true;
+};
 window._tourDemoBrainstormClear = function(){
   document.querySelectorAll('.essay-bs-feedback[data-tour-demo="1"]').forEach(function(f){
     f.innerHTML = ''; f.hidden = true; f.removeAttribute('data-tour-demo');
   });
+  document.querySelectorAll('.essay-ai-feedback[data-tour-demo="1"]').forEach(function(c){ c.remove(); });
 };
 function _essayBrainstorm(itemEl, item, ctx, block){
   const tabs = itemEl.querySelectorAll('.essay-tab');
@@ -35063,12 +35134,16 @@ window.TutorIA = (function(){
       const cur = _fg.graphData();
       if(cur && (cur.links || []).some(function(l){ return l && l.kind === 'ref'; })) return true;  // tem conexões REAIS
     }catch(_){ }
+    // A cor do nó vem de _grafoColor(n.subjectId) — os nós PRECISAM de
+    // subjectId, e a legenda usa as MESMAS cores calculadas (na 1ª versão os
+    // nós ficavam todos na cor-padrão enquanto a legenda mostrava outras).
+    const c1 = _grafoColor('tour-hb'), c2 = _grafoColor('tour-eco');
     const nodes = [
-      { id:'ts:hb', kind:'sun', name:'HB', color:'#5dd49f', val:9 },
-      { id:'ts:eco', kind:'sun', name:'ECO', color:'#a78bd0', val:9 },
-      { id:'tu:1', kind:'unit', name:'HB · 01', color:'#5dd49f', val:4 },
-      { id:'tu:3', kind:'unit', name:'HB · 03', color:'#5dd49f', val:3 },
-      { id:'tu:9', kind:'unit', name:'ECO · 01', color:'#a78bd0', val:3 },
+      { id:'ts:hb', kind:'sun', name:'HB', subjectId:'tour-hb', color:c1, val:9 },
+      { id:'ts:eco', kind:'sun', name:'ECO', subjectId:'tour-eco', color:c2, val:9 },
+      { id:'tu:1', kind:'unit', name:'HB · 01', subjectId:'tour-hb', color:c1, val:4 },
+      { id:'tu:3', kind:'unit', name:'HB · 03', subjectId:'tour-hb', color:c1, val:3 },
+      { id:'tu:9', kind:'unit', name:'ECO · 01', subjectId:'tour-eco', color:c2, val:3 },
     ];
     const links = [
       { source:'ts:hb', target:'tu:1', kind:'member' },
@@ -35080,7 +35155,7 @@ window.TutorIA = (function(){
     ];
     try{
       _fg.graphData({ nodes: nodes, links: links });
-      _grafoLegend([{ sigla:'HB', color:'#5dd49f' }, { sigla:'ECO', color:'#a78bd0' }]);
+      _grafoLegend([{ sigla:'HB', color:c1 }, { sigla:'ECO', color:c2 }]);
       const st = document.getElementById('grafoStatus');
       if(st) st.textContent = 'Exemplo ilustrativo — suas conexões aparecem conforme você usa [[ ]] no Caderno';
     }catch(e){ console.warn('[tour demo grafo]', e); return false; }
@@ -42983,6 +43058,36 @@ const RotinaTab = (function(){
         .eq('user_id', uid).gte('quando', desde.toISOString())
         .order('quando', { ascending: true });
     }, 2000);
+    // MODO-VITRINE do tour: conta nova sem histórico → popula a Rotina com um
+    // exemplo determinístico (mapa de constância, gráficos, sessões e um plano
+    // no calendário). SÓ LEITURA — nada disto é salvo; fora do tour, some.
+    if(window.__tourMockStats && !_sess.length){
+      const _mSubs = ((window.COURSES) || []).map(function(c){ return c && c._subjectId; }).filter(function(x){ return x != null; }).slice(0, 3);
+      if(_mSubs.length){
+        const _padrao = [55, 0, 40, 70, 30, 90, 25, 0, 60, 45, 80, 0, 35, 65, 50, 0, 75, 40, 30, 85, 45];
+        for(let i = 0; i < _padrao.length; i++){
+          if(!_padrao[i]) continue;                        // dia sem estudo (o mapa mostra o buraco)
+          const d = new Date(); d.setDate(d.getDate() - (_padrao.length - 1 - i)); d.setHours(12, 0, 0, 0);
+          const ds = _diaStr(d);
+          _sess.push({
+            id: 'tour-s' + i, dia: ds, categoria: 'materia',
+            subject_id: String(_mSubs[i % _mSubs.length]),
+            assunto: null, unit_id: null,
+            duration_min: _padrao[i], source: (i % 3) ? 'timer' : 'crono',
+            created_at: ds + 'T15:00:00.000Z',
+          });
+        }
+        _sess.sort(function(a, b){ return a.dia < b.dia ? 1 : -1; });
+      }
+    }
+    if(window.__tourMockStats && !_plans.length){
+      const _mS1 = ((window.COURSES) || []).map(function(c){ return c && c._subjectId; }).filter(function(x){ return x != null; })[0];
+      if(_mS1 != null){
+        const _am = new Date(); _am.setDate(_am.getDate() + 1); _am.setHours(19, 0, 0, 0);
+        _plans.push({ id: 'tour-p1', quando: _am.toISOString(), categoria: 'materia',
+          subject_id: String(_mS1), assunto: 'Revisão (exemplo do tour)', duracao_min: 60, status: 'planejado', done_session_id: null });
+      }
+    }
     _agrega();
   }
   function _agrega(){
@@ -49457,38 +49562,36 @@ if(document.readyState !== 'loading') _bootOnce();
 
 })();
 // ═══ Tour guiado — CAMINHA pela plataforma real ═══
-// Reescrito (2ª vez) em 27/07/2026, após feedback do dono: tour NÃO é slide de
-// figuras — é um guia que LEVA o aluno às páginas reais, com uma barra inferior
-// explicando cada parada. A 1ª reescrita (painel com ilustrações) foi rejeitada.
-//
-// Duas regras aprendidas com o tour original (o de abril, que quebrou):
-// 1. NENHUM id fixo de rota. O antigo apontava pra `u1`/`g1-1` (dados de
-//    exemplo) e caía em "unidade não encontrada". Aqui TODA rota de unidade é
-//    calculada NA HORA DO CLIQUE, a partir do que está no UbiqueStore/COURSES
-//    do próprio aluno (via _unitHashById/_blocoHref, os helpers já validados).
-// 2. Dado mockado SÓ onde o aluno novo não teria nada pra ver (avaliação de
-//    brainstorm, grafo de conexões) — injetado NA UI REAL pelos ganchos
-//    _tourDemoBrainstorm/_tourDemoGrafo, nunca persistido, e só quando não
-//    existe dado real (os ganchos conferem antes).
+// v3 (27/07): guia com barra inferior + rotas calculadas na hora (zero id fixo).
+// v4 (28/07), após teste do dono numa conta LIMPA (Bertha):
+//  - conta sem compras: "Matérias" leva ao HALL do concurso na Loja (não à
+//    página vazia "você ainda não tem matérias");
+//  - passos próprios pra "Parei aqui" e "Marcar como lido";
+//  - a demo da questão agora marca "E" (abre a caixa do porquê) e o "?" da
+//    dúvida noutro item; passos novos VERIFICAM de verdade (gabarito na
+//    chavinha) e abrem os painéis de estatísticas e comentários — tudo
+//    DESFEITO ao sair (nada fica plantado na conta);
+//  - brainstorm e redação com exemplo COMPLETO pintado pelos renderizadores
+//    reais (o da redação já existia: injectEssayAIFeedback);
+//  - modo-vitrine: __tourMockStats popula Desempenho/Rotina de conta nova com
+//    dados fictícios SÓ DE LEITURA (a unidade-vitrine fica de fora pra demo de
+//    marcar não nascer respondida); __tourPreviewAll destranca Banco/Edital só
+//    pra VER, com escudo de clique no Banco.
 (function(){
   'use strict';
 
   /* ── escolha da unidade-vitrine (na hora, dos dados REAIS do aluno) ── */
   function _blocosDe(){
-    // unit_id -> {text, quiz, essay} (primeiro bloco de cada tipo)
     const out = {};
     try{
       ((window.UbiqueStore && UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.list()) || []).forEach(function(b){
         if(!b || b.unit_id == null) return;
         const k = String(b.unit_id);
-        const o = (out[k] = out[k] || { text:null, quiz:null, essay:null, outro:null, outroTipo:null });
-        // TIPOS REAIS do banco (admin: catálogo de learning blocks). O bloco de
-        // questões objetivas é 'objective_questions' — usar 'quiz' (o nome da
-        // classe CSS) fazia o passo cair na unidade sem abrir as questões.
+        const o = (out[k] = out[k] || { text:null, quiz:null, essay:null, outro:null });
         if((b.type === 'text' || b.type === 'textgallery') && !o.text) o.text = b.id;
-        else if(b.type === 'objective_questions' && !o.quiz) o.quiz = b.id;
+        else if(b.type === 'objective_questions' && !o.quiz) o.quiz = b.id;   // tipo REAL do banco (não 'quiz', que é a classe CSS)
         else if(b.type === 'essay' && !o.essay) o.essay = b.id;
-        else if(!o.outro && ['timeline','glossary','keypoints','gallery','citations','biography','tables','statistics','flashcards'].indexOf(b.type) >= 0){ o.outro = b.id; o.outroTipo = b.type; }
+        else if(!o.outro && ['timeline','glossary','keypoints','gallery','citations','biography','tables','statistics','flashcards'].indexOf(b.type) >= 0) o.outro = b.id;
       });
     }catch(_){ }
     return out;
@@ -49501,6 +49604,11 @@ if(document.readyState !== 'loading') _bootOnce();
       const m = ch && (UbiqueStore.modules.list() || []).find(function(x){ return x && String(x.id) === String(ch.module_id); });
       return m ? String(m.subject_id) : null;
     }catch(_){ return null; }
+  }
+  function _temCompra(){
+    try{
+      return ((window.COURSES) || []).some(function(c){ return c && window.Commerce && Commerce.isOwned && Commerce.isOwned(c.id); });
+    }catch(_){ return false; }
   }
   function _ownedSubjects(){
     const out = new Set();
@@ -49525,7 +49633,7 @@ if(document.readyState !== 'loading') _bootOnce();
     }catch(_){ }
     return set;
   }
-  let _vitrine = null;   // { uid, text, quiz, essay } — memoizado por abertura
+  let _vitrine = null;
   function _escolherUnidade(){
     if(_vitrine) return _vitrine;
     const blocos = _blocosDe();
@@ -49537,9 +49645,10 @@ if(document.readyState !== 'loading') _bootOnce();
       const acessivel = owned.size ? (owned.has(_subjectDe(uid) || '')) : livres.has(uid);
       if(!acessivel) return;
       const pts = (b.text ? 1 : 0) + (b.quiz ? 2 : 0) + (b.essay ? 2 : 0) + (b.outro ? 1 : 0);
-      if(pts > melhorPts){ melhorPts = pts; melhor = { uid: uid, text: b.text, quiz: b.quiz, essay: b.essay, outro: b.outro, outroTipo: b.outroTipo }; }
+      if(pts > melhorPts){ melhorPts = pts; melhor = { uid: uid, text: b.text, quiz: b.quiz, essay: b.essay, outro: b.outro }; }
     });
     _vitrine = melhor;
+    if(melhor) window.__tourMockSkipUnit = melhor.uid;   // a vitrine fica FORA do mock de respostas
     return melhor;
   }
   function _hashUnidade(){
@@ -49551,89 +49660,118 @@ if(document.readyState !== 'loading') _bootOnce();
     if(!v || !v[tipo] || !window._blocoHref) return _hashUnidade();
     return window._blocoHref(v.uid, null, v[tipo]) || _hashUnidade();
   }
+  function _examAtivo(){
+    let ex = window._activeExamId || null;
+    if(!ex){ try{ ex = localStorage.getItem('ubq.activeExam'); }catch(_){ } }
+    if(!ex){ try{ const l = (UbiqueStore.exams && UbiqueStore.exams.list()) || []; ex = l[0] && l[0].id; }catch(_){ } }
+    return ex ? String(ex) : '';
+  }
 
-  /* ── os passos: rota real (função = resolvida no clique) + alvo + ação ── */
+  /* ── os passos ── */
   const P = [
     { t:'Bem-vindo à Ubique', r:'#/inicio',
-      b:'Este tour caminha com você pela plataforma de verdade. Aqui é o Início: suas estatísticas, a unidade para continuar de onde parou, os avisos e o que seus colegas estão fazendo agora.' },
+      b:'Este tour caminha com você pela plataforma de verdade — alguns números e avaliações que você vai ver são exemplos ilustrativos, só para mostrar os recursos vivos. Aqui é o Início: estatísticas, a unidade para continuar, avisos e a atividade dos colegas.' },
     { t:'Loja', r:'#/concursos',
-      b:'Os concursos e matérias à venda. Cada matéria libera a primeira unidade de graça — dá para ler, usar o caderno e o tutor antes de comprar. No carrinho você aplica cupom e escolhe o parcelamento.' },
-    { t:'Matérias', r:'#/cursos',
-      b:'As matérias que você já tem, com módulos, capítulos e unidades. É por aqui que você entra para estudar. Vamos abrir uma unidade e ver tudo o que existe dentro dela.' },
+      b:'Os concursos disponíveis. Entrando num concurso você vê o hall de matérias — cada uma com a primeira unidade grátis para experimentar. No carrinho: cupom e parcelamento.' },
+    { t:'Matérias', r:function(){
+        if(_temCompra()) return '#/cursos';
+        const ex = _examAtivo();                     // conta nova: mostra o HALL do concurso
+        return ex ? ('#/cursos?exam=' + encodeURIComponent(ex) + '&loja=1') : '#/concursos';
+      },
+      b:'As matérias do concurso: as que você já tem entram aqui com módulos, capítulos e unidades — e as demais ficam disponíveis para compra, sempre com a primeira unidade grátis. Vamos abrir uma unidade e ver tudo o que existe dentro dela.' },
 
     { t:'A unidade por dentro', r:function(){ return _hashBloco('text'); }, sel:'.unit-sidebar',
       b:'A unidade é feita de blocos: texto, vídeo, questões, galerias e outros. Esta lateral lista as seções e os parágrafos — clique em qualquer um para pular direto. A setinha no topo dela recolhe a lateral e deixa o texto corrido.' },
     { t:'Grifar, anotar, criar flashcard', sel:'#ctxToolbar', run:function(){ _demoSelecao(); },
-      b:'Selecione qualquer trecho e esta barra aparece: seis cores para grifar, sublinhar, ocultar o texto (para testar a memória), tomar nota ou criar um flashcard — o verso do cartão já vem com o trecho. Também dá para mandar o termo ao glossário.' },
-    { t:'Marcar o progresso', sel:'[data-action="verdepois"]',
-      b:'Em cada bloco: "Ver depois" guarda na playlist ou agenda dia e hora (a aula entra no calendário e a plataforma avisa); o marcador ao lado é o "Parei aqui", que te traz de volta ao ponto exato; e no fim do bloco há o "marcar como lido", que move a barra de progresso da unidade.' },
+      b:'Selecione qualquer trecho e esta barra aparece: seis cores para grifar, sublinhar, ocultar o texto (para testar a memória), tomar nota ou criar um flashcard — o verso do cartão já vem com o trecho. Também dá para consultar o glossário a partir do termo.' },
+    { t:'Ver depois', sel:'[data-action="verdepois"]',
+      b:'Cada bloco tem o "Ver depois": deixe na playlist de leitura ou marque dia e hora — a aula entra no seu calendário e a plataforma te avisa na hora combinada.' },
+    { t:'Parei aqui', sel:'[data-action="resume"]',
+      b:'Este marcador é o "Parei aqui": ao voltar para a unidade, a plataforma te leva direto ao bloco exato onde você parou — do card "Continue de onde parou", no Início.' },
+    { t:'Marcar como lido', sel:'[data-action="bookmark"]',
+      b:'No fim de cada bloco, o "Marcar como lido" registra o avanço: é ele que move a barra de progresso da unidade e alimenta a sua taxa de conclusão no Desempenho.' },
     { t:'Outros tipos de bloco', r:function(){ return _hashBloco('outro'); }, sel:'.timeline-block,.glossary-block,.keypoints-block,.gallery-block,.quote-block,.statistics-block,.flashcards-block',
-      b:'Além do texto e do vídeo existem linha do tempo, glossário, pontos-chave, tabela de referência, galeria, biografias, citações, flashcards e estatísticas. Vários alternam entre slides e lista; na galeria, a imagem abre com título, autor e local.' },
+      b:'Além de texto e vídeo: linha do tempo, glossário, pontos-chave, tabela de referência, galeria, biografias, citações, flashcards e estatísticas. Vários alternam entre slides e lista; na galeria, a imagem abre com título, autor e local.' },
 
     { t:'Questões objetivas', r:function(){ return _hashBloco('quiz'); }, sel:'.quiz-block',
-      b:'O painel à direita mostra quantas você respondeu e quantas faltam. Vou marcar uma alternativa para você ver o que acontece.' },
-    { t:'Respondeu — e agora?', sel:'[data-qz-verify]', run:function(){ _demoQuiz(); },
-      b:'Ao marcar, aparece o botão de verificar (por grupo ou tudo de uma vez). Na dúvida, o "?" abre um campo para você escrever o porquê — e o comentário da IA vem em cima do SEU raciocínio. Depois de verificar você tem gabarito, comentários da turma, estatísticas da questão e o envio a um colega.' },
+      b:'Questões no estilo da banca, de provas anteriores e inéditas da Ubique. O painel-satélite à direita acompanha o progresso: quantas você respondeu e quantas faltam.' },
+    { t:'Marcando — e a dúvida', sel:'.qz-verify-bar', run:function(){ _demoQuiz(); },
+      b:'Marquei "E" numa questão e o "?" da dúvida em outra, para você ver: ao responder aparece o botão de verificar (por grupo ou tudo de uma vez), marcar "E" abre a caixa do porquê, e o "?" abre a caixa da dúvida — o comentário da IA vem em cima do que VOCÊ escreveu.' },
+    { t:'Verificar: o gabarito', sel:'.q-show-key', run:function(){ _demoVerificar(); },
+      b:'Verifiquei a resposta: o item mostra se você acertou, e a chavinha abre o gabarito oficial comentado. O painel-satélite passa a detalhar cada item selecionado. (Esta marcação é do tour e será desfeita ao sair.)' },
+    { t:'Estatísticas, comentários e colegas', sel:'.q-actions-bar', run:function(){ _demoPaineis(); },
+      b:'Depois de responder, cada questão ganha três botões: as estatísticas dela (dificuldade real medida pelos alunos), os comentários da turma — abertos aqui embaixo — e o envio para um colega de estudo avaliar sua resposta.' },
 
     { t:'Discursivas', r:function(){ return _hashBloco('essay'); }, sel:'.essay-tabs',
-      b:'Toda discursiva tem duas frentes: o brainstorm, para organizar as ideias antes, e a redação em si. Vamos ver as duas.' },
-    { t:'Brainstorm avaliado', sel:'.essay-ai-feedback', run:function(){ _demoBrainstorm(); },
-      b:'Você lista os tópicos e as ideias, pede a avaliação e recebe: nota, o que faltou em cada item, um comentário sobre a ordem e o esqueleto ideal parágrafo a parágrafo — cinza são as suas ideias, caramelo o que a plataforma acrescentaria. Este é um exemplo ilustrativo.' },
-    { t:'A redação corrigida', sel:'.essay-tabpane[data-essay-pane="redacao"]', run:function(){ _demoRedacao(); },
-      b:'Na aba de redação você escreve e envia para correção. Antes de enviar dá para abrir os critérios de avaliação e a melhor resposta; em questões de prova, também o padrão da banca. E dá para mandar a um colega corrigir, com os critérios junto.' },
+      b:'Toda discursiva tem duas frentes: o brainstorm, para organizar as ideias antes, e a redação em si. Vamos ver as duas — com a avaliação aberta.' },
+    { t:'Brainstorm avaliado', sel:'.essay-bs-feedback .essay-ai-feedback', run:function(){ _demoBrainstorm(); },
+      b:'Você lista os tópicos e as ideias e pede a avaliação: nota, cobertura item a item (o que você trouxe e o que faltou), comentário sobre a ordem e o esqueleto ideal — cinza são as suas ideias, caramelo o que a plataforma acrescentaria. Este é um exemplo ilustrativo.' },
+    { t:'A redação corrigida', sel:'.essay-tabpane[data-essay-pane="redacao"] .essay-ai-feedback', run:function(){ _demoRedacao(); },
+      b:'Na aba de redação você escreve e envia: a correção volta com nota, pontos fortes e fracos por critério e os trechos que custaram nota — com a sugestão de como alcançar a nota máxima. Antes de enviar dá para ver os critérios e o padrão da banca; e dá para mandar a um colega corrigir. Exemplo ilustrativo.' },
 
     { t:'O tutor da unidade', sel:'.tutor-tab', run:function(){ _abrirDrawer(); },
-      b:'Aqui dentro você tira dúvidas sobre este conteúdo ou pede o aprendizado guiado, em que o tutor caminha pelo texto com você fazendo perguntas. Os botões trazem questões reais do banco, geram inéditas e abrem a conversa por voz; o seletor escolhe o modelo (Rápido, Equilibrado, Avançado).' },
+      b:'Tire dúvidas sobre este conteúdo ou peça o aprendizado guiado, em que o tutor caminha pelo texto com você fazendo perguntas. Os botões trazem questões reais do banco, geram inéditas e abrem a conversa por voz; o seletor escolhe o modelo (Rápido, Equilibrado, Avançado).' },
     { t:'Caderno', sel:'#cadernoInput', run:function(){ _abaDrawer('caderno'); },
       b:'A sua anotação livre desta unidade, com grifo e cor de letra. Digitando [[ abre a busca de unidades: escolher uma cria uma ligação entre elas — é isso que alimenta o mapa de conexões.' },
     { t:'Conexões', sel:'#grafoStatus', run:function(){ _abaDrawer('grafo'); _demoGrafo(0); },
-      b:'O mapa das unidades que você ligou pelo caderno — seu segundo cérebro. As linhas são as citações; em "ajustes" você muda cores por matéria, exibição e forças. Se você ainda não tem ligações, este é um exemplo de como ele cresce.' },
+      b:'O mapa das unidades que você ligou pelo caderno — seu segundo cérebro. As linhas são as citações; em "ajustes" você muda as cores por matéria, a exibição e as forças. Se ainda não tem ligações, este é um exemplo de como ele cresce.' },
 
-    { t:'Banco', r:'#/banco', run:_fecharDrawer,
-      b:'Tudo da plataforma reunido por tipo: questões objetivas e discursivas, flashcards, biografias, glossário, citações, linhas do tempo, tabelas e fontes. Filtre por várias matérias ao mesmo tempo, por origem (prova anterior ou Ubique), ano e dificuldade — e baixe um PDF com folha de respostas e gabarito.' },
+    { t:'Banco', r:function(){ window.__tourPreviewAll = true; return '#/banco'; }, run:function(){ _fecharDrawer(); _escudo(true); },
+      b:'Tudo da plataforma reunido por tipo: questões objetivas e discursivas, flashcards, biografias, glossário, citações, linhas do tempo, tabelas e fontes. Filtre por várias matérias, origem, ano e dificuldade — e baixe um PDF com folha de respostas e gabarito. (Aqui é só uma espiada: o conteúdo completo abre com a matéria liberada.)' },
     { t:'Edital', r:'#/edital',
-      b:'O edital do concurso, tópico a tópico. Cada matéria mostra sua pílula de desempenho e quantas unidades a cobrem; abrindo o tópico você chega nas aulas. A caixa de concluído marca o que você já venceu — e isso aparece no seu Desempenho.' },
+      b:'O edital do concurso, tópico a tópico. Cada matéria mostra sua pílula de desempenho e quantas unidades cobrem cada ponto; a caixa de concluído marca o que você já venceu — e aparece no seu Desempenho.' },
     { t:'Simulados', r:'#/simulados',
-      b:'Filtre por disciplina, dificuldade e acesso. Responda na plataforma ou baixe o PDF; você escolhe se entra no ranking. No fim: gabarito comentado questão a questão, seu resultado comparado com a média e a sua posição. Alguns permitem refazer, com gráfico de evolução.' },
+      b:'Filtre por disciplina, dificuldade e acesso. Responda na plataforma ou baixe o PDF; você escolhe se entra no ranking. No fim: gabarito comentado, seu resultado comparado com a média e a sua posição. Alguns permitem refazer, com gráfico de evolução.' },
     { t:'Desempenho', r:'#/performance',
-      b:'Seu radar de acertos, a divisão entre certo e errado (com e sem dúvida), a comparação com a média e o ranking das unidades em que você vai melhor e pior — visto por unidade ou por tópico do edital. O Raio-X faz uma leitura do seu desempenho por IA.' },
-    { t:'Rotina de estudo', sel:'#perfTabRotina', run:function(){ var tb = document.querySelector('[data-ptab="rotina"]'); if(tb) tb.click(); },
-      b:'Registre o tempo por cronômetro, por timer ou lançando manualmente. Aqui ficam o mapa de constância, o calendário com as aulas que você agendou no "Ver depois", as sessões recentes e as metas diária e semanal.' },
+      b:'Seu radar de acertos, a divisão entre certo e errado (com e sem dúvida), a comparação com a média e o ranking das unidades em que você vai melhor e pior — por unidade ou por tópico do edital. Os números desta conta nova são um exemplo ilustrativo. O Raio-X faz uma leitura por IA.' },
+    { t:'Rotina de estudo', sel:'#perfTabRotina', run:function(){ const tb = document.querySelector('[data-ptab="rotina"]'); if(tb) tb.click(); },
+      b:'Registre o tempo por cronômetro, timer ou lançamento manual. Aqui ficam o mapa de constância, o calendário com as aulas agendadas no "Ver depois", as sessões recentes e as metas diária e semanal. (Preenchido com um exemplo para você ver os gráficos vivos.)' },
 
     { t:'Notas', r:'#/notes',
-      b:'Tudo o que você produziu: notas, flashcards (com exportação para o Anki), destaques e os cadernos das unidades. Filtre por matéria, unidade, tópico e tags, agrupe como quiser e use o "compilar para estudo" para gerar uma página imprimível.' },
+      b:'Tudo o que você produziu: notas, flashcards (com exportação para o Anki), destaques e os cadernos das unidades. Filtre, agrupe e use o "compilar para estudo" para gerar uma página imprimível.' },
     { t:'Lista de leitura', r:'#/reading',
       b:'Os blocos que você guardou no "Ver depois", na ordem em que salvou — sua playlist. Os agendados mostram dia e hora, e "abrir" leva direto ao bloco.' },
     { t:'Fórum', r:'#/forum',
-      b:'O fórum do concurso: publique dúvidas com enquete, aplauda e comente. Um comentário seu numa questão pode ser publicado aqui com a questão anexada, e dá para filtrar tudo por matéria e unidade.' },
+      b:'O fórum do concurso: publique dúvidas com enquete, aplauda e comente. Um comentário seu numa questão pode ser publicado com a questão anexada, e dá para filtrar por matéria e unidade.' },
     { t:'Salas de estudo', r:'#/salas',
       b:'Estude em grupo com meta de questões por integrante, ranking (dia, semana, mês, ano), feed e chat. As questões enviadas ao grupo aparecem para os colegas corrigirem.' },
     { t:'Glossário', r:'#/glossario',
       b:'Todos os termos da plataforma, com busca e filtro por matéria e classe. A estrela salva o termo em "Minhas salvas".' },
     { t:'Pronto para começar', r:'#/inicio',
-      b:'É isso. Os recursos de IA usam UbiTokens (saldo no ⓤ, no topo); ler o conteúdo e responder questões objetivas é livre. Dúvidas de uso: Tutor → "Ajuda com a plataforma". E você pode rever este tour quando quiser, no menu da sua foto.' }
+      b:'É isso. Os recursos de IA usam UbiTokens (saldo no ⓤ, no topo); ler o conteúdo e responder questões objetivas é livre. Dúvidas de uso: Tutor → "Ajuda com a plataforma". Reveja este tour quando quiser, no menu da sua foto.' }
   ];
+  // Índice do passo do Banco (usado pra ligar o escudo só nele).
+  const _PASSO_BANCO = P.findIndex(function(s){ return s.t === 'Banco'; });
 
-  /* ── demos (dados de exemplo NA UI REAL, só se o aluno não tiver os dele) ── */
+  /* ── demos (na UI REAL; nada persiste sem desfazer) ── */
   function _demoBrainstorm(){
     let tent = 0;
     (function tenta(){
-      if(_st.idx == null) return;                        // tour fechado no meio
+      if(_st.idx == null) return;
       const ok = (typeof window._tourDemoBrainstorm === 'function') && window._tourDemoBrainstorm();
-      if(!ok && ++tent < 12) setTimeout(tenta, 300);     // espera o bloco montar
-      else _mirar();                                     // re-aponta o holofote
+      if(!ok && ++tent < 24) setTimeout(tenta, 350);
+      else _mirar();
+    })();
+  }
+  function _demoRedacao(){
+    let tent = 0;
+    (function tenta(){
+      if(_st.idx == null) return;
+      const ok = (typeof window._tourDemoRedacao === 'function') && window._tourDemoRedacao();
+      if(!ok && ++tent < 24) setTimeout(tenta, 350);
+      else _mirar();
     })();
   }
   function _demoGrafo(tent){
     if(_st.idx == null) return;
     const ok = (typeof window._tourDemoGrafo === 'function') && window._tourDemoGrafo();
-    if(!ok && tent < 15) setTimeout(function(){ _demoGrafo(tent + 1); }, 350);  // a lib do grafo carrega sob demanda
+    if(!ok && tent < 15) setTimeout(function(){ _demoGrafo(tent + 1); }, 350);
   }
   function _fecharDrawer(){
     if(_st.abriuDrawer && window.TutorIA && TutorIA.close){ try{ TutorIA.close(); }catch(_){ } _st.abriuDrawer = false; }
   }
   function _abrirDrawer(){
-    if(document.querySelector('.tutor-tab')) return;                 // já aberto
+    if(document.querySelector('.tutor-tab')) return;
     const b = document.querySelector('#tutorLaunchBtn') || document.querySelector('#tutorLaunchFab');
     if(b){ b.click(); _st.abriuDrawer = true; }
   }
@@ -49644,11 +49782,9 @@ if(document.readyState !== 'loading') _bootOnce();
       if(_st.idx == null) return;
       const tb = document.querySelector('.tutor-tab[data-ttab="' + qual + '"]');
       if(tb){ tb.click(); setTimeout(_mirar, 240); }
-      else if(++tent < 12) setTimeout(tenta, 250);                   // o drawer monta assíncrono
+      else if(++tent < 12) setTimeout(tenta, 250);
     })();
   }
-  // SELEÇÃO no texto: faz o navegador selecionar um trecho de verdade, o que
-  // dispara a barra de grifo REAL (#ctxToolbar). Selecionar não grava nada.
   function _demoSelecao(){
     let tent = 0;
     (function tenta(){
@@ -49660,7 +49796,6 @@ if(document.readyState !== 'loading') _bootOnce();
           const r = document.createRange();
           r.setStart(no, 0); r.setEnd(no, Math.min(60, no.nodeValue.length));
           const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
-          // a barra ouve mouseup/selectionchange — provoca os dois
           document.dispatchEvent(new Event('selectionchange'));
           p.dispatchEvent(new MouseEvent('mouseup', { bubbles:true }));
           setTimeout(_mirar, 260);
@@ -49669,45 +49804,100 @@ if(document.readyState !== 'loading') _bootOnce();
     })();
   }
   function _limparSelecao(){ try{ const s = window.getSelection(); if(s) s.removeAllRanges(); }catch(_){ } }
-  // QUESTÃO: marca uma alternativa pra barra de verificar aparecer — e DESFAZ ao
-  // sair. Só age numa questão que o aluno NÃO respondeu (nunca sobrescreve
-  // resposta dele) e guarda o item pra limpar depois: o tour não pode deixar
-  // resposta plantada na conta de ninguém.
+
+  // Registra um item usado pela demo pra DESFAZER depois (unit/block/item).
+  function _regQuiz(item){
+    if(!item) return;
+    const sec = item.closest('.block-section');
+    const stage = document.querySelector('#blockStage');
+    _st.quizItens.push({
+      unit: stage ? stage.getAttribute('data-unit-id') : null,
+      block: sec && sec.id && sec.id.indexOf('block-') === 0 ? sec.id.slice(6) : null,
+      item: item.getAttribute('data-item-id'),
+    });
+  }
+  // Passo "Marcando": marca "E" num item (abre a caixa do porquê) e o "?" da
+  // dúvida noutro. Só usa itens NÃO respondidos — nunca sobrescreve o aluno.
   function _demoQuiz(){
     let tent = 0;
     (function tenta(){
       if(_st.idx == null) return;
-      const item = Array.prototype.find.call(document.querySelectorAll('.q-item'), function(it){
+      const livres = Array.prototype.filter.call(document.querySelectorAll('.q-item'), function(it){
         return !it.classList.contains('answered') && !it.querySelector('.q-option.is-picked, .q-option.selected');
       });
-      const op = item && item.querySelector('.q-option');
-      if(op){
-        _st.quizItem = item.getAttribute('data-item-id') || null;
-        _st.quizUnit = (document.querySelector('#blockStage') || {}).getAttribute ? document.querySelector('#blockStage').getAttribute('data-unit-id') : null;
-        try{ op.click(); }catch(_){ }
-        setTimeout(_mirar, 300);
+      if(livres.length){
+        const a = livres[0], b = livres[1] || null;
+        const ops = a.querySelectorAll('.q-option');
+        const opE = ops[1] || ops[0];
+        if(opE){ _regQuiz(a); try{ opE.click(); }catch(_){ } }
+        if(b){
+          const dv = b.querySelector('.q-doubt');
+          if(dv){ _regQuiz(b); try{ dv.click(); }catch(_){ } }
+        }
+        setTimeout(_mirar, 320);
       } else if(++tent < 12) setTimeout(tenta, 280);
     })();
   }
-  function _limparQuiz(){
-    if(!_st.quizItem) return;
-    try{
-      const bloco = document.querySelector('.quiz-block');
-      const bid = bloco && bloco.getAttribute('data-block-id');
-      if(window.Store && Store.clearQuizAnswer && _st.quizUnit && bid){
-        Store.clearQuizAnswer(_st.quizUnit, bid, _st.quizItem);
+  // Passo "Verificar": clica o verificar REAL (do grupo, se houver) e abre a
+  // chavinha do gabarito do item da demo.
+  function _demoVerificar(){
+    let tent = 0;
+    (function tenta(){
+      if(_st.idx == null) return;
+      const jaVerificado = document.querySelector('.q-item.answered');
+      if(!jaVerificado){
+        const vb = document.querySelector('[data-qz-verify-group-btn]:not([hidden])') ||
+                   document.querySelector('[data-qz-verify-btn]');
+        if(vb){ try{ vb.click(); }catch(_){ } }
       }
-    }catch(_){ }
-    _st.quizItem = null; _st.quizUnit = null;
+      const chave = document.querySelector('.q-item.answered .q-show-key');
+      if(chave){
+        try{ chave.click(); }catch(_){ }
+        setTimeout(_mirar, 300);
+      } else if(++tent < 14) setTimeout(tenta, 320);
+    })();
   }
-  // REDAÇÃO: só troca pra aba de redação (não escreve nada no campo do aluno).
-  function _demoRedacao(){
-    const t = document.querySelector('[data-essay-tab="redacao"]');
-    if(t){ try{ t.click(); }catch(_){ } setTimeout(_mirar, 260); }
+  // Passo "Estatísticas e comentários": abre os painéis reais do item.
+  function _demoPaineis(){
+    let tent = 0;
+    (function tenta(){
+      if(_st.idx == null) return;
+      const it = document.querySelector('.q-item.answered');
+      const stats = it && it.querySelector('[data-action="q-data"]');
+      const com = it && it.querySelector('[data-action="q-comments"]');
+      if(stats || com){
+        if(stats){ try{ stats.click(); }catch(_){ } }
+        if(com) setTimeout(function(){ try{ com.click(); }catch(_){ } setTimeout(_mirar, 260); }, 700);
+        else setTimeout(_mirar, 260);
+      } else if(++tent < 14) setTimeout(tenta, 320);
+    })();
+  }
+  // DESFAZ tudo que a demo de questões marcou/verificou (limpa memória e
+  // banco — o clearQuizAnswer também apaga a resposta sincronizada).
+  function _limparQuiz(){
+    if(!_st.quizItens.length) return;
+    _st.quizItens.forEach(function(q){
+      try{
+        if(window.Store && Store.clearQuizAnswer && q.unit && q.block && q.item){
+          Store.clearQuizAnswer(q.unit, q.block, q.item);
+        }
+      }catch(_){ }
+    });
+    _st.quizItens = [];
+  }
+  // Escudo de clique do passo Banco: dá pra VER (e rolar), não pra interagir.
+  function _escudo(liga){
+    let el = document.getElementById('gtShield');
+    if(!liga){ if(el) el.remove(); return; }
+    if(el) return;
+    el = document.createElement('div');
+    el.id = 'gtShield';
+    el.addEventListener('wheel', function(e){ window.scrollBy(0, e.deltaY); e.preventDefault(); }, { passive:false });
+    document.body.appendChild(el);
   }
 
   /* ── engine ── */
-  const _st = { idx: null, bar: null, abriuDrawer: false, poll: null, quizItem: null, quizUnit: null };
+  const _st = { idx: null, bar: null, abriuDrawer: false, poll: null, quizItens: [] };
 
   function _css(){
     if(document.getElementById('gtCss')) return;
@@ -49730,6 +49920,7 @@ if(document.readyState !== 'loading') _bootOnce();
       '.gt-ant{background:transparent;color:var(--accent);border:1px solid var(--border-strong)}',
       '.gt-ant:hover{border-color:var(--accent)}',
       '.gt-spot{outline:2px solid var(--accent) !important;outline-offset:4px;border-radius:6px;transition:outline .2s ease}',
+      '#gtShield{position:fixed;inset:0;z-index:1550;background:transparent;cursor:default}',
       '@media (max-width:640px){.gt-bar{bottom:.5rem;padding:.7rem .8rem}.gt-dots{display:none}}',
     ].join('\n');
     document.head.appendChild(st);
@@ -49739,7 +49930,6 @@ if(document.readyState !== 'loading') _bootOnce();
     document.querySelectorAll('.gt-spot').forEach(function(el){ el.classList.remove('gt-spot'); });
     if(_st.poll){ clearTimeout(_st.poll); _st.poll = null; }
   }
-  // Espera o alvo EXISTIR (as páginas renderizam assíncrono) e ilumina.
   function _mirar(){
     _limparSpot();
     const s = P[_st.idx];
@@ -49752,8 +49942,8 @@ if(document.readyState !== 'loading') _bootOnce();
         el.classList.add('gt-spot');
         try{ el.scrollIntoView({ behavior:'smooth', block:'center' }); }catch(_){ }
       } else if(++tent < 14){
-        _st.poll = setTimeout(acha, 260);                // sem alvo (ex.: unidade sem
-      }                                                  // discursiva) → segue sem holofote
+        _st.poll = setTimeout(acha, 260);
+      }
     })();
   }
 
@@ -49774,16 +49964,16 @@ if(document.readyState !== 'loading') _bootOnce();
 
   function _ir(n){
     if(n < 0 || n >= P.length || _st.idx == null) return;
-    // Sair do passo da questão desfaz a marcação de demonstração ANTES de
-    // navegar — se o aluno fechar a aba no meio, nada fica gravado.
-    if(_st.quizItem && P[n] && P[n].sel !== '[data-qz-verify]') _limparQuiz();
-    _limparSelecao();              // some com o grifo de demonstração ao sair
+    // Saindo da vizinhança das questões → desfaz a marcação da demo.
+    const _naDemoQuiz = function(i){ const s = P[i]; return s && (s.sel === '.qz-verify-bar' || s.sel === '.q-show-key' || s.sel === '.q-actions-bar'); };
+    if(_st.quizItens.length && !_naDemoQuiz(n)) _limparQuiz();
+    _limparSelecao();
+    if(n !== _PASSO_BANCO) _escudo(false);         // o run do passo Banco religa
     _st.idx = n;
     const s = P[n];
     const rota = (typeof s.r === 'function') ? s.r() : s.r;
     if(rota && location.hash !== rota) location.hash = rota;
     _pintar();
-    // dá tempo do render assíncrono da página antes de agir/mirar
     setTimeout(function(){
       if(_st.idx !== n) return;
       if(typeof s.run === 'function'){ try{ s.run(); }catch(_){ } }
@@ -49801,8 +49991,11 @@ if(document.readyState !== 'loading') _bootOnce();
   function abrir(){
     _css();
     fechar();
-    _vitrine = null;                                   // re-escolhe com os dados atuais
+    _vitrine = null;
+    _escolherUnidade();                       // define __tourMockSkipUnit já na abertura
+    window.__tourMockStats = true;            // popula Desempenho/Rotina/pílulas com exemplo (só leitura)
     _st.idx = 0;
+    _st.quizItens = [];
     _st.bar = document.createElement('div');
     _st.bar.className = 'gt-bar';
     _st.bar.id = 'gtBar';
@@ -49825,8 +50018,12 @@ if(document.readyState !== 'loading') _bootOnce();
   function fechar(){
     _limparSpot();
     _limparSelecao();
-    _limparQuiz();                 // nunca deixa resposta plantada na conta
+    _limparQuiz();
     _fecharDrawer();
+    _escudo(false);
+    window.__tourMockStats = false;           // o modo-vitrine morre com o tour
+    window.__tourPreviewAll = false;
+    window.__tourMockSkipUnit = null;
     if(typeof window._tourDemoBrainstormClear === 'function'){ try{ window._tourDemoBrainstormClear(); }catch(_){ } }
     if(_st.bar){ _st.bar.remove(); _st.bar = null; }
     _st.idx = null;
