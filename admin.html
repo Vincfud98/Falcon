@@ -11502,6 +11502,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             Cole um JSON com vários <strong>grupos de questões</strong>. Elas são criadas <strong>no banco</strong>
             (e, se você abriu isto por uma <strong>unidade</strong>, já entram na unidade como referência).
             Questões repetidas (mesmo código de origem) são <strong>referenciadas sem recriar</strong>.
+            Grupo <strong>Ubique</strong> (sem <code>origin</code>) exige o campo <code>"ano"</code> — o ano real de criação
+            da questão (a numeração dentro do ano sai sozinha).
           </p>
           <textarea class="field-input" id="q-bulk-json" rows="12" placeholder='{ "groups": [ { "origin": "[#15/2006]", "reference_text": "<p>…</p>", "questions": [ { "type": "true_false", "origin": "[#15-1/2006]", "statement": "<p>…</p>", "correct": false, "comment": "<p>…</p>", "tags": [] } ] } ] }' style="font-family:var(--mono);font-size:.74rem;line-height:1.5;width:100%"></textarea>
           <details style="margin-top:.5rem">
@@ -11549,7 +11551,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       ]
     },
     {
-      "title": "C/E — Ubique (OMITA origin)",
+      "title": "C/E — Ubique (OMITA origin; \"ano\" é obrigatório)",
+      "ano": 2025,
       "subjects": ["HB", "ECO"],
       "enunciado": "&lt;p&gt;Julgue o item a seguir.&lt;/p&gt;",
       "questions": [
@@ -11601,7 +11604,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       ]
     },
     {
-      "title": "Discursiva — Ubique (OMITA origin; official_answer vira null)",
+      "title": "Discursiva — Ubique (OMITA origin; \"ano\" é obrigatório; official_answer vira null)",
+      "ano": 2025,
       "subjects": ["HB", "ECO"],
       "enunciado": "&lt;p&gt;Leia com atenção o texto a seguir.&lt;/p&gt;",
       "reference_texts": [
@@ -16226,6 +16230,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   const conteudo = () => supabase.schema('conteudo');
   const questoes = () => supabase.schema('questoes');
+  // Bancas e edições (exam_bancas) moraram no schema questoes até 2026-07-28;
+  // migraram pro concursos junto com o fim do cadastro legado questoes.exams.
+  const concursosSb = () => supabase.schema('concursos');
 
   /* ── ARMADILHA Nº3: PostgREST corta em 1000 linhas SEM AVISO ──
      Pedir a tabela inteira devolve só as 1000 primeiras e NENHUM erro. No app
@@ -17954,6 +17961,17 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         return _wrap(concursos().from('exam_subjects')
           .delete().eq('exam_id', examId), 'exam_subj delete by exam');
       },
+      // exam_bancas (edições: ano + banca por concurso)
+      examBancaInsert(row){
+        if(!concursos()) return;
+        return _wrap(concursos().from('exam_bancas')
+          .upsert(row, { onConflict: 'exam_id,year' }), 'exam_banca insert');
+      },
+      examBancaDeleteByPair(examId, year){
+        if(!concursos()) return;
+        return _wrap(concursos().from('exam_bancas')
+          .delete().eq('exam_id', examId).eq('year', year), 'exam_banca delete');
+      },
       // editais
       editalInsert(row){
         if(!concursos()) return;
@@ -18389,26 +18407,35 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(!window._sb || !window.UbiqueStore) return;
     try{
       const csb = window._sb.schema('concursos');
-      const [ex, es, ed, et, etu] = await Promise.all([
+      const [ex, es, ed, et, etu, eb] = await Promise.all([
         csb.from('exams').select('*'),
         csb.from('exam_subjects').select('*'),
         csb.from('editais').select('*'),
         csb.from('edital_topics').select('*'),
         csb.from('edital_topic_units').select('*'),
+        // Edições (ano + banca + fases). NUNCA era carregada: o "Histórico de
+        // bancas por ano" começava vazio a cada F5 e o que o admin digitava
+        // morria na memória. Agora o Supabase é a fonte, como as irmãs acima.
+        csb.from('exam_bancas').select('*'),
       ]);
-      const errs = [ex.error, es.error, ed.error, et.error, etu.error].filter(Boolean);
+      // exam_bancas não tem coluna id (chave = concurso + ano); o store acha
+      // por id, então cada linha ganha um determinístico "concurso:ano".
+      const ebRows = (eb.data || []).map(r => Object.assign({ id: r.exam_id + ':' + r.year }, r));
+      const errs = [ex.error, es.error, ed.error, et.error, etu.error, eb.error].filter(Boolean);
       if(errs.length){ console.warn('[hydrate concursos admin] erros:', errs); return; }
       if(UbiqueStore.exams)              UbiqueStore.exams.replaceAll(ex.data || []);
       if(UbiqueStore.exam_subjects)      UbiqueStore.exam_subjects.replaceAll(es.data || []);
       if(UbiqueStore.editais)            UbiqueStore.editais.replaceAll(ed.data || []);
       if(UbiqueStore.edital_topics)      UbiqueStore.edital_topics.replaceAll(et.data || []);
       if(UbiqueStore.edital_topic_units) UbiqueStore.edital_topic_units.replaceAll(etu.data || []);
+      if(UbiqueStore.exam_bancas)        UbiqueStore.exam_bancas.replaceAll(ebRows);
       console.log('[hydrate concursos admin] ✅', {
         exams: ex.data?.length || 0,
         exam_subjects: es.data?.length || 0,
         editais: ed.data?.length || 0,
         edital_topics: et.data?.length || 0,
         edital_topic_units: etu.data?.length || 0,
+        exam_bancas: eb.data?.length || 0,
       });
     }catch(e){ console.warn('[hydrate concursos admin] exception:', e); }
   }
@@ -20473,6 +20500,31 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }
     }
 
+    // ─── Sincroniza o vínculo matéria<->concurso na tabela OFICIAL ──────
+    // O modal gravava só na lista concurso_ids da matéria; a aba Concursos e o
+    // app do aluno leem concursos.exam_subjects. Sem esta sincronia, a matéria
+    // vinculada aqui aparecia DESMARCADA no concurso (era o bug relatado).
+    try{
+      if(subjectId != null && window.UbiqueStore && UbiqueStore.exam_subjects){
+        const desejo = new Set([...csConcursosState].map(String));
+        const atuais = (UbiqueStore.exam_subjects.list() || [])
+          .filter(r => r && String(r.subject_id) === String(subjectId));
+        for(const r of atuais){
+          if(!desejo.has(String(r.exam_id))){
+            UbiqueStore.exam_subjects.remove(r.id);
+            ConcursosSync.examSubjectDeleteByPair(r.exam_id, subjectId);
+          }
+        }
+        const jaTem = new Set(atuais.map(r => String(r.exam_id)));
+        for(const examId of desejo){
+          if(!jaTem.has(examId)){
+            UbiqueStore.exam_subjects.add({ exam_id: examId, subject_id: subjectId });
+            ConcursosSync.examSubjectInsert({ exam_id: examId, subject_id: subjectId });
+          }
+        }
+      }
+    }catch(e){ console.warn('[exam_subjects] sync após salvar matéria:', e); }
+
     csCloseModal();
     await loadSubjects();
     if(typeof loadModules === 'function') await loadModules();
@@ -21038,7 +21090,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   document.getElementById('taSaveBtn').addEventListener('click', async () => {
     if(!editingTopicAliasesId) return;
     const rows = [...document.querySelectorAll('#ta-rows .ta-row')].map(r => ({
-      exam_id: parseInt(r.querySelector('[data-ta="exam_id"]').value) || null,
+      // id do concurso é TEXTO ('cacd') — parseInt aqui devolvia NaN e o salvar
+      // sempre falhava com "Toda linha precisa de Concurso".
+      exam_id: r.querySelector('[data-ta="exam_id"]').value || null,
       item: r.querySelector('[data-ta="item"]').value.trim() || null,
       alias: r.querySelector('[data-ta="alias"]').value.trim() || null,
     }));
@@ -21122,7 +21176,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
     // Coleta + valida aliases do subform ANTES de inserir o tema
     const aliasRows = [...document.querySelectorAll('#t-aliases-rows .ta-row')].map(r => ({
-      exam_id: parseInt(r.querySelector('[data-ta="exam_id"]').value) || null,
+      // id do concurso é TEXTO — ver o comentário no modal de aliases.
+      exam_id: r.querySelector('[data-ta="exam_id"]').value || null,
       item:    r.querySelector('[data-ta="item"]').value.trim() || null,
       alias:   r.querySelector('[data-ta="alias"]').value.trim() || null,
     }));
@@ -21329,7 +21384,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // BANCAS
   // ═══════════════════════════════════════════════════════════
   async function loadBancas(){
-    const { data, error } = await questoes()
+    const { data, error } = await concursosSb()
       .from('bancas').select('*').order('id');
     if(error){
       document.getElementById('bancasTable').innerHTML =
@@ -21413,7 +21468,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(!updates.name || !updates.sigla){
         showMsg('globalMessage2', 'Nome e sigla são obrigatórios.'); return;
       }
-      const { error } = await questoes().from('bancas').update(updates).eq('id', id);
+      const { error } = await concursosSb().from('bancas').update(updates).eq('id', id);
       if(error){ showMsg('globalMessage2', explainBancasError(error)); return; }
       showMsg('globalMessage2', 'Banca atualizada.', 'success');
       await loadBancas();
@@ -21423,7 +21478,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
   async function deleteBanca(id){
     if(!confirm('Apagar esta banca? Concursos vinculados ficarão sem banca (não são apagados).')) return;
-    const { error } = await questoes().from('bancas').delete().eq('id', id);
+    const { error } = await concursosSb().from('bancas').delete().eq('id', id);
     if(error){ showMsg('globalMessage2', explainBancasError(error)); return; }
     showMsg('globalMessage2', 'Banca apagada.', 'success');
     await loadBancas();
@@ -21435,7 +21490,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const description = document.getElementById('b-description').value.trim();
     if(!name){ showMsg('globalMessage2', 'O nome da banca é obrigatório.'); return; }
     if(!sigla){ showMsg('globalMessage2', 'A sigla da banca é obrigatória.'); return; }
-    const { error } = await questoes().from('bancas').insert({
+    const { error } = await concursosSb().from('bancas').insert({
       name, sigla, description: description || null
     });
     if(error){ showMsg('globalMessage2', explainBancasError(error)); return; }
@@ -21744,6 +21799,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             .filter(r => r && String(r.exam_id) === String(exam.id))
             .forEach(r => window.UbiqueStore.exam_subjects.remove(r.id));
         }
+        // Edições do concurso: o banco apaga em cascata (FK); o store acompanha.
+        if(window.UbiqueStore.exam_bancas){
+          (window.UbiqueStore.exam_bancas.list() || [])
+            .filter(r => r && String(r.exam_id) === String(exam.id))
+            .forEach(r => window.UbiqueStore.exam_bancas.remove(r.id));
+        }
       } catch(_){}
       window.UbiqueStore.exams.remove(exam.id);
       // Fase 4i — cascade pro Supabase (exam + todos exam_subjects do exam)
@@ -21784,7 +21845,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       });
     });
 
-    // Adicionar ano + banca (UbiqueStore.exam_bancas local-only)
+    // Adicionar ano + banca (store + espelho no Supabase, como os chips de matérias)
     document.getElementById('addYearBtn').addEventListener('click', () => {
       const year = parseInt(document.getElementById('eb-year').value);
       const banca_id = parseInt(document.getElementById('eb-banca').value);
@@ -21800,7 +21861,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         showMsg('globalMessage2', `O ano ${year} já está cadastrado neste concurso.`);
         return;
       }
-      window.UbiqueStore.exam_bancas.add({ exam_id: exam.id, year, banca_id });
+      window.UbiqueStore.exam_bancas.add({ id: exam.id + ':' + year, exam_id: exam.id, year, banca_id });
+      ConcursosSync.examBancaInsert({ exam_id: exam.id, year, banca_id });
       showMsg('globalMessage2', `Ano ${year} adicionado.`, 'success');
       loadExamBancas().then(() => {
         renderExamsList();
@@ -21808,7 +21870,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       });
     });
 
-    // Remover ano (UbiqueStore local-only)
+    // Remover ano (store + espelho no Supabase)
     document.querySelectorAll('#examDetail [data-act="remove-year"]').forEach(btn => {
       btn.addEventListener('click', () => {
         const year = parseInt(btn.closest('.year-banca-row').dataset.year);
@@ -21819,6 +21881,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         const matches = (window.UbiqueStore.exam_bancas.list() || [])
           .filter(r => r && String(r.exam_id) === String(exam.id) && r.year === year);
         matches.forEach(r => window.UbiqueStore.exam_bancas.remove(r.id));
+        ConcursosSync.examBancaDeleteByPair(exam.id, year);
         showMsg('globalMessage2', 'Ano removido.', 'success');
         loadExamBancas().then(() => {
           renderExamsList();
@@ -21936,11 +21999,17 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           numero: i + 1,
           nome: p.nome.trim(),
         }));
-        const { error } = await questoes()
+        const { error } = await concursosSb()
           .from('exam_bancas')
           .update({ phases: normalized })
           .eq('exam_id', examId)
           .eq('year', year);
+        if(!error){
+          // Espelha no store local — o Supabase é a fonte, mas a tela lê o store.
+          const row = (window.UbiqueStore && UbiqueStore.exam_bancas.list() || [])
+            .find(r => r && String(r.exam_id) === String(examId) && r.year === year);
+          if(row) UbiqueStore.exam_bancas.update(row.id, { phases: normalized });
+        }
         if(error){
           showMsg('globalMessage2', `Erro ao salvar: ${error.message}`);
           return;
@@ -56844,7 +56913,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       for(const g of inlineGroups){
         const code = g.origin || '';
         const ym = code.match(/\/(\d{4})\]/);
-        const year = ym ? parseInt(ym[1], 10) : null;
+        const anoJson = parseInt(g.ano, 10) || null;
+        const year = ym ? parseInt(ym[1], 10) : anoJson;
+        if(!code && !year){
+          throw new Error('Grupo Ubique (sem "origin") precisa do campo "ano" no bloco antes de migrar.');
+        }
         const gm = code.match(/\[#(\d+)/);
         const numero = gm ? parseInt(gm[1], 10) : 0;
         const enunciado = g.enunciado || g.description || g.title || '';
@@ -56967,10 +57040,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   async function _ueBankCreateEssayFromInline(g, q, subjectId, examId){
     const code = String(q.origin || g.origin || '').trim();
     const ym = code.match(/\/(\d{4})\]/);
-    const year = ym ? parseInt(ym[1], 10) : null;
+    // Ano: origin > "ano" da questão > "ano" do grupo (obrigatório pra Ubique).
+    const anoJson = parseInt(q.ano || g.ano, 10) || null;
+    const year = ym ? parseInt(ym[1], 10) : anoJson;
     const gm = code.match(/#(\d+)/);
     const numero = gm ? parseInt(gm[1], 10) : null;
     const isUbique = !code;
+    if(isUbique && !year){
+      throw new Error('Discursiva Ubique (sem "origin") precisa do campo "ano" no JSON — ex.: "ano": 2025.');
+    }
 
     console.log('[import] criando essay no banco', {
       origin: code || '(vazio → Ubique)',
@@ -57233,11 +57311,19 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   async function _ueBankCreateGroupFromInline(g, subjectId, examId, exceptBid){
     const code = (g.origin || '').trim();
     const ym = code.match(/\/(\d{4})\]/);
-    const year = ym ? parseInt(ym[1], 10) : null;
+    // Ano: do origin quando há; senão do campo "ano" do JSON (obrigatório pra
+    // grupo Ubique — sem ele as inéditas entravam sem ano no banco e ficavam
+    // fora das edições e do filtro por ano).
+    const anoJson = parseInt(g.ano, 10) || null;
+    const year = ym ? parseInt(ym[1], 10) : anoJson;
     const gm = code.match(/#(\d+)/);
+    // Ubique sem número: o gatilho do banco numera sozinho (1..N dentro do ano).
     const numero = gm ? parseInt(gm[1], 10) : null;
     const qs = Array.isArray(g.questions) ? g.questions : [];
     const isUbique = !code;
+    if(isUbique && !year){
+      throw new Error('Grupo Ubique (sem "origin") precisa do campo "ano" no JSON — ex.: "ano": 2025.');
+    }
 
     // ═══ Dispatch — se o grupo tem 1+ discursiva, cada uma cria sua
     // própria entrada no banco. Discursivas não compartilham grupo
