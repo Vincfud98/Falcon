@@ -14208,7 +14208,14 @@ const Store = (function(){
       // nova ver os gráficos do Desempenho/Edital vivos. SÓ LEITURA — nada é
       // gravado. A unidade-vitrine fica de fora (a demo de "marcar uma
       // alternativa" não pode nascer respondida).
-      if(window.__tourMockSkipUnit != null && String(unitId) === String(window.__tourMockSkipUnit)) return null;
+      // ARMADILHA DOS IDS: a unidade chega aqui com o id PREFIXADO da árvore
+      // COURSE ('u6') e a vitrine é guardada com o id CRU do store ('6') —
+      // comparar só uma forma não pulava nada, e o mock respondia a unidade
+      // inteira: as demos de marcar/duvidar não achavam item livre.
+      if(window.__tourMockSkipUnit != null){
+        const _a = String(unitId).replace(/^u/, ''), _b = String(window.__tourMockSkipUnit).replace(/^u/, '');
+        if(_a === _b) return null;
+      }
       const chave = String(unitId) + '|' + String(blockId) + '|' + String(itemId);
       let h = 0;
       for(let i = 0; i < chave.length; i++) h = (h * 31 + chave.charCodeAt(i)) | 0;
@@ -26747,16 +26754,30 @@ async function _forumPublishQuestionComment(ctx, text){
 }
 // Render da questão anexada no post: enunciado em cima; gabarito + comentário do
 // autor ficam BORRADOS (spoiler), revelados ao clicar.
+// O enunciado e o texto de referência vêm do BANCO DE QUESTÕES como HTML
+// (<p>…</p>). Passá-los pelo _forumBodyHTML — que ESCAPA, e está certo pro
+// comentário digitado pelo aluno — fazia as tags aparecerem cruas na tela.
+// Aqui usamos o mesmo caminho da unidade: desescapa se veio escapado
+// (_refHtmlForRender) e sanitiza com o sanitizador dos learning blocks.
+function _forumQHtml(raw){
+  const s = String(raw == null ? '' : raw);
+  if(!s.trim()) return '';
+  const temTag = /<[a-z][\s\S]*?>/i.test(s) || /&lt;\/?[a-z][\s\S]*?&gt;/i.test(s);
+  if(!temTag) return _forumBodyHTML(s);                 // texto puro: escapa como sempre
+  const limpa = (window.LearningBlocks && window.LearningBlocks.sanitizeRichHTML)
+    || function(x){ return Util.esc(x); };              // sem sanitizador → escapa (nunca injeta)
+  return limpa(window._refHtmlForRender ? window._refHtmlForRender(s) : s);
+}
 function _forumQuestionHTML(q, comment){
   if(!q) return '';
-  const ref = q.reference_text ? `<div class="forum-q-ref">${_forumBodyHTML(q.reference_text)}</div>` : '';
+  const ref = q.reference_text ? `<div class="forum-q-ref">${_forumQHtml(q.reference_text)}</div>` : '';
   const spoiler = `
     <div class="forum-q-gab"><strong>Gabarito:</strong> ${Util.esc(q.key || '—')}</div>
     ${comment ? `<div class="forum-q-comment"><span class="forum-q-comment-lbl">Comentário do autor</span>${_forumBodyHTML(comment)}</div>` : ''}`;
   return `<div class="forum-q">
     ${q.origin ? `<div class="forum-q-origin">${Util.esc(q.origin)}</div>` : ''}
     ${ref}
-    <div class="forum-q-statement">${_forumBodyHTML(q.statement || '')}</div>
+    <div class="forum-q-statement">${_forumQHtml(q.statement || '')}</div>
     <div class="forum-spoiler" data-spoiler>
       <div class="forum-spoiler-content">${spoiler}</div>
       <div class="forum-spoiler-hint">Toque para revelar a resposta</div>
@@ -43199,14 +43220,20 @@ const RotinaTab = (function(){
     // MODO-VITRINE do tour: conta nova sem histórico → popula a Rotina com um
     // exemplo determinístico (mapa de constância, gráficos, sessões e um plano
     // no calendário). SÓ LEITURA — nada disto é salvo; fora do tour, some.
-    if(window.__tourMockStats && !_sess.length){
+    // Antes só entrava com histórico VAZIO — mas uma conta nova costuma ter
+    // 1 sessão solta (o próprio cronômetro do tour), e aí a Rotina aparecia
+    // quase vazia. Agora o exemplo entra sempre no tour, pulando os dias que
+    // já têm sessão real (nada é somado em cima do que é do aluno).
+    if(window.__tourMockStats){
       const _mSubs = ((window.COURSES) || []).map(function(c){ return c && c._subjectId; }).filter(function(x){ return x != null; }).slice(0, 3);
       if(_mSubs.length){
+        const _diasReais = new Set(_sess.map(function(x){ return String(x && x.dia); }));
         const _padrao = [55, 0, 40, 70, 30, 90, 25, 0, 60, 45, 80, 0, 35, 65, 50, 0, 75, 40, 30, 85, 45];
         for(let i = 0; i < _padrao.length; i++){
           if(!_padrao[i]) continue;                        // dia sem estudo (o mapa mostra o buraco)
           const d = new Date(); d.setDate(d.getDate() - (_padrao.length - 1 - i)); d.setHours(12, 0, 0, 0);
           const ds = _diaStr(d);
+          if(_diasReais.has(ds)) continue;                 // respeita o dia real do aluno
           _sess.push({
             id: 'tour-s' + i, dia: ds, categoria: 'materia',
             subject_id: String(_mSubs[i % _mSubs.length]),
@@ -43220,11 +43247,11 @@ const RotinaTab = (function(){
         _sess.forEach(function(sx){
           if(String(sx.id).indexOf('tour-') !== 0) return;
           const q = Math.max(4, Math.round(sx.duration_min / 4));
-          _xpDias[sx.dia] = { q: q, ok: Math.round(q * 0.8) };
+          if(!_xpDias[sx.dia]) _xpDias[sx.dia] = { q: q, ok: Math.round(q * 0.8) };   // não sobrescreve dia real
         });
       }
     }
-    if(window.__tourMockStats && !_plans.length){
+    if(window.__tourMockStats && !_plans.some(function(x){ return String(x && x.id).indexOf('tour-') === 0; })){
       const _mS1 = ((window.COURSES) || []).map(function(c){ return c && c._subjectId; }).filter(function(x){ return x != null; })[0];
       if(_mS1 != null){
         const _am = new Date(); _am.setDate(_am.getDate() + 1); _am.setHours(19, 0, 0, 0);
@@ -49826,7 +49853,7 @@ if(document.readyState !== 'loading') _bootOnce();
 
     { t:'A unidade por dentro', r:function(){ return _hashBloco('text'); }, sel:'.unit-sidebar',
       b:'A unidade é feita de blocos: texto, vídeo, questões, galerias e outros. Esta lateral lista as seções e os parágrafos — clique em qualquer um para pular direto. A setinha no topo dela recolhe a lateral e deixa o texto corrido.' },
-    { t:'Grifar, anotar, criar flashcard', sel:function(){ return _paragrafoTexto(); }, run:function(){ _demoSelecao(); },
+    { t:'Grifar, anotar, criar flashcard', sel:function(){ return _paragrafoTexto(); }, semScroll:true, run:function(){ _demoSelecao(); },
       b:'Selecione qualquer trecho e esta barra aparece: seis cores para grifar, sublinhar, ocultar o texto (para testar a memória), tomar nota ou criar um flashcard — o verso do cartão já vem com o trecho. Também dá para consultar o glossário a partir do termo.' },
     { t:'Ver depois', sel:'[data-action="verdepois"]',
       b:'Cada bloco tem o "Ver depois": deixe na playlist de leitura ou marque dia e hora — a aula entra no seu calendário e a plataforma te avisa na hora combinada.' },
@@ -49839,12 +49866,24 @@ if(document.readyState !== 'loading') _bootOnce();
 
     { t:'Questões objetivas', r:function(){ return _hashBloco('quiz'); }, sel:'.quiz-block',
       b:'Questões no estilo da banca, de provas anteriores e inéditas da Ubique. O painel-satélite à direita acompanha o progresso: quantas você respondeu e quantas faltam.' },
-    { t:'Marcando — e a dúvida', sel:function(){ return _st.elA || document.querySelector('.qz-verify-bar'); }, run:function(){ _demoQuiz(); },
-      b:'Marquei "E" numa questão e o "?" da dúvida em outra, para você ver: ao responder aparece o botão de verificar (por grupo ou tudo de uma vez), marcar "E" abre a caixa do porquê, e o "?" abre a caixa da dúvida — o comentário da IA vem em cima do que VOCÊ escreveu.' },
+    { t:'Marcando — e a dúvida', run:function(){ _demoQuiz(); },
+      // Mira a CAIXA que aparece embaixo da questão (o ponto do passo), não a
+      // barra de verificar — que era o alvo errado que o dono flagrou.
+      sel:function(){
+        return (_st.elB && (_st.elB.querySelector('.q-why-hint') || _st.elB.querySelector('.q-why-input')))
+            || (_st.elA && (_st.elA.querySelector('.q-why-hint') || _st.elA.querySelector('.q-why-input')))
+            || document.querySelector('.q-why-hint, .q-why-input')
+            || _st.elA || document.querySelector('.qz-verify-bar');
+      },
+      b:'Marquei "E" numa questão e o "?" da dúvida em outra: os dois abrem esta caixa embaixo do item, para você escrever o seu raciocínio — e o comentário da IA vem em cima do que VOCÊ escreveu, não um gabarito genérico. Ao responder também aparece o botão de verificar (por grupo ou tudo de uma vez).' },
     { t:'Verificar: o gabarito', sel:function(){ return (_st.elA && _st.elA.querySelector('.q-show-key')) || document.querySelector('.q-item.answered .q-show-key'); }, run:function(){ _demoVerificar(); },
       b:'Verifiquei a resposta: o item mostra se você acertou, e a chavinha abre o gabarito oficial comentado. O painel-satélite passa a detalhar cada item selecionado. (Esta marcação é do tour e será desfeita ao sair.)' },
     { t:'Estatísticas, comentários e colegas', sel:function(){ return (_st.elA && (_st.elA.querySelector('[data-qd-panel]:not([hidden])') || _st.elA.querySelector('.q-actions-bar'))) || document.querySelector('.q-item.answered .q-actions-bar'); }, run:function(){ _demoPaineis(); },
       b:'Depois de responder, cada questão ganha três botões: abri o de ESTATÍSTICAS — o painel mostra a dificuldade real medida pelos alunos, e a aba ao lado traz os comentários da turma. O terceiro botão envia a questão a um colega de estudo para ele avaliar sua resposta.' },
+
+    { t:'Comentários da turma', run:function(){ _demoComentarios(); },
+      sel:function(){ return (_st.elA && _st.elA.querySelector('[data-qd-panel]:not([hidden])')) || document.querySelector('.q-item.answered [data-qd-panel]:not([hidden])'); },
+      b:'A aba de comentários abre no mesmo painel: é onde a turma discute a questão — você lê o raciocínio dos colegas, comenta o seu e pode publicar esse comentário no Fórum com a questão anexada.' },
 
     { t:'Discursivas', r:function(){ return _hashBloco('essay'); }, sel:'.essay-tabs',
       b:'Toda discursiva tem duas frentes: o brainstorm, para organizar as ideias antes, e a redação em si. Vamos ver as duas — com a avaliação aberta.' },
@@ -49920,9 +49959,16 @@ if(document.readyState !== 'loading') _bootOnce();
     if(_st.abriuDrawer && window.TutorIA && TutorIA.close){ try{ TutorIA.close(); }catch(_){ } _st.abriuDrawer = false; }
   }
   function _abrirDrawer(){
-    if(document.querySelector('.tutor-tab')) return;
-    const b = document.querySelector('#tutorLaunchBtn') || document.querySelector('#tutorLaunchFab');
-    if(b){ b.click(); _st.abriuDrawer = true; }
+    let tent = 0;
+    (function tenta(){
+      if(_st.idx == null) return;
+      if(document.querySelector('.tutor-tab')) return;          // já aberto
+      const b = document.querySelector('#tutorLaunchBtn') || document.querySelector('#tutorLaunchFab');
+      // O passo do tutor volta pra rota-base da unidade; o botão só existe
+      // DEPOIS que a página re-renderiza — sem insistir, o drawer não abria.
+      if(b){ b.click(); _st.abriuDrawer = true; setTimeout(_mirar, 320); }
+      else if(++tent < 16) setTimeout(tenta, 260);
+    })();
   }
   function _abaDrawer(qual){
     _abrirDrawer();
@@ -49975,17 +50021,22 @@ if(document.readyState !== 'loading') _bootOnce();
       if(_st.idx == null) return;
       const p = _paragrafoTexto();
       const no = p && Array.prototype.find.call(p.childNodes, function(n){ return n.nodeType === 3 && (n.nodeValue || '').trim().length > 40; });
-      if(no){
+      if(!no){ if(++tent < 12) setTimeout(tenta, 260); return; }
+      // 1) posiciona SEM rolagem suave (o app tem um listener de scroll em
+      //    captura que chama hideToolbar — rolar depois de selecionar fazia a
+      //    barra abrir e sumir na hora).
+      try{ p.scrollIntoView({ behavior:'auto', block:'center' }); }catch(_){ }
+      // 2) só com a página parada, seleciona e avisa o app.
+      setTimeout(function(){
+        if(_st.idx == null) return;
         try{
           const r = document.createRange();
           r.setStart(no, 0); r.setEnd(no, Math.min(60, no.nodeValue.length));
           const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
-          try{ p.scrollIntoView({ behavior:'smooth', block:'center' }); }catch(_){ }
           document.dispatchEvent(new Event('selectionchange'));
-          p.dispatchEvent(new MouseEvent('mouseup', { bubbles:true }));
-          setTimeout(_mirar, 260);
+          p.dispatchEvent(new MouseEvent('mouseup', { bubbles:true, button:0 }));
         }catch(_){ }
-      } else if(++tent < 12) setTimeout(tenta, 260);
+      }, 220);
     })();
   }
   function _limparSelecao(){ try{ const s = window.getSelection(); if(s) s.removeAllRanges(); }catch(_){ } }
@@ -50060,6 +50111,18 @@ if(document.readyState !== 'loading') _bootOnce();
       } else if(++tent < 14) setTimeout(tenta, 320);
     })();
   }
+  // Passo dos comentários: clica o botão de comentários do MESMO item, que
+  // troca a aba do painel já aberto pelas estatísticas.
+  function _demoComentarios(){
+    let tent = 0;
+    (function tenta(){
+      if(_st.idx == null) return;
+      const it = (_st.elA && _st.elA.classList.contains('answered')) ? _st.elA : document.querySelector('.q-item.answered');
+      const com = it && it.querySelector('[data-action="q-comments"]');
+      if(com){ try{ com.click(); }catch(_){ } setTimeout(_mirar, 320); }
+      else if(++tent < 14) setTimeout(tenta, 320);
+    })();
+  }
   // DESFAZ tudo que a demo de questões marcou/verificou (limpa memória e
   // banco — o clearQuizAnswer também apaga a resposta sincronizada).
   function _limparQuiz(){
@@ -50131,7 +50194,9 @@ if(document.readyState !== 'loading') _bootOnce();
       const el = (typeof s.sel === 'function') ? s.sel() : document.querySelector(s.sel);
       if(el){
         el.classList.add('gt-spot');
-        try{ el.scrollIntoView({ behavior:'smooth', block: s.topo ? 'start' : 'center' }); }catch(_){ }
+        // semScroll: a demo já posicionou a página; rolar de novo mataria a
+        // barra flutuante (o app esconde no scroll).
+        if(!s.semScroll){ try{ el.scrollIntoView({ behavior:'smooth', block: s.topo ? 'start' : 'center' }); }catch(_){ } }
       } else if(++tent < 14){
         _st.poll = setTimeout(acha, 260);
       }
@@ -50158,7 +50223,8 @@ if(document.readyState !== 'loading') _bootOnce();
     // Notas de exemplo só existem DENTRO do passo Notas.
     if(P[n] && P[n].t !== 'Notas'){ try{ if(window.Store && Store._tourNotasDemo) Store._tourNotasDemo(false); }catch(_){ } }
     // Saindo da vizinhança das questões → desfaz a marcação da demo.
-    const _naDemoQuiz = function(i){ const s = P[i]; return s && (s.sel === '.qz-verify-bar' || s.sel === '.q-show-key' || s.sel === '.q-actions-bar'); };
+    const _DEMO_QUIZ = ['Marcando — e a dúvida', 'Verificar: o gabarito', 'Estatísticas, comentários e colegas', 'Comentários da turma'];
+    const _naDemoQuiz = function(i){ return P[i] && _DEMO_QUIZ.indexOf(P[i].t) >= 0; };
     if(_st.quizItens.length && !_naDemoQuiz(n)) _limparQuiz();
     _limparSelecao();
     if(n !== _PASSO_BANCO) _escudo(false);         // o run do passo Banco religa
