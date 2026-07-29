@@ -57056,6 +57056,50 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // ─── Helper: cria ESSAY (discursiva) a partir de objeto JSON ───
   // Espelha o save do modal de questão (linhas ~21097-21183 + persistEssayContent).
   // Pacote D/E. Aceita criteria[] e models[] já normalizados.
+  // Insere critérios de discursiva (campos espelham o form do modal; aceita
+  // nomes do schema documentado E legados). Retorna a lista de erros.
+  async function _ueEssayInsertCriteria(questionId, crits){
+    const erros = [];
+    for(let i = 0; i < crits.length; i++){
+      const c = crits[i];
+      // numero é INTEIRO no banco; o schema aceita "Q1"/"Q10" → extrai os dígitos.
+      const _cnum = Number(String(c.numero == null ? '' : c.numero).replace(/\D/g, '')) || (c.ordem || (i + 1));
+      const ce = await questoes().from('essay_criteria').insert({
+        question_id:       questionId,
+        numero:            _cnum,
+        ordem:             c.ordem || (i + 1),
+        criterio:          c.criterio || c.label || c.title || c.nome || null,
+        descricao:         c.descricao || c.description || null,
+        resposta_esperada: c.resposta_esperada || c.expected || null,
+        peso:              (c.peso != null ? c.peso : (c.weight != null ? c.weight : (c.max_score != null ? c.max_score : null))),
+      });
+      if(ce.error){
+        const msg = 'essay_criteria #' + (i+1) + ': ' + ce.error.message;
+        console.warn('[import]', msg); erros.push(msg);
+      }
+    }
+    return erros;
+  }
+  async function _ueEssayInsertModels(questionId, models){
+    const erros = [];
+    for(let i = 0; i < models.length; i++){
+      const m = models[i];
+      const me = await questoes().from('essay_answer_models').insert({
+        question_id: questionId,
+        title:       m.title || null,
+        author:      m.author || null,
+        grade:       m.grade || null,
+        description: m.description || m.descricao || null,
+        modelo:      m.modelo || m.body || m.content || '',
+        ordem:       m.ordem || (i + 1),
+      });
+      if(me.error){
+        const msg = 'essay_answer_models #' + (i+1) + ': ' + me.error.message;
+        console.warn('[import]', msg); erros.push(msg);
+      }
+    }
+    return erros;
+  }
   async function _ueBankCreateEssayFromInline(g, q, subjectId, examId){
     const code = String(q.origin || g.origin || '').trim();
     const ym = code.match(/\/(\d{4})\]/);
@@ -57067,6 +57111,76 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const isUbique = !code;
     if(isUbique && !year){
       throw new Error('Discursiva Ubique (sem "origin") precisa do campo "ano" no JSON — ex.: "ano": 2025.');
+    }
+
+    // ── Dedup da discursiva (não existia NENHUM — nem por origin). Regra:
+    // com origin, o origin é a identidade; sem origin (Ubique), a identidade
+    // é o TEXTO COMPLETO (enunciado do grupo + comando, letra por letra).
+    // Gêmea achada → REFERENCIA a existente e COMPLEMENTA só o que falta
+    // (nunca sobrescreve). A mesma discursiva pode viver em várias unidades
+    // apontando pro mesmo registro.
+    const existente = code
+      ? ((questionsCache || []).find(function(x){
+          return x && x.type === 'essay' && x.origin && String(x.origin) === String(code);
+        }) || null)
+      : _ueBankFindEssayTwin(g, q);
+    if(existente){
+      const childErrors = [];
+      const complementos = [];
+      // padrão da banca + nº de linhas: preenche SÓ se o campo está vazio
+      const oaNovo = isUbique ? null : ((q.official_answer || '').trim() || null);
+      const patch = {};
+      if(oaNovo && !(existente.official_answer || '').trim()){
+        patch.official_answer = oaNovo; complementos.push('padrão da banca');
+      }
+      if(q.max_lines && existente.max_lines == null){
+        patch.max_lines = q.max_lines; complementos.push('nº de linhas');
+      }
+      if(Object.keys(patch).length){
+        const up = await questoes().from('questions').update(patch).eq('id', existente.id);
+        if(up.error) childErrors.push('complemento da questão: ' + up.error.message);
+        else Object.assign(existente, patch);           // cache local acompanha
+      }
+      // critérios: só se ela não tem NENHUM (nunca mistura conjuntos)
+      const critNovos = Array.isArray(q.criteria) ? q.criteria : [];
+      if(critNovos.length){
+        const temC = await questoes().from('essay_criteria')
+          .select('id', { count: 'exact', head: true }).eq('question_id', existente.id);
+        if(!temC.error && !(temC.count > 0)){
+          Array.prototype.push.apply(childErrors, await _ueEssayInsertCriteria(existente.id, critNovos));
+          complementos.push(critNovos.length + ' critério(s)');
+        }
+      }
+      // modelos de resposta: idem
+      const modNovos = Array.isArray(q.models) ? q.models : [];
+      if(modNovos.length){
+        const temM = await questoes().from('essay_answer_models')
+          .select('id', { count: 'exact', head: true }).eq('question_id', existente.id);
+        if(!temM.error && !(temM.count > 0)){
+          Array.prototype.push.apply(childErrors, await _ueEssayInsertModels(existente.id, modNovos));
+          complementos.push(modNovos.length + ' modelo(s)');
+        }
+      }
+      // textos de referência: só se ela não tem nenhum vinculado
+      if(Array.isArray(g.reference_texts) && g.reference_texts.length){
+        const temR = await questoes().from('question_reference_texts')
+          .select('question_id', { count: 'exact', head: true }).eq('question_id', existente.id);
+        if(!temR.error && !(temR.count > 0)){
+          await _ueBankPersistReferenceTexts(existente.id, g.reference_texts, examId, year);
+          complementos.push(g.reference_texts.length + ' texto(s) de referência');
+        }
+      }
+      console.log('[import] discursiva já existia — referenciada', existente.id,
+        complementos.length ? ('| complementada: ' + complementos.join(', ')) : '| nada a complementar');
+      return {
+        bankQuestionId: existente.id,
+        nQuestoes:      1,
+        wasExisting:    true,
+        complementos:   complementos,
+        refs:           [{ id: String(existente.id), type: 'essay',
+                           sourceType: existente.origin ? 'past_exam' : 'ubique' }],
+        childErrors:    childErrors,
+      };
     }
 
     console.log('[import] criando essay no banco', {
@@ -57130,60 +57244,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // reference_texts[] ricos vinculados ao grupo (= à questão essay)
     await _ueBankPersistReferenceTexts(bankQuestionId, g.reference_texts, examId, year);
 
-    // Critérios (essay_criteria) — campos espelham o form do modal.
-    // Erros agora são COLETADOS (não só console.warn) pra subir à UI do
-    // result box, evitando "criou sem critérios mas ninguém viu".
+    // Critérios e modelos: mesmos helpers do caminho de COMPLEMENTO (uma
+    // fonte só — criar e complementar nunca divergem).
     const childErrors = [];
     const crits = Array.isArray(q.criteria) ? q.criteria : [];
-    for(let i = 0; i < crits.length; i++){
-      const c = crits[i];
-      // numero é INTEIRO no banco; o schema aceita "Q1"/"Q10" → extrai os dígitos
-      // ("Q1"→1). Sem dígitos, cai pra ordem/posição.
-      const _cnum = Number(String(c.numero == null ? '' : c.numero).replace(/\D/g, '')) || (c.ordem || (i + 1));
-      // Aceita os nomes do schema documentado (label/weight/description) E os
-      // nomes de coluna legados (criterio/peso/descricao) — normalização, causa-raiz.
-      const ce = await questoes().from('essay_criteria').insert({
-        question_id:       bankQuestionId,
-        numero:            _cnum,
-        ordem:             c.ordem || (i + 1),
-        criterio:          c.criterio || c.label || c.title || c.nome || null,
-        descricao:         c.descricao || c.description || null,
-        resposta_esperada: c.resposta_esperada || c.expected || null,
-        peso:              (c.peso != null ? c.peso : (c.weight != null ? c.weight : (c.max_score != null ? c.max_score : null))),
-      });
-      if(ce.error){
-        const msg = 'essay_criteria #' + (i+1) + ': ' + ce.error.message;
-        console.warn('[import]', msg);
-        childErrors.push(msg);
-      }
-    }
-
-    // Modelos (essay_answer_models) — idem coleta erros.
+    Array.prototype.push.apply(childErrors, await _ueEssayInsertCriteria(bankQuestionId, crits));
     const models = Array.isArray(q.models) ? q.models : [];
-    for(let i = 0; i < models.length; i++){
-      const m = models[i];
-      const me = await questoes().from('essay_answer_models').insert({
-        question_id: bankQuestionId,
-        title:       m.title || null,
-        author:      m.author || null,
-        grade:       m.grade || null,
-        description: m.description || m.descricao || null,
-        // schema documentado usa "body"; aceita legados modelo/content também.
-        modelo:      m.modelo || m.body || m.content || '',
-        ordem:       m.ordem || (i + 1),
-      });
-      if(me.error){
-        const msg = 'essay_answer_models #' + (i+1) + ': ' + me.error.message;
-        console.warn('[import]', msg);
-        childErrors.push(msg);
-      }
-    }
+    Array.prototype.push.apply(childErrors, await _ueEssayInsertModels(bankQuestionId, models));
 
     console.log('[import] essay criada no banco:', bankQuestionId, '| critérios:', crits.length, '| modelos:', models.length, '| erros filhos:', childErrors.length);
 
     return {
       bankQuestionId: bankQuestionId,
       nQuestoes:      1,
+      wasExisting:    false,
+      complementos:   [],
       refs:           [{ id: String(bankQuestionId), type: 'essay', sourceType: isUbique ? 'ubique' : 'past_exam' }],
       childErrors:    childErrors,
     };
@@ -57220,12 +57295,73 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return topicIds.length;
   }
 
+  // Normalização de texto pra comparação de identidade: tira HTML e REMOVE
+  // todo espaço (etiqueta no meio da frase — "</b>." — virava espaço e
+  // "portuguesa ." não casava com "portuguesa."). A identidade é a sequência
+  // pura de letras e pontuação, imune à formatação. REGRA DE OURO: só texto
+  // IDÊNTICO (após isto) conta como mesma questão — uma vírgula diferente já
+  // é questão nova.
+  function _ueNormTexto(html){
+    return String(html || '').replace(/<[^>]*>/g,' ').replace(/&nbsp;/gi,' ').replace(/\s+/g,'').toLowerCase();
+  }
   // Identidade de um item C/E pra dedup: usa o origin ([#15-2/2006]) quando houver;
   // senão o texto do enunciado. Evita duplicar item já existente no grupo.
   function _ueTfIdent(origin, stmt){
     const o = String(origin || '').trim().toLowerCase();
     if(o) return 'o:' + o;
-    return 's:' + String(stmt || '').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim().toLowerCase();
+    return 's:' + _ueNormTexto(stmt);
+  }
+  // ── Gêmeas por TEXTO (a identidade das Ubique, que não têm origin) ──
+  // Discursiva: gêmea = MESMO enunciado do grupo E MESMO comando, letra por
+  // letra (normalizados). Os dois campos precisam bater — checa tudo, não só
+  // o comando. Dois textos vazios nunca casam.
+  function _ueBankFindEssayTwin(g, q){
+    const en = _ueNormTexto(g && g.enunciado);
+    const cm = _ueNormTexto(q && q.command);
+    if(!en && !cm) return null;
+    return (questionsCache || []).find(function(x){
+      return x && x.type === 'essay'
+        && _ueNormTexto(x.enunciado) === en
+        && _ueNormTexto(x.command) === cm;
+    }) || null;
+  }
+  // Grupo objetivo: gêmeo = questão do mesmo tipo com item de texto IDÊNTICO
+  // (C/E casa por assertiva; MC exige enunciado + todas as alternativas).
+  // Havendo mais de um candidato C/E, vence o que casa MAIS itens.
+  function _ueBankFindGroupTwinByText(qType, objQs, g){
+    if(qType === 'true_false'){
+      const alvo = objQs.map(function(q){ return _ueNormTexto(q.statement || q.assertion); })
+        .filter(Boolean);
+      if(!alvo.length) return null;
+      const alvoSet = {};
+      alvo.forEach(function(x){ alvoSet[x] = 1; });
+      const pontos = {};                       // question_id -> nº de assertivas idênticas
+      (tfItemsCache || []).forEach(function(ti){
+        if(alvoSet[_ueNormTexto(ti.assertiva)]) pontos[ti.question_id] = (pontos[ti.question_id] || 0) + 1;
+      });
+      let melhor = null, melhorN = 0;
+      Object.keys(pontos).forEach(function(qid){
+        if(pontos[qid] > melhorN){ melhorN = pontos[qid]; melhor = qid; }
+      });
+      if(!melhor) return null;
+      const qx = (questionsCache || []).find(function(x){ return String(x.id) === String(melhor) && x.type === 'true_false'; });
+      return qx || null;
+    }
+    if(qType === 'multiple_choice'){
+      const q = objQs[0] || {};
+      const en = _ueNormTexto((g && g.enunciado) || q.statement);
+      const opts = (Array.isArray(q.options) ? q.options : [])
+        .map(function(o){ return _ueNormTexto(o.text); }).filter(Boolean).sort().join('\u0001');
+      if(!en || !opts) return null;
+      return (questionsCache || []).find(function(x){
+        if(!x || x.type !== 'multiple_choice' || _ueNormTexto(x.enunciado) !== en) return false;
+        const dele = (mcOptionsCache || [])
+          .filter(function(o){ return String(o.question_id) === String(x.id); })
+          .map(function(o){ return _ueNormTexto(o.opcao); }).filter(Boolean).sort().join('\u0001');
+        return dele === opts;
+      }) || null;
+    }
+    return null;
   }
   // Completa um grupo C/E: adiciona SÓ os itens que faltam (dedup por identidade),
   // reusando os já existentes. Retorna { itemIds (os DESTA importação), gabAdded }.
@@ -57378,10 +57514,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }
 
     // Cria todas as discursivas; coleta refs com type='essay'.
+    const essaysReusadas = [];              // gêmeas referenciadas (com o que foi complementado)
     for(const q of essayQs){
       const r = await _ueBankCreateEssayFromInline(g, q, subjectId, examId);
       if(r && Array.isArray(r.refs)) Array.prototype.push.apply(allRefs, r.refs);
       if(r && Array.isArray(r.childErrors)) Array.prototype.push.apply(allChildErrors, r.childErrors);
+      if(r && r.wasExisting) essaysReusadas.push({ complementos: r.complementos || [] });
     }
 
     // Sem objetivas, retorna o que temos.
@@ -57393,7 +57531,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         kind:           'essay',
         refs:           allRefs,
         childErrors:    allChildErrors,
-        wasExisting:    false,
+        // Grupo só de discursivas: se TODAS já existiam, o grupo conta como
+        // "já existente" no resumo (não como criado).
+        wasExisting:    essayQs.length > 0 && essaysReusadas.length === essayQs.length,
+        essaysReusadas: essaysReusadas,
         createdObjective: false,
         essayCount:     essayQs.length,
         gabAdded:       0,
@@ -57403,8 +57544,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const qType = objQs.some(function(q){ return q.type === 'multiple_choice'; }) ? 'multiple_choice' : 'true_false';
     // enunciado recebe o comando/enunciado do GRUPO (não o title interno).
     const enunciado = g.enunciado || g.description || '';
-    // Dedup por CÓDIGO: se o grupo já existe, COMPLETA (não recria, não duplica).
-    const existingGroup = code ? _ueBankFindGroupByOrigin(code) : null;
+    // Dedup: com origin, o CÓDIGO é a identidade (como sempre foi). Sem origin
+    // (Ubique), a identidade é o TEXTO — gêmea achada é COMPLETADA igualzinho
+    // (era o buraco que gerou as triplicatas de GEO).
+    const existingGroup = code
+      ? _ueBankFindGroupByOrigin(code)
+      : _ueBankFindGroupTwinByText(qType, objQs, g);
     let bankQuestionId, wasExisting = false, gabAdded = 0, importedItemIds = [];
 
     if(existingGroup){
@@ -57478,6 +57623,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       refs:           allRefs,
       childErrors:    allChildErrors,
       wasExisting:    wasExisting,
+      essaysReusadas: essaysReusadas,
       createdObjective: !wasExisting,
       essayCount:     essayQs.length,
       gabAdded:       gabAdded,
@@ -57520,6 +57666,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   //                                para o draft do simulado em edição via
   //                                addQuestionToMockExam
   let _bulkImportando = false;      // trava: clique duplo disparava DUAS importações
+  let _bulkConfirmado = false;      // o admin já viu o aviso de gêmeas por texto e mandou seguir
+  window.ueOqBulkImportConfirmar = function(){ _bulkConfirmado = true; window.ueOqBulkImportToBank(); };
+  window.ueOqBulkImportCancelar = function(){
+    _bulkConfirmado = false;
+    const r = document.getElementById('q-bulk-result');
+    if(r){ r.style.display = 'none'; r.innerHTML = ''; }
+  };
+  // Editou o JSON → a confirmação anterior não vale mais.
+  (function(){
+    const ta = document.getElementById('q-bulk-json');
+    if(ta) ta.addEventListener('input', function(){ _bulkConfirmado = false; });
+  })();
   window.ueOqBulkImportToBank = async function(){
     // CAUSA-RAIZ das triplicatas de GEO: o botão ficava vivo durante a
     // importação (sem aviso de carregando). Quem clicava de novo rodava a
@@ -57556,6 +57714,36 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       ].filter(Boolean));
     }catch(e){ console.warn('[import] refresh inicial falhou:', e); }
 
+    // ── Gêmeas por TEXTO: pausa pra confirmar ANTES de gravar qualquer coisa.
+    // Só vale pro caminho SEM origin (Ubique) — completar por código continua
+    // silencioso, como sempre foi. Texto idêntico = mesma questão.
+    if(!_bulkConfirmado){
+      let repetidas = 0;
+      for(const g of groups){
+        const qs = Array.isArray(g.questions) ? g.questions : [];
+        const codeG = (g.origin || '').trim();
+        for(const q of qs.filter(function(x){ return x.type === 'essay'; })){
+          const codeQ = String(q.origin || g.origin || '').trim();
+          if(!codeQ && _ueBankFindEssayTwin(g, q)) repetidas++;
+        }
+        const obj = qs.filter(function(x){ return x.type !== 'essay'; });
+        if(!codeG && obj.length){
+          const qT = obj.some(function(x){ return x.type === 'multiple_choice'; }) ? 'multiple_choice' : 'true_false';
+          if(_ueBankFindGroupTwinByText(qT, obj, g)) repetidas++;
+        }
+      }
+      if(repetidas > 0){
+        show('<strong>' + repetidas + '</strong> questão(ões) do seu JSON já existe(m) no banco com o MESMO texto.<br>'
+          + 'Ao continuar, serão <strong>referenciadas neste material</strong> e complementadas com o que vier a mais '
+          + '(padrão da banca, critérios, gabaritos, modelos) — <strong>nada será duplicado</strong>.'
+          + '<div style="display:flex;gap:.5rem;margin-top:.6rem">'
+          + '<button type="button" class="btn" onclick="ueOqBulkImportConfirmar()" style="background:var(--accent);color:var(--bg);border:0;font-weight:600;padding:.35rem .9rem;border-radius:var(--radius);cursor:pointer">Continuar sem duplicar</button>'
+          + '<button type="button" class="btn btn-ghost" onclick="ueOqBulkImportCancelar()" style="padding:.35rem .9rem;cursor:pointer">Cancelar</button>'
+          + '</div>', true);
+        return;                        // o finally destrava o botão
+      }
+    }
+
     // Pré-requisito do destino simulado: deve haver pelo menos uma seção criada.
     if(target === 'mock_exam'){
       const secs = (typeof getActiveSections === 'function') ? getActiveSections() : [];
@@ -57576,6 +57764,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // recebia bankQuestionId (1 id), perdendo essays múltiplas de um grupo
     // e empurrando tudo em groups[] (que bloco essay não lê).
     let created = 0, dupes = 0, gabAdded = 0;
+    const essaysReuse = [];            // discursivas gêmeas referenciadas (não duplicadas)
     const dupeCodes = [];
     const allRefs = [];           // [{ id, type: 'essay'|'objective', sourceType }]
     const allChildErrors = [];
@@ -57589,6 +57778,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         if(!r) continue;
         if(Array.isArray(r.refs)) Array.prototype.push.apply(allRefs, r.refs);
         if(Array.isArray(r.childErrors)) Array.prototype.push.apply(allChildErrors, r.childErrors);
+        if(Array.isArray(r.essaysReusadas)) Array.prototype.push.apply(essaysReuse, r.essaysReusadas);
         if(typeof r.gabAdded === 'number') gabAdded += r.gabAdded;
         if(r.wasExisting){ dupes++; if(g.origin) dupeCodes.push(g.origin); }
         else created++;
@@ -57713,6 +57903,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       : '') + '<strong>' + created + '</strong> grupo(s) criados no banco.';
     if(dupes) msg += ' <strong>' + dupes + '</strong> grupo(s) já existente(s) COMPLETADO(s) com as questões que faltavam (sem duplicar): <span style="font-family:var(--mono);font-size:.72rem">' + esc(dupeCodes.filter(Boolean).join(', ')) + '</span>.';
     if(gabAdded) msg += ' <strong>' + gabAdded + '</strong> gabarito(s) comentado(s) adicionado(s) às questões repetidas.';
+    if(essaysReuse.length){
+      const comps = [];
+      essaysReuse.forEach(function(e){ (e.complementos || []).forEach(function(c){ comps.push(c); }); });
+      msg += ' <strong>' + essaysReuse.length + '</strong> discursiva(s) já existia(m) no banco e foi(ram) referenciada(s) sem duplicar'
+        + (comps.length ? ' — complementada(s) com: ' + comps.join(', ') + '.' : '.');
+    }
     if(destLabel) msg += destLabel;
     if(topicsMsg) msg += topicsMsg;
     if(mismatchWarn) msg += '<br>' + mismatchWarn;
@@ -57730,6 +57926,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }finally{
       // Destrava SEMPRE — inclusive quando o JSON é inválido ou algo lança.
       _bulkImportando = false;
+      _bulkConfirmado = false;
       const b2 = document.getElementById('qBulkImportBtn');
       if(b2){ b2.disabled = false; b2.style.opacity = ''; b2.style.cursor = 'pointer'; b2.textContent = _btnTexto || 'Importar tudo'; }
     }
