@@ -7857,9 +7857,22 @@
     max-width:640px;
   }
 
-  /* Unit Editor — block drag states (only behavioral styles) */
-  #unitEditorModal [data-block-card].dragging{ opacity:.4; }
-  #unitEditorModal [data-block-card].drag-over{ border-color:var(--accent); }
+  /* Unit Editor — organizador de blocos na coluna central (drag entre seções) */
+  .ue-nav-block{
+    display:flex;align-items:center;gap:.35rem;width:100%;
+    padding:.16rem .3rem;border-radius:3px;cursor:pointer;
+    color:var(--text-dim);font-size:.74rem;text-align:left;
+    border:1px solid transparent;background:transparent;
+  }
+  .ue-nav-block:hover{background:var(--accent-lo);color:var(--accent)}
+  .ue-nav-block.dragging{opacity:.45}
+  .ue-nav-handle{
+    color:var(--text-mute);cursor:grab;flex-shrink:0;font-size:.72rem;
+    user-select:none;line-height:1;
+  }
+  .ue-nav-block:hover .ue-nav-handle{color:var(--accent)}
+  .ue-nav-list{border:1px dashed transparent;border-radius:4px;transition:border-color .15s ease, background .15s ease}
+  .ue-nav-list.drop-alvo{border-color:var(--accent);background:var(--accent-xlo)}
 
   /* Selinho de autosave no topo do editor de unidade */
   .ue-autosave-status{ font-family:var(--mono); font-size:.64rem; letter-spacing:.04em; padding:.25rem .6rem; border-radius:999px; border:1px solid transparent; white-space:nowrap; transition:color .2s ease,background .2s ease; }
@@ -52348,7 +52361,6 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   let ueBlocksCache = [];          // SOMENTE blocos da seção atual
   let ueAllBlocksCache = [];       // todos os blocos da unidade (todas as seções)
   let ueDownloadsCache = [];
-  let ueDragSrcIndex = null;
   let ueDeleteTargetBlockId = null;
 
   // SVG icon set para os botões de tipo de bloco — mesmo padrão dos Icons
@@ -53055,12 +53067,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             const onClick = isActive
               ? 'ueScrollToBlock(' + b.id + ')'
               : "ueSelectSection(" + s.id + "); setTimeout(function(){ ueScrollToBlock(" + b.id + "); }, 50)";
-            return '<button type="button" onclick="' + onClick + '" style="all:unset;cursor:pointer;display:flex;align-items:center;gap:.4rem;padding:.25rem .4rem;border-radius:var(--radius);font-family:var(--sans);font-size:.74rem;color:var(--text-dim);line-height:1.3" onmouseover="this.style.background=\'var(--accent-xlo)\';this.style.color=\'var(--text)\'" onmouseout="this.style.background=\'\';this.style.color=\'var(--text-dim)\'">' +
+            // Arrastável: mover entre seções OU reordenar dentro da mesma (o
+            // clique continua rolando até o bloco; os pontinhos convidam).
+            return '<button type="button" class="ue-nav-block" draggable="true" data-nav-block-id="' + b.id + '" onclick="' + onClick + '">' +
+              '<span class="ue-nav-handle" title="Arraste para mover (de seção ou de ordem)">⠿</span>' +
               '<span style="opacity:.7">' + def.icon + '</span>' +
               '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">' + esc(t) + '</span>' +
               '</button>';
           }).join('')
-        : '<p style="margin:.2rem 0 0 .5rem;color:var(--text-mute);font-size:.72rem;font-style:italic">sem blocos</p>';
+        : '<p style="margin:.2rem 0 0 .5rem;color:var(--text-mute);font-size:.72rem;font-style:italic">sem blocos (arraste um para cá)</p>';
 
       return '<div style="border-left:2px solid ' + (isActive ? 'var(--accent)' : 'var(--accent-border-soft)') + ';padding-left:.55rem;display:flex;flex-direction:column;gap:.25rem">' +
         '<div style="display:flex;align-items:center;gap:.3rem">' +
@@ -53070,9 +53085,127 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           '<button class="btn btn-ghost btn-sm" style="padding:.1rem .3rem;font-size:.7rem" title="Mover para cima" ' + (idx === 0 ? 'disabled' : '') + ' onclick="ueMoveSection(' + s.id + ',\'up\')">▲</button>' +
           '<button class="btn btn-ghost btn-sm" style="padding:.1rem .3rem;font-size:.7rem" title="Mover para baixo" ' + (idx === ueSectionsCache.length-1 ? 'disabled' : '') + ' onclick="ueMoveSection(' + s.id + ',\'down\')">▼</button>' +
         '</div>' +
-        '<div style="display:flex;flex-direction:column;gap:.05rem;margin-left:.2rem">' + blocksHTML + '</div>' +
+        '<div class="ue-nav-list" data-nav-section-id="' + s.id + '" style="display:flex;flex-direction:column;gap:.05rem;margin-left:.2rem;padding:.1rem;min-height:1.2rem">' + blocksHTML + '</div>' +
       '</div>';
     }).join('');
+    _ueBindNavDnD();
+  }
+
+  // ── Organizador de blocos na coluna central (mesmo padrão do organizador de
+  // unidades do modal da matéria): delegação ligada UMA vez, índice de
+  // inserção pela metade da altura de cada item, gravação banco-primeiro. ──
+  function _ueNavDropIndex(list, clientY, draggingId){
+    const items = [].slice.call(list.querySelectorAll('.ue-nav-block'))
+      .filter(function(el){ return String(el.dataset.navBlockId) !== String(draggingId); });
+    for(let i = 0; i < items.length; i++){
+      const r = items[i].getBoundingClientRect();
+      if(clientY < r.top + r.height / 2) return i;
+    }
+    return items.length;
+  }
+  function _ueBindNavDnD(){
+    const host = document.getElementById('ueSectionsNav');
+    if(!host || host._navDnDBound) return;
+    host._navDnDBound = true;
+    let draggingId = null;
+    host.addEventListener('dragstart', function(e){
+      const el = e.target.closest && e.target.closest('.ue-nav-block');
+      if(!el) return;
+      draggingId = el.dataset.navBlockId;
+      el.classList.add('dragging');
+      try{ e.dataTransfer.setData('text/plain', draggingId); e.dataTransfer.effectAllowed = 'move'; }catch(_){}
+    });
+    host.addEventListener('dragend', function(e){
+      const el = e.target.closest && e.target.closest('.ue-nav-block');
+      if(el) el.classList.remove('dragging');
+      host.querySelectorAll('.ue-nav-list').forEach(function(l){ l.classList.remove('drop-alvo'); });
+      draggingId = null;
+    });
+    host.addEventListener('dragover', function(e){
+      const list = e.target.closest && e.target.closest('.ue-nav-list');
+      if(!list || draggingId == null) return;
+      e.preventDefault();
+      try{ e.dataTransfer.dropEffect = 'move'; }catch(_){}
+      list.classList.add('drop-alvo');
+    });
+    host.addEventListener('dragleave', function(e){
+      const list = e.target.closest && e.target.closest('.ue-nav-list');
+      if(list && !list.contains(e.relatedTarget)) list.classList.remove('drop-alvo');
+    });
+    host.addEventListener('drop', async function(e){
+      const list = e.target.closest && e.target.closest('.ue-nav-list');
+      if(!list) return;
+      e.preventDefault();
+      host.querySelectorAll('.ue-nav-list').forEach(function(l){ l.classList.remove('drop-alvo'); });
+      let id = draggingId;
+      try{ id = e.dataTransfer.getData('text/plain') || draggingId; }catch(_){}
+      if(!id) return;
+      const sid = parseInt(list.dataset.navSectionId);
+      const index = _ueNavDropIndex(list, e.clientY, id);
+      host.style.pointerEvents = 'none';           // evita drop duplo enquanto grava
+      try{ await ueMoveBlockToSection(parseInt(id), sid, index); }
+      catch(err){ console.warn('[organizar blocos] mover:', err); }
+      finally{ host.style.pointerEvents = ''; }
+    });
+  }
+
+  // Move um bloco pra (outra) seção na posição pedida. Banco PRIMEIRO — se a
+  // gravação falhar, a tela não muda (mesma regra do Publicar).
+  async function ueMoveBlockToSection(bid, sid, index){
+    const b = ueAllBlocksCache.find(function(x){ return String(x.id) === String(bid); });
+    if(!b) return false;
+    const origemSid = b.section_id;
+    const mesmaSecao = String(origemSid) === String(sid);
+    // Destino ordenado (sem o movido) + insere onde o cursor soltou.
+    const destino = ueAllBlocksCache
+      .filter(function(x){ return String(x.section_id) === String(sid) && String(x.id) !== String(bid); })
+      .sort(function(a, c){ return (a.position||0) - (c.position||0); });
+    destino.splice(Math.max(0, Math.min(index, destino.length)), 0, b);
+    // Patches: o movido leva section_id + position; os irmãos, só position.
+    const patches = destino.map(function(x, i2){
+      const p = { id: x.id, position: i2 };
+      if(String(x.id) === String(bid) && !mesmaSecao) p.section_id = sid;
+      return p;
+    });
+    if(!mesmaSecao){
+      // A seção de origem fecha o buraco (renumera sem o movido).
+      ueAllBlocksCache
+        .filter(function(x){ return String(x.section_id) === String(origemSid) && String(x.id) !== String(bid); })
+        .sort(function(a, c){ return (a.position||0) - (c.position||0); })
+        .forEach(function(x, i2){ patches.push({ id: x.id, position: i2 }); });
+    }
+    // Banco primeiro
+    if(window.UBIQUE_USE_SUPABASE){
+      for(const p of patches){
+        const upd = { position: p.position };
+        if(p.section_id != null) upd.section_id = p.section_id;
+        const { error } = await conteudo().from('unit_blocks').update(upd).eq('id', p.id);
+        if(error){
+          if(typeof window.ueToast === 'function') window.ueToast('Não movi o bloco: ' + error.message, 'error');
+          else alert('Não movi o bloco: ' + error.message);
+          await ueLoadBlocks();                    // realinha a tela com o banco
+          ueRefreshBlocksForCurrentSection();
+          ueRenderBlocks();
+          ueRenderSectionsNav();
+          return false;
+        }
+      }
+    }
+    // Espelhos locais
+    patches.forEach(function(p){
+      const upd = { position: p.position };
+      if(p.section_id != null) upd.section_id = p.section_id;
+      if(window.UbiqueStore) UbiqueStore.unit_blocks.update(p.id, upd);
+      const x = ueAllBlocksCache.find(function(y){ return String(y.id) === String(p.id); });
+      if(x) Object.assign(x, upd);
+    });
+    ueRefreshBlocksForCurrentSection();
+    ueRenderBlocks();
+    ueRenderSectionsNav();
+    if(typeof window.ueToast === 'function'){
+      window.ueToast(mesmaSecao ? 'Ordem atualizada' : 'Bloco movido de seção', 'success');
+    }
+    return true;
   }
 
   // ── Blocks ────────────────────────────────────────────────
@@ -53241,10 +53374,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // flex-shrink:0 IMPEDE que o flex column pai (#ueBlocksList) comprima
     // o card. Sem isso, blocos com conteúdo grande ficam espremidos pra
     // caber na altura visível em vez de empurrar os irmãos pra baixo.
-    return '<article class="card" data-block-card="1" data-block-id="' + b.id + '" data-index="' + i + '" draggable="true" style="padding:0;overflow:hidden;margin-bottom:1rem;flex-shrink:0">' +
+    return '<article class="card" data-block-card="1" data-block-id="' + b.id + '" data-index="' + i + '" style="padding:0;overflow:hidden;margin-bottom:1rem;flex-shrink:0">' +
       // ── header (handle + tipo + título + ações) ────────────────────
       '<header style="display:flex;align-items:center;gap:.6rem;padding:.6rem .85rem;border-bottom:1px solid var(--accent-border-soft);background:var(--bg-card);flex-shrink:0">' +
-        '<span data-block-handle title="Arrastar" style="color:var(--text-mute);font-size:.9rem;cursor:grab;flex-shrink:0;user-select:none">⠿</span>' +
         '<span class="card-label" style="margin:0;background:var(--accent-lo);padding:.15rem .5rem;border-radius:var(--radius);border:1px solid var(--accent-border)">' + def.icon + ' ' + def.label + '</span>' +
         '<span class="card-title" style="flex:1;margin:0;font-size:.95rem">' + esc(titleText) + '</span>' +
         '<div style="display:flex;gap:.3rem;flex-shrink:0">' +
@@ -59578,47 +59710,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       });
     }
 
-    // drag-and-drop
-    card.addEventListener('dragstart', function(e){
-      ueDragSrcIndex = parseInt(card.dataset.index);
-      card.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    card.addEventListener('dragend', function(){ card.classList.remove('dragging'); });
-    card.addEventListener('dragover', function(e){
-      e.preventDefault();
-      card.classList.add('drag-over');
-    });
-    card.addEventListener('dragleave', function(){ card.classList.remove('drag-over'); });
-    card.addEventListener('drop', async function(e){
-      e.preventDefault();
-      card.classList.remove('drag-over');
-      const destIndex = parseInt(card.dataset.index);
-      if(ueDragSrcIndex === null || ueDragSrcIndex === destIndex) return;
-      const reordered = ueBlocksCache.slice();
-      const moved = reordered.splice(ueDragSrcIndex, 1)[0];
-      reordered.splice(destIndex, 0, moved);
-      ueBlocksCache = reordered;
-      ueRenderBlocks();
-      // Persiste novas posições — UbiqueStore (modo mock)
-      if(window.UbiqueStore){
-        reordered.forEach(function(b, idx){
-          UbiqueStore.unit_blocks.update(b.id, { position: idx });
-          b.position = idx;
-          const all = ueAllBlocksCache.find(function(x){ return x.id === b.id; });
-          if(all) all.position = idx;
-        });
-      }
-      ueRenderSectionsNav();
-      // Supabase opcional
-      if(window.UBIQUE_USE_SUPABASE){
-        try{
-          await Promise.all(reordered.map(function(b, idx){
-            return conteudo().from('unit_blocks').update({ position: idx }).eq('id', b.id);
-          }));
-        }catch(_){}
-      }
-    });
+    // O ARRASTO saiu do card de propósito (pedido do dono): o card inteiro
+    // era draggable e isso IMPEDIA selecionar texto com o mouse dentro dos
+    // campos. Mover/reordenar blocos agora é na coluna central das seções
+    // (ueRenderSectionsNav), que também move ENTRE seções.
   }
 
   async function ueAddBlock(type){
