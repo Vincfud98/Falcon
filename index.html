@@ -32884,10 +32884,16 @@ function renderLearningBlock(block){
 // bank_ids que vivem só inline (sem migração pra UbiqueStore.questions).
 let _derivedQBankCache = null;
 let _derivedQBankCacheKey = null;
+let _derivedQBankCacheQB = null;
+let _derivedEBankCacheQB = null;
 function _getDerivedQBankMap(){
   if(!window.UbiqueStore || !UbiqueStore.unit_blocks) return {};
-  const key = (UbiqueStore.unit_blocks.list() || []).length;
-  if(_derivedQBankCache && _derivedQBankCacheKey === key) return _derivedQBankCache;
+  // Invalida por EVENTO + identidade do _QBank (a versão antiga clonava a
+  // tabela inteira só pra ler o tamanho).
+  _bankWireRev();
+  const key = _bankBlocksRev;
+  const qbNow = window._QBank || null;
+  if(_derivedQBankCache && _derivedQBankCacheKey === key && _derivedQBankCacheQB === qbNow) return _derivedQBankCache;
   const map = {};
   if(typeof _buildQuestionBankFromBlocks === 'function'){
     _buildQuestionBankFromBlocks().forEach(function(q){
@@ -32896,14 +32902,17 @@ function _getDerivedQBankMap(){
   }
   _derivedQBankCache = map;
   _derivedQBankCacheKey = key;
+  _derivedQBankCacheQB = qbNow;
   return map;
 }
 let _derivedEBankCache = null;
 let _derivedEBankCacheKey = null;
 function _getDerivedEBankMap(){
   if(!window.UbiqueStore || !UbiqueStore.unit_blocks) return {};
-  const key = (UbiqueStore.unit_blocks.list() || []).length;
-  if(_derivedEBankCache && _derivedEBankCacheKey === key) return _derivedEBankCache;
+  _bankWireRev();
+  const key = _bankBlocksRev;
+  const qbNow = window._QBank || null;
+  if(_derivedEBankCache && _derivedEBankCacheKey === key && _derivedEBankCacheQB === qbNow) return _derivedEBankCache;
   const map = {};
   if(typeof _buildEssayBankFromBlocks === 'function'){
     _buildEssayBankFromBlocks().forEach(function(q){
@@ -32912,6 +32921,7 @@ function _getDerivedEBankMap(){
   }
   _derivedEBankCache = map;
   _derivedEBankCacheKey = key;
+  _derivedEBankCacheQB = qbNow;
   return map;
 }
 
@@ -32948,18 +32958,68 @@ window._isAnnulledItem = function(itemId){
   return !!(s && s.has(String(itemId)));
 };
 
+/* Índices do _QBank — construídos UMA vez por hidratação e guardados no
+   próprio objeto (window._QBank é TROCADO inteiro ao hidratar, então o
+   índice morre junto, sozinho). Antes, cada resolveBankGroup varria as
+   tabelas inteiras e o filtro de comentários rodava POR ITEM — com o banco
+   cheio isso era O(grupos × itens × comentários) A CADA RENDER, a raiz do
+   "Buscar questões" travar a página. */
+function _qbankIndex(){
+  const bank = window._QBank;
+  if(!bank) return null;
+  if(bank._idx) return bank._idx;
+  const idx = {
+    questionById: new Map(),
+    tfByQuestion: new Map(),
+    mcByQuestion: new Map(),
+    commentsByItem: new Map(),
+    refTextByQuestion: new Map(),
+  };
+  (bank.questions || []).forEach(function(q){ if(q) idx.questionById.set(String(q.id), q); });
+  (bank.tfItems || []).forEach(function(x){
+    if(!x) return;
+    const k = String(x.question_id);
+    let l = idx.tfByQuestion.get(k); if(!l){ l = []; idx.tfByQuestion.set(k, l); }
+    l.push(x);
+  });
+  idx.tfByQuestion.forEach(function(l){ l.sort(function(a, b){ return (a.numero || 0) - (b.numero || 0); }); });
+  (bank.mcOptions || []).forEach(function(o){
+    if(!o) return;
+    const k = String(o.question_id);
+    let l = idx.mcByQuestion.get(k); if(!l){ l = []; idx.mcByQuestion.set(k, l); }
+    l.push(o);
+  });
+  idx.mcByQuestion.forEach(function(l){ l.sort(function(a, b){ return String(a.letra || '').localeCompare(String(b.letra || '')); }); });
+  (bank.tfItemComments || []).forEach(function(c){
+    if(!c) return;
+    const k = String(c.tf_item_id);
+    let l = idx.commentsByItem.get(k); if(!l){ l = []; idx.commentsByItem.set(k, l); }
+    l.push(c);
+  });
+  idx.commentsByItem.forEach(function(l){ l.sort(function(a, b){ return (a.position || 0) - (b.position || 0); }); });
+  const rtById = new Map();
+  (bank.referenceTexts || []).forEach(function(r){ if(r) rtById.set(String(r.id), r); });
+  (bank.questionRefTexts || []).forEach(function(l){
+    if(!l) return;
+    const k = String(l.question_id);
+    if(idx.refTextByQuestion.has(k)) return;    // 1º vínculo vence (mesma regra do find antigo)
+    idx.refTextByQuestion.set(k, rtById.get(String(l.reference_text_id)) || null);
+  });
+  bank._idx = idx;
+  return idx;
+}
 function resolveBankGroup(questionId, itemIds, commentChoice){
   const bank = window._QBank;
   if(!bank || questionId == null) return null;
-  const q = (bank.questions || []).find(x => String(x.id) === String(questionId));
+  const idx = _qbankIndex();
+  const q = idx ? idx.questionById.get(String(questionId)) : null;
   if(!q) return null;
   // Subconjunto opcional: importar só algumas questões do grupo.
   const subset = (Array.isArray(itemIds) && itemIds.length) ? new Set(itemIds.map(String)) : null;
   // Texto de referência (via junção question_reference_texts → reference_texts)
   let refText = '';
-  const link = (bank.questionRefTexts || []).find(l => String(l.question_id) === String(q.id));
-  if(link){
-    const rt = (bank.referenceTexts || []).find(r => String(r.id) === String(link.reference_text_id));
+  {
+    const rt = idx.refTextByQuestion.get(String(q.id));
     if(rt) refText = rt.text || rt.body || rt.conteudo || '';
   }
   const refImage = q.image_url || '';
@@ -32968,9 +33028,7 @@ function resolveBankGroup(questionId, itemIds, commentChoice){
   let items = [];
   if(q.type === 'multiple_choice'){
     if(!subset || subset.has(String(q.id))){
-      const opts = (bank.mcOptions || [])
-        .filter(o => String(o.question_id) === String(q.id))
-        .sort((a, b) => String(a.letra || '').localeCompare(String(b.letra || '')));
+      const opts = idx.mcByQuestion.get(String(q.id)) || [];   // já ordenadas no índice
       const correct = opts.find(o => o.correct);
       items = [{
         id: q.id,
@@ -32994,17 +33052,13 @@ function resolveBankGroup(questionId, itemIds, commentChoice){
     }
   } else {
     // true_false (Certo/Errado) — cada tf_item é uma QUESTÃO respondível
-    let tf = (bank.tfItems || [])
-      .filter(t => String(t.question_id) === String(q.id))
-      .sort((a, b) => (a.numero || 0) - (b.numero || 0));
+    let tf = idx.tfByQuestion.get(String(q.id)) || [];          // já ordenados no índice
     if(subset) tf = tf.filter(t => subset.has(String(t.id)));
     items = tf.map(t => {
       // E3.3/E3.4 — gabarito a exibir: o escolhido pela unidade (commentChoice) se houver;
       // senão o 1º comentário de tf_item_comments (por position); fallback ao legado.
       let gab = t.comment || '';
-      const cs = (bank.tfItemComments || [])
-        .filter(c => String(c.tf_item_id) === String(t.id))
-        .sort((a, b) => (a.position || 0) - (b.position || 0));
+      const cs = idx.commentsByItem.get(String(t.id)) || [];    // já ordenados no índice
       let chosen = null;
       if(commentChoice && commentChoice[String(t.id)] != null){
         chosen = cs.find(c => String(c.id) === String(commentChoice[String(t.id)])) || null;
@@ -38100,18 +38154,35 @@ function _bankEditalDescendants(topicId){
    Idem pra edital_topics via tabela edital_topic_units. */
 let _unitContextCache = null;
 let _unitContextCacheKey = null;
+/* ── Revisões por EVENTO pros caches do Banco ──────────────────────────
+   Antes, cada checagem de cache clonava tabelas INTEIRAS só pra comparar
+   tamanho (list() faz deep clone de tudo — unit_blocks carrega o conteúdo
+   completo da plataforma). Agora um contador sobe quando a tabela muda de
+   verdade, e o cache compara número com número. */
+let _bankBlocksRev = 1;
+let _unitCtxRev = 1;
+function _bankWireRev(){
+  if(window.__bankRevWired || !window.UbiqueStore || !UbiqueStore.subscribe) return;
+  window.__bankRevWired = true;
+  UbiqueStore.subscribe(function(evt){
+    if(!evt || !evt.type) return;
+    const t = evt.type;
+    if(t === 'sync' || t === 'reset'){ _bankBlocksRev++; _unitCtxRev++; return; }
+    if(t.indexOf('unit_blocks') === 0) _bankBlocksRev++;
+    if(t.indexOf('units') === 0 || t.indexOf('chapters') === 0 || t.indexOf('modules') === 0 ||
+       t.indexOf('editais') === 0 || t.indexOf('edital_topics') === 0 ||
+       t.indexOf('edital_topic_units') === 0 || t.indexOf('exams') === 0 ||
+       t.indexOf('subjects') === 0) _unitCtxRev++;
+  });
+}
 function _bankBuildUnitContext(){
   if(!window.UbiqueStore) return {};
   const store = UbiqueStore;
-  // Invalida cache se qualquer das tabelas mudou (simples: rev count)
-  const rev = [
-    store.units && store.units.list ? store.units.list().length : 0,
-    store.chapters && store.chapters.list ? store.chapters.list().length : 0,
-    store.modules && store.modules.list ? store.modules.list().length : 0,
-    store.edital_topic_units && store.edital_topic_units.list ? store.edital_topic_units.list().length : 0,
-    store.editais && store.editais.list ? store.editais.list().length : 0,
-    store.edital_topics && store.edital_topics.list ? store.edital_topics.list().length : 0
-  ].join('|');
+  // Invalida por EVENTO (contador) — a versão antiga clonava 6 tabelas a
+  // CADA CHAMADA só pra ler o tamanho, e esta função roda várias vezes por
+  // render do Banco.
+  _bankWireRev();
+  const rev = 'r' + _unitCtxRev;
   if(_unitContextCache && _unitContextCacheKey === rev) return _unitContextCache;
 
   const modules = (store.modules && store.modules.list && store.modules.list()) || [];
@@ -38407,105 +38478,147 @@ function _bankSubjectIdOfMateria(mid){
    inline em blocos objective_questions/quiz/essay vira um item sintético
    com appears_in apontando pra unit do bloco. Idempotente e sem mutar
    nada — só compõe o snapshot consultado pelo filtro. */
-function _buildQuestionBankFromBlocks(){
-  if(!window.UbiqueStore || !UbiqueStore.unit_blocks) return [];
-  const blocks = UbiqueStore.unit_blocks.list() || [];
-  const out = [];
-  blocks.forEach(function(b){
-    if(!b || !b.content) return;
-    if(b.type !== 'objective_questions' && b.type !== 'quiz') return;
-    const groups = b.content.groups || [];
-    groups.forEach(function(g){
-      // Fase Q2 (expand): grupo que referencia o banco real → resolve e emite os
-      // itens resolvidos (com appears_in), pro filtro do Banco enxergá-los.
-      if(g && g.bank_question_id && typeof window.resolveBankGroup === 'function'){
-        const bg = window.resolveBankGroup(g.bank_question_id, g.bank_item_ids, g.bank_item_comments);
-        if(bg && Array.isArray(bg.items) && bg.items.length){
-          bg.items.forEach(function(it){
-            const item = Object.assign({}, it);
-            if(!item.statement) item.statement = it.assertion || '';
+/* ── UMA passada cacheada pelos blocos ────────────────────────────────
+   Os construtores antigos varriam UbiqueStore.unit_blocks.list() — um deep
+   clone do conteúdo INTEIRO da plataforma — a CADA render do Banco (e o
+   repaint dos filtros re-renderiza a cada clique). Agora a passada roda uma
+   vez por mudança de dados (contador por evento + identidade do _QBank) e
+   serve os três consumidores: itens de questões, de discursivas e os
+   metadados de grupo das seções de resultado. */
+let _bankBuiltCache = null;
+function _bankBuiltData(){
+  _bankWireRev();
+  const qb = window._QBank || null;
+  if(_bankBuiltCache && _bankBuiltCache.rev === _bankBlocksRev && _bankBuiltCache.qb === qb){
+    return _bankBuiltCache;
+  }
+  const d = { rev: _bankBlocksRev, qb: qb, questions: [], essays: [], quizGroupMeta: {} };
+  if(window.UbiqueStore && UbiqueStore.unit_blocks){
+    const blocks = UbiqueStore.unit_blocks.list() || [];
+    // questões objetivas (+ metadados de grupo pro agrupamento das seções)
+    (function(){
+      const out = d.questions;
+      blocks.forEach(function(b){
+        if(!b || !b.content) return;
+        if(b.type !== 'objective_questions' && b.type !== 'quiz') return;
+        const groups = b.content.groups || [];
+        groups.forEach(function(g){
+          if(!g) return;
+          const chave = String(b.id) + '|' + String(g.id || '');
+          if(g.bank_question_id && typeof window.resolveBankGroup === 'function'){
+            const bg = window.resolveBankGroup(g.bank_question_id, g.bank_item_ids, g.bank_item_comments);
+            if(bg && Array.isArray(bg.items) && bg.items.length){
+              d.quizGroupMeta[chave] = {
+                enunciado:       bg.enunciado || '',
+                description:     bg.description || '',
+                title:           bg.title || '',
+                reference_text:  bg.reference_text || '',
+                reference_image: bg.reference_image || '',
+                origin:          bg.origin || ''
+              };
+              bg.items.forEach(function(it){
+                const item = Object.assign({}, it);
+                if(!item.statement) item.statement = it.assertion || '';
+                if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
+                item.bank_question_id = g.bank_question_id;  // p/ mapear a busca semântica (IA)
+                item.appears_in = [{ unit_id: b.unit_id, block_id: b.id, group_id: g.id }];
+                item._refTextForSearch = bg.reference_text || bg.enunciado || bg.description || '';
+                out.push(item);
+              });
+              return;
+            }
+          }
+          d.quizGroupMeta[chave] = {
+            enunciado:       g.enunciado || g.description || g.title || '',
+            description:     g.description || '',
+            title:           g.title || '',
+            reference_text:  g.reference_text || '',
+            reference_image: g.reference_image || '',
+            origin:          g.origin || ''
+          };
+          const list = (g.questions && g.questions.length ? g.questions : (g.items || []));
+          list.forEach(function(q){
+            if(!q) return;
+            const item = Object.assign({}, q);
             if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
-            item.bank_question_id = g.bank_question_id;  // p/ mapear a busca semântica (IA)
             item.appears_in = [{ unit_id: b.unit_id, block_id: b.id, group_id: g.id }];
-            item._refTextForSearch = bg.reference_text || bg.enunciado || bg.description || '';
+            item._refTextForSearch = g.reference_text || g.enunciado || g.description || '';
             out.push(item);
           });
-          return;
-        }
-      }
-      const list = (g.questions && g.questions.length ? g.questions : (g.items || []));
-      list.forEach(function(q){
-        if(!q) return;
-        // Item sintético com tudo que _bankApplyFilters precisa.
-        // NÃO herdamos reference_text/reference_image do grupo — a referência
-        // (enunciado de apoio + imagem) vive no header do grupo no bloco
-        // sintético renderizado. Se herdar aqui, o resolver pelo
-        // QuestionBank.getById devolve item com referência, e o render do
-        // quiz duplica (header do grupo + dentro da questão).
-        // Mantém keyword-search funcional: a referência continua sendo
-        // varrida pelo grupo (g.reference_text é puxado em _bankBuildResultSections).
-        const item = Object.assign({}, q);
-        if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
-        // appears_in pra cadeia indireta funcionar
-        item.appears_in = [{ unit_id: b.unit_id, block_id: b.id, group_id: g.id }];
-        // _refTextForSearch: campo INTERNO usado só pelo filtro de keyword,
-        // pra continuar batendo em texto do enunciado de apoio sem poluir
-        // o render. _bankApplyFilters lê isso adicionalmente ao statement.
-        item._refTextForSearch = g.reference_text || g.enunciado || g.description || '';
-        out.push(item);
+        });
       });
-    });
-  });
-  return out;
+    })();
+    // discursivas
+    (function(){
+      const out = d.essays;
+      blocks.forEach(function(b){
+        if(!b || !b.content) return;
+        if(b.type !== 'essay') return;
+        const items = b.content.items || [];
+        const qb = window._QBank || {};
+        items.forEach(function(it){
+          if(!it) return;
+          // O item do bloco referencia a discursiva por bank_question_id (banco REAL
+          // questoes — conteúdo em window._QBank) OU por bank_id (legado —
+          // UbiqueStore.essays). Sem referência não há o que mostrar — ignora.
+          const isQBankRef = it.bank_question_id != null;
+          const bankId = it.bank_question_id || it.bank_id || it.id;
+          if(!bankId) return;
+          // Conteúdo SÓ pros filtros (ano/origem/keyword). O render usa o resolver
+          // com o ref ORIGINAL (preservado em _essayRef), então não dependemos do
+          // que montamos aqui pra exibir. NÃO usar EssayBank.getById: ele cai no
+          // _getDerivedEBankMap → este mesmo builder → recursão infinita.
+          let banked = null;
+          if(isQBankRef){
+            const _qi = (typeof _qbankIndex === 'function') ? _qbankIndex() : null;
+            banked = (_qi && _qi.questionById.get(String(bankId))) || null;
+          } else if(window.UbiqueStore && UbiqueStore.essays && UbiqueStore.essays.get){
+            banked = UbiqueStore.essays.get(bankId) || null;
+          }
+          const item = Object.assign({}, banked || {}, it);
+          item.id = String(bankId);                  // CRÍTICO: sobrevive ao dedup de _bankItemsForEssays
+          item.bank_question_id = String(bankId);    // p/ mapear a busca semântica (IA) na D2
+          // Ref original pro render: o resolver _resolveEssayItem usa bank_id OU
+          // bank_question_id — preservamos exatamente o que a unidade usa, pro
+          // conteúdo (enunciado/critérios/modelos/textos-base) resolver igual.
+          item._essayRef = isQBankRef ? { bank_question_id: String(bankId) } : { bank_id: String(bankId) };
+          // statement p/ a busca por palavra-chave bater no enunciado/comando.
+          if(!item.statement) item.statement = (banked && (banked.command || banked.enunciado)) || item.statement || '';
+          // source_type DERIVADO do origin (igual ao resolver/selo na linha ~14926):
+          // não herdamos um source_type possivelmente desatualizado do item do bloco —
+          // senão o selo diz "Ubique" (resolver usa origin) mas o filtro de Origem
+          // discorda (usava o source_type herdado) → bug "ubique não acha nada".
+          item.source_type = item.origin ? 'past_exam' : 'ubique';
+          // appears_in: faz a cadeia matéria/edital/concurso funcionar (unit → edital).
+          item.appears_in = [{ unit_id: b.unit_id, block_id: b.id }];
+          out.push(item);
+        });
+      });
+  
+    })();
+  }
+  _bankBuiltCache = d;
+  return d;
 }
-
-function _buildEssayBankFromBlocks(){
-  if(!window.UbiqueStore || !UbiqueStore.unit_blocks) return [];
-  const blocks = UbiqueStore.unit_blocks.list() || [];
-  const out = [];
-  blocks.forEach(function(b){
-    if(!b || !b.content) return;
-    if(b.type !== 'essay') return;
-    const items = b.content.items || [];
-    const qb = window._QBank || {};
-    items.forEach(function(it){
-      if(!it) return;
-      // O item do bloco referencia a discursiva por bank_question_id (banco REAL
-      // questoes — conteúdo em window._QBank) OU por bank_id (legado —
-      // UbiqueStore.essays). Sem referência não há o que mostrar — ignora.
-      const isQBankRef = it.bank_question_id != null;
-      const bankId = it.bank_question_id || it.bank_id || it.id;
-      if(!bankId) return;
-      // Conteúdo SÓ pros filtros (ano/origem/keyword). O render usa o resolver
-      // com o ref ORIGINAL (preservado em _essayRef), então não dependemos do
-      // que montamos aqui pra exibir. NÃO usar EssayBank.getById: ele cai no
-      // _getDerivedEBankMap → este mesmo builder → recursão infinita.
-      let banked = null;
-      if(isQBankRef){
-        banked = (qb.questions || []).find(function(x){ return String(x.id) === String(bankId); }) || null;
-      } else if(window.UbiqueStore && UbiqueStore.essays && UbiqueStore.essays.get){
-        banked = UbiqueStore.essays.get(bankId) || null;
-      }
-      const item = Object.assign({}, banked || {}, it);
-      item.id = String(bankId);                  // CRÍTICO: sobrevive ao dedup de _bankItemsForEssays
-      item.bank_question_id = String(bankId);    // p/ mapear a busca semântica (IA) na D2
-      // Ref original pro render: o resolver _resolveEssayItem usa bank_id OU
-      // bank_question_id — preservamos exatamente o que a unidade usa, pro
-      // conteúdo (enunciado/critérios/modelos/textos-base) resolver igual.
-      item._essayRef = isQBankRef ? { bank_question_id: String(bankId) } : { bank_id: String(bankId) };
-      // statement p/ a busca por palavra-chave bater no enunciado/comando.
-      if(!item.statement) item.statement = (banked && (banked.command || banked.enunciado)) || item.statement || '';
-      // source_type DERIVADO do origin (igual ao resolver/selo na linha ~14926):
-      // não herdamos um source_type possivelmente desatualizado do item do bloco —
-      // senão o selo diz "Ubique" (resolver usa origin) mas o filtro de Origem
-      // discorda (usava o source_type herdado) → bug "ubique não acha nada".
-      item.source_type = item.origin ? 'past_exam' : 'ubique';
-      // appears_in: faz a cadeia matéria/edital/concurso funcionar (unit → edital).
-      item.appears_in = [{ unit_id: b.unit_id, block_id: b.id }];
-      out.push(item);
-    });
+/* As fachadas devolvem CÓPIAS rasas (com appears_in/options próprios):
+   o contrato antigo era "objetos novos a cada render" — se algum consumidor
+   mexer num item no lugar, o efeito não pode vazar pro cache. Custa ~1-2ms
+   por render; a economia real está na passada única acima. */
+function _buildQuestionBankFromBlocks(){
+  return _bankBuiltData().questions.map(function(q){
+    const c = Object.assign({}, q);
+    if(Array.isArray(q.appears_in)) c.appears_in = q.appears_in.slice();
+    if(Array.isArray(q.options))    c.options    = q.options.slice();
+    return c;
   });
-  return out;
+}
+function _buildEssayBankFromBlocks(){
+  return _bankBuiltData().essays.map(function(q){
+    const c = Object.assign({}, q);
+    if(Array.isArray(q.appears_in)) c.appears_in = q.appears_in.slice();
+    if(q._essayRef) c._essayRef = Object.assign({}, q._essayRef);
+    return c;
+  });
 }
 
 // Escopo da matéria ativa no banco: se houver matéria ativa, mantém só os
@@ -39343,43 +39456,14 @@ function _bankBuildResultSections(filteredQuestions, mode){
   // texto-base/imagem NÃO estão no bloco — vêm do banco. Por isso resolvemos
   // via resolveBankGroup (idêntico ao que a unidade faz em normalizeQuizBlock),
   // senão o Banco mostra a questão "órfã", sem referência.
+  // Metadados prontos da passada única (_bankBuiltData) — antes esta função
+  // re-clonava e re-varria TODOS os blocos (e re-resolvia grupos) a cada
+  // render, por cima do trabalho que o construtor de itens já tinha feito.
   const originalGroupsMap = {};
-  if(window.UbiqueStore && UbiqueStore.unit_blocks){
-    (UbiqueStore.unit_blocks.list() || []).forEach(function(b){
-      if(!b || !b.content) return;
-      if(b.type !== 'objective_questions' && b.type !== 'quiz') return;
-      if(!Array.isArray(b.content.groups)) return;
-      b.content.groups.forEach(function(g){
-        const key = String(b.id) + '|' + String(g.id || '');
-        if(!neededKeys.has(key)) return;  // só os grupos que vão aparecer
-        let meta = null;
-        if(g.bank_question_id && typeof window.resolveBankGroup === 'function'){
-          const bg = window.resolveBankGroup(g.bank_question_id, g.bank_item_ids, g.bank_item_comments);
-          if(bg){
-            meta = {
-              enunciado:       bg.enunciado || '',
-              description:     bg.description || '',
-              title:           bg.title || '',
-              reference_text:  bg.reference_text || '',
-              reference_image: bg.reference_image || '',
-              origin:          bg.origin || ''
-            };
-          }
-        }
-        if(!meta){
-          meta = {
-            enunciado:       g.enunciado || g.description || g.title || '',
-            description:     g.description || '',
-            title:           g.title || '',
-            reference_text:  g.reference_text || '',
-            reference_image: g.reference_image || '',
-            origin:          g.origin || ''
-          };
-        }
-        originalGroupsMap[key] = meta;
-      });
-    });
-  }
+  const _metaAll = (typeof _bankBuiltData === 'function') ? _bankBuiltData().quizGroupMeta : {};
+  neededKeys.forEach(function(key){
+    if(_metaAll[key]) originalGroupsMap[key] = _metaAll[key];
+  });
   const ctx = _bankBuildUnitContext();
   const subjById = {};
   ((window.UbiqueStore && UbiqueStore.subjects && UbiqueStore.subjects.list && UbiqueStore.subjects.list()) || [])
