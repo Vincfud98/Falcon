@@ -43055,7 +43055,16 @@ const StudyTimer = (function(){
       '.st-float .dot{width:8px;height:8px;border-radius:50%;background:#5dd49f;animation:stpulse 1.6s infinite}',
       '.st-float.paused .dot{animation:none;background:var(--text-mute,rgba(240,236,228,.32))}',
       '@keyframes stpulse{0%,100%{opacity:1}50%{opacity:.35}}',
-      '.st-float .tm{font-family:var(--mono);font-size:.84rem;color:var(--text)}',
+      // Tempo correndo gera ansiedade (pedido do Diego): fica só a bolinha
+      // pulsando; passar o mouse revela o tempo; clique abre o modal (que
+      // sempre mostra o relógio — é o caminho do touch, que não tem hover).
+      '.st-float{min-width:34px;min-height:34px;justify-content:center}',
+      '.st-float .tm{font-family:var(--mono);font-size:.84rem;color:var(--text);display:none}',
+      '.st-float:hover .tm{display:block}',
+      // Ícone de cronômetro quando NÃO há sessão (fechar não some mais)
+      'button.st-idle{padding:.5rem .55rem;cursor:pointer}',
+      '.st-idle svg{width:16px;height:16px;stroke:var(--text-dim);fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;display:block}',
+      '.st-idle:hover svg{stroke:var(--accent)}',
       '.st-float .mat{font-size:.64rem;color:var(--text-mute)}',
       // toast pós-salvar (auto e manual)
       '.st-toast{position:fixed;left:1.3rem;bottom:1.3rem;z-index:915;background:var(--bg-elevated);border:1px solid var(--accent-border,rgba(200,169,126,.3));border-left:3px solid var(--accent);border-radius:4px;padding:.75rem .95rem;font-size:.75rem;color:var(--text-dim);max-width:340px;line-height:1.55;box-shadow:0 18px 44px -18px rgba(0,0,0,.7)}',
@@ -43128,8 +43137,10 @@ const StudyTimer = (function(){
     let el = document.getElementById('stFloat');
     // Pausou ≠ sumiu (pedido do dono): a pill fica com o tempo congelado e o
     // ponto sem pulsar — senão o aluno teria que voltar ao Desempenho só pra
-    // retomar. Ela só sai quando a sessão acaba (salva ou descartada).
-    if(!S){ if(el) el.remove(); return; }
+    // retomar. Sem sessão, o lugar dela vira o ÍCONE de cronômetro (pedido do
+    // Diego: fechar não pode fazer o relógio desaparecer por completo).
+    if(!S){ if(el) el.remove(); _idleUpdate(); return; }
+    const _idle = document.getElementById('stIdle'); if(_idle) _idle.remove();
     _ensureStyles();
     if(!el){
       el = document.createElement('div');
@@ -43150,6 +43161,26 @@ const StudyTimer = (function(){
     _pillAplicaPos(el);
   }
 
+  /* Ícone de cronômetro no lugar da pill quando não há sessão: porta pra
+     reabrir e iniciar de novo (cronômetro ou timer). Compartilha posição
+     salva e arrasto com a pill. */
+  function _idleUpdate(){
+    let el = document.getElementById('stIdle');
+    const logado = !!(window.Auth && Auth.getUser && Auth.getUser());
+    if(S || !logado){ if(el) el.remove(); return; }
+    _ensureStyles();
+    if(!el){
+      el = document.createElement('button');
+      el.type = 'button'; el.id = 'stIdle'; el.className = 'st-float st-idle';
+      el.title = 'Registrar estudo'; el.setAttribute('aria-label', 'Registrar estudo (cronômetro ou timer)');
+      el.innerHTML = '<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 13l2.4-2.4"/><path d="M9 2h6"/><path d="M12 2v3"/></svg>';
+      el.addEventListener('click', function(){ if(_pillDragJust) return; open(); });
+      _pillDrag(el);
+      document.body.appendChild(el);
+    }
+    _pillAplicaPos(el);
+  }
+
   function _tickStart(){
     _pillUpdate();                     // pill aparece JÁ, não no 1º tick
     if(_tick) return;
@@ -43157,7 +43188,7 @@ const StudyTimer = (function(){
       if(!S){ _tickStop(); return; }
       // timer chegou ao fim → salva sozinho
       if(S.kind === 'manual' && S.mode === 'timer' && S.running && _elapsedSec() >= (S.targetSec || 0)){
-        _finishAndSave();
+        _finishAndSave('tempo');
         return;
       }
       // auto: pausa por inatividade
@@ -43196,7 +43227,7 @@ const StudyTimer = (function(){
   }
 
   /* ── toast pós-salvar (Editar / Apagar) ── */
-  function _toast(rowId, resumo, rowData){
+  function _toast(rowId, resumo, rowData, lead){
     document.querySelectorAll('.st-toast').forEach(function(t){ t.remove(); });
     _ensureStyles();
     const t = document.createElement('div');
@@ -43208,7 +43239,7 @@ const StudyTimer = (function(){
       setTimeout(function(){ if(t.isConnected) t.remove(); }, 15000);
       return;
     }
-    t.innerHTML = '<b>Estudo registrado:</b> ' + _esc(resumo) + '.<br>' +
+    t.innerHTML = (lead || '<b>Estudo registrado:</b> ') + _esc(resumo) + '.<br>' +
       '<a data-st-act="edit">Editar</a><a data-st-act="del">Apagar</a>';
     t.querySelector('[data-st-act="edit"]').addEventListener('click', function(){
       t.remove(); _editRow = Object.assign({ id: rowId }, rowData); open('inserir');
@@ -43221,7 +43252,7 @@ const StudyTimer = (function(){
   }
 
   /* ── finalizar sessão ativa (manual ou auto) e salvar ── */
-  async function _finishAndSave(){
+  async function _finishAndSave(motivo){
     if(!S) return;
     const total = _elapsedSec();
     const sess = S; S = null; _save(); _tickStop();
@@ -43240,7 +43271,7 @@ const StudyTimer = (function(){
     };
     const id = await _insertSession(row);
     const resumo = _fmtMin(row.duration_min) + ' em ' + (sess.nome || 'Estudo') + (sess.unitLabel ? ' · ' + sess.unitLabel : '');
-    _toast(id, resumo, row);
+    _toast(id, resumo, row, motivo === 'tempo' ? '<b>Tempo esgotado</b> — estudo registrado: ' : null);
   }
   function _discard(){
     S = null; _save(); _tickStop();
@@ -43501,6 +43532,22 @@ const StudyTimer = (function(){
       _bootAuto = saved;                // espera a unidade reabrir; senão, salva o órfão
       _bootClaimT = setTimeout(function(){ if(_bootAuto) _flushBootAuto(); }, 8000);
     }
+  })();
+
+  // Ícone ocioso: no boot Auth ainda não restaurou (sem ícone); os eventos
+  // de hidratação do Store são o sinal de que o login chegou. Debounce leve.
+  _pillUpdate();
+  (function(){
+    let _t = null;
+    try{
+      UbiqueStore.subscribe(function(){ clearTimeout(_t); _t = setTimeout(_pillUpdate, 500); });
+    }catch(_){}
+    // Abrir/fechar o drawer do tutor muda o canto padrão — a pill viva se
+    // reposiciona no tick; o ícone (sem tick) se reposiciona pós-clique.
+    document.addEventListener('click', function(){
+      const el = document.getElementById('stIdle');
+      if(el) setTimeout(function(){ _pillAplicaPos(el); }, 350);
+    });
   })();
 
   // Edição vinda de fora (lista de sessões da aba Rotina): abre o modal
