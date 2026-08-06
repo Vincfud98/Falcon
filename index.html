@@ -10805,73 +10805,7 @@ window.TAG_REGISTRY = {
           }
         } catch(e){ console.warn('[hydrate glossario] exception:', e); }
         })(),
-        (async () => {
-        // Fase 3.2 — hidrata o DIRETÓRIO de usuários (pra menções @ funcionarem).
-        // Sem a lista de perfis da plataforma, o UserDirectory fica vazio e o
-        // autocomplete do "@" não sugere ninguém. Faz merge (preserva o que já
-        // veio do mirror do usuário atual / autores de comentários).
-        // PRIVACIDADE (2026-07-16): lê a VITRINE (crm.user_directory), não a tabela.
-        // A tabela tinha regra `USING (true)`: qualquer aluno logado baixava os
-        // perfis INTEIROS — o nome completo de quem marcou "não mostrar" (a defesa
-        // era só na pintura, em ~20069) e o `genero` de TODO MUNDO, que nenhuma
-        // tela lê de terceiros. A vitrine já sai mascarada da origem e não tem
-        // gênero; a tabela agora é "só o meu perfil, ou admin".
-        // A vitrine NÃO mascara a minha própria linha (o `or user_id = auth.uid()`
-        // no SQL) — senão a /conta abriria com o nome vazio e o Salvar gravaria
-        // nulo, ou seja, o conserto de privacidade apagaria o nome do aluno.
-        try {
-          const { data: profs, error } = await window._sb.schema('crm').from('user_directory')
-            .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform');
-          if(!error && Array.isArray(profs) && UbiqueStore.user_profiles){
-            const list = UbiqueStore.user_profiles.list() || [];
-            profs.forEach(p => {
-              if(!p || !p.user_id) return;
-              const merged = {
-                user_id:        p.user_id,
-                displayName:    p.display_name || '',
-                nickname:       p.nickname || '',
-                namePublic:     p.full_name_public !== false,
-                handle:         p.handle || '',
-                bio:            p.bio || '',
-                photoUrl:       p.photo_url || '',
-                photoTransform: p.photo_transform || { x:0, y:0, scale:1 },
-                updated_at:     Date.now()
-              };
-              const existing = list.find(x => x && x.user_id === p.user_id);
-              if(existing) UbiqueStore.user_profiles.update(existing.id, merged);
-              else UbiqueStore.user_profiles.add(Object.assign({ created_at: Date.now() }, merged));
-            });
-            console.log('[hydrate user_profiles] ✅', { perfis: profs.length });
-          } else if(error){ console.warn('[hydrate user_profiles] erro:', error); }
-        } catch(e){ console.warn('[hydrate user_profiles] exception:', e); }
-        // MEU perfil, da TABELA — depois da vitrine, pra sobrescrever a minha
-        // linha com o que só eu posso ver. Hoje isso é o `genero`, que saiu do
-        // diretório por ser dado pessoal que ninguém lê de terceiros. Sem esta
-        // leitura, o <select> de gênero em /conta abriria em "Prefiro não dizer"
-        // e o primeiro Salvar apagaria a escolha do aluno.
-        // A policy nova (user_id = auth.uid() or is_admin()) permite exatamente
-        // esta leitura — é a única linha da tabela que eu enxergo.
-        try {
-          const _me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-          if(_me && _me.id && UbiqueStore.user_profiles){
-            const { data: meu, error: meuErr } = await window._sb.schema('crm').from('user_profiles')
-              .select('user_id, display_name, genero, full_name_public')
-              .eq('user_id', _me.id).maybeSingle();
-            if(!meuErr && meu){
-              const list = UbiqueStore.user_profiles.list() || [];
-              const existing = list.find(x => x && x.user_id === meu.user_id);
-              const patch = {
-                genero: meu.genero || '',
-                displayName: meu.display_name || '',
-                namePublic: meu.full_name_public !== false,
-                updated_at: Date.now()
-              };
-              if(existing) UbiqueStore.user_profiles.update(existing.id, patch);
-              else UbiqueStore.user_profiles.add(Object.assign({ user_id: meu.user_id, created_at: Date.now() }, patch));
-            } else if(meuErr){ console.warn('[hydrate meu perfil] erro:', meuErr); }
-          }
-        } catch(e){ console.warn('[hydrate meu perfil] exception:', e); }
-        })(),
+        window._hydrateDirectory(),
         (async () => {
         // Foto do sistema (config global, crm.platform_settings) — avatar das
         // notificações de sistema. Linha única id='default'; leitura liberada.
@@ -11094,6 +11028,83 @@ window.TAG_REGISTRY = {
   };
 
   // Dispara hydrate em paralelo. Quando termina, re-popula e re-renderiza.
+/* Hidrata o DIRETÓRIO de perfis (vitrine crm.user_directory) + o MEU perfil.
+   CAUSA-RAIZ dos "colegas sumiram": este bloco vivia SÓ no boot, que corre
+   contra a restauração da sessão — perdendo a corrida, a requisição sai como
+   anônima (a vitrine é só pra logado: 42501) e NINGUÉM re-buscava depois.
+   Os vínculos (follows) chegavam, mas sem perfil na vitrine o app descartava
+   os colegas em silêncio. Agora a função é nomeada e roda TAMBÉM no
+   initUserSession — garantida depois do login, nos dois fluxos (boot com
+   sessão e login sem reload). Idempotente: faz merge, nunca duplica. */
+window._hydrateDirectory = async function(){
+
+        // Fase 3.2 — hidrata o DIRETÓRIO de usuários (pra menções @ funcionarem).
+        // Sem a lista de perfis da plataforma, o UserDirectory fica vazio e o
+        // autocomplete do "@" não sugere ninguém. Faz merge (preserva o que já
+        // veio do mirror do usuário atual / autores de comentários).
+        // PRIVACIDADE (2026-07-16): lê a VITRINE (crm.user_directory), não a tabela.
+        // A tabela tinha regra `USING (true)`: qualquer aluno logado baixava os
+        // perfis INTEIROS — o nome completo de quem marcou "não mostrar" (a defesa
+        // era só na pintura, em ~20069) e o `genero` de TODO MUNDO, que nenhuma
+        // tela lê de terceiros. A vitrine já sai mascarada da origem e não tem
+        // gênero; a tabela agora é "só o meu perfil, ou admin".
+        // A vitrine NÃO mascara a minha própria linha (o `or user_id = auth.uid()`
+        // no SQL) — senão a /conta abriria com o nome vazio e o Salvar gravaria
+        // nulo, ou seja, o conserto de privacidade apagaria o nome do aluno.
+        try {
+          const { data: profs, error } = await window._sb.schema('crm').from('user_directory')
+            .select('user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform');
+          if(!error && Array.isArray(profs) && UbiqueStore.user_profiles){
+            const list = UbiqueStore.user_profiles.list() || [];
+            profs.forEach(p => {
+              if(!p || !p.user_id) return;
+              const merged = {
+                user_id:        p.user_id,
+                displayName:    p.display_name || '',
+                nickname:       p.nickname || '',
+                namePublic:     p.full_name_public !== false,
+                handle:         p.handle || '',
+                bio:            p.bio || '',
+                photoUrl:       p.photo_url || '',
+                photoTransform: p.photo_transform || { x:0, y:0, scale:1 },
+                updated_at:     Date.now()
+              };
+              const existing = list.find(x => x && x.user_id === p.user_id);
+              if(existing) UbiqueStore.user_profiles.update(existing.id, merged);
+              else UbiqueStore.user_profiles.add(Object.assign({ created_at: Date.now() }, merged));
+            });
+            console.log('[hydrate user_profiles] ✅', { perfis: profs.length });
+          } else if(error){ console.warn('[hydrate user_profiles] erro:', error); }
+        } catch(e){ console.warn('[hydrate user_profiles] exception:', e); }
+        // MEU perfil, da TABELA — depois da vitrine, pra sobrescrever a minha
+        // linha com o que só eu posso ver. Hoje isso é o `genero`, que saiu do
+        // diretório por ser dado pessoal que ninguém lê de terceiros. Sem esta
+        // leitura, o <select> de gênero em /conta abriria em "Prefiro não dizer"
+        // e o primeiro Salvar apagaria a escolha do aluno.
+        // A policy nova (user_id = auth.uid() or is_admin()) permite exatamente
+        // esta leitura — é a única linha da tabela que eu enxergo.
+        try {
+          const _me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+          if(_me && _me.id && UbiqueStore.user_profiles){
+            const { data: meu, error: meuErr } = await window._sb.schema('crm').from('user_profiles')
+              .select('user_id, display_name, genero, full_name_public')
+              .eq('user_id', _me.id).maybeSingle();
+            if(!meuErr && meu){
+              const list = UbiqueStore.user_profiles.list() || [];
+              const existing = list.find(x => x && x.user_id === meu.user_id);
+              const patch = {
+                genero: meu.genero || '',
+                displayName: meu.display_name || '',
+                namePublic: meu.full_name_public !== false,
+                updated_at: Date.now()
+              };
+              if(existing) UbiqueStore.user_profiles.update(existing.id, patch);
+              else UbiqueStore.user_profiles.add(Object.assign({ user_id: meu.user_id, created_at: Date.now() }, patch));
+            } else if(meuErr){ console.warn('[hydrate meu perfil] erro:', meuErr); }
+          }
+        } catch(e){ console.warn('[hydrate meu perfil] exception:', e); }
+};
+
   hydrateFromSupabase().then(ok => {
     if(ok){
       rebuildCourses();
@@ -21985,6 +21996,10 @@ async function initUserSession(user){
       if(u && u.id) _refreshNotifsAndFollows(u.id);
     }, 30000);
   }
+  // 3.5) Diretório de perfis (vitrine) — a leitura do boot pode ter saído
+  //      como anônima (42501) se a sessão ainda não tinha restaurado; aqui a
+  //      sessão JÁ existe, então esta chamada nunca volta vazia por corrida.
+  if(typeof window._hydrateDirectory === 'function') window._hydrateDirectory().catch(()=>{});
   // 4) Follows
   if(window.Follows && typeof Follows.hydrate === 'function') Follows.hydrate(user.id).catch(()=>{});
   // 5) Acesso do dia (entrou na plataforma — conta mesmo que só leia um texto)
@@ -27468,9 +27483,17 @@ function _coopPartners(){
   try{
     const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
     if(!me || !me.id || !window.Follows || !Follows.mutual) return [];
-    return Follows.mutual(me.id)
-      .map(edge => (window.UserDirectory ? UserDirectory.getById(edge.following_id) : null))
-      .filter(Boolean);
+    return Follows.mutual(me.id).map(edge => {
+      const u = window.UserDirectory ? UserDirectory.getById(edge.following_id) : null;
+      if(u) return u;
+      // Colega com vínculo mas SEM perfil carregado ainda APARECE (nome
+      // reserva) — o filter(Boolean) antigo descartava em silêncio, e uma
+      // falha de hidratação virava "você não tem colegas" (foi o sintoma
+      // que os alunos reportaram). Falha visível > sumiço mudo.
+      console.warn('[coop partners] colega sem perfil na vitrine:', edge.following_id);
+      return { id: edge.following_id, nickname: '', handle: 'colega', photoUrl: '',
+               photoTransform: { x: 0, y: 0, scale: 1 } };
+    });
   }catch(e){ console.warn('[coop partners]', e); return []; }
 }
 function _coopInjectStyles(){
