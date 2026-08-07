@@ -10595,6 +10595,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             <h2>Banco de avatares</h2>
             <span class="count" id="avatars-list-count">— avatares</span>
             <div style="margin-left:auto;display:flex;gap:.5rem">
+              <button class="btn btn-ghost" id="migrarAvataresBtn" title="Move as imagens guardadas como texto (base64) na tabela para o Storage — roda uma vez e resolve a lentidão do seletor do aluno">Migrar imagens</button>
               <button class="btn btn-ghost" id="newAvatarCategoryBtn">+ Nova categoria</button>
               <button class="btn" id="newAvatarBtn" disabled title="Crie ao menos uma categoria primeiro">+ Novo avatar</button>
             </div>
@@ -63645,15 +63646,73 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     }
 
     // ── Salvar/apagar avatar ──
-    function _saveAvatar(){
+    // CAUSA-RAIZ da lentidão do seletor do aluno: o upload gravava a imagem
+    // INTEIRA em base64 na coluna url de crm.avatars — 113 avatares somavam
+    // 44MB que o aluno baixava numa consulta só (timeout → "erro de
+    // carregamento"). Regra nova: imagem NUNCA entra na tabela — vai pro
+    // bucket 'avatars' do Storage (pasta banco/) e a tabela guarda só o link.
+    // Redimensiona no navegador antes de subir (avatar é miniatura; teto
+    // 512px). PNG mantém PNG (transparência); GIF sobe como está (canvas
+    // mataria a animação); resto vira JPEG 85%.
+    async function _avImagemPraStorage(dataUrl, id){
+      if(!window._sb) throw new Error('Supabase indisponível');
+      const mime = (String(dataUrl).match(/^data:(image\/[a-z0-9.+-]+)/i) || [])[1] || 'image/jpeg';
+      let blob, ext;
+      if(/gif$/i.test(mime)){
+        blob = await (await fetch(dataUrl)).blob(); ext = 'gif';
+      } else {
+        const img = await new Promise(function(res, rej){
+          const i = new Image();
+          i.onload = function(){ res(i); };
+          i.onerror = function(){ rej(new Error('imagem inválida')); };
+          i.src = dataUrl;
+        });
+        const MAX = 512;
+        const f = Math.min(1, MAX / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+        const w = Math.max(1, Math.round((img.naturalWidth || 1) * f));
+        const h = Math.max(1, Math.round((img.naturalHeight || 1) * f));
+        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        const png = /png$/i.test(mime);
+        blob = await new Promise(function(res){ cv.toBlob(res, png ? 'image/png' : 'image/jpeg', png ? undefined : 0.85); });
+        if(!blob) throw new Error('falha ao comprimir a imagem');
+        ext = png ? 'png' : 'jpg';
+      }
+      const path = 'banco/' + id + '.' + ext;
+      const up = await window._sb.storage.from('avatars').upload(path, blob, { upsert: true, contentType: blob.type });
+      if(up.error) throw new Error(up.error.message);
+      const pub = window._sb.storage.from('avatars').getPublicUrl(path);
+      const publicUrl = pub && pub.data && pub.data.publicUrl;
+      if(!publicUrl) throw new Error('não obtive a URL pública');
+      return publicUrl;
+    }
+
+    async function _saveAvatar(){
       const msg = document.getElementById('avatarModalMsg');
       msg.textContent = '';
       const name = (document.getElementById('avatarName').value || '').trim();
       const catId = document.getElementById('avatarCategorySelect').value || '';
-      const url = (document.getElementById('avatarUrl').value || '').trim();
+      let url = (document.getElementById('avatarUrl').value || '').trim();
       if(!catId){ msg.textContent = 'Escolha uma categoria.'; return; }
       if(!url){ msg.textContent = 'Forneça uma URL ou faça upload de uma imagem.'; return; }
       if(!_cropState.naturalW){ msg.textContent = 'Aguarde a imagem carregar antes de salvar.'; return; }
+      // id decidido ANTES do upload (vira o nome do arquivo no Storage)
+      const slug = (name || 'avatar').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
+        .replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || ('av-' + Date.now().toString(36));
+      const id = _editingAvatarId || ('av_' + slug + '_' + Date.now().toString(36));
+      if(url.startsWith('data:')){
+        const btn = document.getElementById('avatarSaveBtn');
+        if(btn){ btn.disabled = true; btn.textContent = 'Enviando imagem…'; }
+        try{
+          url = await _avImagemPraStorage(url, id);
+          document.getElementById('avatarUrl').value = url;
+        }catch(e){
+          msg.textContent = 'Falha ao enviar a imagem pro Storage: ' + (e && e.message || e) + ' — nada foi salvo.';
+          if(btn){ btn.disabled = false; btn.textContent = 'Salvar avatar'; }
+          return;
+        }
+        if(btn){ btn.disabled = false; btn.textContent = 'Salvar avatar'; }
+      }
       const payload = {
         url,
         name: name || '',
@@ -63669,15 +63728,43 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
         UbiqueStore.avatars.update(_editingAvatarId, payload);
         AvataresSync.avatarUpsert(Object.assign({ id: _editingAvatarId }, payload));
       } else {
-        const slug = (name || 'avatar').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')
-          .replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || ('av-' + Date.now().toString(36));
-        const id = 'av_' + slug + '_' + Date.now().toString(36);
         const avRow = Object.assign({ id, created_at: Date.now() }, payload);
         UbiqueStore.avatars.add(avRow);
         AvataresSync.avatarUpsert(avRow);
       }
       closeAvatarModal();
       render();
+    }
+
+    // Migração ÚNICA do acervo antigo: cada avatar base64 → arquivo no
+    // Storage → tabela passa a guardar só o link. Continua nas falhas e
+    // relata no fim (dá pra rodar de novo: só pega quem ainda é base64).
+    async function _migrarAvatares(){
+      const btn = document.getElementById('migrarAvataresBtn'); if(!btn) return;
+      const rows = (UbiqueStore.avatars.list() || []).filter(function(a){ return /^data:/.test(a.url || ''); });
+      if(!rows.length){ btn.textContent = 'Nada para migrar'; setTimeout(function(){ btn.textContent = 'Migrar imagens'; }, 4000); return; }
+      if(!confirm('Migrar ' + rows.length + ' imagens do banco de avatares para o Storage?\n\nAs imagens serão comprimidas (teto 512px; GIF fica como está) e a tabela passa a guardar só o link. Isso resolve a lentidão do seletor do aluno.')) return;
+      btn.disabled = true;
+      let ok = 0; const falhas = [];
+      for(const a of rows){
+        btn.textContent = 'Migrando ' + (ok + falhas.length + 1) + '/' + rows.length + '…';
+        try{
+          const url = await _avImagemPraStorage(a.url, a.id);
+          const { error } = await window._sb.schema('crm').from('avatars')
+            .update({ url: url, updated_at: new Date().toISOString() }).eq('id', a.id);
+          if(error) throw new Error(error.message);
+          UbiqueStore.avatars.update(a.id, { url: url });
+          ok++;
+        }catch(e){
+          falhas.push((a.name || a.id) + ': ' + (e && e.message || e));
+          console.warn('[migrar avatar]', a.id, e);
+        }
+      }
+      btn.disabled = false;
+      btn.textContent = 'Migrar imagens';
+      render();
+      alert('Migração concluída: ' + ok + ' migradas, ' + falhas.length + ' falhas.'
+        + (falhas.length ? '\n\nFalhas:\n' + falhas.slice(0, 10).join('\n') : ''));
     }
     function _deleteAvatar(){
       if(!_editingAvatarId) return;
@@ -63706,9 +63793,13 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     }
     async function _saveSystemAvatar(){
       const msg = document.getElementById('sysAvatarMsg'); if(msg){ msg.style.color = 'var(--red)'; msg.textContent = ''; }
-      const url = (document.getElementById('sysAvatarUrl').value || '').trim();
+      let url = (document.getElementById('sysAvatarUrl').value || '').trim();
       if(!url){ if(msg) msg.textContent = 'Forneça uma URL ou faça upload de uma imagem.'; return; }
       if(!_sysCropState.naturalW){ if(msg) msg.textContent = 'Aguarde a imagem carregar antes de salvar.'; return; }
+      if(url.startsWith('data:')){
+        try{ url = await _avImagemPraStorage(url, 'sistema'); document.getElementById('sysAvatarUrl').value = url; }
+        catch(e){ if(msg) msg.textContent = 'Falha ao enviar a imagem pro Storage: ' + (e && e.message || e); return; }
+      }
       const row = {
         id: 'default',
         system_avatar_url: url,
@@ -63739,6 +63830,8 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
 
       const avBtn = document.getElementById('newAvatarBtn');
       if(avBtn) avBtn.addEventListener('click', () => openAvatarModal(null));
+      const migBtn = document.getElementById('migrarAvataresBtn');
+      if(migBtn) migBtn.addEventListener('click', _migrarAvatares);
       const avSave = document.getElementById('avatarSaveBtn');
       if(avSave) avSave.addEventListener('click', _saveAvatar);
       const avDel = document.getElementById('avatarDeleteBtn');
