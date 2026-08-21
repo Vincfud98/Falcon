@@ -11191,6 +11191,8 @@ window.defaultUserState = function(course){
     bookmarks:{},      // "mark as finished" per-block
     readingList:[],    // ordered list of { moduleId, chapterId, unitId, blockId, addedAt }
     notes:[],
+    deck:[],           // flashcards do aluno (aluno.flashcards) — Fase 0
+    userTags:[],       // tags privadas do aluno (aluno.user_tags)
     banco:{ lastFilters:{}, lastCard:null }
   };
 };
@@ -13364,6 +13366,141 @@ const Store = (function(){
     }catch(e){ console.warn('[note sync delete exception]', e); }
   }
 
+  /* ══ FLASHCARDS DO ALUNO (aluno.flashcards) — Fase 0 ══════════════════
+     Antes eram notas com type='flashcard' (frente=body, verso=quote) — molde
+     que não cabia cloze/multi-linha nem SM-2, e o Dominei/Revisar nunca era
+     gravado no servidor. Agora: tabela própria, linha = card. */
+  function _deckRowFromCard(c, userId){
+    return {
+      id: c.id, user_id: userId,
+      kind: c.kind || 'basic',
+      front: c.front || null, back: c.back || null,
+      cloze_text: c.clozeText || null,
+      lines: Array.isArray(c.lines) ? c.lines : null,
+      source_quote: c.sourceQuote || null,
+      anchor: c.anchor || null,
+      origin: c.origin || 'manual',
+      source_card: c.sourceCard || null,
+      gen_params: c.genParams || null,
+      module_id: c.moduleId || null, chapter_id: c.chapterId || null,
+      unit_id: c.unitId || null, unit_title: c.unitTitle || null,
+      block_id: c.blockId || null, block_title: c.blockTitle || null, block_type: c.blockType || null,
+      topics: Array.isArray(c.topics) ? c.topics : [],
+      tags: Array.isArray(c.tags) ? c.tags : [],
+      user_tags: Array.isArray(c.userTags) ? c.userTags : [],
+      fc_status: c.fcStatus || 'new',
+      updated_at: new Date().toISOString()
+    };
+  }
+  function _cardFromDeckRow(r){
+    return {
+      id: r.id, kind: r.kind || 'basic',
+      front: r.front || '', back: r.back || '',
+      clozeText: r.cloze_text || '', lines: Array.isArray(r.lines) ? r.lines : [],
+      sourceQuote: r.source_quote || '', anchor: r.anchor || null,
+      origin: r.origin || 'manual', sourceCard: r.source_card || null, genParams: r.gen_params || null,
+      moduleId: r.module_id || null, chapterId: r.chapter_id || null,
+      unitId: r.unit_id || null, unitTitle: r.unit_title || '',
+      blockId: r.block_id || null, blockTitle: r.block_title || '', blockType: r.block_type || '',
+      topics: r.topics || [], tags: r.tags || [], userTags: r.user_tags || [],
+      fcStatus: r.fc_status || 'new',
+      ease: r.ease != null ? Number(r.ease) : 2.5, intervalDays: r.interval_days || 0,
+      dueAt: r.due_at ? new Date(r.due_at).getTime() : null,
+      reps: r.reps || 0, lapses: r.lapses || 0,
+      lastReviewedAt: r.last_reviewed_at ? new Date(r.last_reviewed_at).getTime() : null,
+      createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
+      updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : Date.now()
+    };
+  }
+  async function _syncDeckInsertToSupabase(card){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_UUID_RE.test(String(card.id||''))) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('flashcards').insert(_deckRowFromCard(card, userId));
+      if(error){
+        console.warn('[deck sync insert]', error);
+        if(window.ueToast) ueToast('Seu flashcard não foi salvo no servidor. Confira a conexão e tente de novo.', 'warn');
+      }
+    }catch(e){ console.warn('[deck sync insert exception]', e); }
+  }
+  async function _syncDeckUpdateToSupabase(card){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_UUID_RE.test(String(card.id||''))) return;
+    try{
+      const row = _deckRowFromCard(card, userId); delete row.id; delete row.user_id;
+      const { error } = await window._sb.schema('aluno').from('flashcards').update(row).eq('id', card.id).eq('user_id', userId);
+      if(error) console.warn('[deck sync update]', error);
+    }catch(e){ console.warn('[deck sync update exception]', e); }
+  }
+  async function _syncDeckDeleteToSupabase(cardId){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_UUID_RE.test(String(cardId||''))) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('flashcards').delete().eq('id', cardId).eq('user_id', userId);
+      if(error) console.warn('[deck sync delete]', error);
+    }catch(e){ console.warn('[deck sync delete exception]', e); }
+  }
+  async function _hydrateDeckFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      // Paginado desde o berço (armadilha nº3: corte silencioso em 1000).
+      const { data, error } = await window._fetchAllRows(
+        () => window._sb.schema('aluno').from('flashcards').select('*').eq('user_id', userId),
+        'id', 'flashcards');
+      if(error){ console.warn('[hydrate deck]', error); return; }
+      _state.deck = (data || []).map(_cardFromDeckRow);
+      if(_state.deck.length) console.log('[Store] hydrated deck:', _state.deck.length);
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate deck exception]', e); }
+  }
+  /* ══ TAGS PRIVADAS (aluno.user_tags) ═══════════════════════════════════
+     A identidade da tag é o slug normalizado (minúsculas, sem acento, sem
+     caractere especial) — calculado pelo BANCO (gatilho). O espelho em JS
+     serve só pra checar duplicata com as tags da plataforma antes de pedir
+     ao servidor; o slug gravado é sempre o que o servidor devolve. */
+  window._tagSlug = function(nome){
+    return String(nome || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  };
+  async function _hydrateUserTagsFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._fetchAllRows(
+        () => window._sb.schema('aluno').from('user_tags').select('id, name, slug').eq('user_id', userId),
+        'id', 'user_tags');
+      if(error){ console.warn('[hydrate user_tags]', error); return; }
+      _state.userTags = (data || []).map(r => ({ id: r.id, name: r.name, slug: r.slug }));
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate user_tags exception]', e); }
+  }
+  // Garante a tag privada no servidor e devolve { name, slug }. Conflito de
+  // slug (já existia) → devolve a existente. Sem sessão → só memória local.
+  async function _userTagEnsureRemote(nome){
+    const userId = _currentSupaUserId();
+    const local = (_state.userTags || []).find(t => t.slug === window._tagSlug(nome));
+    if(local) return local;
+    if(!userId || !window._sb) return { name: String(nome||'').trim(), slug: window._tagSlug(nome) };
+    try{
+      const ins = await window._sb.schema('aluno').from('user_tags')
+        .insert({ user_id: userId, name: String(nome||'').trim() }).select('id, name, slug').single();
+      let row = ins.data;
+      if(ins.error){
+        if(String(ins.error.code) !== '23505'){ console.warn('[user_tag insert]', ins.error); return { name: String(nome||'').trim(), slug: window._tagSlug(nome) }; }
+        const q = await window._sb.schema('aluno').from('user_tags').select('id, name, slug')
+          .eq('user_id', userId).eq('slug', window._tagSlug(nome)).maybeSingle();
+        row = q.data;
+      }
+      if(!row) return { name: String(nome||'').trim(), slug: window._tagSlug(nome) };
+      const tag = { id: row.id, name: row.name, slug: row.slug };
+      if(!Array.isArray(_state.userTags)) _state.userTags = [];
+      if(!_state.userTags.some(t => t.slug === tag.slug)) _state.userTags.push(tag);
+      _persist(); _emit();
+      return tag;
+    }catch(e){ console.warn('[user_tag ensure exception]', e); return { name: String(nome||'').trim(), slug: window._tagSlug(nome) }; }
+  }
+
   async function _hydrateNotesFromSupabase(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state) return;
@@ -13911,6 +14048,9 @@ const Store = (function(){
       _hydrateBookmarksFromSupabase().catch(()=>{});
       // Fase 4e — hidrata notes, reading_list, highlights do Supabase
       _hydrateNotesFromSupabase().catch(()=>{});
+      // Fase 0 dos flashcards — deck próprio + tags privadas
+      _hydrateDeckFromSupabase().catch(()=>{});
+      _hydrateUserTagsFromSupabase().catch(()=>{});
       _hydrateReadingListFromSupabase().catch(()=>{});
       _hydrateHighlightsFromSupabase().catch(()=>{});
       // Fase 4h — hidrata flashcards + simulados do Supabase
@@ -14265,6 +14405,34 @@ const Store = (function(){
       // Fase 4e — fire-and-forget sync Supabase
       _syncNoteDeleteToSupabase(id).catch(()=>{});
     },
+    /* ── Deck de flashcards do aluno (Fase 0) ── */
+    deckList(){ return Array.isArray(_state.deck) ? _state.deck.slice() : []; },
+    deckAdd(payload){
+      const now = Date.now();
+      const card = Object.assign({ id: _genUuid() || ('fc'+now), kind:'basic', origin:'manual', fcStatus:'new',
+        topics:[], tags:[], userTags:[], createdAt:now, updatedAt:now }, payload);
+      if(!Array.isArray(_state.deck)) _state.deck = [];
+      _state.deck.push(card);
+      _persist(); _emit();
+      _syncDeckInsertToSupabase(card).catch(()=>{});
+      return card;
+    },
+    deckUpdate(id, patch){
+      const idx = (_state.deck||[]).findIndex(c => c.id === id);
+      if(idx < 0) return null;
+      _state.deck[idx] = Object.assign({}, _state.deck[idx], patch, { updatedAt: Date.now() });
+      _persist(); _emit();
+      _syncDeckUpdateToSupabase(_state.deck[idx]).catch(()=>{});
+      return _state.deck[idx];
+    },
+    deckDelete(id){
+      if(!Array.isArray(_state.deck)) return;
+      _state.deck = _state.deck.filter(c => c.id !== id);
+      _persist(); _emit();
+      _syncDeckDeleteToSupabase(id).catch(()=>{});
+    },
+    userTags(){ return Array.isArray(_state.userTags) ? _state.userTags.slice() : []; },
+    userTagEnsure(nome){ return _userTagEnsureRemote(nome); },
     listNotes(filters){
       filters = filters || {};
       let list = Array.isArray(_state.notes) ? _state.notes.slice() : [];
@@ -41504,7 +41672,9 @@ Renderers.notes = function(route){
   }).join('')}</div>` : `<div class="empty"><div class="empty-title">Nenhuma nota encontrada</div><div class="empty-body">Abra um bloco e clique em "Adicionar nota" para começar. Você pode selecionar um trecho da leitura antes de clicar para que ele apareça como citação na nota.</div></div>`;
 
   // Build user flashcards with filters
-  let userFlashcards = (Store.get().notes || []).filter(n => n.type === 'flashcard');
+  // Fase 0: o deck vem de aluno.flashcards (Store.deckList), não mais das notas.
+  const _deckAll = Store.deckList();
+  let userFlashcards = _deckAll.slice();
   const fcFilterModule = (route.query && route.query.fcModule) || '';
   const fcFilterUnit = (route.query && route.query.fcUnit) || '';
   const fcFilterStatus = (route.query && route.query.fcStatus) || '';
@@ -41512,28 +41682,34 @@ Renderers.notes = function(route){
   if(fcFilterUnit) userFlashcards = userFlashcards.filter(fc => fc.unitId === fcFilterUnit);
   if(fcFilterStatus) userFlashcards = userFlashcards.filter(fc => (fc.fcStatus||'new') === fcFilterStatus);
 
-  const fcModuleIds = [...new Set((Store.get().notes||[]).filter(n=>n.type==='flashcard').map(n=>n.moduleId).filter(Boolean))];
-  const fcUnitIds = [...new Set((Store.get().notes||[]).filter(n=>n.type==='flashcard').map(n=>n.unitId).filter(Boolean))];
+  const fcModuleIds = [...new Set(_deckAll.map(n=>n.moduleId).filter(Boolean))];
+  const fcUnitIds = [...new Set(_deckAll.map(n=>n.unitId).filter(Boolean))];
   const fcModuleOpts = `<div class="fb-group"><span class="fb-label">Módulo</span><select class="fb-select" data-fc-filter="fcModule"><option value="">Todos</option>${fcModuleIds.map(mid=>{const m=Util.findModule(mid);return m?`<option value="${Util.attr(mid)}" ${fcFilterModule===mid?'selected':''}>${Util.esc(m.label+' · '+m.title)}</option>`:''}).join('')}</select></div>`;
-  const fcUnitOpts = `<div class="fb-group"><span class="fb-label">Unidade</span><select class="fb-select" data-fc-filter="fcUnit"><option value="">Todas</option>${fcUnitIds.map(uid=>{const fc0=(Store.get().notes||[]).find(n=>n.unitId===uid);return `<option value="${Util.attr(uid)}" ${fcFilterUnit===uid?'selected':''}>${Util.esc(fc0?.unitTitle||uid)}</option>`}).join('')}</select></div>`;
+  const fcUnitOpts = `<div class="fb-group"><span class="fb-label">Unidade</span><select class="fb-select" data-fc-filter="fcUnit"><option value="">Todas</option>${fcUnitIds.map(uid=>{const fc0=_deckAll.find(n=>n.unitId===uid);return `<option value="${Util.attr(uid)}" ${fcFilterUnit===uid?'selected':''}>${Util.esc(fc0?.unitTitle||uid)}</option>`}).join('')}</select></div>`;
   const fcStatusOpts = `<div class="fb-group"><span class="fb-label">Status</span><select class="fb-select" data-fc-filter="fcStatus"><option value="">Todos</option><option value="mastered" ${fcFilterStatus==='mastered'?'selected':''}>Dominei</option><option value="learning" ${fcFilterStatus==='learning'?'selected':''}>Revisar</option><option value="new" ${fcFilterStatus==='new'?'selected':''}>Novo</option></select></div>`;
 
   // Topic/tag filters for flashcards
-  const fcTopicIds = [...new Set((Store.get().notes||[]).filter(n=>n.type==='flashcard').flatMap(n=>n.topics||[]))];
-  const fcTagIds = [...new Set((Store.get().notes||[]).filter(n=>n.type==='flashcard').flatMap(n=>n.tags||[]))];
+  const fcTopicIds = [...new Set(_deckAll.flatMap(n=>n.topics||[]))];
+  // Tags da plataforma são guardadas por NOME; as privadas por slug (nome
+  // de exibição vem do registro aluno.user_tags). Valor 'u:<slug>' no filtro.
+  const fcTagIds = [...new Set(_deckAll.flatMap(n=>n.tags||[]))];
+  const _utNome = {}; (Store.userTags ? Store.userTags() : []).forEach(t => { _utNome[t.slug] = t.name; });
+  const fcUserTagSlugs = [...new Set(_deckAll.flatMap(n=>n.userTags||[]))];
   const fcFilterTopic = (route.query && route.query.fcTopic) || '';
   const fcFilterTag = (route.query && route.query.fcTag) || '';
   if(fcFilterTopic) userFlashcards = userFlashcards.filter(fc => (fc.topics||[]).includes(fcFilterTopic));
-  if(fcFilterTag) userFlashcards = userFlashcards.filter(fc => (fc.tags||[]).includes(fcFilterTag));
+  if(fcFilterTag) userFlashcards = userFlashcards.filter(fc => fcFilterTag.indexOf('u:') === 0
+    ? (fc.userTags||[]).includes(fcFilterTag.slice(2))
+    : (fc.tags||[]).includes(fcFilterTag));
   if(filters.q){
     const qLower = filters.q.toLowerCase();
     userFlashcards = userFlashcards.filter(fc =>
-      (fc.body||'').toLowerCase().includes(qLower) ||
-      (fc.quote||'').toLowerCase().includes(qLower)
+      (fc.front||'').toLowerCase().includes(qLower) ||
+      (fc.back||'').toLowerCase().includes(qLower)
     );
   }
-  const fcTopicOpts = `<div class="fb-group"><span class="fb-label">Tópico</span><select class="fb-select" data-fc-filter="fcTopic"><option value="">Todos</option>${fcTopicIds.map(id=>{const t=Util.getTopic(id);return t?`<option value="${Util.attr(id)}" ${fcFilterTopic===id?'selected':''}>${Util.esc(t.number+' '+t.name)}</option>`:''}).join('')}</select></div>`;
-  const fcTagOpts = `<div class="fb-group"><span class="fb-label">Tag</span><select class="fb-select" data-fc-filter="fcTag"><option value="">Todas</option>${fcTagIds.map(id=>{const t=Util.getTag(id);return t?`<option value="${Util.attr(id)}" ${fcFilterTag===id?'selected':''}>${Util.esc(t.name)}</option>`:''}).join('')}</select></div>`;
+  const fcTopicOpts = `<div class="fb-group"><span class="fb-label">Tópico</span><select class="fb-select" data-fc-filter="fcTopic"><option value="">Todos</option>${fcTopicIds.map(id=>{const t=Util.getTopic(id);const m=t?null:Util.findModule(id);const lb=t?(t.number+' '+t.name):(m?((m.label||'')+' · '+(m.title||'')):'');return lb?`<option value="${Util.attr(id)}" ${fcFilterTopic===id?'selected':''}>${Util.esc(lb)}</option>`:''}).join('')}</select></div>`;
+  const fcTagOpts = `<div class="fb-group"><span class="fb-label">Tag</span><select class="fb-select" data-fc-filter="fcTag"><option value="">Todas</option>${fcTagIds.map(nm=>`<option value="${Util.attr(nm)}" ${fcFilterTag===nm?'selected':''}>${Util.esc(nm)}</option>`).join('')}${fcUserTagSlugs.map(sl=>`<option value="${Util.attr('u:'+sl)}" ${fcFilterTag===('u:'+sl)?'selected':''}>${Util.esc(_utNome[sl]||sl)} (minha)</option>`).join('')}</select></div>`;
 
   const fcCards = userFlashcards.length ? `<div class="ufc-grid">${userFlashcards.map(fc => {
     const status = fc.fcStatus || 'new';
@@ -41544,10 +41720,10 @@ Renderers.notes = function(route){
             <button class="ufc-icon-btn" data-ufc-edit="${Util.attr(fc.id)}" title="Editar"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4z"/></svg></button>
             <button class="ufc-icon-btn" data-ufc-delete="${Util.attr(fc.id)}" title="Excluir"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>
           </div>
-          <div class="ufc-term">${Util.esc(fc.body||'')}</div>
+          <div class="ufc-term">${Util.esc(fc.front||'')}</div>
         </div>
         <div class="ufc-face ufc-back-face">
-          <div class="ufc-def">${Util.esc(fc.quote||'')}</div>
+          <div class="ufc-def">${Util.esc(fc.back||'')}</div>
           <div class="ufc-actions">
             <button class="ufc-btn ufc-btn-learn ${status==='learning'?'active':''}" data-ufc-status="learning">Revisar</button>
             <button class="ufc-btn ufc-btn-master ${status==='mastered'?'active':''}" data-ufc-status="mastered">Dominei</button>
@@ -41830,7 +42006,7 @@ Renderers.notes.mount = function(stageEl, route){
       const card = btn.closest('.ufc-card');
       const noteId = card.getAttribute('data-fc-note-id');
       const status = btn.getAttribute('data-ufc-status');
-      Store.updateNote(noteId, { fcStatus: status });
+      Store.deckUpdate(noteId, { fcStatus: status });   // agora PERSISTE no servidor
       card.className = 'ufc-card flipped ' + status;
       card.querySelectorAll('.ufc-btn-learn,.ufc-btn-master').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
@@ -41840,16 +42016,18 @@ Renderers.notes.mount = function(stageEl, route){
     btn.addEventListener('click', e => {
       e.stopPropagation();
       const noteId = btn.getAttribute('data-ufc-edit');
-      const note = (Store.get().notes||[]).find(n => n.id === noteId);
-      if(!note) return;
-      const newFront = prompt('Frente do cartão (pergunta):', note.body||'');
-      if(newFront === null) return;
-      const newBack = prompt('Verso do cartão (resposta):', note.quote||'');
-      if(newBack === null) return;
-      Store.updateNote(noteId, { body:newFront, quote:newBack });
-      const card = btn.closest('.ufc-card');
-      card.querySelector('.ufc-term').textContent = newFront;
-      card.querySelector('.ufc-def').textContent = newBack;
+      const fc = Store.deckList().find(c => c.id === noteId);
+      if(!fc) return;
+      // Edição inline (era prompt() do navegador). Mesmo modal que a geração
+      // por IA vai usar pra ajustar o card antes de salvar.
+      DeckEditModal.open(fc, function(novo){
+        Store.deckUpdate(noteId, { front: novo.front, back: novo.back });
+        const card = btn.closest('.ufc-card');
+        if(card){
+          card.querySelector('.ufc-term').textContent = novo.front;
+          card.querySelector('.ufc-def').textContent = novo.back;
+        }
+      });
     });
   });
   stageEl.querySelectorAll('[data-ufc-delete]').forEach(btn => {
@@ -41857,7 +42035,7 @@ Renderers.notes.mount = function(stageEl, route){
       e.stopPropagation();
       if(!confirm('Excluir este flashcard?')) return;
       const noteId = btn.getAttribute('data-ufc-delete');
-      Store.deleteNote(noteId);
+      Store.deckDelete(noteId);
       btn.closest('.ufc-card')?.remove();
     });
   });
@@ -47997,6 +48175,8 @@ const NoteModal = (function(){
       seen.add(low); userTags.push(s);
     };
     ((Store.get() && Store.get().notes) || []).forEach(n => (n.tags||[]).forEach(pushUser));
+    // Registro de tags privadas (aluno.user_tags) — nome de exibição.
+    if(Store.userTags) Store.userTags().forEach(t => pushUser(t.name));
     // Tags recém-criadas nesta sessão (selecionadas mas ainda não salvas).
     Array.from(_selectedTags).forEach(pushUser);
 
@@ -48028,7 +48208,14 @@ const NoteModal = (function(){
   function createTag(name){
     const s = String(name||'').trim();
     if(!s) return;
-    _selectedTags.add(s);
+    // "Dom Pedro II." e "dom pedro ii" são a MESMA tag; e se a plataforma já
+    // tem essa tag, seleciona a dela em vez de criar uma privada igual.
+    const slug = window._tagSlug ? window._tagSlug(s) : s.toLowerCase();
+    if(!slug) return;
+    const plat = ((window.UbiqueStore && UbiqueStore.tags && UbiqueStore.tags.list()) || [])
+      .map(t => String(t.tag||'').trim()).find(t => (window._tagSlug ? window._tagSlug(t) : t.toLowerCase()) === slug);
+    const jaSel = Array.from(_selectedTags).find(t => (window._tagSlug ? window._tagSlug(t) : t.toLowerCase()) === slug);
+    _selectedTags.add(plat || jaSel || s);
     renderChips();
   }
 
@@ -48097,15 +48284,46 @@ const NoteModal = (function(){
     document.body.style.overflow = '';
   }
 
-  function save(){
+  async function save(){
     const quote = document.getElementById('noteQuote').textContent.trim();
     const body = document.getElementById('noteBody').value.trim();
+    const noteType = document.getElementById('noteType').value || 'note';
+    const sel = (_ctx.selection && typeof _ctx.selection === 'object') ? _ctx.selection : null;
+    if(noteType === 'flashcard'){
+      // Card precisa dos DOIS lados (frente = pergunta digitada, verso = trecho).
+      if(!body || !quote){
+        alert(!body ? 'Escreva a pergunta (frente do cartão).' : 'O verso está vazio: selecione um trecho ou escreva a resposta.');
+        return;
+      }
+      // Tags: as da plataforma vão por nome; as privadas viram slug do registro.
+      const platSet = new Set(((window.UbiqueStore && UbiqueStore.tags && UbiqueStore.tags.list()) || [])
+        .map(t => String(t.tag||'').trim()).filter(Boolean));
+      const tagsPlat = [], tagsUser = [];
+      for(const nome of Array.from(_selectedTags)){
+        if(platSet.has(nome)) tagsPlat.push(nome);
+        else { try{ const tg = await Store.userTagEnsure(nome); if(tg && tg.slug) tagsUser.push(tg.slug); }catch(_){} }
+      }
+      Store.deckAdd({
+        kind: 'basic', origin: 'manual',
+        front: body, back: quote, sourceQuote: quote,
+        moduleId: _ctx.moduleId || null,
+        chapterId: _ctx.chapterId || null,
+        unitId: _ctx.unit ? _ctx.unit.id : null,
+        unitTitle: _ctx.unit ? _ctx.unit.title : '',
+        blockId: (sel && sel.blockId) || (_ctx.block ? _ctx.block.id : null),
+        blockTitle: _ctx.block ? _ctx.block.title : '',
+        blockType: _ctx.block ? _ctx.block.type : '',
+        topics: Array.from(_selectedTopics),
+        tags: tagsPlat, userTags: tagsUser
+      });
+      document.getElementById('noteSavedAt').textContent = 'Flashcard salvo.';
+      setTimeout(close, 500);
+      return;
+    }
     if(!body && !quote){
       alert('Escreva um comentário ou selecione um trecho antes de salvar.');
       return;
     }
-    const noteType = document.getElementById('noteType').value || 'note';
-    const sel = (_ctx.selection && typeof _ctx.selection === 'object') ? _ctx.selection : null;
     const payload = {
       type: noteType,
       moduleId: _ctx.moduleId || null,
@@ -48198,6 +48416,53 @@ const NoteListModal = (function(){
   return { open, close };
 })();
 window.NoteListModal = NoteListModal;
+
+/* ───────── Deck Edit Modal — edita frente/verso de um flashcard do aluno ───────── */
+const DeckEditModal = (function(){
+  let _el = null, _onSave = null;
+  function ensureEl(){
+    if(_el) return _el;
+    _el = document.createElement('div');
+    _el.className = 'note-list-modal';
+    _el.innerHTML = '<div class="nlm-backdrop"></div><div class="nlm-panel">'
+      + '<div class="nlm-header"><span class="nlm-title">Editar flashcard</span><button class="nlm-close" type="button">&times;</button></div>'
+      + '<div class="nlm-body"><div class="nlm-note">'
+      + '<label class="note-modal-label" for="dkFront">Frente (pergunta)</label>'
+      + '<textarea class="nlm-note-body" id="dkFront" rows="3"></textarea>'
+      + '<label class="note-modal-label" for="dkBack" style="margin-top:.6rem">Verso (resposta)</label>'
+      + '<textarea class="nlm-note-body" id="dkBack" rows="4"></textarea>'
+      + '<div class="nlm-note-foot"><span class="nlm-note-date" id="dkMsg"></span><div class="nlm-note-actions">'
+      + '<button class="nlm-delete" type="button" id="dkCancel">Cancelar</button>'
+      + '<button class="nlm-save" type="button" id="dkSave">Salvar</button></div></div>'
+      + '</div></div></div>';
+    document.body.appendChild(_el);
+    _el.querySelector('.nlm-backdrop').addEventListener('click', close);
+    _el.querySelector('.nlm-close').addEventListener('click', close);
+    _el.querySelector('#dkCancel').addEventListener('click', close);
+    _el.querySelector('#dkSave').addEventListener('click', function(){
+      const front = _el.querySelector('#dkFront').value.trim();
+      const back = _el.querySelector('#dkBack').value.trim();
+      const msg = _el.querySelector('#dkMsg');
+      if(!front || !back){ msg.textContent = 'Os dois lados precisam de texto.'; return; }
+      if(_onSave) _onSave({ front: front, back: back });
+      close();
+    });
+    document.addEventListener('keydown', function(e){ if(e.key === 'Escape' && _el.classList.contains('open')) close(); });
+    return _el;
+  }
+  function open(card, onSave){
+    const el = ensureEl();
+    _onSave = onSave || null;
+    el.querySelector('#dkFront').value = (card && card.front) || '';
+    el.querySelector('#dkBack').value = (card && card.back) || '';
+    el.querySelector('#dkMsg').textContent = '';
+    el.classList.add('open');
+    setTimeout(function(){ el.querySelector('#dkFront').focus(); }, 60);
+  }
+  function close(){ if(_el) _el.classList.remove('open'); _onSave = null; }
+  return { open, close };
+})();
+window.DeckEditModal = DeckEditModal;
 
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('noteClose').addEventListener('click', NoteModal.close);
