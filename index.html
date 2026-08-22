@@ -8538,6 +8538,14 @@ html[data-theme="light"] .hl-mark[data-hl-color="veil"]{background:var(--text);c
 .ufc-link{font-family:var(--sans);font-size:.66rem;color:var(--accent);text-decoration:none;margin-right:auto;align-self:center}
 .ufc-link:hover{text-decoration:underline}
 @media(pointer:coarse){.fcia-pop{max-height:60dvh}.fcia-edit{width:32px;height:32px}}
+/* Exportar para o Anki (Fase 4) */
+.fb-export{margin-left:.4rem}
+.anki-intro{font-family:var(--sans);font-size:.82rem;line-height:1.6;color:var(--text-dim);margin-bottom:.9rem}
+.anki-intro strong{color:var(--text)}
+.anki-opt{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.75rem .9rem;border:1px solid var(--border);border-radius:8px;background:var(--bg-elevated);margin-bottom:.6rem;font-family:var(--sans)}
+.anki-opt strong{display:block;font-size:.88rem;color:var(--text)}
+.anki-opt span{display:block;font-size:.72rem;color:var(--text-mute);margin-top:.15rem}
+.anki-foot{font-family:var(--sans);font-size:.68rem;color:var(--text-mute);margin-top:.6rem;line-height:1.5}
 .ufc-term{
   font-family:var(--serif);font-size:1.05rem;color:var(--text);line-height:1.4;
   overflow-y:auto;max-height:100%;width:100%;
@@ -41868,7 +41876,7 @@ Renderers.notes = function(route){
       </div>
     </div>`;
   }).join('')}</div>` : `<div class="empty"><div class="empty-title">Nenhum flashcard criado</div><div class="empty-body">Selecione um trecho de texto e escolha "Flashcard" no modal de notas para criar seus próprios cartões de revisão.</div></div>`;
-  const fcFilterBar = `<div class="filter-bar">${fcModuleOpts}${fcUnitOpts}${fcStatusOpts}${fcKindOpts}${fcTopicOpts}${fcTagOpts}<button class="fb-clear" id="fcClear">Limpar</button><span class="fb-count">${userFlashcards.length} flashcard${userFlashcards.length===1?'':'s'}</span></div>`;
+  const fcFilterBar = `<div class="filter-bar">${fcModuleOpts}${fcUnitOpts}${fcStatusOpts}${fcKindOpts}${fcTopicOpts}${fcTagOpts}<button class="fb-clear" id="fcClear">Limpar</button><button class="fb-clear fb-export" id="fcExport" data-ids="${Util.attr(userFlashcards.map(fc => fc.id).join(','))}" data-tip="Baixa arquivos de texto que o Anki importa (o que está filtrado)">Exportar para o Anki</button><span class="fb-count">${userFlashcards.length} flashcard${userFlashcards.length===1?'':'s'}</span></div>`;
 
   // Build highlights compilation with filters + links
   const allHighlights = Store.getHighlights();
@@ -42185,6 +42193,13 @@ Renderers.notes.mount = function(stageEl, route){
       q[key] = el.value; if(!q[key]) delete q[key];
       Router.go(`/notes${Router.querystring(q)}`);
     });
+  });
+  // Exportar para o Anki: exporta exatamente a lista filtrada na tela
+  const fcExport = stageEl.querySelector('#fcExport');
+  if(fcExport) fcExport.addEventListener('click', () => {
+    const ids = new Set(String(fcExport.getAttribute('data-ids') || '').split(',').filter(Boolean));
+    const cards = Store.deckList().filter(c => ids.has(c.id));
+    if(window.AnkiExport) AnkiExport.abrir(cards);
   });
   const fcClear = stageEl.querySelector('#fcClear');
   if(fcClear) fcClear.addEventListener('click', () => {
@@ -48475,11 +48490,12 @@ const FlashcardsIA = (function(){
   // tópicos (= módulo), tags herdadas e o deep-link de volta ao bloco.
   function _contexto(unitId, blockId){
     const out = { unitId: unitId ? String(unitId) : null, blockId: blockId ? String(blockId) : null, unitSid: null,
-      moduleId: null, chapterId: null, unitTitle: '', blockTitle: '', blockType: '', topics: [], tags: [], block: null, groupId: null, href: '' };
+      moduleId: null, chapterId: null, unitTitle: '', blockTitle: '', blockType: '', topics: [], tags: [], block: null, groupId: null, href: '', sigla: '', materia: '' };
     let hit = null;
     ((window.COURSES || []).filter(Boolean)).some(c => (c.modules || []).some(m => Util.unitsOfModule(m).some(e => {
-      if(String(e.unit.id) === String(unitId)){ hit = { module: m, chapter: e.chapter, unit: e.unit }; return true; } return false; })));
+      if(String(e.unit.id) === String(unitId)){ hit = { course: c, module: m, chapter: e.chapter, unit: e.unit }; return true; } return false; })));
     if(!hit) return out;
+    out.sigla = hit.course.sigla || ''; out.materia = hit.course.title || '';
     out.moduleId = hit.module.id; out.chapterId = hit.chapter ? hit.chapter.id : null;
     out.unitTitle = hit.unit.title || ''; out.topics = [hit.module.id];
     out.unitSid = hit.unit._storeId != null ? String(hit.unit._storeId) : null;
@@ -48697,9 +48713,89 @@ const FlashcardsIA = (function(){
     if(texto.length < 20){ toast('Este bloco não tem texto suficiente para gerar flashcards.', 'warn'); return; }
     abrirModal({ trecho: texto, blockId: ctx.blockId, unitId: ctx.unitId });
   }
-  return { abrirPreview, abrirModal, abrirDoBloco, fecharModal };
+  return { abrirPreview, abrirModal, abrirDoBloco, fecharModal, contexto: _contexto };
 })();
 window.FlashcardsIA = FlashcardsIA;
+
+/* ══ EXPORTAR PARA O ANKI (Fase 4) — arquivos de texto que o Anki importa ══
+   Dois arquivos: tradicionais+listas (tipo "Básico": frente/verso) e lacunas
+   (tipo "Omissão de palavras"/Cloze: texto com {{cN::…}} nativo). O aluno
+   escolhe o tipo de nota no diálogo de importação — funciona em qualquer
+   idioma do Anki (os nomes dos tipos são traduzidos por instalação, por
+   isso NÃO amarramos o nome no arquivo). Cabeçalhos reconhecidos pelo Anki
+   2.1.55+; em versões antigas viram comentários e o TSV importa igual.
+   Deck por matéria (Falcon::SIGLA) e tags normalizadas. Sem servidor. */
+const AnkiExport = (function(){
+  const escHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\t/g, ' ').replace(/\r?\n/g, '<br>');
+  const tagAnki = s => { const t = window._tagSlug ? window._tagSlug(s) : String(s || '').toLowerCase().replace(/\s+/g, '-'); return t.replace(/-+/g, '-'); };
+  const CAB = '#separator:tab\n#html:true\n#deck column:1\n#tags column:4\n';
+  function ctxDe(card){ return (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(card.unitId, card.blockId) : {}; }
+  function deckDe(ctx){ return 'Falcon::' + (ctx.sigla || ctx.materia || 'Geral').replace(/\s+/g, ' '); }
+  function tagsDe(card, ctx){
+    const t = new Set();
+    (card.tags || []).forEach(x => { const s = tagAnki(x); if(s) t.add(s); });
+    (card.userTags || []).forEach(x => { if(x) t.add(String(x)); });
+    if(ctx.sigla) t.add('falcon::' + tagAnki(ctx.sigla));
+    return Array.from(t).join(' ');
+  }
+  // Devolve { basico: {n, texto}, lacunas: {n, texto} }
+  function montar(cards){
+    const lb = [], lc = [];
+    (cards || []).forEach(c => {
+      const ctx = ctxDe(c), deck = deckDe(ctx), tags = tagsDe(c, ctx);
+      if(c.kind === 'cloze'){
+        if(!c.clozeText) return;
+        const extra = ctx.unitTitle ? escHtml(ctx.unitTitle) : '';
+        lc.push([deck, escHtml(c.clozeText), extra, tags].join('\t'));
+      } else if(c.kind === 'multi'){
+        const tagL = c.listStyle === 'number' ? 'ol' : 'ul';
+        const back = '<' + tagL + '>' + (c.lines || []).map(l => '<li>' + escHtml(l) + '</li>').join('') + '</' + tagL + '>';
+        lb.push([deck, escHtml(c.front), back, tags].join('\t'));
+      } else {
+        if(!c.front && !c.back) return;
+        lb.push([deck, escHtml(c.front), escHtml(c.back), tags].join('\t'));
+      }
+    });
+    return {
+      basico:  { n: lb.length, texto: lb.length ? CAB + lb.join('\n') + '\n' : '' },
+      lacunas: { n: lc.length, texto: lc.length ? CAB + lc.join('\n') + '\n' : '' },
+    };
+  }
+  function baixar(nome, texto){
+    const blob = new Blob(['\ufeff' + texto], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = nome; document.body.appendChild(a); a.click();
+    setTimeout(function(){ a.remove(); URL.revokeObjectURL(url); }, 1500);
+  }
+  let _el = null;
+  function abrir(cards){
+    const m = montar(cards);
+    if(!m.basico.n && !m.lacunas.n){ if(window.ueToast) ueToast('Nenhum flashcard para exportar com esses filtros.', 'warn'); return; }
+    if(!_el){
+      _el = document.createElement('div'); _el.className = 'note-list-modal';
+      _el.innerHTML = '<div class="nlm-backdrop"></div><div class="nlm-panel"><div class="nlm-header"><span class="nlm-title">Exportar para o Anki</span><button class="nlm-close" type="button" aria-label="Fechar">&times;</button></div><div class="nlm-body" id="ankiBody"></div></div>';
+      document.body.appendChild(_el);
+      _el.querySelector('.nlm-backdrop').addEventListener('click', fechar);
+      _el.querySelector('.nlm-close').addEventListener('click', fechar);
+      document.addEventListener('keydown', function(e){ if(e.key === 'Escape' && _el.classList.contains('open')) fechar(); });
+    }
+    const hoje = new Date().toISOString().slice(0, 10);
+    const body = _el.querySelector('#ankiBody');
+    body.innerHTML = '<div class="anki-intro">Baixe o(s) arquivo(s) e, no Anki, use <strong>Arquivo → Importar</strong>. Na tela de importação, escolha o <strong>tipo de nota</strong> indicado abaixo — o deck (<em>Falcon::matéria</em>) e as tags já vão dentro do arquivo.</div>'
+      + (m.basico.n ? '<div class="anki-opt"><div><strong>' + m.basico.n + (m.basico.n === 1 ? ' card tradicional/lista' : ' cards tradicionais/listas') + '</strong><span>Tipo de nota no Anki: <em>Básico</em> (Basic) · frente/verso</span></div><button type="button" class="btn-primary" data-anki="basico">Baixar .txt</button></div>' : '')
+      + (m.lacunas.n ? '<div class="anki-opt"><div><strong>' + m.lacunas.n + (m.lacunas.n === 1 ? ' card de lacunas' : ' cards de lacunas') + '</strong><span>Tipo de nota no Anki: <em>Omissão de palavras</em> (Cloze) · cada grupo c1, c2… vira um card</span></div><button type="button" class="btn-primary" data-anki="lacunas">Baixar .txt</button></div>' : '')
+      + '<div class="anki-foot">Funciona no Anki do computador (2.1.55 ou mais novo importa os cabeçalhos sozinho) e no AnkiMobile/AnkiDroid via importação de texto.</div>';
+    body.querySelectorAll('[data-anki]').forEach(b => b.addEventListener('click', function(){
+      const k = b.getAttribute('data-anki');
+      baixar('falcon-flashcards-' + (k === 'lacunas' ? 'lacunas' : 'tradicionais') + '-' + hoje + '.txt', m[k].texto);
+      b.textContent = 'Baixado'; b.disabled = true;
+    }));
+    _el.classList.add('open');
+  }
+  function fechar(){ if(_el) _el.classList.remove('open'); }
+  return { montar, baixar, abrir, fechar };
+})();
+window.AnkiExport = AnkiExport;
 
 /* ─ Note modal ─ */
 const NoteModal = (function(){
