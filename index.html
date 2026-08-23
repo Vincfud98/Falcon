@@ -8469,7 +8469,8 @@ html[data-theme="light"] .hl-mark[data-hl-color="veil"]{background:var(--text);c
 .ufc-front .ufc-term{max-height:100%;width:100%;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 @media(max-width:720px){.ufc-grid{grid-template-columns:1fr}.ufc-card{aspect-ratio:auto;height:240px}}
 /* ── Flashcards Fase 1: tipos (lacunas / lista) ── */
-.ufc-kind{font-family:var(--mono);font-size:.55rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-mute);margin-right:auto;align-self:center}
+.ufc-kind{font-family:var(--mono);font-size:.55rem;letter-spacing:.08em;text-transform:uppercase;color:var(--text-mute);margin-right:.5rem;align-self:center}
+.ufc-due{font-family:var(--mono);font-size:.55rem;letter-spacing:.06em;color:var(--accent);margin-right:auto;align-self:center}
 .fc-kind-toggle{margin-top:.15rem}
 .fc-arrow{color:var(--accent)}
 .fc-list{margin:.35rem 0 0 1.25rem;padding:0;text-align:left;font-family:var(--sans);font-size:.86rem;line-height:1.55}
@@ -11303,6 +11304,8 @@ window.defaultUserState = function(course){
     readingList:[],    // ordered list of { moduleId, chapterId, unitId, blockId, addedAt }
     notes:[],
     deck:[],           // flashcards do aluno (aluno.flashcards) — Fase 0
+    srs:[],            // agendamento por card/grupo (aluno.flashcard_srs) — Fase 5A
+    srsSettings:{},    // configurações do SM-2 que o aluno mudou (aluno.flashcard_settings)
     userTags:[],       // tags privadas do aluno (aluno.user_tags)
     banco:{ lastFilters:{}, lastCard:null }
   };
@@ -13517,10 +13520,6 @@ const Store = (function(){
       blockId: r.block_id || null, blockTitle: r.block_title || '', blockType: r.block_type || '',
       topics: r.topics || [], tags: r.tags || [], userTags: r.user_tags || [],
       fcStatus: r.fc_status || 'new',
-      ease: r.ease != null ? Number(r.ease) : 2.5, intervalDays: r.interval_days || 0,
-      dueAt: r.due_at ? new Date(r.due_at).getTime() : null,
-      reps: r.reps || 0, lapses: r.lapses || 0,
-      lastReviewedAt: r.last_reviewed_at ? new Date(r.last_reviewed_at).getTime() : null,
       createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
       updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : Date.now()
     };
@@ -13612,6 +13611,120 @@ const Store = (function(){
       _persist(); _emit();
       return tag;
     }catch(e){ console.warn('[user_tag ensure exception]', e); return { name: String(nome||'').trim(), slug: window._tagSlug(nome) }; }
+  }
+
+  /* ══ AGENDAMENTO (SM-2) — Fase 5A ══════════════════════════════════════
+     Uma linha por card/GRUPO em aluno.flashcard_srs (o gatilho do banco cria
+     e remove as linhas conforme os grupos {{cN}} do card). Aqui: hidratação,
+     espelho local imediato ao criar/editar card (sem esperar refetch), upsert
+     de uma linha, log de revisão e configurações por aluno. */
+  window.SRS_DEFAULTS = {
+    learningSteps: ['1d', '2d'],     // passos de aprendizado
+    easyIntervalDays: 4,             // "Fácil" saindo do aprendizado
+    startingEase: 2.3,               // 230%
+    easyBonus: 1.3,                  // 130%
+    intervalMultiplier: 1.0,         // 100%
+    overdueBonus: { hard: 0.25, good: 0.5, easy: 1.0 },
+    maxIntervalDays: 90,
+    forgotIntervalMin: 1,
+    relearningSteps: ['1d', '4d'],
+    lapseMultiplier: 0.1,            // 10%
+    newPerDay: 999999, reviewsPerDay: 999999,
+    showIntervals: false,            // intervalo previsto nos botões (vicia no tempo)
+    aiCheck: true,                   // campo "digite sua resposta" + IA
+    leechThreshold: 8,
+    matureDays: 21                   // "dominado" = intervalo ≥ 21 dias
+  };
+  function _srsFromRow(r){
+    return { cardId: r.card_id, ord: r.ord || 1, state: r.state || 'new', step: r.step || 0,
+      ease: r.ease != null ? Number(r.ease) : window.SRS_DEFAULTS.startingEase,
+      intervalDays: r.interval_days != null ? Number(r.interval_days) : 0,
+      dueAt: r.due_at ? new Date(r.due_at).getTime() : null,
+      reps: r.reps || 0, lapses: r.lapses || 0,
+      lastReviewedAt: r.last_reviewed_at ? new Date(r.last_reviewed_at).getTime() : null,
+      suspended: !!r.suspended, leech: !!r.leech,
+      updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : Date.now() };
+  }
+  function _srsRowFrom(x, userId){
+    return { card_id: x.cardId, ord: x.ord || 1, user_id: userId, state: x.state || 'new', step: x.step || 0,
+      ease: x.ease, interval_days: x.intervalDays || 0,
+      due_at: x.dueAt ? new Date(x.dueAt).toISOString() : null,
+      reps: x.reps || 0, lapses: x.lapses || 0,
+      last_reviewed_at: x.lastReviewedAt ? new Date(x.lastReviewedAt).toISOString() : null,
+      suspended: !!x.suspended, leech: !!x.leech, updated_at: new Date().toISOString() };
+  }
+  // Grupos de um card (espelho de aluno.flashcard_ords): cloze → números dos
+  // {{cN}}; tradicional/lista → [1].
+  function _srsOrdsDe(card){
+    if(card && card.kind === 'cloze' && window.Cloze){ const g = Cloze.groups(card.clozeText || ''); return g.length ? g : [1]; }
+    return [1];
+  }
+  // Espelho local das linhas que o gatilho do banco cria/remove.
+  function _srsLocalSync(card){
+    if(!_state || !card) return;
+    if(!Array.isArray(_state.srs)) _state.srs = [];
+    const ords = _srsOrdsDe(card);
+    ords.forEach(o => { if(!_state.srs.some(x => x.cardId === card.id && x.ord === o)) _state.srs.push(_srsFromRow({ card_id: card.id, ord: o })); });
+    _state.srs = _state.srs.filter(x => x.cardId !== card.id || ords.indexOf(x.ord) >= 0);
+  }
+  async function _hydrateSrsFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      // Paginado com ordem ESTÁVEL (card_id, ord) — a chave é composta, então
+      // não dá pra usar o _fetchAllRows (uma coluna só).
+      const out = []; const PAG = 1000;
+      for(let de = 0; ; de += PAG){
+        const { data, error } = await window._sb.schema('aluno').from('flashcard_srs').select('*').eq('user_id', userId)
+          .order('card_id', { ascending: true }).order('ord', { ascending: true }).range(de, de + PAG - 1);
+        if(error){ console.warn('[hydrate srs]', error); return; }
+        out.push.apply(out, data || []);
+        if((data || []).length < PAG) break;
+      }
+      _state.srs = out.map(_srsFromRow);
+      if(out.length) console.log('[Store] hydrated srs:', out.length);
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate srs exception]', e); }
+  }
+  async function _hydrateSrsSettingsFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('flashcard_settings').select('params').eq('user_id', userId).maybeSingle();
+      if(error){ console.warn('[hydrate srs settings]', error); return; }
+      _state.srsSettings = (data && data.params && typeof data.params === 'object') ? data.params : {};
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate srs settings exception]', e); }
+  }
+  async function _syncSrsUpsert(x){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_UUID_RE.test(String(x.cardId || ''))) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('flashcard_srs').upsert(_srsRowFrom(x, userId), { onConflict: 'card_id,ord' });
+      if(error){ console.warn('[srs upsert]', error); if(window.ueToast) ueToast('Sua revisão não foi salva no servidor. Confira a conexão.', 'warn'); }
+    }catch(e){ console.warn('[srs upsert exception]', e); }
+  }
+  async function _syncSrsSettingsSave(params){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('flashcard_settings')
+        .upsert({ user_id: userId, params: params, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+      if(error) console.warn('[srs settings save]', error);
+    }catch(e){ console.warn('[srs settings save exception]', e); }
+  }
+  async function _syncReviewInsert(r){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb) return;
+    try{
+      const row = { user_id: userId, card_id: r.cardId, ord: r.ord || 1, session_id: r.sessionId || null, rating: r.rating,
+        state_before: r.stateBefore || null, interval_before: r.intervalBefore != null ? r.intervalBefore : null,
+        interval_after: r.intervalAfter != null ? r.intervalAfter : null, ease_after: r.easeAfter != null ? r.easeAfter : null,
+        due_after: r.dueAfter ? new Date(r.dueAfter).toISOString() : null, response_ms: r.responseMs || null,
+        typed_answer: r.typedAnswer || null, ai_verdict: r.aiVerdict || null };
+      const { error } = await window._sb.schema('aluno').from('flashcard_reviews').insert(row);
+      if(error) console.warn('[review insert]', error);
+    }catch(e){ console.warn('[review insert exception]', e); }
   }
 
   async function _hydrateNotesFromSupabase(){
@@ -14164,6 +14277,9 @@ const Store = (function(){
       // Fase 0 dos flashcards — deck próprio + tags privadas
       _hydrateDeckFromSupabase().catch(()=>{});
       _hydrateUserTagsFromSupabase().catch(()=>{});
+      // Fase 5A — agendamento (SM-2) + configurações por aluno
+      _hydrateSrsFromSupabase().catch(()=>{});
+      _hydrateSrsSettingsFromSupabase().catch(()=>{});
       _hydrateReadingListFromSupabase().catch(()=>{});
       _hydrateHighlightsFromSupabase().catch(()=>{});
       // Fase 4h — hidrata flashcards + simulados do Supabase
@@ -14529,6 +14645,7 @@ const Store = (function(){
         topics:[], tags:[], userTags:[], createdAt:now, updatedAt:now }, payload);
       if(!Array.isArray(_state.deck)) _state.deck = [];
       _state.deck.push(card);
+      _srsLocalSync(card);           // o gatilho do banco faz o mesmo no servidor
       _persist(); _emit();
       _syncDeckInsertToSupabase(card).catch(()=>{});
       return card;
@@ -14538,6 +14655,7 @@ const Store = (function(){
       const idx = (_state.deck||[]).findIndex(c => c.id === id);
       if(idx < 0) return null;
       _state.deck[idx] = Object.assign({}, _state.deck[idx], patch, { updatedAt: Date.now() });
+      if(patch && (patch.clozeText != null || patch.kind != null)) _srsLocalSync(_state.deck[idx]);
       _persist(); _emit();
       _syncDeckUpdateToSupabase(_state.deck[idx]).catch(()=>{});
       return _state.deck[idx];
@@ -14545,10 +14663,39 @@ const Store = (function(){
     deckDelete(id){
       if(!_state || !Array.isArray(_state.deck)) return;
       _state.deck = _state.deck.filter(c => c.id !== id);
+      if(Array.isArray(_state.srs)) _state.srs = _state.srs.filter(x => x.cardId !== id);   // cascade no servidor
       _persist(); _emit();
       _syncDeckDeleteToSupabase(id).catch(()=>{});
     },
     userTags(){ return (_state && Array.isArray(_state.userTags)) ? _state.userTags.slice() : []; },
+    /* ── Agendamento (Fase 5A) ── */
+    srsList(){ return (_state && Array.isArray(_state.srs)) ? _state.srs.slice() : []; },
+    srsFor(cardId){ return (_state && Array.isArray(_state.srs)) ? _state.srs.filter(x => x.cardId === cardId).sort((a, b) => a.ord - b.ord) : []; },
+    srsUpsert(cardId, ord, patch){
+      if(!_state) return null;
+      if(!Array.isArray(_state.srs)) _state.srs = [];
+      ord = ord || 1;
+      let x = _state.srs.find(y => y.cardId === cardId && y.ord === ord);
+      if(!x){ x = _srsFromRow({ card_id: cardId, ord: ord }); _state.srs.push(x); }
+      Object.assign(x, patch || {}, { updatedAt: Date.now() });
+      _persist(); _emit();
+      _syncSrsUpsert(x).catch(()=>{});
+      return x;
+    },
+    reviewAdd(r){ _syncReviewInsert(r).catch(()=>{}); return r; },
+    srsSettings(){
+      const d = window.SRS_DEFAULTS, o = (_state && _state.srsSettings) || {};
+      const m = Object.assign({}, d, o);
+      m.overdueBonus = Object.assign({}, d.overdueBonus, (o.overdueBonus && typeof o.overdueBonus === 'object') ? o.overdueBonus : {});
+      return m;
+    },
+    srsSettingsSave(patch){
+      if(!_state) return null;
+      _state.srsSettings = Object.assign({}, _state.srsSettings || {}, patch || {});
+      _persist(); _emit();
+      _syncSrsSettingsSave(_state.srsSettings).catch(()=>{});
+      return Store.srsSettings();
+    },
     userTagEnsure(nome){ return _userTagEnsureRemote(nome); },
     listNotes(filters){
       filters = filters || {};
@@ -41860,6 +42007,7 @@ Renderers.notes = function(route){
         <div class="ufc-face ufc-front">
           <div class="ufc-top-actions">
             <span class="ufc-kind">${FlashcardRender.kindLabel(fc)}</span>
+            <span class="ufc-due">${Util.esc(FlashcardRender.dueLabel(Store.srsFor(fc.id)))}</span>
             <button class="ufc-icon-btn" data-ufc-edit="${Util.attr(fc.id)}" title="Editar"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4z"/></svg></button>
             <button class="ufc-icon-btn" data-ufc-delete="${Util.attr(fc.id)}" title="Excluir"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>
           </div>
@@ -48335,7 +48483,18 @@ const FlashcardRender = (function(){
     if(k === 'multi') return card.listStyle === 'number' ? 'Lista numerada' : 'Lista';
     return 'Tradicional';
   }
-  return { front, back, kindLabel, gcls };
+  // Etiqueta de agendamento do card (linhas de srs de todos os grupos)
+  function dueLabel(rows){
+    if(!rows || !rows.length) return '';
+    if(rows.every(r => r.state === 'new')) return 'novo';
+    const ativos = rows.filter(r => !r.suspended);
+    if(!ativos.length) return 'desativado';
+    const min = Math.min.apply(null, ativos.map(r => r.dueAt == null ? 0 : r.dueAt));
+    const dias = Math.ceil((min - Date.now()) / 86400000);
+    if(dias <= 0) return 'revisar hoje';
+    return 'revisão em ' + dias + (dias === 1 ? ' dia' : ' dias');
+  }
+  return { front, back, kindLabel, dueLabel, gcls };
 })();
 window.FlashcardRender = FlashcardRender;
 
