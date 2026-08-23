@@ -14090,7 +14090,18 @@ const Store = (function(){
   /* ── Agregado diário dos flashcards (gráficos da Fase 5E) ──
      Carregado sob demanda (1ª abertura da página), paginado por (dia, rating)
      — teto de 1000 linhas do PostgREST (armadilha nº3). */
-  let _fcDailyPromise = null, _fcDailyErro = null;
+  /* CAUSA-RAIZ do "flick + esqueleto eterno" (2026-08-23): Store.init TROCA
+     o _state inteiro (e roda de novo no boot quando o curso ativo muda).
+     Se o agregado morar só no _state, os dados chegam num estado que já foi
+     substituído — e a promessa memorizada nunca busca de novo. Por isso a
+     FONTE DA VERDADE é o cache do MÓDULO (_fcDailyRows), que sobrevive à
+     troca de estado; o _state é só espelho pra persistência. Cache zera
+     apenas quando o USUÁRIO muda. */
+  let _fcDailyPromise = null, _fcDailyErro = null, _fcDailyRows = null, _fcDailyUid = null;
+  function _fcDailySyncUid(){
+    const uid = _currentSupaUserId();
+    if(uid !== _fcDailyUid){ _fcDailyUid = uid; _fcDailyRows = null; _fcDailyPromise = null; _fcDailyErro = null; }
+  }
   async function _fetchFcDaily(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state) return { rows: null, erro: { codigo: 'sem_sessao', mensagem: 'Você precisa estar logado para ver as estatísticas.' } };
@@ -14113,11 +14124,16 @@ const Store = (function(){
   // Falha NÃO fica memorizada: a próxima abertura da página tenta de novo.
   function _fcDailyEnsure(force){
     if(!force && _fcDailyPromise) return _fcDailyPromise;
+    _fcDailySyncUid();
     _fcDailyPromise = _fetchFcDaily().then(r => {
       _fcDailyErro = r.erro;
       // [] = sucesso sem revisões ainda (aluno novo) — NUNCA tratar como falha
-      if(Array.isArray(r.rows) && _state){ _state.fcDaily = r.rows; _persist(); }
-      if(!Array.isArray(r.rows)) _fcDailyPromise = null;
+      if(Array.isArray(r.rows)){
+        _fcDailyRows = r.rows;                                    // fonte da verdade (módulo)
+        if(_state){ _state.fcDaily = r.rows; _persist(); }        // espelho persistido
+      } else {
+        _fcDailyPromise = null;                                   // falha → próxima abertura tenta de novo
+      }
       return r;
     }).catch(e => { console.warn('[fc daily exception]', e); _fcDailyPromise = null; _fcDailyErro = { codigo: 'excecao', mensagem: String(e && e.message || e) }; return { rows: null, erro: _fcDailyErro }; });
     return _fcDailyPromise;
@@ -15109,7 +15125,12 @@ const Store = (function(){
       if(sess) _syncSessionUpsert(sess).catch(()=>{});
     },
     studyLog(row){ return _syncStudyLog(row); },
-    fcDaily(){ return (_state && Array.isArray(_state.fcDaily)) ? _state.fcDaily.slice() : null; },
+    fcDaily(){
+      _fcDailySyncUid();
+      if(Array.isArray(_fcDailyRows)) return _fcDailyRows.slice();
+      if(_state && Array.isArray(_state.fcDaily)){ _fcDailyRows = _state.fcDaily.slice(); return _fcDailyRows.slice(); }   // semeia do persistido
+      return null;
+    },
     fcDailyEnsure(){ return _fcDailyEnsure(false); },   // Promise<{rows, erro}>
     fcDailyRefresh(){ return _fcDailyEnsure(true); },
     fcDailyErro(){ return _fcDailyErro; },
