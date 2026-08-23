@@ -8603,6 +8603,8 @@ html[data-theme="light"] .hl-mark[data-hl-color="veil"]{background:var(--text);c
 .fcp-topic-t.is-none{color:var(--text-mute);font-style:italic}
 .fcp-agrupar{margin-bottom:.9rem}
 .fcp-unit-topic{padding-left:1.7rem}
+.fcp-topic-row{padding-left:calc(1.6rem + var(--d,0)*1.15rem)}
+div.fcp-topic-row{padding-left:calc(2.3rem + var(--d,0)*1.15rem)}
 .fcp-unit-topic .fcp-topic-n{margin-right:.5rem}
 .fcp-topic-none{color:var(--text-mute);font-style:italic}
 .fcp-chip{font-family:var(--mono);font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);border:1px solid var(--accent-border-soft);border-radius:2px;padding:.14rem .4rem;margin-right:.5rem;white-space:nowrap;vertical-align:1px}
@@ -13970,7 +13972,8 @@ const Store = (function(){
     lapseMultiplier: 0.1,            // 10%
     newPerDay: 999999, reviewsPerDay: 999999,
     showIntervals: false,            // intervalo previsto nos botões (vicia no tempo)
-    aiCheck: true,                   // campo "digite sua resposta" + IA
+    aiCheck: true,
+    aiAutoCheck: true,               // conferir com a IA sozinho ao mostrar a resposta (se houver texto)                   // campo "digite sua resposta" + IA
     leechThreshold: 8,
     matureDays: 21,                  // "dominado" = intervalo ≥ 21 dias
     dailyGoal: 20                    // meta diária de cards revisados (mapa de calor)
@@ -49559,6 +49562,7 @@ const SrsSettingsModal = (function(){
     { k: 'dailyGoal', lab: 'Meta diária de cards revisados', tipo: 'num', un: 'cards', min: 1, max: 5000, help: 'A sequência conta qualquer dia com revisão; a meta marca o dia no mapa de calor.' },
     { k: 'showIntervals', lab: 'Mostrar o intervalo previsto nos botões', tipo: 'bool', help: 'Desligado por padrão: com o tempo à vista, o julgamento vira "quero ver em 12 h" em vez de "foi bom".' },
     { k: 'aiCheck', lab: 'Campo para digitar a resposta e conferir com a IA', tipo: 'bool' },
+    { k: 'aiAutoCheck', lab: 'Conferir com a IA automaticamente ao mostrar a resposta', tipo: 'bool', help: 'Se você digitou uma resposta, a conferência (0,01ⓤ) roda sozinha ao virar o card — antes de o gabarito influenciar sua autoavaliação. Desligado, fica só o botão.' },
   ];
   function getPath(o, k){ return k.split('.').reduce((a, p) => (a == null ? a : a[p]), o); }
   function setPath(o, k, v){ const ps = k.split('.'); let cur = o; ps.slice(0, -1).forEach(p => { if(typeof cur[p] !== 'object' || cur[p] == null) cur[p] = {}; cur = cur[p]; }); cur[ps[ps.length - 1]] = v; }
@@ -49974,8 +49978,9 @@ const Practice = (function(){
     _root.querySelector('#prCard').classList.add('flipped');
     const ans = _root.querySelector('#prAnswer'); if(ans) ans.hidden = true;
     if(a.typed && a.typed.trim()){ const tp = _root.querySelector('#prTyped'); tp.hidden = false; tp.querySelector('#prTypedTxt').textContent = a.typed.trim(); }
-    const ai = _root.querySelector('#prAi'); if(ai) ai.hidden = !(a.typed && a.typed.trim());
     const cfg = Store.srsSettings();
+    const ai = _root.querySelector('#prAi'); if(ai) ai.hidden = !(a.typed && a.typed.trim());
+    if(ai && !ai.hidden && cfg.aiAutoCheck !== false) _conferirIA();   // roda sozinho (opção ligada por padrão)
     const prev = cfg.showIntervals ? Scheduler.preview4(_srsDe(a.cardId, a.ord), Date.now(), cfg) : null;
     const acts = _root.querySelector('#prActions'); acts.innerHTML = _acoesHtml(prev);
     acts.querySelectorAll('[data-rate]').forEach(b => b.addEventListener('click', function(){ responder(parseInt(b.getAttribute('data-rate'), 10)); }));
@@ -50271,6 +50276,19 @@ const FlashcardsPage = (function(){
     }
     return _unitIdx[String(unitId)] || { topics: [], order: 1e9, unitNumber: '', mod: null, cap: null };
   }
+  // cadeia completa do tópico até a raiz (1 → 1.2 → 1.2.5), pra árvore do edital
+  function _topicoChain(id){
+    const S = window.UbiqueStore; const out = []; let cur = id, guard = 0;
+    while(cur != null && guard++ < 20){
+      let tp = null;
+      if(S && S.edital_topics && S.edital_topics.get) tp = S.edital_topics.get(cur) || S.edital_topics.get(Number(cur)) || S.edital_topics.get(String(cur)) || null;
+      if(!tp && Util.getTopic) tp = Util.getTopic(cur);
+      if(!tp) break;
+      out.unshift({ id: String(tp.id), code: tp.code || tp.number || '', name: tp.title || tp.name || '' });
+      cur = tp.parent_id != null ? tp.parent_id : (tp.parentId != null ? tp.parentId : null);
+    }
+    return out;
+  }
   // tópico do edital ligado à unidade (o primeiro vínculo válido). Os tópicos
   // REAIS vivem em UbiqueStore.edital_topics (code + title); Util.getTopic é
   // o registro legado de mock — fica só como reserva.
@@ -50483,10 +50501,36 @@ const FlashcardsPage = (function(){
           </details>`;
           }).join('')}
         </details>`).join('')
-      : Array.from(m.topicos.values()).sort(ordTop).map(tp => `<div class="fcp-unit fcp-unit-topic">
-          <span class="fcp-row-t"><span class="fcp-unit-t">${tp.topico ? `<span class="fcp-topic-n">${esc(tp.topico.number)}</span>${esc(tp.topico.name)}` : '<em class="fcp-topic-none">Sem tópico no edital</em>'}</span>${vencidos(tp)}</span>${barra(tp)}
-          <span class="fcp-acc-a">${_split({ ids: tp.cards.join(','), subject: m.subjectId || '', unit: '', pend: tp.due + tp.novos, total: tp.itens, label: 'Praticar', nome: tp.topico ? (tp.topico.number + ' ' + tp.topico.name) : 'Sem tópico no edital' })}</span>
+      : (function(){
+        // Árvore completa do edital: cada leaf soma nos ANCESTRAIS — dá pra
+        // praticar o tópico 1, o 1.3 ou só o 1.3.1, como na visão por unidade.
+        const raiz = { children: new Map() }; const semTopico = [];
+        Array.from(m.topicos.values()).forEach(tp => {
+          const chain = tp.topico ? _topicoChain(tp.topico.id) : [];
+          if(!chain.length){ semTopico.push(tp); return; }
+          let node = raiz;
+          chain.forEach(t2 => {
+            if(!node.children.has(t2.id)) node.children.set(t2.id, { info: t2, children: new Map(), agg: novoNo({}) });
+            node = node.children.get(t2.id);
+            ['due', 'novos', 'learn', 'dom', 'rev', 'itens'].forEach(k => { node.agg[k] += tp[k]; });
+            node.agg.cards = node.agg.cards.concat(tp.cards);
+          });
+        });
+        const ordCode = (a, b) => String(a.info.code).localeCompare(String(b.info.code), 'pt-BR', { numeric: true });
+        const linhaTopo = n => `<span class="fcp-row-t"><span class="fcp-unit-t">${chip(n.info.code || '·')}${esc(n.info.name)}</span>${vencidos(n.agg)}</span>${barra(n.agg)}
+            <span class="fcp-acc-a">${_split({ ids: n.agg.cards.join(','), subject: m.subjectId || '', unit: '', pend: n.agg.due + n.agg.novos, total: n.agg.itens, label: 'Praticar', nome: (n.info.code ? n.info.code + ' ' : '') + n.info.name })}</span>`;
+        const render = (node, depth) => Array.from(node.children.values()).sort(ordCode).map(n => {
+          if(!n.children.size) return `<div class="fcp-unit fcp-topic-row" style="--d:${depth}">${linhaTopo(n)}</div>`;
+          return `<details class="fcp-lvl fcp-lvl-top"${(depth === 0 || (n.agg.due + n.agg.novos)) ? ' open' : ''}>
+            <summary class="fcp-lvl-h fcp-topic-row" style="--d:${depth}">${linhaTopo(n)}</summary>
+            ${render(n, depth + 1)}
+          </details>`;
+        }).join('');
+        return render(raiz, 0) + semTopico.map(tp => `<div class="fcp-unit fcp-unit-topic">
+          <span class="fcp-row-t"><span class="fcp-unit-t"><em class="fcp-topic-none">Sem tópico no edital</em></span>${vencidos(tp)}</span>${barra(tp)}
+          <span class="fcp-acc-a">${_split({ ids: tp.cards.join(','), subject: m.subjectId || '', unit: '', pend: tp.due + tp.novos, total: tp.itens, label: 'Praticar', nome: 'Sem tópico no edital' })}</span>
         </div>`).join('');
+      })();
     const acc = matArr.length ? matArr.map((m, i) => `<details class="fcp-acc"${i < 3 ? ' open' : ''}>
       <summary class="fcp-acc-h"><span class="fcp-acc-sg">${esc(m.sigla || '—')}</span><span class="fcp-row-t"><span class="fcp-acc-t">${esc(m.materia || m.sigla)}</span>${vencidos(m)}</span>${barra(m)}
         <span class="fcp-acc-a">${_split({ ids: m.cards.join(','), subject: m.subjectId || '', unit: '', pend: m.due + m.novos, total: m.itens, label: 'Praticar', nome: m.materia || m.sigla })}</span></summary>
