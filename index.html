@@ -8632,6 +8632,9 @@ div.fcp-topic-row{padding-left:calc(2.3rem + var(--d,0)*1.15rem)}
 @media(max-width:760px){.fcp-acc-h,.fcp-unit,.fcp-topic-h{flex-wrap:wrap}.fcp-prog{width:100%;order:3}.fcp-acc-a{order:4}}
 .fcp-gcard-err{display:flex;gap:.7rem;align-items:center;flex-wrap:wrap}
 .fcp-retry{background:transparent;border:1px solid var(--accent-border);border-radius:var(--radius,4px);color:var(--accent);font-family:var(--sans);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;padding:.35rem .7rem;cursor:pointer}
+.anki-opt-apkg{border-color:var(--accent-border)}
+.anki-sep{display:flex;align-items:center;gap:.8rem;margin:.9rem 0 .5rem;font-family:var(--sans);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
+.anki-sep::before,.anki-sep::after{content:"";flex:1;height:1px;background:var(--accent-border-soft)}
 /* Revisar na unidade (Fase 5G-A) */
 .unit-revisar{margin:2.2rem 0 0;border:1px solid var(--accent-border-soft);border-radius:var(--radius-lg,8px);background:var(--bg-card);overflow:hidden}
 .unit-revisar-in{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;padding:1rem 1.2rem;font-family:var(--sans)}
@@ -50814,6 +50817,208 @@ window.FlashcardsPage = FlashcardsPage;
    isso NÃO amarramos o nome no arquivo). Cabeçalhos reconhecidos pelo Anki
    2.1.55+; em versões antigas viram comentários e o TSV importa igual.
    Deck por matéria (Falcon::SIGLA) e tags normalizadas. Sem servidor. */
+/* ══ EXPORTAÇÃO .APKG (Fase 5G-B) — arquivo do Anki COM agendamento ═════════
+   O .apkg é um zip com um SQLite no formato do Anki (schema 11). Montamos o
+   banco no navegador com sql.js (SQLite em WASM) + JSZip, carregados SOB
+   DEMANDA no clique (mesmo padrão do grafo/força e da voz). O agendamento
+   SM-2 vai junto: novo/aprendendo/revisão, intervalo, facilidade,
+   vencimento, repetições, lapsos e suspensos. */
+const AnkiApkg = (function(){
+  // ═══════════ PURO:INICIO — sem window/document; testado em Node ═══════════
+  const SEP = '\u001f';
+  const escHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r?\n/g, '<br>');
+  const textoPlano = s => String(s == null ? '' : s).replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '$1').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+  function grupos(clozeText){ const out = new Set(); const re = /\{\{c(\d+)::/g; let m; while((m = re.exec(String(clozeText || '')))) out.add(parseInt(m[1], 10)); return Array.from(out).sort((a, b) => a - b); }
+
+  function esquemaSql(){
+    return [
+      'CREATE TABLE col (id integer primary key, crt integer not null, mod integer not null, scm integer not null, ver integer not null, dty integer not null, usn integer not null, ls integer not null, conf text not null, models text not null, decks text not null, dconf text not null, tags text not null);',
+      'CREATE TABLE notes (id integer primary key, guid text not null, mid integer not null, mod integer not null, usn integer not null, tags text not null, flds text not null, sfld integer not null, csum integer not null, flags integer not null, data text not null);',
+      'CREATE TABLE cards (id integer primary key, nid integer not null, did integer not null, ord integer not null, mod integer not null, usn integer not null, type integer not null, queue integer not null, due integer not null, ivl integer not null, factor integer not null, reps integer not null, lapses integer not null, left integer not null, odue integer not null, odid integer not null, flags integer not null, data text not null);',
+      'CREATE TABLE revlog (id integer primary key, cid integer not null, usn integer not null, ease integer not null, ivl integer not null, lastIvl integer not null, factor integer not null, time integer not null, type integer not null);',
+      'CREATE TABLE graves (usn integer not null, oid integer not null, type integer not null);',
+      'CREATE INDEX ix_notes_usn ON notes (usn);',
+      'CREATE INDEX ix_cards_usn ON cards (usn);',
+      'CREATE INDEX ix_revlog_usn ON revlog (usn);',
+      'CREATE INDEX ix_cards_nid ON cards (nid);',
+      'CREATE INDEX ix_cards_sched ON cards (did, queue, due);',
+      'CREATE INDEX ix_revlog_cid ON revlog (cid);',
+      'CREATE INDEX ix_notes_csum ON notes (csum);',
+    ].join('\n');
+  }
+  const CSS_CARD = '.card { font-family: arial; font-size: 20px; text-align: center; color: black; background-color: white; }';
+  const LATEX_PRE = '\\documentclass[12pt]{article}\n\\special{papersize=3in,5in}\n\\usepackage[utf8]{inputenc}\n\\usepackage{amssymb,amsmath}\n\\pagestyle{empty}\n\\setlength{\\parindent}{0in}\n\\begin{document}\n';
+  function campo(nome, ord){ return { name: nome, ord: ord, sticky: false, rtl: false, font: 'Arial', size: 20, media: [] }; }
+  function modeloBasico(mid, agoraS){
+    return { id: mid, name: 'Falcon Básico', type: 0, mod: agoraS, usn: -1, sortf: 0, did: 1,
+      tmpls: [{ name: 'Cartão 1', ord: 0, qfmt: '{{Frente}}', afmt: '{{FrontSide}}\n<hr id=answer>\n{{Verso}}', bqfmt: '', bafmt: '', did: null, bfont: '', bsize: 0 }],
+      flds: [campo('Frente', 0), campo('Verso', 1)], css: CSS_CARD,
+      latexPre: LATEX_PRE, latexPost: '\\end{document}', latexsvg: false, req: [[0, 'any', [0]]], vers: [], tags: [] };
+  }
+  function modeloCloze(mid, agoraS){
+    return { id: mid, name: 'Falcon Lacunas', type: 1, mod: agoraS, usn: -1, sortf: 0, did: 1,
+      tmpls: [{ name: 'Cloze', ord: 0, qfmt: '{{cloze:Texto}}', afmt: '{{cloze:Texto}}<br>\n{{Extra}}', bqfmt: '', bafmt: '', did: null, bfont: '', bsize: 0 }],
+      flds: [campo('Texto', 0), campo('Extra', 1)], css: CSS_CARD + '\n.cloze { font-weight: bold; color: blue; }',
+      latexPre: LATEX_PRE, latexPost: '\\end{document}', latexsvg: false, vers: [], tags: [] };
+  }
+  function baralho(did, nome, agoraS){
+    return { id: did, name: nome, mod: agoraS, usn: -1, lrnToday: [0, 0], revToday: [0, 0], newToday: [0, 0], timeToday: [0, 0],
+      collapsed: false, browserCollapsed: false, desc: '', dyn: 0, conf: 1, extendNew: 10, extendRev: 50 };
+  }
+  function dconfPadrao(){
+    return { 1: { id: 1, name: 'Default', mod: 0, usn: -1, maxTaken: 60, autoplay: true, timer: 0, replayq: true,
+      new: { bury: false, delays: [1, 10], initialFactor: 2500, ints: [1, 4, 0], order: 1, perDay: 20 },
+      rev: { bury: false, ease4: 1.3, ivlFct: 1, maxIvl: 36500, perDay: 200, hardFactor: 1.2 },
+      lapse: { delays: [10], leechAction: 1, leechFails: 8, minInt: 1, mult: 0 } } };
+  }
+  function fator(r){ return Math.max(1300, Math.round(((r && r.ease) || 2.3) * 1000)); }
+  // Estado SM-2 → colunas do Anki. crtS = criação da coleção (s); agora em ms.
+  function schedDe(r, crtS, agora, proxNovo){
+    const dia = ms => Math.max(0, Math.round((ms - crtS * 1000) / 86400000));
+    let out;
+    if(!r || !r.state || r.state === 'new'){
+      out = { type: 0, queue: 0, due: proxNovo.v++, ivl: 0, factor: 0, reps: 0, lapses: 0, left: 0 };
+    } else if(r.state === 'learning' || r.state === 'relearning'){
+      const dueAt = r.dueAt != null ? r.dueAt : agora;
+      const mesmoDia = (dueAt - agora) < 86400000;
+      out = { type: 1, queue: mesmoDia ? 1 : 3, due: mesmoDia ? Math.floor(dueAt / 1000) : dia(dueAt),
+        ivl: Math.max(0, Math.round(r.intervalDays || 0)), factor: fator(r), reps: r.reps || 0, lapses: r.lapses || 0, left: 1001 };
+    } else {
+      out = { type: 2, queue: 2, due: dia(r.dueAt != null ? r.dueAt : agora), ivl: Math.max(1, Math.round(r.intervalDays || 1)),
+        factor: fator(r), reps: r.reps || 0, lapses: r.lapses || 0, left: 0 };
+    }
+    if(r && r.suspended) out.queue = -1;
+    return out;
+  }
+  /* Monta todas as linhas do banco. deps:
+     ctxDe(card) → {sigla, materia, unitTitle} · tagsDe(card, ctx) → 'a b c'
+     srsFor(cardId) → linhas de agendamento [{ord, state, …}]
+     agora (ms) · sha1hex(texto) → Promise<hex> */
+  async function montarDados(cards, deps){
+    const agora = deps.agora, agoraS = Math.floor(agora / 1000);
+    const crtD = new Date(agora); crtD.setHours(4, 0, 0, 0); if(crtD.getTime() > agora) crtD.setDate(crtD.getDate() - 1);
+    const crtS = Math.floor(crtD.getTime() / 1000);
+    const midB = agora + 1, midC = agora + 2;
+    const models = {}; models[midB] = modeloBasico(midB, agoraS); models[midC] = modeloCloze(midC, agoraS);
+    const decks = { 1: baralho(1, 'Default', agoraS) };
+    const didDe = {}; let didSeq = 0;
+    const notes = [], linhas = [], resumo = { notas: 0, cards: 0, novos: 0, aprendendo: 0, revisao: 0, suspensos: 0, baralhos: [] };
+    const proxNovo = { v: 1 };
+    let nId = agora + 1000, cId = agora + 600000;
+    for(const c of (cards || [])){
+      const ctx = deps.ctxDe(c) || {};
+      const nomeDeck = 'Falcon::' + String(ctx.sigla || ctx.materia || 'Geral').replace(/\s+/g, ' ');
+      if(didDe[nomeDeck] == null){ didDe[nomeDeck] = agora + 900000 + (didSeq++); decks[didDe[nomeDeck]] = baralho(didDe[nomeDeck], nomeDeck, agoraS); resumo.baralhos.push(nomeDeck); }
+      const did = didDe[nomeDeck];
+      const tags = ' ' + String(deps.tagsDe(c, ctx) || '').trim() + ' ';
+      let mid, flds, ords;
+      if(c.kind === 'cloze'){
+        if(!c.clozeText) continue;
+        mid = midC; flds = escHtml(c.clozeText) + SEP + escHtml(ctx.unitTitle || '');
+        ords = grupos(c.clozeText).map(g => ({ ord: g - 1, srsOrd: g }));
+        if(!ords.length) continue;
+      } else if(c.kind === 'multi'){
+        const tagL = c.listStyle === 'number' ? 'ol' : 'ul';
+        mid = midB; flds = escHtml(c.front) + SEP + '<' + tagL + '>' + (c.lines || []).map(l => '<li>' + escHtml(l) + '</li>').join('') + '</' + tagL + '>';
+        ords = [{ ord: 0, srsOrd: 1 }];
+      } else {
+        if(!c.front && !c.back) continue;
+        mid = midB; flds = escHtml(c.front) + SEP + escHtml(c.back);
+        ords = [{ ord: 0, srsOrd: 1 }];
+      }
+      const sfld = textoPlano(flds.split(SEP)[0]);
+      const csum = parseInt((await deps.sha1hex(sfld)).slice(0, 8), 16) || 0;
+      const noteId = nId++;
+      notes.push([noteId, 'fal.' + String(c.id), mid, agoraS, -1, tags, flds, sfld, csum, 0, '']);
+      resumo.notas++;
+      const srsRows = deps.srsFor(String(c.id)) || [];
+      for(const o of ords){
+        const r = srsRows.find(x => Number(x.ord) === Number(o.srsOrd)) || null;
+        const sc = schedDe(r, crtS, agora, proxNovo);
+        linhas.push([cId++, noteId, did, o.ord, agoraS, -1, sc.type, sc.queue, sc.due, sc.ivl, sc.factor, sc.reps, sc.lapses, sc.left, 0, 0, 0, '']);
+        resumo.cards++;
+        if(sc.queue === -1) resumo.suspensos++;
+        else if(sc.type === 0) resumo.novos++;
+        else if(sc.type === 1) resumo.aprendendo++;
+        else resumo.revisao++;
+      }
+    }
+    const conf = { activeDecks: [1], curDeck: 1, newSpread: 0, collapseTime: 1200, timeLim: 0, estTimes: true, dueCounts: true,
+      curModel: String(midB), nextPos: proxNovo.v, sortType: 'noteFld', sortBackwards: false, addToCur: true, dayLearnFirst: false, newBury: true };
+    const colRow = [1, crtS, agora, agora, 11, 0, 0, 0, JSON.stringify(conf), JSON.stringify(models), JSON.stringify(decks), JSON.stringify(dconfPadrao()), '{}'];
+    return { colRow, notes, cards: linhas, resumo };
+  }
+  // Executa o esquema + inserts num banco sql.js e devolve os bytes.
+  function construirDb(SQL, dados){
+    const db = new SQL.Database();
+    db.run(esquemaSql());
+    db.run('INSERT INTO col VALUES (' + dados.colRow.map(() => '?').join(',') + ')', dados.colRow);
+    const stN = db.prepare('INSERT INTO notes VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+    dados.notes.forEach(r => stN.run(r)); stN.free();
+    const stC = db.prepare('INSERT INTO cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+    dados.cards.forEach(r => stC.run(r)); stC.free();
+    const bytes = db.export(); db.close();
+    return bytes;
+  }
+  // ═══════════ PURO:FIM ═══════════
+
+  const CDN = { sqljs: 'https://cdn.jsdelivr.net/npm/sql.js@1.11.0/dist/', jszip: 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js' };
+  let _SQL = null;
+  function _carregarScript(src){
+    return new Promise(function(res, rej){
+      const el = document.createElement('script'); el.src = src;
+      el.onload = res; el.onerror = function(){ rej(new Error('Não consegui baixar a biblioteca (' + src + '). Confira a conexão.')); };
+      document.head.appendChild(el);
+    });
+  }
+  async function _libs(){
+    if(!window.initSqlJs) await _carregarScript(CDN.sqljs + 'sql-wasm.js');
+    if(!window.JSZip) await _carregarScript(CDN.jszip);
+    if(!_SQL) _SQL = await window.initSqlJs({ locateFile: f => CDN.sqljs + f });
+    return { SQL: _SQL, JSZip: window.JSZip };
+  }
+  async function _sha1hex(txt){
+    const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(String(txt)));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  function _depsReais(){
+    return {
+      agora: Date.now(),
+      sha1hex: _sha1hex,
+      ctxDe: c => (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(c.unitId, c.blockId) : {},
+      tagsDe: (c, ctx) => {
+        const t = new Set();
+        (c.tags || []).forEach(x => { const s2 = window._tagSlug ? _tagSlug(x) : ''; if(s2) t.add(s2); });
+        (c.userTags || []).forEach(x => { if(x) t.add(String(x)); });
+        if(ctx.sigla) t.add('falcon::' + (window._tagSlug ? _tagSlug(ctx.sigla) : String(ctx.sigla).toLowerCase()));
+        return Array.from(t).join(' ');
+      },
+      srsFor: id => (window.Store && Store.srsFor) ? Store.srsFor(id) : [],
+    };
+  }
+  async function gerarBlob(cards){
+    const libs = await _libs();
+    const dados = await montarDados(cards, _depsReais());
+    if(!dados.resumo.cards) throw new Error('Nenhum flashcard válido para exportar.');
+    const bytes = construirDb(libs.SQL, dados);
+    const zip = new libs.JSZip();
+    zip.file('collection.anki2', bytes);
+    zip.file('media', '{}');
+    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    return { blob, resumo: dados.resumo };
+  }
+  async function exportar(cards){
+    const r = await gerarBlob(cards);
+    const nome = 'falcon-flashcards-' + new Date().toISOString().slice(0, 10) + '.apkg';
+    const url = URL.createObjectURL(r.blob);
+    const a = document.createElement('a'); a.href = url; a.download = nome; document.body.appendChild(a); a.click();
+    setTimeout(function(){ a.remove(); URL.revokeObjectURL(url); }, 1500);
+    return r.resumo;
+  }
+  return { exportar, gerarBlob, montarDados, construirDb, esquemaSql, grupos };
+})();
+window.AnkiApkg = AnkiApkg;
+
 const AnkiExport = (function(){
   const escHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\t/g, ' ').replace(/\r?\n/g, '<br>');
   const tagAnki = s => { const t = window._tagSlug ? window._tagSlug(s) : String(s || '').toLowerCase().replace(/\s+/g, '-'); return t.replace(/-+/g, '-'); };
@@ -50870,10 +51075,24 @@ const AnkiExport = (function(){
     }
     const hoje = new Date().toISOString().slice(0, 10);
     const body = _el.querySelector('#ankiBody');
-    body.innerHTML = '<div class="anki-intro">Baixe o(s) arquivo(s) e, no Anki, use <strong>Arquivo → Importar</strong>. Na tela de importação, escolha o <strong>tipo de nota</strong> indicado abaixo — o deck (<em>Falcon::matéria</em>) e as tags já vão dentro do arquivo.</div>'
+    const nTotal = (cards || []).length;
+    body.innerHTML = '<div class="anki-intro">No Anki, use <strong>Arquivo → Importar</strong>. O deck (<em>Falcon::matéria</em>) e as tags já vão dentro dos arquivos.</div>'
+      + '<div class="anki-opt anki-opt-apkg"><div><strong>Arquivo .apkg — com agendamento</strong><span>Um único arquivo com os três tipos de card e o estado do SM-2 (intervalos, vencimentos, facilidade, suspensos): você continua de onde parou. Importa em dois cliques.</span></div><button type="button" class="btn-primary" data-anki-apkg>Baixar .apkg</button></div>'
+      + '<div class="anki-sep"><span>ou os arquivos de texto (sem agendamento)</span></div>'
       + (m.basico.n ? '<div class="anki-opt"><div><strong>' + m.basico.n + (m.basico.n === 1 ? ' card tradicional/lista' : ' cards tradicionais/listas') + '</strong><span>Tipo de nota no Anki: <em>Básico</em> (Basic) · frente/verso</span></div><button type="button" class="btn-primary" data-anki="basico">Baixar .txt</button></div>' : '')
       + (m.lacunas.n ? '<div class="anki-opt"><div><strong>' + m.lacunas.n + (m.lacunas.n === 1 ? ' card de lacunas' : ' cards de lacunas') + '</strong><span>Tipo de nota no Anki: <em>Omissão de palavras</em> (Cloze) · cada grupo c1, c2… vira um card</span></div><button type="button" class="btn-primary" data-anki="lacunas">Baixar .txt</button></div>' : '')
       + '<div class="anki-foot">Funciona no Anki do computador (2.1.55 ou mais novo importa os cabeçalhos sozinho) e no AnkiMobile/AnkiDroid via importação de texto.</div>';
+    const apkgBtn = body.querySelector('[data-anki-apkg]');
+    if(apkgBtn) apkgBtn.addEventListener('click', async function(){
+      apkgBtn.disabled = true; apkgBtn.textContent = 'Gerando…';
+      try{
+        const r = await window.AnkiApkg.exportar(cards);
+        apkgBtn.textContent = 'Baixado (' + r.cards + ' card' + (r.cards === 1 ? '' : 's') + ')';
+      }catch(e){
+        apkgBtn.disabled = false; apkgBtn.textContent = 'Baixar .apkg';
+        if(window.ueToast) ueToast(String(e && e.message || 'Não consegui gerar o .apkg agora.'), 'error');
+      }
+    });
     body.querySelectorAll('[data-anki]').forEach(b => b.addEventListener('click', function(){
       const k = b.getAttribute('data-anki');
       baixar('falcon-flashcards-' + (k === 'lacunas' ? 'lacunas' : 'tradicionais') + '-' + hoje + '.txt', m[k].texto);
