@@ -8697,7 +8697,9 @@ html[data-theme="light"] .cad-fc[data-fc="red"]{color:#b03434}
 .tutor-caderno-ed [data-fc-id][data-fc-links]::before{content:attr(data-fc-links);position:absolute;bottom:.3rem;right:.5rem;font-family:var(--mono);font-size:.55rem;color:var(--text-mute);pointer-events:none}
 /* Vista renderizada das linhas de card (linha ativa mostra a sintaxe crua) */
 .tutor-caderno-ed .fc-oc{display:none}
-.tutor-caderno-ed .fc-chip{display:inline;border:1px solid;border-radius:6px;padding:.02rem .3rem;margin:0 .05rem;cursor:pointer;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.tutor-caderno-ed .fc-chip{display:inline;border:1px solid;border-radius:6px;padding:.02rem .3rem;margin:0 .05rem;cursor:text;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.fc-chip-btn{position:fixed;z-index:1150;background:var(--bg-card);border:1px solid var(--accent-border);border-radius:6px;font-family:var(--mono);font-size:.6rem;color:var(--accent);padding:.15rem .4rem;cursor:pointer;box-shadow:0 6px 18px -8px rgba(0,0,0,.6)}
+.fc-chip-btn:hover{background:var(--accent-lo)}
 .tutor-caderno-ed .fc-chip::after{content:'c' attr(data-g);font-family:var(--mono);font-size:.5rem;vertical-align:super;margin-left:.12rem;opacity:.75}
 .tutor-caderno-ed .fc-sep{color:var(--accent);font-family:var(--mono);font-size:.82em;opacity:.9;letter-spacing:.04em}
 .tutor-caderno-ed .fc-mk-b{font-size:0}
@@ -36478,22 +36480,29 @@ window.TutorIA = (function(){
   function _fcCadMarcarItens(entry){
     entry.blocos.slice(1).forEach(function(){ /* índices resolvidos pelo chamador */ });
   }
-  /* ── Vista renderizada (live preview) das linhas de card ──────────────────
-     A linha ATIVA (cursor dentro) mostra a sintaxe crua; as demais linhas de
-     card renderizam: lacuna vira chip colorido do grupo, " :: "/" :::" ganham
-     marca dourada e "- " vira bullet. A decoração é SÓ EMBRULHO visual —
-     nenhum caractere muda (marcadores ficam escondidos em spans data-deco),
-     então _fcCadTexto/ciclo/equivalência leem o mesmo texto de sempre. O
-     ciclo des-renderiza tudo antes de rodar e o save serializa o corpo cru. */
-  let _fcVistaMudando = false;
+  /* ── Vista renderizada das linhas de card (render IMEDIATO) ───────────────
+     Sintaxe fechada renderiza NA HORA, inclusive na linha em edição:
+     {n:lacuna} vira chip colorido do grupo, " :: "/" :::" ganham marca
+     dourada, "- " vira bullet. A decoração é SÓ EMBRULHO visual — nenhum
+     caractere muda (marcadores ficam em spans data-deco escondidos), então
+     ciclo/equivalência/save leem o mesmo texto e o caret mapeia 1:1.
+     A cada input, o PLANO (decoração que o texto pede) é comparado com o
+     ATUAL (decoração no DOM): iguais → nada acontece (digitação normal não
+     sofre cirurgia); diferentes (sintaxe fechou ou quebrou) → reembrulha a
+     linha preservando o caret. Chips são EDITÁVEIS por dentro; o menu de
+     unir/separar aparece num botão quando o caret está dentro da lacuna. */
+  let _fcVistaMudando = false, _fcComposing = false;
   function _fcVistaPos(linha, off){
-    let acc = 0, achou = null;
+    // fronteira exata prefere o COMEÇO do nó seguinte (off < fim, não <=):
+    // senão, embrulhar faixas adjacentes parte o span vizinho em cópias vazias
+    let acc = 0, achou = null, ult = null;
     (function walk(n){
       if(achou) return;
       if(n.nodeType === 3){
         const len = n.nodeValue.length;
-        if(off <= acc + len){ achou = { node: n, off: off - acc }; return; }
-        acc += len; return;
+        if(off < acc + len){ achou = { node: n, off: off - acc }; return; }
+        acc += len; ult = { node: n, off: len };
+        return;
       }
       if(n.nodeType !== 1) return;
       if(n.tagName === 'BR'){
@@ -36503,7 +36512,25 @@ window.TutorIA = (function(){
       if(n.tagName === 'SCRIPT' || n.tagName === 'STYLE') return;
       Array.prototype.forEach.call(n.childNodes, walk);
     })(linha);
+    if(!achou && off <= acc && ult) achou = ult;   // fim exato do texto da linha
     return achou;
+  }
+  function _fcVistaCaretOff(linha, alvo, aoff){
+    let off = 0, achou = false;
+    (function walk(n){
+      if(achou) return;
+      if(n === alvo && n.nodeType === 3){ off += aoff; achou = true; return; }
+      if(n.nodeType === 3){ off += n.nodeValue.length; return; }
+      if(n.nodeType !== 1) return;
+      if(n === alvo){
+        for(let i = 0; i < aoff && i < n.childNodes.length; i++) off += _fcCadTexto(n.childNodes[i]).length;
+        achou = true; return;
+      }
+      if(n.tagName === 'BR'){ off += 1; return; }
+      if(n.tagName === 'SCRIPT' || n.tagName === 'STYLE') return;
+      Array.prototype.forEach.call(n.childNodes, walk);
+    })(linha);
+    return achou ? off : null;
   }
   function _fcVistaWrap(linha, a, b, cls, atrs){
     const pa = _fcVistaPos(linha, a), pb = _fcVistaPos(linha, b);
@@ -36525,40 +36552,53 @@ window.TutorIA = (function(){
     while((m = re.exec(texto))){ out.push({ g: m[1] ? parseInt(m[1], 10) : (++seq), ia: m.index, ib: m.index + m[0].length, abre: 1 + (m[1] ? m[1].length + 1 : 0) }); }
     return out;
   }
-  function _fcVistaRender(linha){
-    if(!window.Store || !Store.deckList) return;
-    if(linha.getAttribute('data-fc-vista')) return;
-    const id = linha.getAttribute('data-fc-id') || linha.getAttribute('data-fc-item');
-    const card = Store.deckList().find(function(c){ return String(c.id) === String(id); });
-    if(!card) return;
-    linha.setAttribute('data-fc-vista', '1');
-    const texto = _fcCadTexto(linha);
-    if(linha.hasAttribute('data-fc-item')){
+  // Decoração que o TEXTO pede, por tipo de card
+  function _fcVistaPlano(texto, kind){
+    const out = [];
+    if(kind === 'item'){
       const mi = texto.match(/^\s*(-|•|\d+[.)])\s+/);
-      if(mi) _fcVistaWrap(linha, 0, mi[0].length, /\d/.test(mi[1]) ? 'fc-mk-n' : 'fc-mk-b');
-      return;
+      if(mi) out.push({ a: 0, b: mi[0].length, cls: /\d/.test(mi[1]) ? 'fc-mk-n' : 'fc-mk-b' });
+      return out;
     }
-    if(card.kind === 'multi'){
+    if(kind === 'multi'){
       const mm = texto.match(/ :::\s*$/);
-      if(mm) _fcVistaWrap(linha, mm.index, mm.index + mm[0].length, 'fc-sep');
-      return;
+      if(mm) out.push({ a: mm.index, b: mm.index + mm[0].length, cls: 'fc-sep' });
+      return out;
     }
-    if(card.kind === 'basic'){
+    if(kind === 'basic'){
       const i = texto.indexOf(' :: ');
-      if(i >= 0) _fcVistaWrap(linha, i, i + 4, 'fc-sep');
-      return;
+      if(i >= 0) out.push({ a: i, b: i + 4, cls: 'fc-sep' });
+      return out;
     }
-    if(card.kind === 'cloze'){
+    if(kind === 'cloze'){
       _fcVistaGrupos(texto).forEach(function(L, oc){
-        _fcVistaWrap(linha, L.ib - 1, L.ib, 'fc-oc');
-        _fcVistaWrap(linha, L.ia + L.abre, L.ib - 1, 'fc-chip clz-g' + (((L.g - 1) % 6) + 1), { 'data-g': String(L.g), 'data-oc': String(oc), contenteditable: 'false' });
-        _fcVistaWrap(linha, L.ia, L.ia + L.abre, 'fc-oc');
+        out.push({ a: L.ia, b: L.ia + L.abre, cls: 'fc-oc' });
+        out.push({ a: L.ia + L.abre, b: L.ib - 1, cls: 'fc-chip clz-g' + (((L.g - 1) % 6) + 1), g: L.g, oc: oc });
+        out.push({ a: L.ib - 1, b: L.ib, cls: 'fc-oc' });
       });
     }
+    return out;
+  }
+  // Decoração PRESENTE no DOM, como faixas de texto
+  function _fcVistaAtual(linha){
+    const out = []; let acc = 0;
+    (function walk(n){
+      if(n.nodeType === 3){ acc += n.nodeValue.length; return; }
+      if(n.nodeType !== 1) return;
+      if(n.tagName === 'BR'){ acc += 1; return; }
+      if(n.getAttribute && n.getAttribute('data-deco') != null){
+        const a = acc;
+        Array.prototype.forEach.call(n.childNodes, walk);
+        out.push({ a: a, b: acc, cls: n.className });
+        return;
+      }
+      if(n.tagName === 'SCRIPT' || n.tagName === 'STYLE') return;
+      Array.prototype.forEach.call(n.childNodes, walk);
+    })(linha);
+    out.sort(function(x, y){ return x.a - y.a || x.b - y.b; });
+    return out;
   }
   function _fcVistaSource(linha){
-    if(!linha.getAttribute || !linha.getAttribute('data-fc-vista')) return;
-    linha.removeAttribute('data-fc-vista');
     Array.prototype.slice.call(linha.querySelectorAll('[data-deco]')).forEach(function(sp){
       while(sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
       sp.remove();
@@ -36566,30 +36606,109 @@ window.TutorIA = (function(){
     linha.normalize();
   }
   function _fcVistaLimpar(el){
-    Array.prototype.slice.call(el.querySelectorAll('[data-fc-vista]')).forEach(_fcVistaSource);
-    // decoração órfã (linha mesclada por delete/backspace): desembrulha onde estiver
     Array.prototype.slice.call(el.querySelectorAll('[data-deco]')).forEach(function(sp){
       while(sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
       sp.remove();
     });
+    el.normalize();
   }
-  function _fcVistaLinhaAtiva(el){
+  // Sincroniza UMA linha: só mexe no DOM se a decoração devida mudou
+  function _fcVistaSync(linha){
+    if(!window.FcSintaxe) return;
+    const texto = _fcCadTexto(linha);
+    let kind = null;
+    if(linha.hasAttribute && linha.hasAttribute('data-fc-item')) kind = 'item';
+    else {
+      const id = linha.getAttribute ? linha.getAttribute('data-fc-id') : null;
+      const card = (id && window.Store && Store.deckList) ? Store.deckList().find(function(c){ return String(c.id) === String(id); }) : null;
+      kind = card ? card.kind : FcSintaxe.detectar(texto);
+    }
+    const plano = kind ? _fcVistaPlano(texto, kind) : [];
+    const atual = _fcVistaAtual(linha);
+    if(plano.length === atual.length && plano.every(function(pl, i){ return pl.a === atual[i].a && pl.b === atual[i].b && pl.cls === atual[i].cls; })) return;
     const sel = window.getSelection();
-    if(!sel || !sel.anchorNode || !el.contains(sel.anchorNode)) return null;
-    const n = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
-    return n && n.closest ? n.closest('[data-fc-id],[data-fc-item]') : null;
+    let off = null;
+    if(sel && sel.isCollapsed && sel.anchorNode && linha.contains(sel.anchorNode)) off = _fcVistaCaretOff(linha, sel.anchorNode, sel.anchorOffset);
+    _fcVistaMudando = true;
+    try{
+      _fcVistaSource(linha);
+      plano.forEach(function(pl){
+        const atrs = {};
+        if(pl.g != null){ atrs['data-g'] = String(pl.g); atrs['data-oc'] = String(pl.oc); }
+        _fcVistaWrap(linha, pl.a, pl.b, pl.cls, atrs);
+      });
+      if(off != null){
+        const pp = _fcVistaPos(linha, off);
+        if(pp && pp.node){
+          const r = document.createRange();
+          let posto = false;
+          // sintaxe recém-fechada: caret cai no marcador oculto ou na borda → pula pra fora
+          const hit = plano.find(function(pl){ return off > pl.a && off <= pl.b; });
+          if(hit && (hit.cls === 'fc-oc' || off === hit.b)){
+            const spans = linha.querySelectorAll('[data-deco]');
+            const alvoSp = spans[plano.indexOf(hit)];
+            if(alvoSp){ try{ r.setStartAfter(alvoSp); r.collapse(true); posto = true; }catch(_){} }
+          }
+          if(!posto){ try{ r.setStart(pp.node, pp.off); r.collapse(true); posto = true; }catch(_){} }
+          if(posto){ sel.removeAllRanges(); sel.addRange(r); }
+        }
+      }
+    } finally { _fcVistaMudando = false; }
   }
   function _fcVistaAplicar(el){
-    if(!el) return;
-    const ativa = _fcVistaLinhaAtiva(el);
-    Array.prototype.forEach.call(el.querySelectorAll('[data-fc-id],[data-fc-item]'), function(l){
-      if(l === ativa) return;
-      try{ _fcVistaRender(l); }catch(e){ console.warn('[fc vista]', e); }
+    if(!el || !window.FcSintaxe) return;
+    Array.prototype.forEach.call(el.children, function(l){
+      if(l.nodeType !== 1 || !l.matches || !l.matches(_FC_BLOCO_SEL)) return;
+      try{ _fcVistaSync(l); }catch(e){ console.warn('[fc vista]', e); }
     });
   }
-  // ── Popover da lacuna: unir a outro grupo / separar / desfazer ──
-  let _fcChipDd = null;
+  document.addEventListener('compositionstart', function(e){ const el = _cadEl(); if(el && el.contains(e.target)) _fcComposing = true; });
+  document.addEventListener('compositionend', function(e){ const el = _cadEl(); if(el && el.contains(e.target)){ _fcComposing = false; try{ _fcVistaAplicar(el); }catch(_){} } });
+  /* Enter divide o <div> da linha e o navegador CLONA os atributos pro bloco
+     novo — inclusive o carimbo data-fc-id. Sem dedup, passam a existir duas
+     linhas do MESMO card (o conteúdo fica alternando entre elas) e a linha
+     vazia nasce vestida de card. Regra: o carimbo fica na linha que tem a
+     SINTAXE (senão, na primeira); as outras viram anotação limpa. */
+  function _fcCadDedup(el){
+    const porId = {};
+    Array.prototype.slice.call(el.querySelectorAll('[data-fc-id]')).forEach(function(n){
+      const id = n.getAttribute('data-fc-id');
+      (porId[id] = porId[id] || []).push(n);
+    });
+    Object.keys(porId).forEach(function(id){
+      const ls = porId[id]; if(ls.length < 2) return;
+      const keeper = ls.find(function(n){ return window.FcSintaxe && FcSintaxe.detectar(_fcCadTexto(n)); }) || ls[0];
+      ls.forEach(function(n){
+        if(n === keeper) return;
+        ['data-fc-id', 'data-fc-due', 'data-fc-links', 'data-fc-vista'].forEach(function(a){ n.removeAttribute(a); });
+        _fcVistaSource(n);
+      });
+    });
+    // clone de linha de item sem marcador não é item (o visual sai na hora)
+    Array.prototype.slice.call(el.querySelectorAll('[data-fc-item]')).forEach(function(n){
+      if(!/^\s*(?:-|•|\d+[.)])\s+/.test(_fcCadTexto(n))) n.removeAttribute('data-fc-item');
+    });
+  }
+  // ── Botão de opções da lacuna (aparece com o caret dentro do chip) ──
+  let _fcChipBtn = null, _fcChipDd = null;
   function _fcChipDdFechar(){ if(_fcChipDd){ _fcChipDd.remove(); _fcChipDd = null; } }
+  function _fcChipBtnSync(el, sel, node){
+    const chip = (sel && sel.isCollapsed && node && node.closest) ? node.closest('.fc-chip') : null;
+    if(!chip || !el.contains(chip)){ if(_fcChipBtn) _fcChipBtn.hidden = true; return; }
+    if(!_fcChipBtn){
+      _fcChipBtn = document.createElement('button');
+      _fcChipBtn.type = 'button'; _fcChipBtn.className = 'fc-chip-btn'; _fcChipBtn.hidden = true;
+      document.body.appendChild(_fcChipBtn);
+      _fcChipBtn.addEventListener('mousedown', function(ev){ ev.preventDefault(); ev.stopPropagation(); });
+      _fcChipBtn.addEventListener('click', function(){ if(_fcChipBtn._chip) _fcChipMenu(_fcChipBtn._chip); });
+    }
+    _fcChipBtn._chip = chip;
+    _fcChipBtn.textContent = 'c' + (chip.getAttribute('data-g') || '') + ' ⌄';
+    const r = chip.getBoundingClientRect();
+    _fcChipBtn.hidden = false;
+    _fcChipBtn.style.left = Math.min(r.right + 4, window.innerWidth - 72) + 'px';
+    _fcChipBtn.style.top = Math.max(4, r.top - 26) + 'px';
+  }
   function _fcChipEditar(linha, oc, acao, alvoG){
     _fcVistaSource(linha);
     const texto = _fcCadTexto(linha);
@@ -36612,18 +36731,14 @@ window.TutorIA = (function(){
       troca(L.ia, L.ia + L.abre, '{' + g + ':');
     }
     linha.normalize();
-    try{ _fcVistaRender(linha); }catch(_){}
+    try{ _fcVistaSync(linha); }catch(_){}
+    if(_fcChipBtn) _fcChipBtn.hidden = true;
     _cadSchedule();
   }
-  document.addEventListener('mousedown', function(e){
-    const alvo = e.target && e.target.closest ? e.target : null;
-    if(!alvo) return;
-    if(_fcChipDd && !alvo.closest('.fc-chip-dd')) _fcChipDdFechar();
-    const chip = alvo.closest ? alvo.closest('.tutor-caderno-ed .fc-chip') : null;
-    if(!chip) return;
+  function _fcChipMenu(chip){
     const el = _cadEl(); if(!el || !el.contains(chip)) return;
-    e.preventDefault(); e.stopPropagation();
-    const linha = chip.closest('[data-fc-id],[data-fc-item]'); if(!linha) return;
+    const linha = chip.closest('[data-fc-id],[data-fc-item]') || chip.closest('div,p'); if(!linha) return;
+    _fcChipDdFechar();
     const texto = _fcCadTexto(linha);
     const Ls = _fcVistaGrupos(texto);
     const oc = parseInt(chip.getAttribute('data-oc'), 10);
@@ -36652,6 +36767,13 @@ window.TutorIA = (function(){
     const bs = _fcChipDd.querySelector('[data-ch-sep]');
     if(bs) bs.addEventListener('click', function(){ _fcChipEditar(linha, oc, 'separar'); _fcChipDdFechar(); });
     _fcChipDd.querySelector('[data-ch-des]').addEventListener('click', function(){ _fcChipEditar(linha, oc, 'desfazer'); _fcChipDdFechar(); });
+  }
+  document.addEventListener('mousedown', function(e){
+    if(_fcChipDd && !(e.target.closest && e.target.closest('.fc-chip-dd'))) _fcChipDdFechar();
+  }, true);
+  document.addEventListener('scroll', function(){
+    if(_fcChipBtn) _fcChipBtn.hidden = true;
+    _fcChipDdFechar();
   }, true);
   // Adoção: o caderno é o editor do deck INTEIRO da unidade — todo card vivo
   // da unidade tem uma linha. Cards nascidos por fora (IA, modal de notas,
@@ -36695,6 +36817,7 @@ window.TutorIA = (function(){
   }
   function _fcCadCicloCorpo(el){
     _fcVistaLimpar(el);
+    _fcCadDedup(el);
     _fcCadAdotar(el);
     const blocos = _fcCadBlocos(el);
     const parse = FcSintaxe.parseBlocos(blocos);
@@ -36786,7 +36909,6 @@ window.TutorIA = (function(){
     const ricas = (window.FcRico && FcRico.linhasHtml) ? FcRico.linhasHtml(card) : null;
     const linhas = FcSintaxe.serializar(card).linhas;
     if(ricas && ricas[0] != null) head.innerHTML = ricas[0]; else head.textContent = linhas[0];
-    head.removeAttribute('data-fc-vista');
     let ref = head;
     linhas.slice(1).forEach(function(l, i){
       const d = document.createElement('div'); d.setAttribute('data-fc-item', String(card.id));
@@ -36895,44 +37017,18 @@ window.TutorIA = (function(){
     }
     _fcDragId = null; _fcDropInd.hidden = true; if(_fcHandle) _fcHandle.hidden = true;
   });
-  // borda no bloco-card com o cursor dentro
+  // borda no bloco-card com o cursor dentro + botão de opções da lacuna
   document.addEventListener('selectionchange', function(){
     const el = _cadEl(); if(!el || !el.isConnected) return;
     const sel = window.getSelection();
     Array.prototype.forEach.call(el.querySelectorAll('.fc-line-active'), function(n){ n.classList.remove('fc-line-active'); });
-    let head = null;
+    let node = null;
     if(sel && sel.anchorNode && el.contains(sel.anchorNode)){
-      const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
-      head = node && node.closest ? node.closest('[data-fc-id],[data-fc-item]') : null;
-      if(head && !el.contains(head)) head = null;
-      if(head) head.classList.add('fc-line-active');
+      node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+      const head = node && node.closest ? node.closest('[data-fc-id],[data-fc-item]') : null;
+      if(head && el.contains(head)) head.classList.add('fc-line-active');
     }
-    if(_fcVistaMudando || _fcCicloAtivo) return;
-    _fcVistaMudando = true;
-    try{
-      if(head && sel && sel.isCollapsed && head.getAttribute('data-fc-vista')){
-        // offset de texto do caret (a decoração não muda o texto → mapeia 1:1)
-        let off = 0, achou = false;
-        const alvo = sel.anchorNode, aoff = sel.anchorOffset;
-        (function walk(n){
-          if(achou) return;
-          if(n === alvo && n.nodeType === 3){ off += aoff; achou = true; return; }
-          if(n.nodeType === 3){ off += n.nodeValue.length; return; }
-          if(n.nodeType !== 1) return;
-          if(n === alvo){
-            for(let i = 0; i < aoff && i < n.childNodes.length; i++) off += _fcCadTexto(n.childNodes[i]).length;
-            achou = true; return;
-          }
-          if(n.tagName === 'BR'){ off += 1; return; }
-          if(n.tagName === 'SCRIPT' || n.tagName === 'STYLE') return;
-          Array.prototype.forEach.call(n.childNodes, walk);
-        })(head);
-        _fcVistaSource(head);
-        const pp = _fcVistaPos(head, off);
-        if(pp && pp.node){ try{ const rr = document.createRange(); rr.setStart(pp.node, pp.off); rr.collapse(true); sel.removeAllRanges(); sel.addRange(rr); }catch(_){} }
-      }
-      _fcVistaAplicar(el);
-    } finally { _fcVistaMudando = false; }
+    _fcChipBtnSync(el, sel, node);
   });
   function _cadStatus(t){ const s = _cadActiveStatusEl || document.getElementById('cadernoStatus'); if(s) s.textContent = t || ''; }
   async function _cadUserId(){
@@ -37138,6 +37234,7 @@ window.TutorIA = (function(){
         .select('body').eq('user_id', uid).eq('unit_id', String(unitId)).maybeSingle();
       if(!error && data && data.body){ el.innerHTML = _cadSanitize(data.body); _cadFixChips(el); }
     } catch(e){ console.warn('[caderno load]', e); }
+    try{ _fcCadDedup(el); }catch(e){ console.warn('[fc caderno dedup]', e); }
     try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
     try{ _fcCadAdotar(el); }catch(e){ console.warn('[fc caderno adoção]', e); }
     try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); }
@@ -37159,12 +37256,73 @@ window.TutorIA = (function(){
     } catch(e){ _cadStatus('erro ao salvar'); console.warn('[caderno save ex]', e); }
   }
   function _cadSchedule(){ _cadStatus('digitando…'); if(_cadTimer) clearTimeout(_cadTimer); _cadTimer = setTimeout(function(){ _cadTimer = null; _cadSave(); }, 1000); }
-  function _onCadInput(){ _emptyToggle(_cadEl()); const ci = _caretInfo(); if(ci) _showRefPicker(ci); else _hideRefPicker(); _cadSchedule(); }
+  function _onCadInput(){
+    const el = _cadEl(); _emptyToggle(el);
+    if(el && !_fcComposing && !_fcCicloAtivo){
+      try{ _fcCadDedup(el); _fcCadBlocos(el); _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista input]', e); }
+    }
+    const ci = _caretInfo(); if(ci) _showRefPicker(ci); else _hideRefPicker();
+    _cadSchedule();
+  }
   function _onCadKey(e){
     const open = _refPickerEl && !_refPickerEl.hidden;
     if(e.key === 'Escape'){ if(open){ e.preventDefault(); _hideRefPicker(); } return; }
-    if(e.key === 'Enter' && open){ e.preventDefault(); const first = _refPickerEl.querySelector('.tutor-refopt'); if(first) _pickRef(first.getAttribute('data-uid'), first.getAttribute('data-ut')); }
-    // sem picker aberto, Enter quebra linha normalmente (caderno não "envia")
+    if(e.key === 'Enter' && open){ e.preventDefault(); const first = _refPickerEl.querySelector('.tutor-refopt'); if(first) _pickRef(first.getAttribute('data-uid'), first.getAttribute('data-ut')); return; }
+    // Enter cru quebra linha normalmente (anotação limpa; o dedup tira o
+    // carimbo clonado). Nas BORDAS de um card multi a quebra padrão entraria
+    // ENTRE título e itens e romperia o card — ali seguimos a convenção de
+    // lista: título → novo item no topo; item → próximo item; item vazio →
+    // sai da lista (anotação depois do card).
+    if(e.key === 'Enter' && !e.shiftKey) _fcCadEnter(e);
+  }
+  function _fcCadEnter(e){
+    const el = _cadEl(); const sel = window.getSelection();
+    if(!el || !sel || !sel.isCollapsed || !sel.anchorNode || !el.contains(sel.anchorNode)) return;
+    const no = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+    const linha = no && no.closest ? no.closest('[data-fc-id],[data-fc-item]') : null;
+    if(!linha) return;
+    const texto = _fcCadTexto(linha);
+    const off = _fcVistaCaretOff(linha, sel.anchorNode, sel.anchorOffset);
+    if(off == null || off < texto.length) return;              // só no FIM da linha
+    const pos = function(d, offNovo){
+      const r = document.createRange();
+      if(d.firstChild && d.firstChild.nodeType === 3) r.setStart(d.firstChild, offNovo != null ? offNovo : d.firstChild.length);
+      else r.setStart(d, 0);
+      r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
+    };
+    if(linha.hasAttribute('data-fc-id')){
+      const id = linha.getAttribute('data-fc-id');
+      const prox = linha.nextElementSibling;
+      if(prox && prox.getAttribute && prox.getAttribute('data-fc-item') === id){
+        e.preventDefault();
+        const d = document.createElement('div');
+        d.setAttribute('data-fc-item', id);
+        d.textContent = /^\s*\d+[.)]/.test(_fcCadTexto(prox)) ? '1. ' : '- ';
+        linha.parentNode.insertBefore(d, prox);
+        pos(d); _onCadInput();
+      }
+      return;                                                   // sem itens: quebra padrão
+    }
+    // fim de um ITEM
+    const id = linha.getAttribute('data-fc-item');
+    e.preventDefault();
+    const soMarcador = /^\s*(?:-|•|\d+[.)])\s*$/.test(texto);
+    if(soMarcador){
+      // item vazio → sai da lista: anotação limpa DEPOIS do card
+      let fim = linha;
+      while(fim.nextElementSibling && fim.nextElementSibling.getAttribute && fim.nextElementSibling.getAttribute('data-fc-item') === id) fim = fim.nextElementSibling;
+      const d = document.createElement('div'); d.innerHTML = '<br>';
+      fim.parentNode.insertBefore(d, fim.nextSibling);
+      linha.remove();
+      pos(d, 0); _onCadInput();
+      return;
+    }
+    const m = texto.match(/^\s*(\d+)[.)]/);
+    const d = document.createElement('div');
+    d.setAttribute('data-fc-item', id);
+    d.textContent = m ? ((parseInt(m[1], 10) + 1) + '. ') : '- ';
+    linha.parentNode.insertBefore(d, linha.nextSibling);
+    pos(d); _onCadInput();
   }
   function _setTab(tab){
     const d = document.getElementById('tutorDrawer'); if(!d) return;
