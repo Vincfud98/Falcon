@@ -18155,18 +18155,37 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(!window._sb || !window.UbiqueStore) return;
     try{
       const csb = window._sb.schema('crm');
+      // METADADOS primeiro (leves) — a coluna url NÃO entra no lote: com o
+      // acervo legado em base64 (MBs por linha), o select * estoura o
+      // statement timeout do banco (erro 57014) e a tela mostrava 0×0.
+      // Falha de uma consulta não descarta mais o que deu certo.
       const [cat, av] = await Promise.all([
         csb.from('avatar_categories').select('*').order('position'),
-        csb.from('avatars').select('*'),
+        csb.from('avatars').select('id, name, category_id, transform, created_at, updated_at'),
       ]);
-      const errs = [cat.error, av.error].filter(Boolean);
-      if(errs.length){ console.warn('[hydrate avatares admin] erros:', errs); return; }
-      if(UbiqueStore.avatar_categories) UbiqueStore.avatar_categories.replaceAll(cat.data || []);
-      if(UbiqueStore.avatars)           UbiqueStore.avatars.replaceAll(av.data || []);
-      console.log('[hydrate avatares admin] ✅', {
-        categorias: cat.data?.length || 0,
-        avatares: av.data?.length || 0,
-      });
+      if(cat.error) console.warn('[hydrate avatares admin] categorias:', cat.error);
+      else if(UbiqueStore.avatar_categories) UbiqueStore.avatar_categories.replaceAll(cat.data || []);
+      if(av.error){ console.warn('[hydrate avatares admin] avatares:', av.error); return; }
+      const metas = av.data || [];
+      if(UbiqueStore.avatars) UbiqueStore.avatars.replaceAll(metas.map(function(r){ return Object.assign({ url: null }, r); }));
+      console.log('[hydrate avatares admin] metadados ✅', { categorias: (cat.data || []).length, avatares: metas.length });
+      // FOTOS em 2º plano: tenta o lote (rápido pós-migração); se o banco
+      // cancelar, baixa UMA POR VEZ — cada linha cabe no timeout — e a
+      // grade vai preenchendo conforme chega.
+      let urls = [];
+      const lote = await csb.from('avatars').select('id, url');
+      if(!lote.error) urls = lote.data || [];
+      else {
+        console.warn('[hydrate avatares admin] lote de fotos cancelado (' + (lote.error.code || '') + ') — baixando uma a uma');
+        for(const m of metas){
+          const um = await csb.from('avatars').select('url').eq('id', m.id).maybeSingle();
+          if(um.error){ console.warn('[hydrate avatares admin] foto falhou:', m.id, um.error.message); continue; }
+          urls.push({ id: m.id, url: um.data ? um.data.url : null });
+        }
+      }
+      const porId = {}; urls.forEach(function(u){ porId[u.id] = u.url; });
+      if(UbiqueStore.avatars) UbiqueStore.avatars.replaceAll(metas.map(function(r){ return Object.assign({}, r, { url: porId[r.id] != null ? porId[r.id] : null }); }));
+      console.log('[hydrate avatares admin] fotos ✅', urls.filter(function(u){ return u.url; }).length + '/' + metas.length);
     }catch(e){ console.warn('[hydrate avatares admin] exception:', e); }
   }
 
@@ -63430,7 +63449,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
               // não é quadrada, então esta grade mostrava um enquadramento
               // diferente do que o próprio admin acabara de definir no crop.
               return '<div class="avatar-thumb" title="' + esc(av.name || av.id) + '"'
-                + ' data-av-url="' + esc(av.url) + '"'
+                + ' data-av-url="' + esc(av.url || '') + '"'
                 + ' data-av-x="' + (t.x || 0) + '" data-av-y="' + (t.y || 0) + '"'
                 + ' data-av-s="' + (t.scale || 1) + '"'
                 + ' onclick="window.AvatarsAdmin.openAvatarModal(\'' + esc(av.id) + '\')"></div>';
@@ -63448,6 +63467,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       // As fotos entram DEPOIS que a grade está no DOM: o cálculo de
       // preenchimento precisa do tamanho real da moldura e da imagem.
       el.querySelectorAll('.avatar-thumb[data-av-url]').forEach(function(box){
+        if(!(box.getAttribute('data-av-url') || '')) return;   // foto ainda baixando em 2º plano
         _renderAdminAvatarInto(box, box.getAttribute('data-av-url') || '', {
           x: parseFloat(box.getAttribute('data-av-x')) || 0,
           y: parseFloat(box.getAttribute('data-av-y')) || 0,
@@ -63766,15 +63786,35 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     // relata no fim (dá pra rodar de novo: só pega quem ainda é base64).
     async function _migrarAvatares(){
       const btn = document.getElementById('migrarAvataresBtn'); if(!btn) return;
-      const rows = (UbiqueStore.avatars.list() || []).filter(function(a){ return /^data:/.test(a.url || ''); });
-      if(!rows.length){ btn.textContent = 'Nada para migrar'; setTimeout(function(){ btn.textContent = 'Migrar imagens'; }, 4000); return; }
-      if(!confirm('Migrar ' + rows.length + ' imagens do banco de avatares para o Storage?\n\nAs imagens serão comprimidas (teto 512px; GIF fica como está) e a tabela passa a guardar só o link. Isso resolve a lentidão do seletor do aluno.')) return;
-      btn.disabled = true;
+      // Pendentes vêm do SERVIDOR (a lista local pode estar sem as fotos —
+      // elas não entram no lote de hidratação por causa do timeout do base64).
+      btn.disabled = true; btn.textContent = 'Procurando…';
+      let alvos = [];
+      try{
+        let r0 = await window._sb.schema('crm').from('avatars').select('id').like('url', 'data:%');
+        if(r0.error){
+          console.warn('[migrar avatares] filtro like falhou (' + (r0.error.code || '') + ') — varrendo todas');
+          r0 = await window._sb.schema('crm').from('avatars').select('id');
+          if(r0.error) throw new Error(r0.error.message);
+        }
+        alvos = r0.data || [];
+      }catch(e){
+        btn.disabled = false; btn.textContent = 'Migrar imagens';
+        alert('Não consegui listar as imagens pendentes: ' + (e && e.message || e));
+        return;
+      }
+      if(!alvos.length){ btn.disabled = false; btn.textContent = 'Nada para migrar'; setTimeout(function(){ btn.textContent = 'Migrar imagens'; }, 4000); return; }
+      if(!confirm('Migrar até ' + alvos.length + ' imagens do banco de avatares para o Storage?\n\nAs imagens serão comprimidas (teto 512px; GIF fica como está) e a tabela passa a guardar só o link. Isso resolve a lentidão do seletor do aluno.')){ btn.disabled = false; btn.textContent = 'Migrar imagens'; return; }
       let ok = 0; const falhas = [];
-      for(const a of rows){
-        btn.textContent = 'Migrando ' + (ok + falhas.length + 1) + '/' + rows.length + '…';
+      for(const a of alvos){
+        btn.textContent = 'Migrando ' + (ok + falhas.length + 1) + '/' + alvos.length + '…';
         try{
-          const url = await _avImagemPraStorage(a.url, a.id);
+          // uma linha por vez: cada base64 individual cabe no timeout do banco
+          const um = await window._sb.schema('crm').from('avatars').select('url').eq('id', a.id).maybeSingle();
+          if(um.error) throw new Error(um.error.message);
+          const dataUrl = um.data && um.data.url;
+          if(!/^data:/.test(dataUrl || '')){ ok++; continue; }   // já migrada / já é link
+          const url = await _avImagemPraStorage(dataUrl, a.id);
           const { error } = await window._sb.schema('crm').from('avatars')
             .update({ url: url, updated_at: new Date().toISOString() }).eq('id', a.id);
           if(error) throw new Error(error.message);
