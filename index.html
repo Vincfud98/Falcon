@@ -8641,6 +8641,11 @@ div.fcp-topic-row{padding-left:calc(2.3rem + var(--d,0)*1.15rem)}
 .anki-opt-apkg{border-color:var(--accent-border)}
 .anki-sep{display:flex;align-items:center;gap:.8rem;margin:.9rem 0 .5rem;font-family:var(--sans);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
 .anki-sep::before,.anki-sep::after{content:"";flex:1;height:1px;background:var(--accent-border-soft)}
+/* Conexões entre cards (6A/6C) */
+button.ufc-links{background:transparent;cursor:pointer}
+button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
+.fcp-conex-btn{background:none;border:0;padding:0;cursor:pointer;color:var(--text-mute);font:inherit;text-align:left}
+.fcp-conex-btn:hover{color:var(--accent)}
 /* Conexões entre cards (Fase 6A) */
 .ufc-links{font-family:var(--mono);font-size:.55rem;letter-spacing:.06em;color:var(--accent);border:1px solid var(--accent-border-soft);border-radius:999px;padding:.1rem .4rem;align-self:center}
 .dk-link{display:flex;align-items:flex-start;gap:.55rem;padding:.5rem .6rem;border:1px solid var(--border);border-radius:6px;background:var(--bg-elevated);margin-bottom:.4rem;font-family:var(--sans)}
@@ -36681,7 +36686,29 @@ window.TutorIA = (function(){
         else refMap[k] = { source: src, target: tgt, sentences: sentence ? [sentence] : [] };
       });
     });
-    const refs = Object.keys(refMap).map(function(k){ return { source: refMap[k].source, target: refMap[k].target, sentence: refMap[k].sentences.join('  •  ') }; });
+    // Fase 6C — flashcards como PONTES: cada conexão de cards liga as unidades
+    // onde os cards estão ancorados (mesma unidade não vira aresta).
+    const fcMap = {};
+    try{
+      if(window.Store && Store.linksList && Store.deckList){
+        const cardUnit = {}, cardFront = {};
+        Store.deckList().forEach(function(c){
+          cardUnit[String(c.id)] = c.unitId != null ? String(c.unitId) : '';
+          cardFront[String(c.id)] = String(c.front || String(c.clozeText || '').replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '$1')).slice(0, 70);
+        });
+        Store.linksList().forEach(function(l){
+          const ua = cardUnit[l.from], ub = cardUnit[l.to];
+          if(!ua || !ub || ua === ub) return;
+          linkedUnits.add(ua); linkedUnits.add(ub);
+          const par = '“' + (cardFront[l.from] || '?') + '” ⇆ “' + (cardFront[l.to] || '?') + '”';
+          const k2 = ua < ub ? ua + '|fc|' + ub : ub + '|fc|' + ua;
+          if(fcMap[k2]){ if(fcMap[k2].pares.indexOf(par) < 0) fcMap[k2].pares.push(par); }
+          else fcMap[k2] = { source: ua, target: ub, pares: [par] };
+        });
+      }
+    }catch(e){ console.warn('[grafo fc]', e); }
+    const refs = Object.keys(refMap).map(function(k){ return { source: refMap[k].source, target: refMap[k].target, sentence: refMap[k].sentences.join('  •  ') }; })
+      .concat(Object.keys(fcMap).map(function(k){ return { source: fcMap[k].source, target: fcMap[k].target, fc: true, n: fcMap[k].pares.length, sentence: 'Flashcards conectados: ' + fcMap[k].pares.join('  •  ') }; }));
     const degree = {}; refs.forEach(function(e){ degree[e.source] = (degree[e.source] || 0) + 1; degree[e.target] = (degree[e.target] || 0) + 1; });
     const studentSubj = new Set((window.COURSES || []).map(function(c){ return String(c._subjectId); }));
     const showUnits = idx.flat.filter(function(u){ return studentSubj.has(String(u.subjectId)) || linkedUnits.has(String(u.id)); });
@@ -36701,7 +36728,7 @@ window.TutorIA = (function(){
     else {
       base = new Set();
       m.units.forEach(function(u){ if(_grafoActive.has(u.subjectId)) base.add(u.id); });        // matérias ativas
-      m.refs.forEach(function(e){                                                                  // + vizinhos ligados a elas
+      _grafoRefsAtivos().forEach(function(e){                                                      // + vizinhos ligados a elas
         if(_grafoActive.has(subjById[e.source])) base.add(e.target);
         if(_grafoActive.has(subjById[e.target])) base.add(e.source);
       });
@@ -36709,6 +36736,12 @@ window.TutorIA = (function(){
     const vis = new Set();
     base.forEach(function(id){ const s = subjById[id]; if(_grafoCollapsed[s] && (m.degree[id] || 0) === 0) return; vis.add(id); }); // recolhe só as unidades sem conexão
     return { base: base, vis: vis, subjById: subjById };
+  }
+  // Arestas visíveis conforme o filtro Cadernos × Flashcards (padrão: ambos).
+  function _grafoRefsAtivos(){
+    const m = _grafoModel; if(!m) return [];
+    const d = _grafoPrefs.display || {};
+    return m.refs.filter(function(e){ return e.fc ? d.showFc !== false : d.showCad !== false; });
   }
   // Reaplica o modelo no grafo (reaproveita objetos-nó p/ preservar posição).
   function _grafoApply(){
@@ -36723,7 +36756,7 @@ window.TutorIA = (function(){
     m.units.forEach(function(u){ if(!vis.has(u.id)) return; nodeFor(u.id, { kind: 'unit', name: u.label, unitId: u.id, subjectId: u.subjectId, color: _grafoColor(u.subjectId), val: _grafoPrefs.display.sizeByDegree ? (2 + u.degree) : 3 }); });
     const links = [];
     m.units.forEach(function(u){ if(vis.has(u.id) && sunSubj.has(u.subjectId)) links.push({ source: 'subj:' + u.subjectId, target: u.id, kind: 'member' }); });
-    m.refs.forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: 'ref', sentence: e.sentence }); });
+    _grafoRefsAtivos().forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: e.fc ? 'fcref' : 'ref', n: e.n || 1, sentence: e.sentence }); });
     // Par RECÍPROCO (A cita B e B cita A): as duas arestas têm os mesmos
     // extremos e, retas (curvatura 0), caem UMA EM CIMA DA OUTRA — some uma
     // seta e o tooltip de uma das frases fica inalcançável. Solução do
@@ -36833,6 +36866,19 @@ window.TutorIA = (function(){
     body.innerHTML = '';
     const sec = function(title){ const d = document.createElement('div'); d.className = 'gp-sec'; const h = document.createElement('div'); h.className = 'gp-h'; h.textContent = title; d.appendChild(h); body.appendChild(d); return d; };
     const row = function(parent){ const r = document.createElement('label'); r.className = 'gp-row'; parent.appendChild(r); return r; };
+    // Tipos de conexão (Fase 6C): cadernos [[ ]] × flashcards ⇆
+    const sC = sec('Conexões');
+    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showFc', 'Flashcards ⇆ — tracejada']].forEach(function(par){
+      const r0 = row(sC);
+      const cb0 = document.createElement('input'); cb0.type = 'checkbox';
+      cb0.checked = (_grafoPrefs.display || {})[par[0]] !== false;
+      const sp0 = document.createElement('span'); sp0.className = 'gp-row-l'; sp0.textContent = par[1];
+      r0.appendChild(cb0); r0.appendChild(sp0);
+      cb0.addEventListener('change', function(){
+        _grafoPrefs.display[par[0]] = cb0.checked;
+        _grafoPrefsSave(); _grafoApply();
+      });
+    });
     // Matérias (filtro + cor)
     const sM = sec('Matérias');
     m.subjects.forEach(function(s){
@@ -36930,7 +36976,8 @@ window.TutorIA = (function(){
       .nodeColor(function(n){ return _grafoColor(n.subjectId); })
       .nodeLabel(function(n){ return n.name; })
       .linkColor(_grafoLinkColor)
-      .linkWidth(function(l){ return l.kind === 'member' ? 0.4 : _grafoPrefs.display.linkWidth; })
+      .linkWidth(function(l){ if(l.kind === 'member') return 0.4; const w = _grafoPrefs.display.linkWidth; return l.kind === 'fcref' ? Math.min(w + (l.n - 1) * 0.6, w * 3) : w; })
+      .linkLineDash(function(l){ return l.kind === 'fcref' ? [4, 3] : null; })
       // Curvatura vem pronta do _grafoApply (só o par recíproco arqueia). A lib
       // deriva daqui os pontos de controle e REUSA nos 3: ponta da seta,
       // partículas e hit-test do tooltip — por isso tudo segue a curva sozinho.
@@ -42650,7 +42697,7 @@ Renderers.notes = function(route){
         <div class="ufc-face ufc-front">
           <div class="ufc-top-actions">
             <span class="ufc-kind">${FlashcardRender.kindLabel(fc)}</span>
-            <span class="ufc-due">${Util.esc(FlashcardRender.dueLabel(Store.srsFor(fc.id)))}</span>${(function(){ const n = Store.linksFor ? Store.linksFor(fc.id).length : 0; return n ? `<span class="ufc-links" data-tip="${n === 1 ? '1 conexão' : n + ' conexões'} com outros cards">&#8646; ${n}</span>` : ''; })()}
+            <span class="ufc-due">${Util.esc(FlashcardRender.dueLabel(Store.srsFor(fc.id)))}</span>${(function(){ const n = Store.linksFor ? Store.linksFor(fc.id).length : 0; return n ? `<button type="button" class="ufc-links" data-fc-conex="${Util.attr(fc.id)}" data-tip="${n === 1 ? '1 conexão' : n + ' conexões'} — clique para ver">&#8646; ${n}</button>` : ''; })()}
             <button class="ufc-icon-btn" data-ufc-edit="${Util.attr(fc.id)}" title="Editar"><svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4z"/></svg></button>
             <button class="ufc-icon-btn" data-ufc-delete="${Util.attr(fc.id)}" title="Excluir"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg></button>
           </div>
@@ -50915,7 +50962,7 @@ const FlashcardsPage = (function(){
     const allOn = rows.length > 0 && rows.every(l => _t.sel.has(l.card.id));
     const body = rows.length ? rows.map(l => `<tr class="${_t.sel.has(l.card.id) ? 'is-selected' : ''}" data-fcp-row="${Util.attr(l.card.id)}">
       <td>${chk(l.card.id, _t.sel.has(l.card.id))}</td>
-      <td class="col-name fcp-front"><button type="button" class="fcp-front-btn" data-fcp-edit="${Util.attr(l.card.id)}" title="Editar">${esc(l.texto.length > 110 ? l.texto.slice(0, 110) + '…' : l.texto)}</button>${l.ords > 1 ? `<span class="fcp-ords">${l.ords} grupos</span>` : ''}${l.conexoes ? `<span class="fcp-ords">&#8646; ${l.conexoes} conex${l.conexoes === 1 ? 'ão' : 'ões'}</span>` : ''}</td>
+      <td class="col-name fcp-front"><button type="button" class="fcp-front-btn" data-fcp-edit="${Util.attr(l.card.id)}" title="Editar">${esc(l.texto.length > 110 ? l.texto.slice(0, 110) + '…' : l.texto)}</button>${l.ords > 1 ? `<span class="fcp-ords">${l.ords} grupos</span>` : ''}${l.conexoes ? `<button type="button" class="fcp-ords fcp-conex-btn" data-fc-conex="${Util.attr(l.card.id)}">&#8646; ${l.conexoes} conex${l.conexoes === 1 ? 'ão' : 'ões'}</button>` : ''}</td>
       <td class="fcp-dim">${esc(TIPO[l.card.kind] || 'Tradicional')}</td>
       <td class="fcp-dim"><span class="fcp-sg">${esc(l.sigla)}</span> ${esc(l.unitTitle)}</td>
       <td><span class="fcp-st fcp-st-${l.estado}">${esc(ESTADO[l.estado])}</span></td>
@@ -51058,6 +51105,60 @@ window.FlashcardsPage = FlashcardsPage;
    isso NÃO amarramos o nome no arquivo). Cabeçalhos reconhecidos pelo Anki
    2.1.55+; em versões antigas viram comentários e o TSV importa igual.
    Deck por matéria (Falcon::SIGLA) e tags normalizadas. Sem servidor. */
+/* ══ CONEXÕES DE UM CARD (Fase 6C) — lista aberta pelo selo ⇆ ═══════════════ */
+const FlashcardsConexoes = (function(){
+  let _el = null;
+  function _resumo(card){
+    if(!card) return { frente: '(card apagado)', verso: '' };
+    const k = card.kind || 'basic';
+    if(k === 'cloze') return { frente: String(card.clozeText || '').replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '[$1]'), verso: '' };
+    if(k === 'multi') return { frente: card.front || '', verso: (card.lines || []).join(' · ') };
+    return { frente: card.front || '', verso: card.back || '' };
+  }
+  function _corta(x, n){ x = String(x || '').trim(); return x.length > n ? x.slice(0, n) + '…' : x; }
+  function abrir(cardId){
+    cardId = String(cardId);
+    if(!_el){
+      _el = document.createElement('div'); _el.className = 'note-list-modal';
+      _el.innerHTML = '<div class="nlm-backdrop"></div><div class="nlm-panel"><div class="nlm-header"><span class="nlm-title">Conexões do card</span><button class="nlm-close" type="button" aria-label="Fechar">&times;</button></div><div class="nlm-body" id="fcConexBody"></div></div>';
+      document.body.appendChild(_el);
+      _el.querySelector('.nlm-backdrop').addEventListener('click', fechar);
+      _el.querySelector('.nlm-close').addEventListener('click', fechar);
+    }
+    const body = _el.querySelector('#fcConexBody');
+    const deck = Store.deckList(); const porId = {}; deck.forEach(c => { porId[String(c.id)] = c; });
+    const eu = porId[cardId]; const rEu = _resumo(eu);
+    const links = Store.linksFor ? Store.linksFor(cardId) : [];
+    body.innerHTML = '<div class="dk-tipo-alvo">' + Util.esc(_corta(rEu.frente, 110)) + '</div>'
+      + (links.length ? links.map(l => {
+        const outroId = l.from === cardId ? l.to : l.from;
+        const outro = porId[outroId]; const r = _resumo(outro);
+        const rel = l.tipo === 'associacao' ? 'Relacionado' : (l.from === cardId ? 'Requer (vem antes)' : 'Pré-requisito de');
+        return '<div class="dk-link"><span class="dk-link-tipo' + (l.tipo === 'associacao' ? ' is-assoc' : '') + '">' + rel + '</span>'
+          + '<span class="dk-link-txt"><b>' + Util.esc(_corta(r.frente, 90)) + '</b>' + (r.verso ? '<i>' + Util.esc(_corta(r.verso, 90)) + '</i>' : '') + '</span>'
+          + (outro ? '<button type="button" class="fcia-adv" data-conex-abrir="' + Util.attr(outroId) + '">Abrir</button>' : '')
+          + '<button type="button" class="dk-link-x" data-conex-del="' + Util.attr(l.id) + '" aria-label="Remover conexão">&times;</button></div>';
+      }).join('') : '<div class="dk-link-vazio">Este card ainda não tem conexões. Conecte pelo lápis (editar).</div>');
+    body.querySelectorAll('[data-conex-del]').forEach(b => b.addEventListener('click', function(){ Store.linkDelete(b.getAttribute('data-conex-del')); abrir(cardId); }));
+    body.querySelectorAll('[data-conex-abrir]').forEach(b => b.addEventListener('click', function(){
+      const alvo = porId[b.getAttribute('data-conex-abrir')]; if(!alvo) return;
+      fechar();
+      DeckEditModal.open(alvo, function(patch){ Store.deckUpdate(alvo.id, patch); });
+    }));
+    _el.classList.add('open');
+  }
+  function fechar(){ if(_el) _el.classList.remove('open'); }
+  // selo ⇆ em qualquer lugar (deck, tabela): captura pra vencer o clique que vira o card
+  document.addEventListener('click', function(e){
+    const b = e.target.closest ? e.target.closest('[data-fc-conex]') : null;
+    if(!b) return;
+    e.preventDefault(); e.stopPropagation();
+    abrir(b.getAttribute('data-fc-conex'));
+  }, true);
+  return { abrir, fechar };
+})();
+window.FlashcardsConexoes = FlashcardsConexoes;
+
 /* ══ EXPORTAÇÃO .APKG (Fase 5G-B) — arquivo do Anki COM agendamento ═════════
    O .apkg é um zip com um SQLite no formato do Anki (schema 11). Montamos o
    banco no navegador com sql.js (SQLite em WASM) + JSZip, carregados SOB
