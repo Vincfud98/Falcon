@@ -51105,6 +51105,152 @@ window.FlashcardsPage = FlashcardsPage;
    isso NÃO amarramos o nome no arquivo). Cabeçalhos reconhecidos pelo Anki
    2.1.55+; em versões antigas viram comentários e o TSV importa igual.
    Deck por matéria (Falcon::SIGLA) e tags normalizadas. Sem servidor. */
+/* ══ SINTAXE DE FLASHCARDS NO CADERNO (Fase 6F) — pura, testada em Node ═══════
+   O caderno é EDITOR de flashcards (decisão do dono, 2026-08-23):
+   - "frente :: verso"            → card tradicional (separador COM espaços)
+   - "frente :::" + sub-linhas    → lista ("- item" marcadores; "1. item" numerada)
+   - "{lacuna}" e "{1:lacuna}"    → card de lacunas ({n:...} agrupa; sem número,
+                                    cada chave é um grupo próprio)
+   Linha sem sintaxe = anotação comum. A serialização é CANÔNICA e reversível:
+   card → linha → card dá o mesmo card (fonte da verdade é o card; a linha é
+   projeção). Blocos de entrada: [{texto, fcId}] — texto já com \n para <br>. */
+const FcSintaxe = (function(){
+  const RE_SEP = / :: /;
+  const RE_MULTI = / :::\s*$/;
+  const RE_ITEM = /^\s*(?:-|•|\d+[.)])\s+/;
+  const RE_ITEM_NUM = /^\s*\d+[.)]\s+/;
+  const RE_CHAVE = /\{(?:(\d+):)?([^{}\n]+)\}/g;
+  const limpa = s => String(s == null ? '' : s).replace(/ /g, ' ').replace(/[ \t]+/g, ' ').trim();
+
+  // A linha tem cara de card? (null | 'basic' | 'multi' | 'cloze')
+  function detectar(texto){
+    const t = String(texto || '');
+    if(RE_MULTI.test(t.replace(/\n[\s\S]*$/, ''))) return 'multi';
+    if(RE_SEP.test(t)) return 'basic';
+    RE_CHAVE.lastIndex = 0;
+    if(RE_CHAVE.test(t)) return 'cloze';
+    return null;
+  }
+  // "{a} e {1:b} … {1:c}" → texto interno {{cN::…}}. Explícitos mantêm o número;
+  // chaves sem número ganham grupos NOVOS (após o maior explícito), um por chave.
+  function chavesParaCloze(texto){
+    let max = 0; let m;
+    RE_CHAVE.lastIndex = 0;
+    while((m = RE_CHAVE.exec(texto))){ if(m[1]) max = Math.max(max, parseInt(m[1], 10)); }
+    let seq = max;
+    RE_CHAVE.lastIndex = 0;
+    return String(texto).replace(RE_CHAVE, function(_, num, corpo){
+      corpo = limpa(corpo);
+      if(!corpo) return '';
+      const g = num ? parseInt(num, 10) : (++seq);
+      return '{{c' + g + '::' + corpo + '}}';
+    });
+  }
+  // {{cN::t}} → forma da sintaxe. Um grupo só com uma ocorrência → "{t}";
+  // senão → "{N:t}" (sem ambiguidade no round-trip).
+  function clozeParaChaves(clozeText){
+    const grupos = {}; let m;
+    const re = /\{\{c(\d+)::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g;
+    while((m = re.exec(String(clozeText || '')))){ grupos[m[1]] = (grupos[m[1]] || 0) + 1; }
+    const ks = Object.keys(grupos);
+    const simples = ks.length === 1 && grupos[ks[0]] === 1;
+    re.lastIndex = 0;
+    return String(clozeText || '').replace(re, function(_, num, corpo){
+      return simples ? '{' + corpo + '}' : '{' + num + ':' + corpo + '}';
+    });
+  }
+  /* Blocos → cards. Cada bloco: {texto, fcId}. Devolve
+     { cards: [{fcId, blocos:[idx…], card:{kind, front, back, clozeText, lines, listStyle}}] }.
+     Card multi consome as sub-linhas de item que vierem em seguida. */
+  function parseBlocos(blocos){
+    const cards = [];
+    for(let i = 0; i < blocos.length; i++){
+      const b = blocos[i] || {}; const t = String(b.texto || '');
+      const head = t.split('\n')[0];
+      if(RE_MULTI.test(head)){
+        const front = limpa(head.replace(RE_MULTI, ''));
+        const idxs = [i]; const lines = [];
+        let numerada = null;
+        let j = i + 1;
+        while(j < blocos.length && RE_ITEM.test(String(blocos[j].texto || ''))){
+          const bt = String(blocos[j].texto || '');
+          if(numerada == null) numerada = RE_ITEM_NUM.test(bt);
+          lines.push(limpa(bt.replace(RE_ITEM, '')));
+          idxs.push(j); j++;
+        }
+        if(front && lines.length){
+          cards.push({ fcId: b.fcId || null, blocos: idxs, card: { kind: 'multi', front: front, lines: lines.filter(Boolean), listStyle: numerada ? 'number' : 'bullets' } });
+          i = j - 1;
+        }
+        continue;
+      }
+      if(RE_SEP.test(t)){
+        const pos = t.search(RE_SEP);
+        const front = limpa(t.slice(0, pos)), back = limpa(t.slice(pos + 4));
+        if(front && back) cards.push({ fcId: b.fcId || null, blocos: [i], card: { kind: 'basic', front: front, back: back } });
+        continue;
+      }
+      RE_CHAVE.lastIndex = 0;
+      if(RE_CHAVE.test(t)){
+        const clz = limpa(chavesParaCloze(t)).replace(/\n/g, ' ');
+        if(/\{\{c\d+::/.test(clz)) cards.push({ fcId: b.fcId || null, blocos: [i], card: { kind: 'cloze', clozeText: clz } });
+      }
+    }
+    return { cards: cards };
+  }
+  // card → linhas canônicas da sintaxe (projeção pro caderno)
+  function serializar(card){
+    card = card || {};
+    if(card.kind === 'multi'){
+      const num = card.listStyle === 'number';
+      return { linhas: [limpa(card.front) + ' :::'].concat((card.lines || []).map((l, i) => (num ? (i + 1) + '. ' : '- ') + limpa(l))) };
+    }
+    if(card.kind === 'cloze') return { linhas: [clozeParaChaves(card.clozeText)] };
+    return { linhas: [limpa(card.front) + ' :: ' + limpa(card.back)] };
+  }
+  // igualdade SEMÂNTICA (cloze comparado com grupos renumerados na ordem)
+  function _norm(s){ return limpa(s).toLowerCase(); }
+  function _clozeCanon(txt){
+    const map = {}; let n = 0;
+    return String(txt || '').replace(/\{\{c(\d+)::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, function(_, g, corpo){
+      if(!(g in map)) map[g] = ++n;
+      return '{{c' + map[g] + '::' + _norm(corpo) + '}}';
+    }).toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+  function equivalentes(a, b){
+    if(!a || !b) return false;
+    const ka = a.kind || 'basic', kb = b.kind || 'basic';
+    if(ka !== kb) return false;
+    if(ka === 'cloze') return _clozeCanon(a.clozeText) === _clozeCanon(b.clozeText);
+    if(ka === 'multi') return _norm(a.front) === _norm(b.front) && (a.listStyle || 'bullets') === (b.listStyle || 'bullets')
+      && (a.lines || []).length === (b.lines || []).length && (a.lines || []).every((l, i) => _norm(l) === _norm((b.lines || [])[i]));
+    return _norm(a.front) === _norm(b.front) && _norm(a.back) === _norm(b.back);
+  }
+  /* Reconciliação de um ciclo de salvamento:
+     prevIds = ids carimbados no corpo ANTERIOR; parse = parseBlocos(atual);
+     cardDe(id) = card atual do deck (ou null).
+     → { criar: [entry…], atualizar: [entry…], sumiram: [id…] } */
+  function reconciliar(prevIds, parse, cardDe){
+    const criar = [], atualizar = [], mortas = [], presentes = new Set();
+    parse.cards.forEach(entry => {
+      if(entry.fcId && cardDe(entry.fcId)){
+        presentes.add(String(entry.fcId));
+        if(!equivalentes(cardDe(entry.fcId), entry.card)) atualizar.push(entry);
+      } else if(entry.fcId){
+        // carimbo de card APAGADO (pela tabela/editor): o card é a fonte —
+        // morto não renasce; a integração REMOVE a linha.
+        mortas.push(entry);
+      } else {
+        criar.push(entry);
+      }
+    });
+    const sumiram = (prevIds || []).map(String).filter(id => !presentes.has(id));
+    return { criar: criar, atualizar: atualizar, sumiram: sumiram, mortas: mortas };
+  }
+  return { detectar, parseBlocos, serializar, equivalentes, reconciliar, chavesParaCloze, clozeParaChaves };
+})();
+window.FcSintaxe = FcSintaxe;
+
 /* ══ CONEXÕES DE UM CARD (Fase 6C) — lista aberta pelo selo ⇆ ═══════════════ */
 const FlashcardsConexoes = (function(){
   let _el = null;
