@@ -8641,6 +8641,17 @@ div.fcp-topic-row{padding-left:calc(2.3rem + var(--d,0)*1.15rem)}
 .anki-opt-apkg{border-color:var(--accent-border)}
 .anki-sep{display:flex;align-items:center;gap:.8rem;margin:.9rem 0 .5rem;font-family:var(--sans);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
 .anki-sep::before,.anki-sep::after{content:"";flex:1;height:1px;background:var(--accent-border-soft)}
+/* Caderno como editor de flashcards (6F-1b) */
+.tutor-caderno-ed [data-fc-id]{position:relative;margin:.35rem 0;padding:.45rem 5.5rem .45rem .7rem;border-left:2px solid var(--accent-border);background:var(--accent-xlo);border-radius:0 6px 6px 0}
+.tutor-caderno-ed [data-fc-item]{margin:0 0 .1rem 1.4rem;padding:.1rem 0 .1rem .6rem;border-left:1px dashed var(--accent-border-soft)}
+.tutor-caderno-ed [data-fc-id].fc-line-active,.tutor-caderno-ed [data-fc-item].fc-line-active{outline:1px solid var(--accent-border);outline-offset:2px;border-radius:4px}
+.tutor-caderno-ed [data-fc-id]::after{content:attr(data-fc-due);position:absolute;top:.45rem;right:.5rem;font-family:var(--mono);font-size:.55rem;letter-spacing:.05em;color:var(--accent);pointer-events:none;opacity:.85}
+.tutor-caderno-ed [data-fc-id][data-fc-links]::before{content:attr(data-fc-links);position:absolute;bottom:.3rem;right:.5rem;font-family:var(--mono);font-size:.55rem;color:var(--text-mute);pointer-events:none}
+.fc-cad-aviso{display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap;margin:0 0 .6rem;padding:.55rem .8rem;border:1px solid rgba(217,165,90,.45);border-radius:8px;background:rgba(217,165,90,.08);font-family:var(--sans);font-size:.74rem;color:var(--text)}
+.fc-cad-aviso-acoes{display:inline-flex;gap:.4rem}
+.fc-cad-aviso button{font-family:var(--sans);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;padding:.35rem .7rem;border-radius:5px;cursor:pointer;background:transparent;border:1px solid var(--accent-border-soft);color:var(--text-dim)}
+.fc-cad-aviso [data-fc-av="apagar"]{color:#e87878;border-color:rgba(232,120,120,.45)}
+.fc-cad-aviso [data-fc-av="restaurar"]{color:var(--accent);border-color:var(--accent-border)}
 /* Conexões entre cards (6A/6C) */
 button.ufc-links{background:transparent;cursor:pointer}
 button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
@@ -15212,12 +15223,14 @@ const Store = (function(){
       if(patch && (patch.clozeText != null || patch.kind != null)) _srsLocalSync(_state.deck[idx]);
       _persist(); _emit();
       _syncDeckUpdateToSupabase(_state.deck[idx]).catch(()=>{});
+      try{ document.dispatchEvent(new CustomEvent('ubq:fc-changed', { detail: { id: id, acao: 'update' } })); }catch(_){}
       return _state.deck[idx];
     },
     deckDelete(id){
       if(!_state || !Array.isArray(_state.deck)) return;
       _state.deck = _state.deck.filter(c => c.id !== id);
       if(Array.isArray(_state.srs)) _state.srs = _state.srs.filter(x => x.cardId !== id);   // cascade no servidor
+      try{ document.dispatchEvent(new CustomEvent('ubq:fc-changed', { detail: { id: id, acao: 'delete' } })); }catch(_){}
       _persist(); _emit();
       _syncDeckDeleteToSupabase(id).catch(()=>{});
     },
@@ -36223,6 +36236,193 @@ window.TutorIA = (function(){
   // (carregar/salvar/[[ ]]/aliases/backlinks) sem reescrever nada.
   let _cadActiveEl = null, _cadActiveStatusEl = null, _cadActiveBl = null;
   function _cadEl(){ return _cadActiveEl || document.getElementById('cadernoInput'); }
+
+  /* ── Fase 6F-1b: o caderno é EDITOR de flashcards ─────────────────────────
+     Sintaxe (FcSintaxe): "frente :: verso" | "frente :::" + "- item" |
+     "{lacuna}"/"{1:lacuna}". Linha-card recebe o carimbo data-fc-id (o
+     sanitizador preserva). Card é a FONTE: editar em qualquer lugar muda nos
+     três; linha de card morto sai; apagar linha pede confirmação (barra). */
+  const _FC_BLOCO_SEL = 'div,p,li,h1,h2,h3,blockquote';
+  function _fcCadTexto(node){
+    let out = '';
+    (function walk(n){
+      if(n.nodeType === 3){ out += n.nodeValue; return; }
+      if(n.nodeType !== 1) return;
+      if(n.tagName === 'BR'){ out += '\n'; return; }
+      Array.prototype.forEach.call(n.childNodes, walk);
+    })(node);
+    return out;
+  }
+  // Blocos de topo do editor. Corrida solta (texto sem <div>) com sintaxe de
+  // card ganha um <div> pra poder receber o carimbo (caret preservado).
+  function _fcCadBlocos(el){
+    const sel = window.getSelection();
+    const marca = (sel && sel.rangeCount && el.contains(sel.anchorNode)) ? { node: sel.anchorNode, off: sel.anchorOffset } : null;
+    // embrulha corridas soltas COM sintaxe
+    let corrida = [];
+    const fecharCorrida = function(antesDe){
+      if(!corrida.length) return;
+      const txt = corrida.map(function(n){ return n.nodeType === 3 ? n.nodeValue : _fcCadTexto(n); }).join('');
+      if(window.FcSintaxe && FcSintaxe.detectar(txt)){
+        const d = document.createElement('div');
+        el.insertBefore(d, corrida[0]);
+        corrida.forEach(function(n){ d.appendChild(n); });
+      }
+      corrida = [];
+    };
+    Array.prototype.slice.call(el.childNodes).forEach(function(n){
+      const ehBloco = n.nodeType === 1 && n.matches && n.matches(_FC_BLOCO_SEL);
+      if(ehBloco){ fecharCorrida(n); } else { corrida.push(n); }
+    });
+    fecharCorrida(null);
+    if(marca && marca.node && marca.node.isConnected){
+      try{ const r = document.createRange(); r.setStart(marca.node, Math.min(marca.off, marca.node.length || marca.off)); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }catch(_){}
+    }
+    return Array.prototype.filter.call(el.children, function(n){ return n.matches(_FC_BLOCO_SEL); })
+      .map(function(n){ return { node: n, texto: _fcCadTexto(n), fcId: n.getAttribute('data-fc-id') || null }; });
+  }
+  function _fcCadPatch(card){
+    return { kind: card.kind, front: card.front || '', back: card.back || '',
+      clozeText: card.clozeText || '', lines: card.lines || [], listStyle: card.listStyle || 'bullets' };
+  }
+  function _fcCadSelos(node, id){
+    try{
+      node.setAttribute('data-fc-due', (window.FlashcardRender && Store.srsFor) ? FlashcardRender.dueLabel(Store.srsFor(id)) : '');
+      const nl = (Store.linksFor ? Store.linksFor(id).length : 0);
+      if(nl) node.setAttribute('data-fc-links', '⇆ ' + nl); else node.removeAttribute('data-fc-links');
+    }catch(_){}
+  }
+  function _fcCadMarcarItens(entry){
+    entry.blocos.slice(1).forEach(function(){ /* índices resolvidos pelo chamador */ });
+  }
+  // Ciclo do salvamento: cria/atualiza/carimba/remove mortas; sumidas → barra.
+  function _fcCadCiclo(){
+    if(!window.FcSintaxe || !window.Store || !Store.deckList) return;
+    const el = _cadEl(); if(!el || !_cadUnit) return;
+    const blocos = _fcCadBlocos(el);
+    const parse = FcSintaxe.parseBlocos(blocos);
+    const prevIds = Store.deckList().filter(function(c){ return c.origin === 'caderno' && String(c.unitId) === String(_cadUnit); }).map(function(c){ return String(c.id); });
+    const rec = FcSintaxe.reconciliar(prevIds, parse, function(id){ return Store.deckList().find(function(c){ return String(c.id) === String(id); }) || null; });
+    const ctx = (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(_cadUnit, null) : {};
+    // mortas: card apagado por fora → a linha sai (o card é a fonte)
+    rec.mortas.forEach(function(entry){
+      entry.blocos.forEach(function(i){ const n = blocos[i] && blocos[i].node; if(n && n.parentNode) n.parentNode.removeChild(n); });
+    });
+    // criar
+    rec.criar.forEach(function(entry){
+      const novo = Store.deckAdd(Object.assign({
+        origin: 'caderno', unitId: String(_cadUnit), unitTitle: ctx.unitTitle || '',
+        moduleId: ctx.moduleId || null, chapterId: ctx.chapterId || null,
+        blockId: null, blockTitle: '', blockType: 'caderno',
+        topics: ctx.moduleId ? [ctx.moduleId] : [], tags: [], userTags: [],
+        anchor: { start: entry.blocos[0] }
+      }, _fcCadPatch(entry.card)));
+      if(novo && novo.id){ entry.fcId = String(novo.id); }
+    });
+    // atualizar
+    rec.atualizar.forEach(function(entry){ Store.deckUpdate(entry.fcId, _fcCadPatch(entry.card)); });
+    // carimbos + itens + ordem + selos (todos os cards presentes)
+    parse.cards.forEach(function(entry){
+      if(!entry.fcId) return;
+      const head = blocos[entry.blocos[0]] && blocos[entry.blocos[0]].node; if(!head) return;
+      head.setAttribute('data-fc-id', entry.fcId);
+      entry.blocos.slice(1).forEach(function(i){ const n = blocos[i] && blocos[i].node; if(n) n.setAttribute('data-fc-item', entry.fcId); });
+      _fcCadSelos(head, entry.fcId);
+      const card = Store.deckList().find(function(c){ return String(c.id) === String(entry.fcId); });
+      if(card && (!card.anchor || card.anchor.start !== entry.blocos[0])) Store.deckUpdate(entry.fcId, { anchor: { start: entry.blocos[0] } });
+    });
+    // itens órfãos (card virou outro tipo / itens cortados): limpa marca antiga
+    Array.prototype.forEach.call(el.querySelectorAll('[data-fc-item]'), function(n){
+      const id = n.getAttribute('data-fc-item');
+      const dono = parse.cards.some(function(e2){ return String(e2.fcId) === String(id) && e2.blocos.slice(1).some(function(i){ return blocos[i] && blocos[i].node === n; }); });
+      if(!dono) n.removeAttribute('data-fc-item');
+    });
+    if(rec.sumiram.length) _fcCadAviso(rec.sumiram); else _fcCadAvisoFechar();
+  }
+  // Barra de decisão: linhas de cards sumiram do texto.
+  let _fcAvisoEl = null;
+  function _fcCadAvisoFechar(){ if(_fcAvisoEl){ _fcAvisoEl.remove(); _fcAvisoEl = null; } }
+  function _fcCadAviso(ids){
+    _fcCadAvisoFechar();
+    const pane = document.getElementById('tutorCaderno'); const el = _cadEl();
+    if(!pane || !el) return;
+    const n = ids.length;
+    _fcAvisoEl = document.createElement('div');
+    _fcAvisoEl.className = 'fc-cad-aviso';
+    _fcAvisoEl.innerHTML = '<span>' + n + (n === 1 ? ' flashcard saiu' : ' flashcards saíram') + ' do texto. Apagar de vez perde o agendamento e o histórico de revisões.</span>'
+      + '<span class="fc-cad-aviso-acoes"><button type="button" data-fc-av="apagar">Apagar ' + (n === 1 ? 'o card' : 'os ' + n + ' cards') + '</button>'
+      + '<button type="button" data-fc-av="restaurar">Restaurar no texto</button></span>';
+    el.parentNode.insertBefore(_fcAvisoEl, el);
+    _fcAvisoEl.querySelector('[data-fc-av="apagar"]').addEventListener('click', function(){
+      ids.forEach(function(id){ Store.deckDelete(id); });
+      _fcCadAvisoFechar();
+      if(window.ueToast) ueToast(n === 1 ? 'Flashcard apagado (agendamento e histórico incluídos).' : n + ' flashcards apagados (agendamentos e históricos incluídos).', 'info');
+    });
+    _fcAvisoEl.querySelector('[data-fc-av="restaurar"]').addEventListener('click', function(){
+      const el2 = _cadEl(); if(!el2) return;
+      ids.forEach(function(id){
+        const card = Store.deckList().find(function(c){ return String(c.id) === String(id); }); if(!card) return;
+        const linhas = FcSintaxe.serializar(card).linhas;
+        linhas.forEach(function(l, i){
+          const d = document.createElement('div'); d.textContent = l;
+          if(i === 0) d.setAttribute('data-fc-id', String(id)); else d.setAttribute('data-fc-item', String(id));
+          el2.appendChild(d);
+        });
+      });
+      _fcCadAvisoFechar();
+      _cadSchedule();
+    });
+  }
+  // Projeção: reescreve linhas a partir dos cards (carga e edição por fora).
+  function _fcCadReescrever(head, card){
+    const el = _cadEl(); if(!el) return;
+    // remove itens antigos deste card
+    Array.prototype.slice.call(el.querySelectorAll('[data-fc-item="' + card.id + '"]')).forEach(function(n){ n.remove(); });
+    const linhas = FcSintaxe.serializar(card).linhas;
+    head.textContent = linhas[0];
+    let ref = head;
+    linhas.slice(1).forEach(function(l){
+      const d = document.createElement('div'); d.textContent = l; d.setAttribute('data-fc-item', String(card.id));
+      ref.parentNode.insertBefore(d, ref.nextSibling); ref = d;
+    });
+    _fcCadSelos(head, String(card.id));
+  }
+  function _fcCadProjetar(el){
+    if(!window.FcSintaxe || !window.Store || !Store.deckList) return;
+    Array.prototype.slice.call(el.querySelectorAll('[data-fc-id]')).forEach(function(head){
+      const id = head.getAttribute('data-fc-id');
+      const card = Store.deckList().find(function(c){ return String(c.id) === String(id); });
+      if(!card){
+        Array.prototype.slice.call(el.querySelectorAll('[data-fc-item="' + id + '"]')).forEach(function(n){ n.remove(); });
+        head.remove(); return;
+      }
+      const itens = Array.prototype.map.call(el.querySelectorAll('[data-fc-item="' + id + '"]'), function(n){ return { texto: _fcCadTexto(n) }; });
+      const blocos = [{ texto: _fcCadTexto(head), fcId: id }].concat(itens);
+      const volta = FcSintaxe.parseBlocos(blocos).cards[0];
+      if(!volta || !FcSintaxe.equivalentes(volta.card, card)) _fcCadReescrever(head, card);
+      else _fcCadSelos(head, id);
+    });
+  }
+  // edição por fora com o caderno aberto → re-projeta a linha na hora
+  document.addEventListener('ubq:fc-changed', function(ev){
+    const el = _cadEl(); if(!el || !el.isConnected) return;
+    const pane = document.getElementById('tutorCaderno');
+    if(pane && pane.hidden) return;
+    if(document.activeElement === el) return;              // não briga com quem está digitando
+    const id = ev.detail && ev.detail.id; if(!id) return;
+    const head = el.querySelector('[data-fc-id="' + id + '"]'); if(!head) return;
+    try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
+  });
+  // borda no bloco-card com o cursor dentro
+  document.addEventListener('selectionchange', function(){
+    const el = _cadEl(); if(!el || !el.isConnected) return;
+    const sel = window.getSelection(); if(!sel || !sel.anchorNode) return;
+    Array.prototype.forEach.call(el.querySelectorAll('.fc-line-active'), function(n){ n.classList.remove('fc-line-active'); });
+    if(!el.contains(sel.anchorNode)) return;
+    const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+    const head = node && node.closest ? node.closest('[data-fc-id],[data-fc-item]') : null;
+    if(head && el.contains(head)) head.classList.add('fc-line-active');
+  });
   function _cadStatus(t){ const s = _cadActiveStatusEl || document.getElementById('cadernoStatus'); if(s) s.textContent = t || ''; }
   async function _cadUserId(){
     if(_cadUid) return _cadUid;
@@ -36427,11 +36627,13 @@ window.TutorIA = (function(){
         .select('body').eq('user_id', uid).eq('unit_id', String(unitId)).maybeSingle();
       if(!error && data && data.body){ el.innerHTML = _cadSanitize(data.body); _cadFixChips(el); }
     } catch(e){ console.warn('[caderno load]', e); }
+    try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
     _emptyToggle(el); _cadStatus('');
     _cadLoadBacklinks(unitId);
   }
   async function _cadSave(){
     const el = _cadEl(); if(!el || !_cadUnit) return;
+    try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); }
     const uid = await _cadUserId(); if(!uid || !window._sb) return;
     const body = _cadSanitize(el.innerHTML);
     _cadStatus('salvando…');
