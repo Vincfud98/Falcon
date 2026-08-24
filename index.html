@@ -8641,6 +8641,21 @@ div.fcp-topic-row{padding-left:calc(2.3rem + var(--d,0)*1.15rem)}
 .anki-opt-apkg{border-color:var(--accent-border)}
 .anki-sep{display:flex;align-items:center;gap:.8rem;margin:.9rem 0 .5rem;font-family:var(--sans);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
 .anki-sep::before,.anki-sep::after{content:"";flex:1;height:1px;background:var(--accent-border-soft)}
+/* Presentear flashcards (6D) */
+.gift-modal .nlm-panel{width:min(640px,calc(100vw - 2rem))}
+.gift-colegas{display:flex;flex-direction:column;gap:.3rem;max-height:180px;overflow-y:auto;overscroll-behavior:contain;margin-bottom:.6rem}
+.gift-colega{display:flex;align-items:center;gap:.55rem;padding:.4rem .5rem;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-family:var(--sans);font-size:.82rem;color:var(--text)}
+.gift-colega:hover{border-color:var(--accent-border)}
+.gift-colega input{accent-color:var(--accent)}
+.gift-colega-foto{width:26px;height:26px;border-radius:50%;background:var(--bg-elevated) center/cover no-repeat;flex-shrink:0}
+.gift-check{display:flex;align-items:center;gap:.45rem;font-family:var(--sans);font-size:.76rem;color:var(--text-dim);margin:.2rem 0 .2rem}
+.gift-check input{accent-color:var(--accent)}
+.gift-bilhete{font-family:var(--serif);font-style:italic;font-size:.92rem;color:var(--text);padding:.5rem .8rem;border-left:2px solid var(--accent);background:rgba(200,169,126,.05);border-radius:0 4px 4px 0;margin-bottom:.7rem}
+.gift-lista{display:flex;flex-direction:column;gap:.5rem;max-height:300px;overflow-y:auto;overscroll-behavior:contain;flex-shrink:0}
+.gift-card{border:1px solid var(--border);border-radius:8px;background:var(--bg-elevated);padding:.6rem .8rem;font-family:var(--sans)}
+.gift-card-f{font-size:.84rem;color:var(--text)}
+.gift-card-v{font-size:.78rem;color:var(--text-dim);margin-top:.3rem;padding-top:.3rem;border-top:1px dashed var(--border)}
+.fcp-gift-banner{margin:0 0 .9rem;border-color:var(--accent-border);background:var(--accent-lo)}
 /* 6F-2: cor de letra dos cards em qualquer página (fonte única: as mesmas
    regras do Caderno — .hl-mark já é global) */
 .cad-fc[data-fc="yellow"]{color:#e8d44d}
@@ -25310,6 +25325,15 @@ function _notifRenderItem(n){
     if(p.coop_id){
       actions = `<div class="notif-actions"><button class="btn-ghost" data-notif-coop="${Util.attr(p.coop_id)}" data-notif-id="${Util.attr(n.id)}">Ver correção →</button></div>`;
     }
+  } else if(n.type === 'gift_cards'){
+    const _gn = Number(p.n) || 0;
+    line = `<strong>${Util.esc(fromName)}</strong> te enviou ${_gn === 1 ? 'um flashcard' : _gn + ' flashcards'} de presente${p.mensagem ? ', com um bilhete' : ''}.`;
+    if(p.gift_id){
+      actions = `<div class="notif-actions"><button class="btn-ghost" data-notif-gift="${Util.attr(p.gift_id)}" data-notif-id="${Util.attr(n.id)}">Ver presente &rarr;</button></div>`;
+    }
+  } else if(n.type === 'gift_accepted'){
+    const _gn2 = Number(p.n) || 0;
+    line = `<strong>${Util.esc(fromName)}</strong> aceitou ${_gn2 === 1 ? 'o flashcard' : 'os ' + _gn2 + ' flashcards'} que você enviou.`;
   } else if(n.type === 'room_invite'){
     line = `<strong>${Util.esc(fromName)}</strong> te convidou para a sala de estudos${p.room_name ? ' <strong>' + Util.esc(p.room_name) + '</strong>' : ''}.`;
     if(Number(p.prenda_valor) > 0){
@@ -26347,6 +26371,13 @@ window._notifActionsDelegate = function(e){
         if(window.ueToast) window.ueToast('Pedido de seguir enviado.', 'info');
       }
       App.render();
+      return;
+    }
+    const gift = e.target.closest('[data-notif-gift]');
+    if(gift){
+      const nid2 = gift.getAttribute('data-notif-id');
+      if(nid2) Notifications.markRead(nid2);
+      if(window.FlashcardsGift) FlashcardsGift.receberModal(gift.getAttribute('data-notif-gift'));
       return;
     }
     const coop = e.target.closest('[data-notif-coop]');
@@ -50381,6 +50412,212 @@ const PracticeQueue = (function(){
 })();
 window.PracticeQueue = PracticeQueue;
 
+/* ══ PRESENTEAR FLASHCARDS (Fase 6D) ═════════════════════════════════════════
+   Presente = RETRATO dos cards no envio (aluno.flashcard_gifts.cards jsonb) +
+   as conexões INTERNAS do pacote. Aceitar cria cards NOVOS no deck do colega
+   (origin 'colega', agendamento zerado pelo gatilho) e recria a teia com o
+   mapa de ids. Só entre colegas mútuos (RLS confere no banco). */
+const FlashcardsGift = (function(){
+  const esc = x => Util.esc(String(x == null ? '' : x));
+  const MAX = 50;
+  // ═══ PURO:INICIO — testado em Node ═══
+  function snapDe(c){
+    return { id: String(c.id), kind: c.kind || 'basic', front: c.front || '', back: c.back || '',
+      clozeText: c.clozeText || '', lines: Array.isArray(c.lines) ? c.lines : [], listStyle: c.listStyle || 'bullets',
+      rich: c.rich || null, tags: c.tags || [], userTags: c.userTags || [],
+      unitId: c.unitId || null, unitTitle: c.unitTitle || '', moduleId: c.moduleId || null, chapterId: c.chapterId || null,
+      blockId: c.blockId || null, blockTitle: c.blockTitle || '', blockType: c.blockType || '', topics: c.topics || [] };
+  }
+  // pacote: cards escolhidos (+ conectados diretos, se pedido) + links internos
+  function montarPacote(ids, deck, links, incluirConectados){
+    const porId = {}; deck.forEach(function(c){ porId[String(c.id)] = c; });
+    const set = new Set(ids.map(String).filter(function(id){ return porId[id]; }));
+    if(incluirConectados){
+      Array.from(set).forEach(function(id){
+        (links || []).forEach(function(l){
+          const outro = l.from === id ? l.to : (l.to === id ? l.from : null);
+          if(outro && porId[outro] && set.size < MAX) set.add(outro);
+        });
+      });
+    }
+    const escolhidos = Array.from(set).slice(0, MAX);
+    const dentro = new Set(escolhidos);
+    const internos = (links || []).filter(function(l){ return dentro.has(l.from) && dentro.has(l.to); })
+      .map(function(l){ return { from: l.from, to: l.to, tipo: l.tipo }; });
+    return { cards: escolhidos.map(function(id){ return snapDe(porId[id]); }), links: internos, cortados: Math.max(0, set.size - escolhidos.length) };
+  }
+  // aceite: cria cards novos e refaz a teia com o mapa velho→novo
+  function aceitarPacote(pacote, criarCard, criarLink){
+    const mapa = {}; let n = 0, nLinks = 0;
+    (pacote.cards || []).forEach(function(snap){
+      const campos = Object.assign({}, snap); delete campos.id;
+      const novo = criarCard(Object.assign({ origin: 'colega', sourceCard: snap.id }, campos));
+      if(novo && novo.id){ mapa[snap.id] = String(novo.id); n++; }
+    });
+    (pacote.links || []).forEach(function(l){
+      const a = mapa[l.from], b = mapa[l.to];
+      if(a && b){ const r = criarLink(a, b, l.tipo); if(r && r.ok) nLinks++; }
+    });
+    return { n: n, nLinks: nLinks, mapa: mapa };
+  }
+  // ═══ PURO:FIM ═══
+  function _me(){ return (window.Auth && Auth.getUser) ? Auth.getUser() : null; }
+  function _perfil(uid){
+    try{ return (UbiqueStore.user_profiles.list() || []).find(function(x){ return x && x.user_id === uid; }) || null; }catch(_){ return null; }
+  }
+  function _nomeDe(uid){ const pr = _perfil(uid); return pr ? (pr.nickname || pr.displayName || (pr.handle ? '@' + pr.handle : '')) : ''; }
+  async function _notificar(paraUid, tipo, payload){
+    if(!window._sb) return;
+    try{
+      const me = _me();
+      const row = { user_id: paraUid, type: tipo,
+        payload: Object.assign({ from_user_id: me ? me.id : null, from_name: me ? (_nomeDe(me.id) || me.name || '') : '' }, payload),
+        read: false, created_at: new Date().toISOString() };
+      if(crypto.randomUUID) row.id = crypto.randomUUID();
+      const { error } = await window._sb.schema('aluno').from('notifications').insert(row);
+      if(error) console.warn('[gift notif]', error.message);
+    }catch(e){ console.warn('[gift notif ex]', e); }
+  }
+  let _el = null;
+  function _modal(titulo, corpoHtml){
+    if(!_el){
+      _el = document.createElement('div'); _el.className = 'note-list-modal gift-modal';
+      _el.innerHTML = '<div class="nlm-backdrop"></div><div class="nlm-panel"><div class="nlm-header"><span class="nlm-title" id="giftTitle"></span><button class="nlm-close" type="button" aria-label="Fechar">&times;</button></div><div class="nlm-body" id="giftBody"></div></div>';
+      document.body.appendChild(_el);
+      _el.querySelector('.nlm-backdrop').addEventListener('click', fechar);
+      _el.querySelector('.nlm-close').addEventListener('click', fechar);
+    }
+    _el.querySelector('#giftTitle').textContent = titulo;
+    _el.querySelector('#giftBody').innerHTML = corpoHtml;
+    _el.classList.add('open');
+    return _el.querySelector('#giftBody');
+  }
+  function fechar(){ if(_el) _el.classList.remove('open'); }
+  /* ── envio ── */
+  function enviarModal(ids){
+    const me = _me(); if(!me){ return; }
+    const mut = (window.Follows && Follows.mutual) ? Follows.mutual(me.id) : [];
+    const colegas = Array.from(new Set(mut.map(function(f){ return f.following_id === me.id ? f.follower_id : f.following_id; }))).filter(function(id){ return id !== me.id; });
+    if(!colegas.length){
+      _modal('Presentear flashcards', '<div class="dk-link-vazio">Você ainda não tem colegas mútuos. Presentes só entre colegas — siga alguém que também te siga, na aba Colegas.</div>');
+      return;
+    }
+    const linhas = colegas.map(function(uid){
+      const nome = _nomeDe(uid) || 'Colega'; const pr = _perfil(uid);
+      return '<label class="gift-colega"><input type="radio" name="giftPara" value="' + Util.attr(uid) + '"><span class="gift-colega-foto"' + (pr && pr.photoUrl ? ' data-photo-url="' + Util.attr(pr.photoUrl) + '"' : '') + '></span><span>' + esc(nome) + '</span></label>';
+    }).join('');
+    const body = _modal('Presentear flashcards',
+      '<div class="anki-intro">O colega recebe uma cópia dos cards com o <strong>agendamento zerado</strong> (cada um estuda no seu ritmo). Os seus continuam intactos.</div>'
+      + '<label class="note-modal-label">Para quem</label><div class="gift-colegas">' + linhas + '</div>'
+      + '<label class="gift-check"><input type="checkbox" id="giftConect" checked> Incluir os cards conectados aos selecionados <span id="giftConectN"></span></label>'
+      + '<label class="note-modal-label" style="margin-top:.6rem">Bilhete (opcional)</label>'
+      + '<textarea class="nlm-note-body" id="giftMsg" rows="2" maxlength="240" placeholder="Ex.: esses de balança comercial me salvaram na revisão…"></textarea>'
+      + '<div class="nlm-note-foot"><span class="nlm-note-date" id="giftResumo"></span><div class="nlm-note-actions"><button class="nlm-delete" type="button" id="giftCancel">Cancelar</button><button class="nlm-save" type="button" id="giftSend">Enviar presente</button></div></div>');
+    const resumo = function(){
+      const pac = montarPacote(ids, Store.deckList(), Store.linksList ? Store.linksList() : [], body.querySelector('#giftConect').checked);
+      const extras = pac.cards.length - Math.min(ids.length, pac.cards.length);
+      body.querySelector('#giftResumo').textContent = pac.cards.length + (pac.cards.length === 1 ? ' card' : ' cards') + (pac.links.length ? ' · ' + pac.links.length + ' conexão(ões)' : '') + (pac.cortados ? ' · corte no teto de ' + MAX : '');
+      body.querySelector('#giftConectN').textContent = extras > 0 ? '(+' + extras + ')' : '';
+      return pac;
+    };
+    resumo();
+    body.querySelector('#giftConect').addEventListener('change', resumo);
+    if(typeof window._renderPeerAvatars === 'function'){ try{ window._renderPeerAvatars(body); }catch(_){} }
+    body.querySelector('#giftCancel').addEventListener('click', fechar);
+    body.querySelector('#giftSend').addEventListener('click', async function(){
+      const para = body.querySelector('input[name="giftPara"]:checked');
+      if(!para){ body.querySelector('#giftResumo').textContent = 'Escolha um colega.'; return; }
+      const btn = body.querySelector('#giftSend'); btn.disabled = true; btn.textContent = 'Enviando…';
+      const pac = resumo();
+      const ok = await enviar(para.value, pac, body.querySelector('#giftMsg').value.trim());
+      if(ok){ fechar(); if(window.ueToast) ueToast('Presente enviado. O colega decide se aceita.', 'success'); }
+      else { btn.disabled = false; btn.textContent = 'Enviar presente'; body.querySelector('#giftResumo').textContent = 'Não consegui enviar. Confira a conexão e tente de novo.'; }
+    });
+  }
+  async function enviar(recipientId, pacote, mensagem){
+    const me = _me(); if(!me || !window._sb || !pacote.cards.length) return false;
+    try{
+      const gid = crypto.randomUUID();
+      const { error } = await window._sb.schema('aluno').from('flashcard_gifts').insert({
+        id: gid, sender_id: me.id, recipient_id: recipientId,
+        cards: pacote.cards, links: pacote.links, mensagem: mensagem || null, status: 'enviado' });
+      if(error){ console.warn('[gift insert]', error); return false; }
+      _notificar(recipientId, 'gift_cards', { gift_id: gid, n: pacote.cards.length, mensagem: !!mensagem });
+      return true;
+    }catch(e){ console.warn('[gift insert ex]', e); return false; }
+  }
+  /* ── recebimento ── */
+  async function pendentes(){
+    const me = _me(); if(!me || !window._sb) return [];
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('flashcard_gifts')
+        .select('id, sender_id, cards, mensagem, status, created_at').eq('recipient_id', me.id).eq('status', 'enviado')
+        .order('created_at', { ascending: false }).limit(20);
+      if(error){ console.warn('[gift pendentes]', error); return []; }
+      return data || [];
+    }catch(e){ return []; }
+  }
+  async function receberModal(giftId){
+    const me = _me(); if(!me || !window._sb) return;
+    let g = null;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('flashcard_gifts').select('*').eq('id', giftId).maybeSingle();
+      if(error) console.warn('[gift fetch]', error);
+      g = data;
+    }catch(_){}
+    if(!g){ _modal('Presente de flashcards', '<div class="dk-link-vazio">Não encontrei este presente (pode ter sido removido).</div>'); return; }
+    const de = _nomeDe(g.sender_id) || 'Um colega';
+    if(g.status !== 'enviado'){
+      _modal('Presente de flashcards', '<div class="dk-link-vazio">Este presente já foi ' + (g.status === 'aceito' ? 'aceito' : 'recusado') + '.</div>');
+      return;
+    }
+    const cards = Array.isArray(g.cards) ? g.cards : [];
+    const lista = cards.map(function(snap){
+      return '<div class="gift-card"><div class="gift-card-f">' + FlashcardRender.front(snap) + '</div><div class="gift-card-v">' + FlashcardRender.back(snap) + '</div></div>';
+    }).join('');
+    const body = _modal('Presente de ' + de,
+      (g.mensagem ? '<div class="gift-bilhete">&ldquo;' + esc(g.mensagem) + '&rdquo;</div>' : '')
+      + '<div class="anki-intro">' + cards.length + (cards.length === 1 ? ' flashcard' : ' flashcards') + (Array.isArray(g.links) && g.links.length ? ' · ' + g.links.length + ' conexão(ões) entre eles' : '') + '. Aceitando, eles entram no seu deck como <strong>novos</strong> — o agendamento é seu, do zero.</div>'
+      + '<div class="gift-lista">' + lista + '</div>'
+      + '<div class="nlm-note-foot"><span class="nlm-note-date" id="giftDecMsg"></span><div class="nlm-note-actions"><button class="nlm-delete" type="button" id="giftRecusar">Recusar</button><button class="nlm-save" type="button" id="giftAceitar">Aceitar os cards</button></div></div>');
+    body.querySelector('#giftRecusar').addEventListener('click', async function(){
+      await window._sb.schema('aluno').from('flashcard_gifts').update({ status: 'recusado', decided_at: new Date().toISOString() }).eq('id', g.id).eq('status', 'enviado');
+      fechar();
+    });
+    body.querySelector('#giftAceitar').addEventListener('click', async function(){
+      const btn = body.querySelector('#giftAceitar'); btn.disabled = true; btn.textContent = 'Aceitando…';
+      let claim = null;
+      try{
+        const r = await window._sb.schema('aluno').from('flashcard_gifts')
+          .update({ status: 'aceito', decided_at: new Date().toISOString() }).eq('id', g.id).eq('status', 'enviado').select('id');
+        claim = r.data;
+        if(r.error) console.warn('[gift claim]', r.error);
+      }catch(_){}
+      if(!claim || !claim.length){
+        body.querySelector('#giftDecMsg').textContent = 'Este presente já foi decidido em outra aba/aparelho.';
+        btn.disabled = false; btn.textContent = 'Aceitar os cards';
+        return;
+      }
+      const res = aceitarPacote({ cards: g.cards, links: g.links }, function(campos){ return Store.deckAdd(campos); }, function(a, b, tipo){ return Store.linkAdd(a, b, tipo); });
+      _notificar(g.sender_id, 'gift_accepted', { n: res.n });
+      fechar();
+      if(window.ueToast) ueToast(res.n + (res.n === 1 ? ' card entrou' : ' cards entraram') + ' no seu deck como novos' + (res.nLinks ? ', com ' + res.nLinks + ' conexão(ões)' : '') + '.', 'success');
+    });
+  }
+  async function receberLista(){
+    const gs = await pendentes();
+    if(!gs.length){ _modal('Presentes de flashcards', '<div class="dk-link-vazio">Nenhum presente aguardando.</div>'); return; }
+    const body = _modal('Presentes aguardando', gs.map(function(g){
+      const de = _nomeDe(g.sender_id) || 'Colega';
+      const n = Array.isArray(g.cards) ? g.cards.length : 0;
+      return '<div class="dk-link"><span class="dk-link-txt"><b>' + esc(de) + '</b><i>' + n + (n === 1 ? ' card' : ' cards') + (g.mensagem ? ' · com bilhete' : '') + '</i></span><button type="button" class="fcia-adv" data-gift-abrir="' + Util.attr(g.id) + '">Abrir</button></div>';
+    }).join(''));
+    body.querySelectorAll('[data-gift-abrir]').forEach(function(b){ b.addEventListener('click', function(){ receberModal(b.getAttribute('data-gift-abrir')); }); });
+  }
+  return { montarPacote, aceitarPacote, snapDe, enviarModal, enviar, receberModal, receberLista, pendentes, fechar };
+})();
+window.FlashcardsGift = FlashcardsGift;
+
 /* ══ PRÁTICA (Fase 5C) — tela de revisão com SM-2 ═══════════════════════════
    Sessão = fila persistida (retomar de onde parou), respostas passam pelo
    Scheduler e viram agendamento + log; "card anterior" desfaz; resumo no
@@ -51405,6 +51642,7 @@ const FlashcardsPage = (function(){
     bar.innerHTML = `<span class="fcp-sel-n">${n} selecionado${n === 1 ? '' : 's'}</span>
       <button type="button" class="filter-btn is-active" data-fcp-a="praticar">Praticar</button>
       <button type="button" class="filter-btn" data-fcp-a="anki">Exportar para o Anki</button>
+      <button type="button" class="filter-btn" data-fcp-a="presentear">Presentear a um colega</button>
       <button type="button" class="filter-btn" data-fcp-a="off">Desativar</button>
       <button type="button" class="filter-btn" data-fcp-a="on">Reativar</button>
       <button type="button" class="filter-btn" data-fcp-a="limpar">Limpar seleção</button>`;
@@ -51436,6 +51674,19 @@ const FlashcardsPage = (function(){
       try{ localStorage.setItem('ubq_fc_agrupar', _t.agrupar); }catch(_){}
       Router.go('/flashcards?tab=visao&ag=' + _t.agrupar);      // mesma view → atualização suave, sem pular pro topo
     }));
+    // presentes aguardando (1 checagem por sessão; banner discreto na Visão geral)
+    if(window.FlashcardsGift && !window.__fcGiftsChecado){
+      window.__fcGiftsChecado = true;
+      FlashcardsGift.pendentes().then(gs => {
+        if(!gs.length || !document.body.contains(stage)) return;
+        const cta = stage.querySelector('.fcp-cta-row'); if(!cta) return;
+        const b = document.createElement('div');
+        b.className = 'fc-cad-aviso fcp-gift-banner';
+        b.innerHTML = '<span>Você tem ' + gs.length + (gs.length === 1 ? ' presente de flashcards aguardando.' : ' presentes de flashcards aguardando.') + '</span><span class="fc-cad-aviso-acoes"><button type="button" data-fc-av="restaurar" id="fcpGiftsVer">Ver presentes</button></span>';
+        cta.parentNode.insertBefore(b, cta);
+        b.querySelector('#fcpGiftsVer').addEventListener('click', () => FlashcardsGift.receberLista());
+      });
+    }
     // gráficos: dados agregados chegam em 2º plano (1 consulta por sessão); troca o esqueleto quando vier
     if(Store.fcDailyEnsure && !Store.fcDaily()){
       const tabAtual = (route.query && route.query.tab) || 'visao';
@@ -51479,6 +51730,7 @@ const FlashcardsPage = (function(){
           const ids = Array.from(_t.sel), act = a.getAttribute('data-fcp-a');
           if(act === 'praticar') Practice.iniciar({ tipo: 'ids', ids: ids, cram: true });
           else if(act === 'anki'){ const set = new Set(ids); if(window.AnkiExport) AnkiExport.abrir(Store.deckList().filter(c => set.has(c.id))); }
+          else if(act === 'presentear'){ if(window.FlashcardsGift) FlashcardsGift.enviarModal(ids); }
           else if(act === 'off'){ _setSuspenso(ids, true); _t.sel.clear(); _rerenderTable(); }
           else if(act === 'on'){ _setSuspenso(ids, false); _t.sel.clear(); _rerenderTable(); }
           else if(act === 'limpar'){ _t.sel.clear(); _rerenderTable(); }
