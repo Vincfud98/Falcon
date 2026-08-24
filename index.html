@@ -14024,9 +14024,18 @@ const Store = (function(){
       if(error) console.warn('[deck sync delete]', error);
     }catch(e){ console.warn('[deck sync delete exception]', e); }
   }
+  // Deck CONFIÁVEL = veio do cache local OU a hidratação do servidor acabou.
+  // Sem login (uid nulo), o estado local é a única verdade → confiável já.
+  // Erro de rede NÃO marca: melhor nunca apagar linha do que apagar errado.
+  let _deckPronto = false;
+  function _deckProntoMarca(){
+    if(_deckPronto) return;
+    _deckPronto = true;
+    try{ document.dispatchEvent(new CustomEvent('ubq:deck-pronto')); }catch(_){}
+  }
   async function _hydrateDeckFromSupabase(){
     const userId = _currentSupaUserId();
-    if(!userId || !window._sb || !_state) return;
+    if(!userId || !window._sb || !_state){ _deckProntoMarca(); return; }
     try{
       // Paginado desde o berço (armadilha nº3: corte silencioso em 1000).
       const { data, error } = await window._fetchAllRows(
@@ -14036,6 +14045,7 @@ const Store = (function(){
       _state.deck = (data || []).map(_cardFromDeckRow);
       if(_state.deck.length) console.log('[Store] hydrated deck:', _state.deck.length);
       _persist(); _emit();
+      _deckProntoMarca();
     }catch(e){ console.warn('[hydrate deck exception]', e); }
   }
   /* ══ TAGS PRIVADAS (aluno.user_tags) ═══════════════════════════════════
@@ -14231,8 +14241,9 @@ const Store = (function(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state) return;
     try{
-      const rows = await _fetchAllRows(() => window._sb.schema('aluno').from('flashcard_links').select('*').eq('user_id', userId), 'id', 'flashcard_links');
-      _state.fcLinks = (rows || []).map(_linkFromRow);
+      const { data, error } = await _fetchAllRows(() => window._sb.schema('aluno').from('flashcard_links').select('*').eq('user_id', userId), 'id', 'flashcard_links');
+      if(error){ console.warn('[hydrate links]', error); return; }
+      _state.fcLinks = (data || []).map(_linkFromRow);
       _persist(); _emit();
     }catch(e){ console.warn('[hydrate links exception]', e); }
   }
@@ -14887,11 +14898,13 @@ const Store = (function(){
         _state = existing;
         // back-fill any missing fields so older records don't crash
         if(!Array.isArray(_state.readingList)) _state.readingList = [];
+        _deckProntoMarca();                 // cache local = deck utilizável já
       } else {
         // Conta nova / sem cache: estado limpo. Sem seed mockado — o
         // progresso real chega pela hidratação do Supabase logo abaixo.
         _state = window.defaultUserState(course);
         _persist();
+        _deckPronto = false;                // sem cache: esperar a hidratação
       }
       // Fase 4c — hidrata respostas Quiz/Essay do Supabase (assíncrono,
       // fire-and-forget; quando termina, _emit dispara re-render)
@@ -14949,6 +14962,7 @@ const Store = (function(){
       _emit();
     },
     subscribe(fn){ _subs.add(fn); return ()=>_subs.delete(fn); },
+    deckPronto(){ return _deckPronto; },
     markUnitView(unitId){
       const v = _state.unitViews[unitId] || { firstSeenAt:Date.now(), viewCount:0, completed:false };
       v.lastSeenAt = Date.now();
@@ -36787,6 +36801,7 @@ window.TutorIA = (function(){
   let _fcCadConhecidos = new Set(), _fcCicloAtivo = false;
   function _fcCadAdotar(el){
     if(!window.FcSintaxe || !window.Store || !Store.deckList || !_cadUnit) return;
+    if(Store.deckPronto && !Store.deckPronto()) return;
     Array.prototype.forEach.call(el.querySelectorAll('[data-fc-id]'), function(n){ _fcCadConhecidos.add(String(n.getAttribute('data-fc-id'))); });
     const falta = Store.deckList().filter(function(c){
       return String(c.unitId) === String(_cadUnit) && !_fcCadConhecidos.has(String(c.id));
@@ -36820,6 +36835,7 @@ window.TutorIA = (function(){
   }
   function _fcCadCicloCorpo(el){
     _fcVistaLimpar(el);
+    if(window.Store && Store.deckPronto && !Store.deckPronto()) return;   // deck ainda não confiável: não criar nem apagar nada
     _fcCadDedup(el);
     _fcCadAdotar(el);
     const blocos = _fcCadBlocos(el);
@@ -36922,6 +36938,7 @@ window.TutorIA = (function(){
   }
   function _fcCadProjetar(el){
     if(!window.FcSintaxe || !window.Store || !Store.deckList) return;
+    if(Store.deckPronto && !Store.deckPronto()) return;   // sem deck confiável, "card sumiu" não é conclusão válida
     Array.prototype.slice.call(el.querySelectorAll('[data-fc-id]')).forEach(function(head){
       const id = head.getAttribute('data-fc-id');
       const card = Store.deckList().find(function(c){ return String(c.id) === String(id); });
@@ -36954,6 +36971,10 @@ window.TutorIA = (function(){
       return;
     }
     try{ _fcCadProjetar(el); _fcVistaAplicar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
+  });
+  document.addEventListener('ubq:deck-pronto', function(){
+    const el = _cadEl(); if(!el || !el.isConnected) return;
+    try{ _fcCadDedup(el); _fcCadProjetar(el); _fcCadAdotar(el); _fcVistaAplicar(el); _emptyToggle(el); }catch(e){ console.warn('[fc caderno deck-pronto]', e); }
   });
   // Alça de arrastar (6F-1c): flutua à esquerda da linha-card sob o mouse;
   // soltar move o head + os itens de lista juntos; a ordem grava no ciclo.
@@ -39213,7 +39234,7 @@ function _unitFcBind(root){
   if(_revBloco && window.FlashcardsPage) FlashcardsPage.bindPractice(_revBloco);
 }
 let _unitFcT = null;
-document.addEventListener('ubq:fc-changed', function(){
+const _unitFcAoMudar = function(){
   clearTimeout(_unitFcT);
   _unitFcT = setTimeout(function(){
     const stage = document.getElementById('blockStage'); if(!stage || !stage.isConnected) return;
@@ -39232,7 +39253,9 @@ document.addEventListener('ubq:fc-changed', function(){
     _unitFcBind(document);
     if(typeof window.setupQuickTooltips === 'function'){ const ua = document.querySelector('.unit-actions'); if(ua) setupQuickTooltips(ua); }
   }, 150);
-});
+};
+document.addEventListener('ubq:fc-changed', _unitFcAoMudar);
+document.addEventListener('ubq:deck-pronto', _unitFcAoMudar);
 Renderers.unit.mount = function(stageEl, route){
   const found = Util.findUnit(route.params.moduleId, route.params.unitId);
   if(!found) return;
