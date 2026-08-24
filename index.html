@@ -8901,6 +8901,15 @@ a.pr-crumb:hover{color:var(--accent)}
 .pr-srs-row label{display:inline-flex;align-items:center;gap:.35rem;color:var(--text-dim)}
 .pr-srs-row input{background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--sans);font-size:.78rem;padding:.3rem .45rem;width:5.5rem}
 .pr-srs-help{font-size:.66rem;color:var(--text-mute);margin-top:.4rem}
+.pr-via{font-family:var(--sans);font-size:.7rem;color:var(--text-mute);margin-bottom:.7rem}
+.pr-via b{color:var(--accent);font-weight:500}
+.pr-conex{margin-top:1rem;font-family:var(--sans);font-size:.72rem;color:var(--text-mute);max-width:720px;text-align:left}
+.pr-conex span{display:block;font-size:.56rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:.25rem}
+.pr-conex em{display:block;font-style:normal;color:var(--text-dim);padding:.15rem 0;border-bottom:1px dashed var(--border)}
+.pr-conex em:last-child{border-bottom:none}
+.pr-card-ctx{min-height:0;margin-bottom:.8rem}
+.pr-face-ctx{position:relative;border:1px dashed var(--accent-border);border-radius:12px;background:var(--bg-card);padding:2rem 1.6rem 1.4rem;display:flex;flex-direction:column;align-items:center;text-align:center}
+.pr-res-ctx{display:block;font-size:.58rem;color:var(--text-mute);letter-spacing:.04em;text-transform:none}
 /* resumo da sessão */
 .pr-resumo .nlm-panel{width:min(640px,calc(100vw - 2rem))}
 .pr-res-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:.6rem;margin-bottom:1rem}
@@ -14014,7 +14023,8 @@ const Store = (function(){
     newPerDay: 999999, reviewsPerDay: 999999,
     showIntervals: false,            // intervalo previsto nos botões (vicia no tempo)
     aiCheck: true,
-    aiAutoCheck: true,               // conferir com a IA sozinho ao mostrar a resposta (se houver texto)                   // campo "digite sua resposta" + IA
+    aiAutoCheck: true,               // conferir com a IA sozinho ao mostrar a resposta (se houver texto)
+    pullLinked: true,                // puxar cards conectados pra sessão (fora do vencimento = contexto "Entendi")                   // campo "digite sua resposta" + IA
     leechThreshold: 8,
     matureDays: 21,                  // "dominado" = intervalo ≥ 21 dias
     dailyGoal: 20                    // meta diária de cards revisados (mapa de calor)
@@ -49707,6 +49717,7 @@ const SrsSettingsModal = (function(){
     { k: 'showIntervals', lab: 'Mostrar o intervalo previsto nos botões', tipo: 'bool', help: 'Desligado por padrão: com o tempo à vista, o julgamento vira "quero ver em 12 h" em vez de "foi bom".' },
     { k: 'aiCheck', lab: 'Campo para digitar a resposta e conferir com a IA', tipo: 'bool' },
     { k: 'aiAutoCheck', lab: 'Conferir com a IA automaticamente ao mostrar a resposta', tipo: 'bool', help: 'Se você digitou uma resposta, a conferência (0,01ⓤ) roda sozinha ao virar o card — antes de o gabarito influenciar sua autoavaliação. Desligado, fica só o botão.' },
+    { k: 'pullLinked', lab: 'Puxar cards conectados para a sessão', tipo: 'bool', help: 'Pré-requisitos aparecem antes, relacionados logo depois. Conectado fora do vencimento entra como CONTEXTO: você lê e aperta "Entendi", sem mexer no agendamento dele. Desligado, cada card só aparece no próprio dia.' },
   ];
   function getPath(o, k){ return k.split('.').reduce((a, p) => (a == null ? a : a[p]), o); }
   function setPath(o, k, v){ const ps = k.split('.'); let cur = o; ps.slice(0, -1).forEach(p => { if(typeof cur[p] !== 'object' || cur[p] == null) cur[p] = {}; cur = cur[p]; }); cur[ps[ps.length - 1]] = v; }
@@ -49839,7 +49850,66 @@ const PracticeQueue = (function(){
     const irm = fila.filter(x => x.cardId === cardId), outros = fila.filter(x => x.cardId !== cardId);
     return outros.concat(irm);
   }
-  return { montar, espacarIrmaos, reentrar, adiarIrmaos };
+  /* Fase 6B — conexões na fila.
+     links: {from REQUER to (to vem antes) | associacao}. infoDe(cardId) →
+     { existe, suspended, itensAtivos:[ords vencidos/novos] }.
+     Regras fechadas com o dono: cadeia de REQUISITOS inteira (teto 10 de
+     profundidade, 50 puxados por sessão); ASSOCIAÇÃO só 1 nível, entra
+     logo DEPOIS do âncora; puxado sem pendência vira CONTEXTO (Entendi);
+     ordenação topológica ESTÁVEL garante requisito antes mesmo sem puxar. */
+  function conectar(fila, links, infoDe, opts){
+    opts = opts || {};
+    links = links || [];
+    const porFrom = {};
+    links.forEach(l => { if(l.tipo === 'requisito'){ (porFrom[l.from] = porFrom[l.from] || []).push(l.to); } });
+    const reqDe = id => porFrom[id] || [];
+    const assocDe = id => links.filter(l => l.tipo === 'associacao' && (l.from === id || l.to === id)).map(l => l.from === id ? l.to : l.from);
+    let out = fila.slice();
+    if(opts.puxar !== false && links.length){
+      const emSessao = new Set(fila.map(x => x.cardId));
+      const added = new Set(); let total = 0;
+      const puxa = function(id, via, lista){
+        if(emSessao.has(id) || added.has(id) || total >= 50) return;
+        const info = infoDe(id);
+        if(!info || !info.existe || info.suspended) return;
+        added.add(id); total++;
+        if(info.itensAtivos && info.itensAtivos.length) info.itensAtivos.forEach(o => lista.push({ cardId: id, ord: o, via: via }));
+        else lista.push({ cardId: id, ord: 1, contexto: true, via: via });
+      };
+      const nova = [];
+      out.forEach(item => {
+        // cadeia de requisitos do âncora (ancestrais primeiro)
+        const cadeia = [];
+        (function sobe(id, prof, trilha){
+          if(prof > 10) return;
+          reqDe(id).forEach(pre => {
+            if(trilha.indexOf(pre) >= 0) return;               // ciclo residual: ignora
+            sobe(pre, prof + 1, trilha.concat([pre]));
+            if(cadeia.indexOf(pre) < 0) cadeia.push(pre);
+          });
+        })(item.cardId, 0, [item.cardId]);
+        cadeia.forEach(pre => puxa(pre, item.cardId, nova));
+        nova.push(item);
+        assocDe(item.cardId).forEach(par => puxa(par, item.cardId, nova));
+      });
+      out = nova;
+    }
+    // ordenação topológica ESTÁVEL (nível de card): quem REQUER vem depois
+    const cardsNaLista = new Set(out.map(x => x.cardId));
+    const dependeDe = {};
+    links.forEach(l => { if(l.tipo === 'requisito' && cardsNaLista.has(l.from) && cardsNaLista.has(l.to)){ (dependeDe[l.from] = dependeDe[l.from] || []).push(l.to); } });
+    const colocados = new Set(); const resultado = []; const pend = out.slice();
+    let guard = out.length * out.length + 10;
+    while(pend.length && guard-- > 0){
+      let idx = pend.findIndex(x => (dependeDe[x.cardId] || []).every(d => colocados.has(d)));
+      if(idx < 0) idx = 0;                                     // ciclo residual: segue a ordem atual
+      const it = pend.splice(idx, 1)[0];
+      resultado.push(it);
+      if(!pend.some(x => x.cardId === it.cardId)) colocados.add(it.cardId);
+    }
+    return resultado.concat(pend);
+  }
+  return { montar, espacarIrmaos, reentrar, adiarIrmaos, conectar };
 })();
 window.PracticeQueue = PracticeQueue;
 
@@ -49909,12 +49979,24 @@ const Practice = (function(){
       return (a.ord || 1) - (b.ord || 1);
     };
   }
+  function _infoConexao(cardId){
+    const card = _cardDe(cardId);
+    if(!card) return { existe: false };
+    const rows = Store.srsFor(cardId); const ords = rows.length ? rows : [{ ord: 1, state: 'new' }];
+    const suspended = ords.length > 0 && ords.every(r => r.suspended);
+    const agora = Date.now();
+    const itensAtivos = ords.filter(r => !r.suspended && (!r.state || r.state === 'new' || r.dueAt == null || r.dueAt <= agora)).map(r => r.ord || 1);
+    return { existe: true, suspended: suspended, itensAtivos: itensAtivos };
+  }
   function iniciar(scope){
     scope = scope || { tipo: 'pendentes' };
     scope.modo = scope.modo || (scope.cram ? 'todos' : 'srs');
     if(scope.modo !== 'srs') scope.cram = true;
     if(scope.registrar == null) scope.registrar = true;
-    const fila = PracticeQueue.montar(_itensDeEscopo(scope), Store.srsSettings(), Date.now(), { cram: !!scope.cram, ordem: scope.modo === 'ordem' ? _comparadorOrdem() : null });
+    let fila = PracticeQueue.montar(_itensDeEscopo(scope), Store.srsSettings(), Date.now(), { cram: !!scope.cram, ordem: scope.modo === 'ordem' ? _comparadorOrdem() : null });
+    // Fase 6B: conexões — pré-requisitos antes (em cadeia), relacionados
+    // depois do âncora; fora do vencimento entra como contexto (Entendi).
+    fila = PracticeQueue.conectar(fila, Store.linksList ? Store.linksList() : [], _infoConexao, { puxar: Store.srsSettings().pullLinked !== false });
     if(!fila.length){ toast(scope.tipo === 'pendentes' ? 'Nada para praticar agora: nenhum card vencido.' : 'Nenhum card para praticar nesta seleção.', 'info'); return false; }
     _s = { id: _uuid(), scope: scope, status: 'andamento', queue: fila, done: [], cardsTotal: fila.length,
       counts: { errei: 0, dificil: 0, bom: 0, facil: 0 }, durationMs: 0, startedAt: Date.now(), endedAt: null, atual: null };
@@ -49983,6 +50065,13 @@ const Practice = (function(){
     const menu = _root && _root.querySelector('#prMenu'); const mb = _root && _root.querySelector('#prMenuBtn');
     if(menu && !menu.hidden && !menu.contains(e.target) && e.target !== mb) menu.hidden = true;
   }
+  function _entendi(){
+    const a = _s && _s.atual; if(!a || !a.contexto) return;
+    _s.done.push({ cardId: a.cardId, ord: a.ord, contexto: true, via: a.via || null, responseMs: Date.now() - a.shownAt });
+    _s.queue.shift();
+    _s.queue = PracticeQueue.adiarIrmaos(_s.queue, a.cardId);
+    _persistir(); _proximo();
+  }
   function _bindKeys(){
     if(_keys) return;
     document.addEventListener('click', _docClick);
@@ -49992,6 +50081,7 @@ const Practice = (function(){
       const digitando = tag === 'TEXTAREA' || tag === 'INPUT';
       if(digitando && !(e.key === 'Enter' && (e.ctrlKey || e.metaKey))) return;
       if(document.querySelector('.note-list-modal.open')) return;
+      if((e.key === ' ' || e.key === 'Enter') && _s.atual.contexto){ e.preventDefault(); _entendi(); return; }
       if((e.key === ' ' || e.key === 'Enter') && _s.atual.face === 'front'){ e.preventDefault(); _mostrar(); return; }
       if(_s.atual.face === 'back' && /^[1-4]$/.test(e.key)){ e.preventDefault(); responder(parseInt(e.key, 10)); return; }
       if(e.key === 'z' || e.key === 'Z'){ e.preventDefault(); voltar(); }
@@ -50004,7 +50094,7 @@ const Practice = (function(){
     if(!_s.queue.length){ _finalizar(); return; }
     const it = _s.queue[0]; const card = _cardDe(it.cardId);
     if(!card){ _s.queue.shift(); return _proximo(); }                 // card apagado no meio
-    _s.atual = { cardId: it.cardId, ord: it.ord, shownAt: Date.now(), face: 'front', typed: '' };
+    _s.atual = { cardId: it.cardId, ord: it.ord, shownAt: Date.now(), face: it.contexto ? 'back' : 'front', typed: '', contexto: !!it.contexto, via: it.via || null };
     _render();
   }
   /* ── render ── */
@@ -50023,6 +50113,39 @@ const Practice = (function(){
       : (k === 'cloze' ? 'Lacunas · card c' + a.ord : 'Tradicional');
     const leech = srs.leech ? '<div class="pr-leech">Este card está dando trabalho (' + srs.lapses + ' erros em revisão). Vale reescrever — use o lápis.</div>' : '';
     const frontHtml = FlashcardRender.frontOrd(card, a.ord), backHtml = FlashcardRender.backOrd(card, a.ord);
+    const viaCard = a.via ? _cardDe(a.via) : null;
+    const viaTxt = viaCard ? (viaCard.front || String(viaCard.clozeText || '').replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '$1')) : '';
+    const viaHtml = a.via ? '<div class="pr-via">' + (a.contexto ? 'Contexto — conectado a: ' : 'Veio pela conexão com: ') + '<b>' + esc(String(viaTxt).slice(0, 90)) + '</b></div>' : '';
+    const conexoes = (Store.linksFor ? Store.linksFor(a.cardId) : []).map(l => {
+      const outro = _cardDe(l.from === String(a.cardId) ? l.to : l.from);
+      return outro ? (outro.front || String(outro.clozeText || '').replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '$1')) : null;
+    }).filter(Boolean).slice(0, 4);
+    const conexHtml = conexoes.length ? '<div class="pr-conex"><span>Conectado a:</span>' + conexoes.map(c2 => '<em>' + esc(String(c2).slice(0, 70)) + '</em>').join('') + '</div>' : '';
+    if(a.contexto){
+      // CARD DE CONTEXTO: frente e verso à vista, botão único "Entendi",
+      // sem tocar no agendamento (regra fechada com o dono).
+      _root.innerHTML =
+        '<div class="pr-top">'
+        + '<button type="button" class="btn-ghost pr-btn-sm" id="prEncerrar">&times; Encerrar sessão</button>'
+        + '<span class="pr-timer" id="prTimer">' + _fmtT(_s.durationMs) + '</span>'
+        + '<span class="pr-mode">Contexto</span>'
+        + '<div class="pr-prog"><div class="pr-prog-l"><span>Seu progresso</span><span id="prCount">' + n + ' de ' + N + '</span></div><div class="pr-bar"><span id="prBarFill" style="width:' + Math.round((_s.done.length / Math.max(1, N)) * 100) + '%"></span></div></div></div>'
+        + _crumb(card)
+        + '<div class="pr-card pr-card-ctx"><div class="pr-face-ctx"><span class="pr-kind">' + esc(kindTxt) + ' · contexto</span>' + viaHtml
+        + '<div class="pr-q">' + frontHtml + '</div><div class="pr-sep">resposta</div><div class="pr-a">' + backHtml + '</div></div></div>'
+        + '<div class="pr-actions"><button type="button" class="btn-primary pr-show" id="prEntendi">Entendi <kbd>espaço</kbd></button></div>'
+        + '<div class="pr-foot"><button type="button" class="btn-ghost pr-btn-sm" id="prVoltar"' + (_s.done.length ? '' : ' disabled') + '>Card anterior</button>'
+        + '<button type="button" class="icon-btn pr-edit" id="prEdit" data-tip="Editar este card" aria-label="Editar card">' + ICO_EDIT + '</button></div>';
+      _root.querySelector('#prEncerrar').addEventListener('click', encerrar);
+      _root.querySelector('#prEntendi').addEventListener('click', _entendi);
+      _root.querySelector('#prVoltar').addEventListener('click', voltar);
+      _root.querySelector('#prEdit').addEventListener('click', function(){
+        const c2 = _cardDe(a.cardId); if(!c2) return;
+        DeckEditModal.open(c2, function(patch){ Store.deckUpdate(c2.id, patch); _render(); });
+      });
+      if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(_root);
+      return;
+    }
     _root.innerHTML =
       '<div class="pr-top">'
       + '<button type="button" class="btn-ghost pr-btn-sm" id="prEncerrar">&times; Encerrar sessão</button>'
@@ -50040,7 +50163,7 @@ const Practice = (function(){
       + _crumb(card)
       + '<div class="pr-card' + (a.face === 'back' ? ' flipped' : '') + '" id="prCard"><div class="pr-inner">'
       + '<div class="pr-face pr-front"><span class="pr-kind">' + esc(kindTxt) + '</span>' + leech + '<div class="pr-q">' + frontHtml + '</div></div>'
-      + '<div class="pr-face pr-back"><span class="pr-kind">' + esc(kindTxt) + '</span><div class="pr-q pr-q-rep">' + frontHtml + '</div><div class="pr-sep">resposta</div><div class="pr-a">' + backHtml + '</div>'
+      + '<div class="pr-face pr-back"><span class="pr-kind">' + esc(kindTxt) + '</span>' + viaHtml + '<div class="pr-q pr-q-rep">' + frontHtml + '</div><div class="pr-sep">resposta</div><div class="pr-a">' + backHtml + '</div>' + conexHtml
       + '<div class="pr-typed" id="prTyped" hidden><span>Você escreveu:</span><div id="prTypedTxt"></div>'
       + '<div class="pr-ai" id="prAi"><button type="button" class="pr-ai-btn" id="prAiBtn">Conferir com a IA <span class="pr-ai-custo">0,01ⓤ</span></button><div class="pr-ai-res" id="prAiRes" hidden></div></div></div></div>'
       + '</div></div>'
@@ -50169,6 +50292,11 @@ const Practice = (function(){
   function voltar(){
     if(!_s || !_s.done.length) return;
     const d = _s.done.pop();
+    if(d.contexto){
+      const i0 = _s.queue.findIndex(x => x.cardId === d.cardId && x.ord === d.ord); if(i0 >= 0) _s.queue.splice(i0, 1);
+      _s.queue.unshift({ cardId: d.cardId, ord: d.ord, contexto: true, via: d.via || null });
+      _persistir(); _proximo(); return;
+    }
     if(!d.livre){ Store.srsUpsert(d.cardId, d.ord, d.prevSrs); if(d.reviewId) Store.reviewDelete(d.reviewId); }
     _s.counts[CNT[d.rating]] = Math.max(0, (_s.counts[CNT[d.rating]] || 0) - 1);
     const i = _s.queue.findIndex(x => x.cardId === d.cardId && x.ord === d.ord); if(i >= 0) _s.queue.splice(i, 1);
@@ -50222,7 +50350,8 @@ const Practice = (function(){
     if(Store.fcDailyRefresh && s.done.some(d => !d.livre)) setTimeout(function(){ Store.fcDailyRefresh(); }, 2500);
   }
   function _resumo(s){
-    const c = s.counts || {}, total = s.done.length, acertos = total - (c.errei || 0);
+    const c = s.counts || {}, ctxN = s.done.filter(d => d.contexto).length;
+    const total = s.done.length - ctxN, acertos = total - (c.errei || 0);
     const pct = total ? Math.round((acertos / total) * 100) : 0;
     const partes = [['errei', 'Errei', '#e87878'], ['dificil', 'Difícil', '#d9a55a'], ['bom', 'Bom', '#5dd49f'], ['facil', 'Fácil', '#6cb2e0']];
     // donut em SVG (sem biblioteca): arcos por botão
@@ -50232,7 +50361,7 @@ const Practice = (function(){
     s.done.filter(d => d.rating === 1).forEach(d => { const k = d.cardId + '|' + d.ord; if(!vis.has(k)){ vis.add(k); errados.push({ cardId: d.cardId, ord: d.ord }); } });
     const el = document.createElement('div'); el.className = 'note-list-modal pr-resumo open';
     el.innerHTML = '<div class="nlm-backdrop"></div><div class="nlm-panel"><div class="nlm-header"><span class="nlm-title">Sessão concluída</span><button class="nlm-close" type="button" aria-label="Fechar">&times;</button></div><div class="nlm-body">'
-      + '<div class="pr-res-kpis"><div><strong>' + total + '</strong><span>cards</span></div><div class="pr-res-ok"><strong>' + acertos + '</strong><span>acertos</span></div><div><strong>' + pct + '%</strong><span>de acerto</span></div><div><strong>' + _fmtT(s.durationMs) + '</strong><span>tempo</span></div></div>'
+      + '<div class="pr-res-kpis"><div><strong>' + total + '</strong><span>cards</span>' + (ctxN ? '<span class="pr-res-ctx">+ ' + ctxN + ' de contexto</span>' : '') + '</div><div class="pr-res-ok"><strong>' + acertos + '</strong><span>acertos</span></div><div><strong>' + pct + '%</strong><span>de acerto</span></div><div><strong>' + _fmtT(s.durationMs) + '</strong><span>tempo</span></div></div>'
       + '<div class="pr-res-mid"><svg viewBox="0 0 120 120" class="pr-donut"><circle r="' + R + '" cx="60" cy="60" fill="none" stroke="var(--border)" stroke-width="12"></circle>' + arcos + '<text x="60" y="64" text-anchor="middle" class="pr-donut-t">' + pct + '%</text></svg>'
       + '<div class="pr-res-det">' + partes.map(p => '<div class="pr-res-li"><span class="pr-res-dot" style="background:' + p[2] + '"></span>' + p[1] + '<strong>' + (c[p[0]] || 0) + '</strong><em>' + (total ? Math.round(((c[p[0]] || 0) / total) * 100) : 0) + '%</em></div>').join('') + '</div></div>'
       + '<div class="nlm-note-foot"><span class="nlm-note-date">' + (s.scope && s.scope.registrar === false ? 'Modo livre: o agendamento não foi alterado.' : (s.durationMs >= 30000 && total ? 'Tempo registrado na sua Rotina como Revisão.' : '')) + '</span><div class="nlm-note-actions">'
