@@ -8641,6 +8641,13 @@ div.fcp-topic-row{padding-left:calc(2.3rem + var(--d,0)*1.15rem)}
 .anki-opt-apkg{border-color:var(--accent-border)}
 .anki-sep{display:flex;align-items:center;gap:.8rem;margin:.9rem 0 .5rem;font-family:var(--sans);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
 .anki-sep::before,.anki-sep::after{content:"";flex:1;height:1px;background:var(--accent-border-soft)}
+/* Sugestões por IA (6E) */
+.dk-sug{margin-bottom:.5rem;display:flex;flex-direction:column;gap:.3rem}
+.dk-pick-sug{border-color:var(--accent-border-soft)}
+.dk-sim{display:flex;flex-direction:column;align-items:flex-end;gap:.15rem;flex-shrink:0;width:64px}
+.dk-sim-bar{width:100%;height:4px;background:var(--border);border-radius:2px;overflow:hidden}
+.dk-sim-bar i{display:block;height:100%;background:var(--accent);border-radius:2px}
+.dk-sim em{font-style:normal;font-family:var(--mono);font-size:.58rem;color:var(--text-mute)}
 /* Presentear flashcards (6D) */
 .gift-modal .nlm-panel{width:min(640px,calc(100vw - 2rem))}
 .gift-colegas{display:flex;flex-direction:column;gap:.3rem;max-height:180px;overflow-y:auto;overscroll-behavior:contain;margin-bottom:.6rem}
@@ -36274,6 +36281,24 @@ window.TutorIA = (function(){
     // o data-ut guarda o rótulo COMPLETO (sigla + número + nome) — vira o chip.
     p.innerHTML = (fcHtml && units.length ? '<div class="tutor-refsec">Unidades</div>' : '') + units.map(function(u){ return '<button type="button" class="tutor-refopt" data-uid="' + Util.attr(u.id) + '" data-ut="' + Util.attr(u.label) + '">' + _esc(u.label) + '</button>'; }).join('');
     if(fcHtml) p.innerHTML += fcHtml;
+    // Fase 6E — com a busca ainda vazia, acrescenta os sugeridos semânticos
+    if(_fcRefLinha && !q && window.FlashcardsSugestoes){
+      const linhaAlvo = _fcRefLinha;
+      FlashcardsSugestoes.prontas(linhaAlvo).then(function(sug){
+        if(!_refPickerEl || _refPickerEl.hidden || _fcRefLinha !== linhaAlvo) return;
+        if(!sug.length || _refPickerEl.querySelector('.fc-sug-sec')) return;
+        const corta2 = function(x, n2){ x = String(x || '').trim(); return x.length > n2 ? x.slice(0, n2) + '…' : x; };
+        const resumo2 = function(c){
+          if(c.kind === 'cloze') return String(c.clozeText || '').replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '[$1]');
+          return c.front || '';
+        };
+        const html2 = '<div class="tutor-refsec fc-sug-sec">Sugeridos pela IA</div>' + sug.map(function(v){
+          return '<button type="button" class="tutor-refopt fc-refopt fc-refopt-sug" data-fcid="' + Util.attr(v.card.id) + '" data-fcfront="' + Util.attr(corta2(resumo2(v.card), 60)) + '"><b>' + Util.esc(corta2(resumo2(v.card), 70)) + '</b><i>' + Math.round(v.sim * 100) + '% parecido</i></button>';
+        }).join('');
+        _refPickerEl.insertAdjacentHTML('beforeend', html2);
+        _refPickerEl.querySelectorAll('.fc-refopt-sug').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); e.stopPropagation(); _fcRefRelacao(b.getAttribute('data-fcid'), b.getAttribute('data-fcfront')); }); });
+      });
+    }
     p.querySelectorAll('.fc-refopt').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); e.stopPropagation(); _fcRefRelacao(b.getAttribute('data-fcid'), b.getAttribute('data-fcfront')); }); });
     p.querySelectorAll('.tutor-refopt:not(.fc-refopt)').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); _pickRef(b.getAttribute('data-uid'), b.getAttribute('data-ut')); }); });
     const sel = window.getSelection(); let rect = null;
@@ -50412,6 +50437,53 @@ const PracticeQueue = (function(){
 })();
 window.PracticeQueue = PracticeQueue;
 
+/* ══ SUGESTÕES DE CONEXÃO POR IA (Fase 6E) ═══════════════════════════════════
+   EF embed-flashcards vetoriza o deck (OpenAI, idempotente por hash) e devolve
+   os vizinhos SEMÂNTICOS de um card. Grátis (decisão do dono). O PISO de
+   similaridade evita conexão forçada: sem candidato forte, a seção nem
+   aparece — calibrar SIM_MIN com prints reais do dono. */
+const FlashcardsSugestoes = (function(){
+  const SIM_MIN = 0.35;      // piso: abaixo disso não sugere (ajustável com uso real)
+  const TOPO = 5;
+  const _cache = new Map();  // cardId → Promise<[{id, sim}]>
+  async function _buscar(cardId){
+    if(!window._sb) return [];
+    try{
+      const r = await window._sb.functions.invoke('embed-flashcards', { body: { card_id: String(cardId) } });
+      if(r.error){
+        let j = null;
+        try{ if(r.error.context && typeof r.error.context.json === 'function') j = await r.error.context.json(); }catch(_){}
+        console.warn('[sugestoes]', (j && (j.codigo || j.mensagem)) || r.error.message || r.error);
+        return [];
+      }
+      const d = r.data || {};
+      if(d.ok === false){ console.warn('[sugestoes]', d.codigo, d.mensagem); return []; }
+      return Array.isArray(d.sugestoes) ? d.sugestoes : [];
+    }catch(e){ console.warn('[sugestoes ex]', e); return []; }
+  }
+  function para(cardId){
+    cardId = String(cardId);
+    if(!_cache.has(cardId)) _cache.set(cardId, _buscar(cardId));
+    return _cache.get(cardId);
+  }
+  // pronto pra pintar: aplica piso, tira o próprio, os já ligados e os apagados
+  async function prontas(cardId){
+    const brutas = await para(cardId);
+    const ligados = new Set((Store.linksFor ? Store.linksFor(cardId) : []).map(function(l){ return l.from === String(cardId) ? l.to : l.from; }));
+    const porId = {}; Store.deckList().forEach(function(c){ porId[String(c.id)] = c; });
+    return brutas
+      .filter(function(v){ return v.sim >= SIM_MIN && String(v.id) !== String(cardId) && !ligados.has(String(v.id)) && porId[String(v.id)]; })
+      .slice(0, TOPO)
+      .map(function(v){ return { card: porId[String(v.id)], sim: v.sim }; });
+  }
+  document.addEventListener('ubq:fc-changed', function(ev){
+    const id = ev.detail && ev.detail.id;
+    if(id) _cache.delete(String(id)); else _cache.clear();
+  });
+  return { para, prontas, SIM_MIN };
+})();
+window.FlashcardsSugestoes = FlashcardsSugestoes;
+
 /* ══ PRESENTEAR FLASHCARDS (Fase 6D) ═════════════════════════════════════════
    Presente = RETRATO dos cards no envio (aluno.flashcard_gifts.cards jsonb) +
    as conexões INTERNAS do pacote. Aceitar cria cards NOVOS no deck do colega
@@ -52790,8 +52862,23 @@ const DeckEditModal = (function(){
   function _renderPicker(f){
     const box = f.querySelector('#dkPicker'); if(!box) return;
     box.hidden = false;
-    box.innerHTML = '<input type="search" class="nlm-note-body dk-picker-q" id="dkPickQ" placeholder="Busque no seu deck (frente, verso, lacunas)…">'
+    box.innerHTML = '<div class="dk-sug" id="dkSug"><div class="dk-link-vazio">Procurando cards parecidos…</div></div>'
+      + '<input type="search" class="nlm-note-body dk-picker-q" id="dkPickQ" placeholder="Busque no seu deck (frente, verso, lacunas)…">'
       + '<div class="dk-picker-list" id="dkPickList"></div>';
+    // Fase 6E — sugestões SEMÂNTICAS (some em silêncio se não houver forte)
+    if(window.FlashcardsSugestoes && _cardId){
+      const alvo = _cardId;
+      FlashcardsSugestoes.prontas(alvo).then(function(sug){
+        const host = f.querySelector('#dkSug');
+        if(!host || _cardId !== alvo) return;
+        if(!sug.length){ host.remove(); return; }
+        host.innerHTML = '<div class="tutor-refsec" style="border-top:none;padding-left:0">Sugeridos pela IA</div>' + sug.map(function(v){
+          const r = _resumo(v.card); const pct = Math.round(v.sim * 100);
+          return '<button type="button" class="dk-pick dk-pick-sug" data-pick-sug="' + Util.attr(v.card.id) + '"><span class="dk-pick-t"><b>' + Util.esc(_corta(r.frente, 100)) + '</b>' + (r.verso ? '<i>' + Util.esc(_corta(r.verso, 100)) + '</i>' : '') + '</span><span class="dk-sim" data-tip="Similaridade de conteúdo"><span class="dk-sim-bar"><i style="width:' + pct + '%"></i></span><em>' + pct + '%</em></span></button>';
+        }).join('');
+        host.querySelectorAll('[data-pick-sug]').forEach(function(b){ b.addEventListener('click', function(){ _renderTipo(f, b.getAttribute('data-pick-sug')); }); });
+      });
+    } else { const host = f.querySelector('#dkSug'); if(host) host.remove(); }
     const jaLigados = new Set(Store.linksFor(_cardId).map(l => l.from === String(_cardId) ? l.to : l.from));
     const candidatos = Store.deckList().filter(c => String(c.id) !== String(_cardId) && !jaLigados.has(String(c.id)));
     const ctxDe = c => (window.FlashcardsIA && FlashcardsIA.contexto) ? (FlashcardsIA.contexto(c.unitId, null).sigla || '') : '';
