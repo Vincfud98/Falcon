@@ -8689,10 +8689,26 @@ html[data-theme="light"] .cad-fc[data-fc="red"]{color:#b03434}
 .fc-drop-ind{position:fixed;z-index:129;height:2px;background:var(--accent);border-radius:1px;pointer-events:none}
 /* Caderno como editor de flashcards (6F-1b) */
 .tutor-caderno-ed [data-fc-id]{position:relative;margin:.35rem 0;padding:.45rem 5.5rem .45rem .7rem;border-left:2px solid var(--accent-border);background:var(--accent-xlo);border-radius:0 6px 6px 0}
-.tutor-caderno-ed [data-fc-item]{margin:0 0 .1rem 1.4rem;padding:.1rem 0 .1rem .6rem;border-left:1px dashed var(--accent-border-soft)}
+.tutor-caderno-ed [data-fc-id]:has(+ [data-fc-item]){border-radius:0 6px 0 0;margin-bottom:0;padding-bottom:.15rem}
+.tutor-caderno-ed [data-fc-item]{margin:0;padding:.08rem 5.5rem .08rem 1.7rem;border-left:2px solid var(--accent-border);background:var(--accent-xlo)}
+.tutor-caderno-ed [data-fc-item]:not(:has(+ [data-fc-item])){border-radius:0 0 6px 0;padding-bottom:.45rem;margin-bottom:.35rem}
 .tutor-caderno-ed [data-fc-id].fc-line-active,.tutor-caderno-ed [data-fc-item].fc-line-active{outline:1px solid var(--accent-border);outline-offset:2px;border-radius:4px}
 .tutor-caderno-ed [data-fc-id]::after{content:attr(data-fc-due);position:absolute;top:.45rem;right:.5rem;font-family:var(--mono);font-size:.55rem;letter-spacing:.05em;color:var(--accent);pointer-events:none;opacity:.85}
 .tutor-caderno-ed [data-fc-id][data-fc-links]::before{content:attr(data-fc-links);position:absolute;bottom:.3rem;right:.5rem;font-family:var(--mono);font-size:.55rem;color:var(--text-mute);pointer-events:none}
+/* Vista renderizada das linhas de card (linha ativa mostra a sintaxe crua) */
+.tutor-caderno-ed .fc-oc{display:none}
+.tutor-caderno-ed .fc-chip{display:inline;border:1px solid;border-radius:6px;padding:.02rem .3rem;margin:0 .05rem;cursor:pointer;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.tutor-caderno-ed .fc-chip::after{content:'c' attr(data-g);font-family:var(--mono);font-size:.5rem;vertical-align:super;margin-left:.12rem;opacity:.75}
+.tutor-caderno-ed .fc-sep{color:var(--accent);font-family:var(--mono);font-size:.82em;opacity:.9;letter-spacing:.04em}
+.tutor-caderno-ed .fc-mk-b{font-size:0}
+.tutor-caderno-ed .fc-mk-b::after{content:'\2022';font-size:.95rem;color:var(--accent);margin-right:.35rem}
+.tutor-caderno-ed .fc-mk-n{color:var(--accent);font-family:var(--mono);font-size:.85em}
+/* Popover da lacuna (unir/separar/desfazer) */
+.fc-chip-dd{position:fixed;z-index:1200;background:var(--bg-card);border:1px solid var(--accent-border);border-radius:8px;box-shadow:0 14px 34px -14px rgba(0,0,0,.75);padding:.4rem;font-family:var(--sans);display:flex;flex-direction:column;gap:.1rem;min-width:230px}
+.fc-chip-dd-t{font-size:.58rem;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);padding:.45rem .6rem .3rem;border-bottom:1px solid var(--accent-border-soft);margin-bottom:.25rem}
+.fc-chip-dd button{display:flex;align-items:center;gap:.45rem;width:100%;text-align:left;background:transparent;border:0;border-radius:6px;padding:.45rem .6rem;font-size:.8rem;color:var(--text);cursor:pointer;font-family:var(--sans)}
+.fc-chip-dd button:hover{background:var(--accent-lo);color:var(--accent)}
+.fc-chip-mini{display:inline-block;border:1px solid;border-radius:5px;font-family:var(--mono);font-size:.6rem;padding:.02rem .3rem;flex-shrink:0}
 .fc-cad-aviso{display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap;margin:0 0 .6rem;padding:.55rem .8rem;border:1px solid rgba(217,165,90,.45);border-radius:8px;background:rgba(217,165,90,.08);font-family:var(--sans);font-size:.74rem;color:var(--text)}
 .fc-cad-aviso-acoes{display:inline-flex;gap:.4rem}
 .fc-cad-aviso button{font-family:var(--sans);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;padding:.35rem .7rem;border-radius:5px;cursor:pointer;background:transparent;border:1px solid var(--accent-border-soft);color:var(--text-dim)}
@@ -36462,6 +36478,181 @@ window.TutorIA = (function(){
   function _fcCadMarcarItens(entry){
     entry.blocos.slice(1).forEach(function(){ /* índices resolvidos pelo chamador */ });
   }
+  /* ── Vista renderizada (live preview) das linhas de card ──────────────────
+     A linha ATIVA (cursor dentro) mostra a sintaxe crua; as demais linhas de
+     card renderizam: lacuna vira chip colorido do grupo, " :: "/" :::" ganham
+     marca dourada e "- " vira bullet. A decoração é SÓ EMBRULHO visual —
+     nenhum caractere muda (marcadores ficam escondidos em spans data-deco),
+     então _fcCadTexto/ciclo/equivalência leem o mesmo texto de sempre. O
+     ciclo des-renderiza tudo antes de rodar e o save serializa o corpo cru. */
+  let _fcVistaMudando = false;
+  function _fcVistaPos(linha, off){
+    let acc = 0, achou = null;
+    (function walk(n){
+      if(achou) return;
+      if(n.nodeType === 3){
+        const len = n.nodeValue.length;
+        if(off <= acc + len){ achou = { node: n, off: off - acc }; return; }
+        acc += len; return;
+      }
+      if(n.nodeType !== 1) return;
+      if(n.tagName === 'BR'){
+        if(off <= acc){ achou = { node: n.parentNode, off: Array.prototype.indexOf.call(n.parentNode.childNodes, n) }; return; }
+        acc += 1; return;
+      }
+      if(n.tagName === 'SCRIPT' || n.tagName === 'STYLE') return;
+      Array.prototype.forEach.call(n.childNodes, walk);
+    })(linha);
+    return achou;
+  }
+  function _fcVistaWrap(linha, a, b, cls, atrs){
+    const pa = _fcVistaPos(linha, a), pb = _fcVistaPos(linha, b);
+    if(!pa || !pb) return null;
+    const r = document.createRange();
+    try{ r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off); }catch(_){ return null; }
+    const sp = document.createElement('span');
+    sp.className = cls; sp.setAttribute('data-deco', '1');
+    Object.keys(atrs || {}).forEach(function(k){ sp.setAttribute(k, atrs[k]); });
+    try{ sp.appendChild(r.extractContents()); r.insertNode(sp); }catch(_){ return null; }
+    return sp;
+  }
+  // grupos POR OCORRÊNCIA, com a mesma regra do parser (implícitas após o maior)
+  function _fcVistaGrupos(texto){
+    const re = /\{(?:(\d+):)?([^{}\n]+)\}/g;
+    let max = 0, m;
+    while((m = re.exec(texto))){ if(m[1]) max = Math.max(max, parseInt(m[1], 10)); }
+    let seq = max; const out = []; re.lastIndex = 0;
+    while((m = re.exec(texto))){ out.push({ g: m[1] ? parseInt(m[1], 10) : (++seq), ia: m.index, ib: m.index + m[0].length, abre: 1 + (m[1] ? m[1].length + 1 : 0) }); }
+    return out;
+  }
+  function _fcVistaRender(linha){
+    if(!window.Store || !Store.deckList) return;
+    if(linha.getAttribute('data-fc-vista')) return;
+    const id = linha.getAttribute('data-fc-id') || linha.getAttribute('data-fc-item');
+    const card = Store.deckList().find(function(c){ return String(c.id) === String(id); });
+    if(!card) return;
+    linha.setAttribute('data-fc-vista', '1');
+    const texto = _fcCadTexto(linha);
+    if(linha.hasAttribute('data-fc-item')){
+      const mi = texto.match(/^\s*(-|•|\d+[.)])\s+/);
+      if(mi) _fcVistaWrap(linha, 0, mi[0].length, /\d/.test(mi[1]) ? 'fc-mk-n' : 'fc-mk-b');
+      return;
+    }
+    if(card.kind === 'multi'){
+      const mm = texto.match(/ :::\s*$/);
+      if(mm) _fcVistaWrap(linha, mm.index, mm.index + mm[0].length, 'fc-sep');
+      return;
+    }
+    if(card.kind === 'basic'){
+      const i = texto.indexOf(' :: ');
+      if(i >= 0) _fcVistaWrap(linha, i, i + 4, 'fc-sep');
+      return;
+    }
+    if(card.kind === 'cloze'){
+      _fcVistaGrupos(texto).forEach(function(L, oc){
+        _fcVistaWrap(linha, L.ib - 1, L.ib, 'fc-oc');
+        _fcVistaWrap(linha, L.ia + L.abre, L.ib - 1, 'fc-chip clz-g' + (((L.g - 1) % 6) + 1), { 'data-g': String(L.g), 'data-oc': String(oc), contenteditable: 'false' });
+        _fcVistaWrap(linha, L.ia, L.ia + L.abre, 'fc-oc');
+      });
+    }
+  }
+  function _fcVistaSource(linha){
+    if(!linha.getAttribute || !linha.getAttribute('data-fc-vista')) return;
+    linha.removeAttribute('data-fc-vista');
+    Array.prototype.slice.call(linha.querySelectorAll('[data-deco]')).forEach(function(sp){
+      while(sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
+      sp.remove();
+    });
+    linha.normalize();
+  }
+  function _fcVistaLimpar(el){
+    Array.prototype.slice.call(el.querySelectorAll('[data-fc-vista]')).forEach(_fcVistaSource);
+    // decoração órfã (linha mesclada por delete/backspace): desembrulha onde estiver
+    Array.prototype.slice.call(el.querySelectorAll('[data-deco]')).forEach(function(sp){
+      while(sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
+      sp.remove();
+    });
+  }
+  function _fcVistaLinhaAtiva(el){
+    const sel = window.getSelection();
+    if(!sel || !sel.anchorNode || !el.contains(sel.anchorNode)) return null;
+    const n = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+    return n && n.closest ? n.closest('[data-fc-id],[data-fc-item]') : null;
+  }
+  function _fcVistaAplicar(el){
+    if(!el) return;
+    const ativa = _fcVistaLinhaAtiva(el);
+    Array.prototype.forEach.call(el.querySelectorAll('[data-fc-id],[data-fc-item]'), function(l){
+      if(l === ativa) return;
+      try{ _fcVistaRender(l); }catch(e){ console.warn('[fc vista]', e); }
+    });
+  }
+  // ── Popover da lacuna: unir a outro grupo / separar / desfazer ──
+  let _fcChipDd = null;
+  function _fcChipDdFechar(){ if(_fcChipDd){ _fcChipDd.remove(); _fcChipDd = null; } }
+  function _fcChipEditar(linha, oc, acao, alvoG){
+    _fcVistaSource(linha);
+    const texto = _fcCadTexto(linha);
+    const Ls = _fcVistaGrupos(texto);
+    const L = Ls[oc]; if(!L) return;
+    const max = Ls.reduce(function(mx, x){ return Math.max(mx, x.g); }, 0);
+    const troca = function(a, b, novo){
+      const pa = _fcVistaPos(linha, a), pb = _fcVistaPos(linha, b);
+      if(!pa || !pb) return;
+      const r = document.createRange();
+      try{
+        r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off); r.deleteContents();
+        if(novo) r.insertNode(document.createTextNode(novo));
+      }catch(_){}
+    };
+    // de trás pra frente: mexer no fim não desloca o começo
+    if(acao === 'desfazer'){ troca(L.ib - 1, L.ib, ''); troca(L.ia, L.ia + L.abre, ''); }
+    else {
+      const g = acao === 'separar' ? (max + 1) : alvoG;
+      troca(L.ia, L.ia + L.abre, '{' + g + ':');
+    }
+    linha.normalize();
+    try{ _fcVistaRender(linha); }catch(_){}
+    _cadSchedule();
+  }
+  document.addEventListener('mousedown', function(e){
+    const alvo = e.target && e.target.closest ? e.target : null;
+    if(!alvo) return;
+    if(_fcChipDd && !alvo.closest('.fc-chip-dd')) _fcChipDdFechar();
+    const chip = alvo.closest ? alvo.closest('.tutor-caderno-ed .fc-chip') : null;
+    if(!chip) return;
+    const el = _cadEl(); if(!el || !el.contains(chip)) return;
+    e.preventDefault(); e.stopPropagation();
+    const linha = chip.closest('[data-fc-id],[data-fc-item]'); if(!linha) return;
+    const texto = _fcCadTexto(linha);
+    const Ls = _fcVistaGrupos(texto);
+    const oc = parseInt(chip.getAttribute('data-oc'), 10);
+    if(!Ls[oc]) return;
+    const g = Ls[oc].g;
+    const max = Ls.reduce(function(mx, x){ return Math.max(mx, x.g); }, 0);
+    const outros = []; Ls.forEach(function(x){ if(x.g !== g && outros.indexOf(x.g) < 0) outros.push(x.g); });
+    const repetido = Ls.filter(function(x){ return x.g === g; }).length > 1;
+    _fcChipDd = document.createElement('div');
+    _fcChipDd.className = 'fc-chip-dd';
+    let html = '<div class="fc-chip-dd-t">Lacuna do grupo c' + g + '</div>';
+    outros.sort(function(a, b){ return a - b; }).forEach(function(x){
+      html += '<button type="button" data-ch-unir="' + x + '"><span class="fc-chip-mini clz-g' + (((x - 1) % 6) + 1) + '">c' + x + '</span>Unir ao grupo c' + x + ' (mesmo card)</button>';
+    });
+    if(repetido) html += '<button type="button" data-ch-sep><span class="fc-chip-mini clz-g' + ((max % 6) + 1) + '">c' + (max + 1) + '</span>Separar em card próprio</button>';
+    html += '<button type="button" data-ch-des>Desfazer lacuna (vira texto)</button>';
+    _fcChipDd.innerHTML = html;
+    document.body.appendChild(_fcChipDd);
+    const r = chip.getBoundingClientRect();
+    _fcChipDd.style.left = Math.max(8, Math.min(r.left, window.innerWidth - _fcChipDd.offsetWidth - 12)) + 'px';
+    _fcChipDd.style.top = Math.min(r.bottom + 6, window.innerHeight - _fcChipDd.offsetHeight - 8) + 'px';
+    _fcChipDd.addEventListener('mousedown', function(ev){ ev.preventDefault(); ev.stopPropagation(); });
+    Array.prototype.forEach.call(_fcChipDd.querySelectorAll('[data-ch-unir]'), function(b){
+      b.addEventListener('click', function(){ _fcChipEditar(linha, oc, 'unir', parseInt(b.getAttribute('data-ch-unir'), 10)); _fcChipDdFechar(); });
+    });
+    const bs = _fcChipDd.querySelector('[data-ch-sep]');
+    if(bs) bs.addEventListener('click', function(){ _fcChipEditar(linha, oc, 'separar'); _fcChipDdFechar(); });
+    _fcChipDd.querySelector('[data-ch-des]').addEventListener('click', function(){ _fcChipEditar(linha, oc, 'desfazer'); _fcChipDdFechar(); });
+  }, true);
   // Adoção: o caderno é o editor do deck INTEIRO da unidade — todo card vivo
   // da unidade tem uma linha. Cards nascidos por fora (IA, modal de notas,
   // presente, anteriores à 6F) entram no FIM, na ordem oficial, com carimbo.
@@ -36503,6 +36694,7 @@ window.TutorIA = (function(){
     try{ _fcCadCicloCorpo(el); } finally { _fcCicloAtivo = false; }
   }
   function _fcCadCicloCorpo(el){
+    _fcVistaLimpar(el);
     _fcCadAdotar(el);
     const blocos = _fcCadBlocos(el);
     const parse = FcSintaxe.parseBlocos(blocos);
@@ -36594,6 +36786,7 @@ window.TutorIA = (function(){
     const ricas = (window.FcRico && FcRico.linhasHtml) ? FcRico.linhasHtml(card) : null;
     const linhas = FcSintaxe.serializar(card).linhas;
     if(ricas && ricas[0] != null) head.innerHTML = ricas[0]; else head.textContent = linhas[0];
+    head.removeAttribute('data-fc-vista');
     let ref = head;
     linhas.slice(1).forEach(function(l, i){
       const d = document.createElement('div'); d.setAttribute('data-fc-item', String(card.id));
@@ -36631,11 +36824,11 @@ window.TutorIA = (function(){
       // card novo desta unidade nascido por fora (IA, modal, presente) → adota na hora
       const card = Store.deckList().find(function(c){ return String(c.id) === String(id); });
       if(card && _cadUnit && String(card.unitId) === String(_cadUnit)){
-        try{ _fcCadAdotar(el); _cadSchedule(); }catch(e){ console.warn('[fc caderno adoção]', e); }
+        try{ _fcCadAdotar(el); _fcVistaAplicar(el); _cadSchedule(); }catch(e){ console.warn('[fc caderno adoção]', e); }
       }
       return;
     }
-    try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
+    try{ _fcCadProjetar(el); _fcVistaAplicar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
   });
   // Alça de arrastar (6F-1c): flutua à esquerda da linha-card sob o mouse;
   // soltar move o head + os itens de lista juntos; a ordem grava no ciclo.
@@ -36705,12 +36898,41 @@ window.TutorIA = (function(){
   // borda no bloco-card com o cursor dentro
   document.addEventListener('selectionchange', function(){
     const el = _cadEl(); if(!el || !el.isConnected) return;
-    const sel = window.getSelection(); if(!sel || !sel.anchorNode) return;
+    const sel = window.getSelection();
     Array.prototype.forEach.call(el.querySelectorAll('.fc-line-active'), function(n){ n.classList.remove('fc-line-active'); });
-    if(!el.contains(sel.anchorNode)) return;
-    const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
-    const head = node && node.closest ? node.closest('[data-fc-id],[data-fc-item]') : null;
-    if(head && el.contains(head)) head.classList.add('fc-line-active');
+    let head = null;
+    if(sel && sel.anchorNode && el.contains(sel.anchorNode)){
+      const node = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+      head = node && node.closest ? node.closest('[data-fc-id],[data-fc-item]') : null;
+      if(head && !el.contains(head)) head = null;
+      if(head) head.classList.add('fc-line-active');
+    }
+    if(_fcVistaMudando || _fcCicloAtivo) return;
+    _fcVistaMudando = true;
+    try{
+      if(head && sel && sel.isCollapsed && head.getAttribute('data-fc-vista')){
+        // offset de texto do caret (a decoração não muda o texto → mapeia 1:1)
+        let off = 0, achou = false;
+        const alvo = sel.anchorNode, aoff = sel.anchorOffset;
+        (function walk(n){
+          if(achou) return;
+          if(n === alvo && n.nodeType === 3){ off += aoff; achou = true; return; }
+          if(n.nodeType === 3){ off += n.nodeValue.length; return; }
+          if(n.nodeType !== 1) return;
+          if(n === alvo){
+            for(let i = 0; i < aoff && i < n.childNodes.length; i++) off += _fcCadTexto(n.childNodes[i]).length;
+            achou = true; return;
+          }
+          if(n.tagName === 'BR'){ off += 1; return; }
+          if(n.tagName === 'SCRIPT' || n.tagName === 'STYLE') return;
+          Array.prototype.forEach.call(n.childNodes, walk);
+        })(head);
+        _fcVistaSource(head);
+        const pp = _fcVistaPos(head, off);
+        if(pp && pp.node){ try{ const rr = document.createRange(); rr.setStart(pp.node, pp.off); rr.collapse(true); sel.removeAllRanges(); sel.addRange(rr); }catch(_){} }
+      }
+      _fcVistaAplicar(el);
+    } finally { _fcVistaMudando = false; }
   });
   function _cadStatus(t){ const s = _cadActiveStatusEl || document.getElementById('cadernoStatus'); if(s) s.textContent = t || ''; }
   async function _cadUserId(){
@@ -36918,14 +37140,16 @@ window.TutorIA = (function(){
     } catch(e){ console.warn('[caderno load]', e); }
     try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
     try{ _fcCadAdotar(el); }catch(e){ console.warn('[fc caderno adoção]', e); }
+    try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); }
     _emptyToggle(el); _cadStatus('');
     _cadLoadBacklinks(unitId);
   }
   async function _cadSave(){
     const el = _cadEl(); if(!el || !_cadUnit) return;
     try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); }
+    const body = _cadSanitize(el.innerHTML);   // corpo CRU: o ciclo des-renderizou
+    try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); }
     const uid = await _cadUserId(); if(!uid || !window._sb) return;
-    const body = _cadSanitize(el.innerHTML);
     _cadStatus('salvando…');
     try {
       const { error } = await window._sb.schema('aluno').from('caderno')
