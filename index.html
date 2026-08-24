@@ -15260,6 +15260,7 @@ const Store = (function(){
       _srsLocalSync(card);           // o gatilho do banco faz o mesmo no servidor
       _persist(); _emit();
       _syncDeckInsertToSupabase(card).catch(()=>{});
+      try{ document.dispatchEvent(new CustomEvent('ubq:fc-changed', { detail: { id: card.id, acao: 'add' } })); }catch(_){}
       return card;
     },
     deckUpdate(id, patch){
@@ -36461,13 +36462,51 @@ window.TutorIA = (function(){
   function _fcCadMarcarItens(entry){
     entry.blocos.slice(1).forEach(function(){ /* índices resolvidos pelo chamador */ });
   }
-  // Ciclo do salvamento: cria/atualiza/carimba/remove mortas; sumidas → barra.
+  // Adoção: o caderno é o editor do deck INTEIRO da unidade — todo card vivo
+  // da unidade tem uma linha. Cards nascidos por fora (IA, modal de notas,
+  // presente, anteriores à 6F) entram no FIM, na ordem oficial, com carimbo.
+  // `_fcCadConhecidos` separa "nunca teve linha" (adotar) de "linha apagada
+  // pelo aluno" (aviso apagar×restaurar) — sem ele, o ciclo ressuscitaria a
+  // linha que o aluno acabou de apagar.
+  let _fcCadConhecidos = new Set(), _fcCicloAtivo = false;
+  function _fcCadAdotar(el){
+    if(!window.FcSintaxe || !window.Store || !Store.deckList || !_cadUnit) return;
+    Array.prototype.forEach.call(el.querySelectorAll('[data-fc-id]'), function(n){ _fcCadConhecidos.add(String(n.getAttribute('data-fc-id'))); });
+    const falta = Store.deckList().filter(function(c){
+      return String(c.unitId) === String(_cadUnit) && !_fcCadConhecidos.has(String(c.id));
+    });
+    if(!falta.length) return;
+    const cmp = (window.Practice && Practice._comparadorOrdem) ? Practice._comparadorOrdem() : null;
+    const chave = function(c){ return { unitId: c.unitId, blockId: c.blockId, anchorPos: (c.anchor && c.anchor.start) || 0, createdAt: c.createdAt || 0, ord: 1 }; };
+    if(cmp) falta.sort(function(a, b){ return cmp(chave(a), chave(b)); });
+    falta.forEach(function(card){
+      const ricas = (window.FcRico && FcRico.linhasHtml) ? FcRico.linhasHtml(card) : null;
+      const linhas = FcSintaxe.serializar(card).linhas;
+      let head = null;
+      linhas.forEach(function(l, i){
+        const d = document.createElement('div');
+        if(ricas && ricas[i] != null) d.innerHTML = ricas[i]; else d.textContent = l;
+        if(i === 0){ d.setAttribute('data-fc-id', String(card.id)); head = d; }
+        else d.setAttribute('data-fc-item', String(card.id));
+        el.appendChild(d);
+      });
+      if(head) _fcCadSelos(head, String(card.id));
+      _fcCadConhecidos.add(String(card.id));
+    });
+    _emptyToggle(el);
+  }
+  // Ciclo do salvamento: adota/cria/atualiza/carimba/remove mortas; sumidas → barra.
   function _fcCadCiclo(){
     if(!window.FcSintaxe || !window.Store || !Store.deckList) return;
     const el = _cadEl(); if(!el || !_cadUnit) return;
+    _fcCicloAtivo = true;
+    try{ _fcCadCicloCorpo(el); } finally { _fcCicloAtivo = false; }
+  }
+  function _fcCadCicloCorpo(el){
+    _fcCadAdotar(el);
     const blocos = _fcCadBlocos(el);
     const parse = FcSintaxe.parseBlocos(blocos);
-    const prevIds = Store.deckList().filter(function(c){ return c.origin === 'caderno' && String(c.unitId) === String(_cadUnit); }).map(function(c){ return String(c.id); });
+    const prevIds = Store.deckList().filter(function(c){ return String(c.unitId) === String(_cadUnit) && _fcCadConhecidos.has(String(c.id)); }).map(function(c){ return String(c.id); });
     const rec = FcSintaxe.reconciliar(prevIds, parse, function(id){ return Store.deckList().find(function(c){ return String(c.id) === String(id); }) || null; });
     const ctx = (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(_cadUnit, null) : {};
     // mortas: card apagado por fora → a linha sai (o card é a fonte)
@@ -36484,7 +36523,7 @@ window.TutorIA = (function(){
         topics: ctx.moduleId ? [ctx.moduleId] : [], tags: [], userTags: [],
         anchor: { start: entry.blocos[0] }
       }, _fcCadPatch(entry.card)));
-      if(novo && novo.id){ entry.fcId = String(novo.id); }
+      if(novo && novo.id){ entry.fcId = String(novo.id); _fcCadConhecidos.add(String(novo.id)); }
     });
     // atualizar (conteúdo E formatação)
     rec.atualizar.forEach(function(entry){ Store.deckUpdate(entry.fcId, Object.assign({ rich: _fcCadRicoDe(entry, blocos) }, _fcCadPatch(entry.card))); });
@@ -36584,9 +36623,18 @@ window.TutorIA = (function(){
     const el = _cadEl(); if(!el || !el.isConnected) return;
     const pane = document.getElementById('tutorCaderno');
     if(pane && pane.hidden) return;
+    if(_fcCicloAtivo) return;                              // mudança veio do próprio ciclo
     if(document.activeElement === el) return;              // não briga com quem está digitando
     const id = ev.detail && ev.detail.id; if(!id) return;
-    const head = el.querySelector('[data-fc-id="' + id + '"]'); if(!head) return;
+    const head = el.querySelector('[data-fc-id="' + id + '"]');
+    if(!head){
+      // card novo desta unidade nascido por fora (IA, modal, presente) → adota na hora
+      const card = Store.deckList().find(function(c){ return String(c.id) === String(id); });
+      if(card && _cadUnit && String(card.unitId) === String(_cadUnit)){
+        try{ _fcCadAdotar(el); _cadSchedule(); }catch(e){ console.warn('[fc caderno adoção]', e); }
+      }
+      return;
+    }
     try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
   });
   // Alça de arrastar (6F-1c): flutua à esquerda da linha-card sob o mouse;
@@ -36860,7 +36908,7 @@ window.TutorIA = (function(){
   }
   async function _cadLoad(unitId){
     const el = _cadEl(); if(!el) return;
-    _cadUnit = unitId; el.innerHTML = ''; _emptyToggle(el); _cadStatus('carregando…');
+    _cadUnit = unitId; _fcCadConhecidos = new Set(); el.innerHTML = ''; _emptyToggle(el); _cadStatus('carregando…');
     const uid = await _cadUserId();
     if(!uid || !window._sb || !unitId){ _cadStatus(''); _emptyToggle(el); return; }
     try {
@@ -36869,6 +36917,7 @@ window.TutorIA = (function(){
       if(!error && data && data.body){ el.innerHTML = _cadSanitize(data.body); _cadFixChips(el); }
     } catch(e){ console.warn('[caderno load]', e); }
     try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
+    try{ _fcCadAdotar(el); }catch(e){ console.warn('[fc caderno adoção]', e); }
     _emptyToggle(el); _cadStatus('');
     _cadLoadBacklinks(unitId);
   }
@@ -51151,7 +51200,7 @@ const Practice = (function(){
     el.querySelector('#prResOk').addEventListener('click', fechar);
     const er = el.querySelector('#prResErr'); if(er) er.addEventListener('click', function(){ el.remove(); iniciar({ tipo: 'itens', itens: errados, cram: true }); });
   }
-  return { iniciar, retomar, sessao, montar, responder, voltar, encerrar };
+  return { iniciar, retomar, sessao, montar, responder, voltar, encerrar, _comparadorOrdem };
 })();
 window.Practice = Practice;
 
