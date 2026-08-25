@@ -14057,6 +14057,27 @@ const Store = (function(){
     _deckPronto = true;
     try{ document.dispatchEvent(new CustomEvent('ubq:deck-pronto')); }catch(_){}
   }
+  // Preferências por conta (aluno.user_prefs — jsonb genérico; voz da leitura etc.)
+  async function _hydratePrefsFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('user_prefs')
+        .select('prefs').eq('user_id', userId).maybeSingle();
+      if(error){ console.warn('[hydrate prefs]', error); return; }
+      _state.prefs = (data && data.prefs) || {};
+      _persist();
+    }catch(e){ console.warn('[hydrate prefs ex]', e); }
+  }
+  async function _syncPrefsToSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('user_prefs')
+        .upsert({ user_id: userId, prefs: _state.prefs || {}, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+      if(error) console.warn('[prefs sync]', error);
+    }catch(e){ console.warn('[prefs sync ex]', e); }
+  }
   // Fase 7A — leituras TTS que o aluno possui (bens: escopo+ref)
   async function _hydrateLeiturasFromSupabase(){
     const userId = _currentSupaUserId();
@@ -14964,6 +14985,7 @@ const Store = (function(){
       _hydrateActiveSessionFromSupabase().catch(()=>{});
       _hydrateLinksFromSupabase().catch(()=>{});
       _hydrateLeiturasFromSupabase().catch(()=>{});
+      _hydratePrefsFromSupabase().catch(()=>{});
       _hydrateReadingListFromSupabase().catch(()=>{});
       _hydrateHighlightsFromSupabase().catch(()=>{});
       // Fase 4h — hidrata flashcards + simulados do Supabase
@@ -15324,6 +15346,15 @@ const Store = (function(){
     // telas/modais podem consultar o deck — devolver vazio, nunca estourar.
     deckList(){ return (_state && Array.isArray(_state.deck)) ? _state.deck.filter(c => !c.deletedAt) : []; },
     deckLixeira(){ return (_state && Array.isArray(_state.deck)) ? _state.deck.filter(c => c.deletedAt).sort((a, b) => b.deletedAt - a.deletedAt) : []; },
+    /* ── Preferências por conta ── */
+    prefsGet(chave){ return (_state && _state.prefs) ? _state.prefs[chave] : undefined; },
+    prefsSet(chave, valor){
+      if(!_state) return;
+      _state.prefs = _state.prefs || {};
+      if(valor == null) delete _state.prefs[chave]; else _state.prefs[chave] = valor;
+      _persist();
+      _syncPrefsToSupabase().catch(()=>{});
+    },
     /* ── Leituras TTS (Fase 7A) ── */
     leiturasTem(escopo, refId){ return !!(_state && Array.isArray(_state.leituras) && _state.leituras.some(l => l.escopo === escopo && l.refId === String(refId))); },
     leituraMarca(escopo, refId){
@@ -16772,7 +16803,8 @@ async function _lbTtsPedir(bid, regen){
   const box0 = _lbTtsBox(bid); if(box0) box0.innerHTML = _lbTtsInner(info.block);
   let d = null;
   try{
-    const r = await window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'bloco', block_id: bid, regenerar: !!regen } });
+    const voz = (window.Store && Store.prefsGet) ? Store.prefsGet('leitura_voice_id') : null;
+    const r = await window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'bloco', block_id: bid, regenerar: !!regen, voice_id: voz || undefined } });
     d = r.data;
     if(r.error){
       try{ if(r.error.context && typeof r.error.context.json === 'function') d = await r.error.context.json(); }catch(_){}
@@ -24193,6 +24225,13 @@ Renderers.account = function(route){
           </div>
         </section>
       </div>
+      <section class="account-fields-section" style="margin-top:1.2rem">
+        <div class="field">
+          <label for="accVozLeitura">Voz da leitura em voz alta</label>
+          <select class="field-input" id="accVozLeitura"><option value="">Padrão da plataforma (Manfredo)</option></select>
+          <span class="field-help">Usada no "Gerar leitura" dos textos. Trocar não custa nada: as leituras que você já possui são refeitas na voz nova, de graça, na próxima vez que ouvir. Salva sozinho.</span>
+        </div>
+      </section>
     </div>`;
 
   // — Tab Colegas de estudo (Fase 2.3) —
@@ -24396,6 +24435,33 @@ Renderers.account.mount = function(stageEl){
   });
   // Se já abriu direto na Carteira, carrega de cara.
   if((window._accountState.tab || 'perfil') === 'carteira') _loadWalletPane(stageEl, user);
+
+  // ── Voz da leitura em voz alta (preferência por conta; salva sozinha) ──
+  (function(){
+    const sel = stageEl.querySelector('#accVozLeitura');
+    if(!sel || !window._sb) return;
+    const atual = (window.Store && Store.prefsGet) ? (Store.prefsGet('leitura_voice_id') || '') : '';
+    const pinta = function(vozes){
+      sel.innerHTML = '<option value="">Padrão da plataforma (Manfredo)</option>' + (vozes || []).map(function(v){
+        return '<option value="' + Util.attr(v.voice_id) + '">' + Util.esc(v.nome) + '</option>';
+      }).join('');
+      sel.value = atual;
+      if(sel.value !== atual) sel.value = '';   // voz salva saiu da lista → padrão
+    };
+    if(window.__vozesLeitura) pinta(window.__vozesLeitura);
+    else window._sb.schema('ia').from('voice_vozes').select('voice_id, nome').eq('ativo', true).order('ordem')
+      .then(function(r){
+        if(r.error){ console.warn('[vozes leitura]', r.error); return; }
+        window.__vozesLeitura = r.data || [];
+        pinta(window.__vozesLeitura);
+      });
+    sel.addEventListener('change', function(){
+      if(window.Store && Store.prefsSet) Store.prefsSet('leitura_voice_id', sel.value || null);
+      if(window.ueToast) ueToast(sel.value
+        ? 'Voz de leitura atualizada. As leituras que você já possui serão refeitas na voz nova, de graça, quando você ouvir.'
+        : 'Voz de leitura de volta ao padrão da plataforma.', 'success');
+    });
+  })();
 
   // ── Tab "Colegas de estudo" — render dinâmico ──
   function renderUserCard(u, actionsHtml, presence){
