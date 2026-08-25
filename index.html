@@ -8856,6 +8856,10 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .fcp-lix-txt i{font-style:normal;color:var(--text-dim);font-size:.78rem}
 .fcp-lix-txt small{color:var(--text-mute);font-family:var(--mono);font-size:.6rem;letter-spacing:.04em}
 .fcp-lix-acoes{display:flex;gap:.4rem;flex-shrink:0}
+.tb-tts{display:flex;align-items:center;gap:.5rem;margin:.3rem 0 .6rem}
+.tb-tts .tb-audio-bar{flex:1;margin:0}
+.tb-tts-btn{display:inline-flex;align-items:center;gap:.4rem}
+.tb-tts-regen{padding:.35rem .55rem}
 .fcp-scope a{color:var(--text-mute);text-decoration:none;font-size:.9rem;line-height:1}
 .fcp-selbar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:.6rem 1.1rem;border-bottom:1px solid var(--accent-border);background:var(--accent-lo)}
 .fcp-selbar[hidden]{display:none}
@@ -14053,6 +14057,18 @@ const Store = (function(){
     _deckPronto = true;
     try{ document.dispatchEvent(new CustomEvent('ubq:deck-pronto')); }catch(_){}
   }
+  // Fase 7A — leituras TTS que o aluno possui (bens: escopo+ref)
+  async function _hydrateLeiturasFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('leituras')
+        .select('escopo, ref_id').eq('user_id', userId).limit(2000);
+      if(error){ console.warn('[hydrate leituras]', error); return; }
+      _state.leituras = (data || []).map(r => ({ escopo: r.escopo, refId: String(r.ref_id) }));
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate leituras ex]', e); }
+  }
   async function _hydrateDeckFromSupabase(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state){ _deckProntoMarca(); return; }
@@ -14947,6 +14963,7 @@ const Store = (function(){
       _hydrateSrsSettingsFromSupabase().catch(()=>{});
       _hydrateActiveSessionFromSupabase().catch(()=>{});
       _hydrateLinksFromSupabase().catch(()=>{});
+      _hydrateLeiturasFromSupabase().catch(()=>{});
       _hydrateReadingListFromSupabase().catch(()=>{});
       _hydrateHighlightsFromSupabase().catch(()=>{});
       // Fase 4h — hidrata flashcards + simulados do Supabase
@@ -15307,6 +15324,14 @@ const Store = (function(){
     // telas/modais podem consultar o deck — devolver vazio, nunca estourar.
     deckList(){ return (_state && Array.isArray(_state.deck)) ? _state.deck.filter(c => !c.deletedAt) : []; },
     deckLixeira(){ return (_state && Array.isArray(_state.deck)) ? _state.deck.filter(c => c.deletedAt).sort((a, b) => b.deletedAt - a.deletedAt) : []; },
+    /* ── Leituras TTS (Fase 7A) ── */
+    leiturasTem(escopo, refId){ return !!(_state && Array.isArray(_state.leituras) && _state.leituras.some(l => l.escopo === escopo && l.refId === String(refId))); },
+    leituraMarca(escopo, refId){
+      if(!_state) return;
+      if(!Array.isArray(_state.leituras)) _state.leituras = [];
+      if(!_state.leituras.some(l => l.escopo === escopo && l.refId === String(refId))) _state.leituras.push({ escopo: escopo, refId: String(refId) });
+      _persist();
+    },
     deckAdd(payload){
       if(!_state) return null;
       const now = Date.now();
@@ -16676,13 +16701,90 @@ function _lbAudioMount(stageEl, block, ctx){
   LBAudio.register(bar, { src: src, cover: cover, title: title });
 }
 
+/* ── Leitura em voz alta (Fase 7A) — TTS do bloco de texto ─────────────────
+   Aparece quando o admin NÃO anexou áudio manual. Modelo híbrido: o mp3 é
+   compartilhado por conteúdo, mas cada aluno paga o SEU desbloqueio e a
+   leitura vira bem dele (replay grátis; texto atualizado = áudio novo
+   grátis pro dono; regenerar = grátis, conserta para todos). */
+const _LB_TTS_PRECO_1K = 0.01;   // só EXIBIÇÃO — a fonte de verdade é a tabela_custos
+function _lbTtsChars(block){
+  try{
+    const c = block || {};
+    let out = '';
+    if(Array.isArray(c.paragraphs) && c.paragraphs.length){
+      c.paragraphs.forEach(function(p){ if(p){ out += ' ' + (p.title || '') + ' ' + (p.content || p.text || ''); } });
+    } else if(c.html) out = c.html;
+    return out.replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim().length;
+  }catch(_){ return 0; }
+}
+function _lbTtsBarHTML(block){
+  try{
+    const chars = _lbTtsChars(block);
+    if(chars < 60) return '';
+    const possui = window.Store && Store.leiturasTem && Store.leiturasTem('bloco', String(block.id));
+    const custo = (Math.max(chars, 1000) / 1000 * _LB_TTS_PRECO_1K).toFixed(2).replace('.', ',');
+    const FONE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>';
+    return '<div class="tb-tts" data-tts-block="' + Util.attr(block.id) + '">'
+      + (possui
+        ? '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="ouvir" data-tip="Você já possui esta leitura — ouvir é grátis">' + FONE + ' Ouvir leitura</button>'
+          + '<button type="button" class="icon-btn tb-tts-regen" data-tts-a="regen" data-tip="Gerar o áudio novamente (grátis; conserta para todos)">&#8635;</button>'
+        : '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="gerar" data-tip="Narração deste bloco por IA. Gerou, é sua para sempre — ouvir de novo não custa nada."><span class="ubt-sym">ⓤ</span> ' + custo + ' · ' + 'Gerar leitura</button>')
+      + '<div class="tb-audio-bar" hidden></div></div>';
+  }catch(_){ return ''; }
+}
+async function _lbTtsMount(stageEl, block, ctx){
+  const box = stageEl.querySelector('.tb-tts[data-tts-block="' + String(block.id).replace(/"/g, '') + '"]') || stageEl.querySelector('.tb-tts');
+  if(!box || box.__tts) return; box.__tts = 1;
+  const bar = box.querySelector('.tb-audio-bar');
+  const unit = ctx && ctx.unit;
+  const tocar = function(url){
+    box.querySelectorAll('.tb-tts-btn, .tb-tts-regen').forEach(function(b){ b.hidden = true; });
+    bar.hidden = false;
+    if(window.LBAudio) LBAudio.register(bar, { src: url, cover: (unit && unit.cover) || '', title: 'Leitura · ' + (block.title || (unit && unit.title) || '') });
+  };
+  const pedir = async function(regen){
+    const btns = box.querySelectorAll('button');
+    btns.forEach(function(b){ b.disabled = true; });
+    const principal = box.querySelector('.tb-tts-btn');
+    const rotulo = principal ? principal.innerHTML : '';
+    if(principal) principal.textContent = regen ? 'Gerando de novo…' : 'Gerando a leitura… (pode levar ~30s)';
+    try{
+      const r = await window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'bloco', block_id: String(block.id), regenerar: !!regen } });
+      let d = r.data;
+      if(r.error){
+        try{ if(r.error.context && typeof r.error.context.json === 'function') d = await r.error.context.json(); }catch(_){}
+        if(!d) d = { ok: false, mensagem: r.error.message || 'A leitura falhou. Tente de novo.' };
+      }
+      if(!d || d.ok === false){
+        if(window.ueToast) ueToast((d && d.mensagem) || 'A leitura falhou. Tente de novo.', 'error');
+        btns.forEach(function(b){ b.disabled = false; });
+        if(principal) principal.innerHTML = rotulo;
+        return;
+      }
+      if(window.Store && Store.leituraMarca) Store.leituraMarca('bloco', String(block.id));
+      if(window.ueToast && d.custo > 0) ueToast('Leitura gerada por ' + String(d.custo).replace('.', ',') + ' ⓤ — agora é sua, ouvir de novo é grátis.', 'success');
+      tocar(d.url);
+    }catch(e){
+      if(window.ueToast) ueToast('A leitura falhou: ' + String(e && e.message || e), 'error');
+      btns.forEach(function(b){ b.disabled = false; });
+      if(principal) principal.innerHTML = rotulo;
+    }
+  };
+  box.addEventListener('click', function(e){
+    const b = e.target.closest('[data-tts-a]'); if(!b || b.disabled) return;
+    const a = b.getAttribute('data-tts-a');
+    if(a === 'regen'){ if(confirm('Gerar o áudio novamente? É grátis e substitui a leitura atual (para todos os alunos que a possuem).')) pedir(true); return; }
+    pedir(false);
+  });
+}
+
 /* TEXT */
 Blocks.text = {
   render(block, ctx){
     const imgs = (block.images||[]).map((im,i) =>
       `<button class="tb-img" data-lightbox data-lightbox-src="${Util.attr(_dImg(im.url))}" data-lightbox-cap="${Util.attr(im.caption||'')}"><img src="${Util.attr(_dImg(im.url))}" alt="${Util.attr(im.alt||im.caption||'')}" loading="lazy"></button>`
     ).join('');
-    const audioBtn = block.audio_url ? _lbAudioBarHTML() : '';
+    const audioBtn = block.audio_url ? _lbAudioBarHTML() : _lbTtsBarHTML(block);
     return `<section class="block-wrap text-block">
       ${blockHeader(block,'Leitura', Icons.text, ctx)}
       ${audioBtn}
@@ -16693,6 +16795,7 @@ Blocks.text = {
   },
   mount(stageEl, block, ctx){
     if(block.audio_url) _lbAudioMount(stageEl, block, ctx);
+    else _lbTtsMount(stageEl, block, ctx);
   }
 };
 
@@ -17193,7 +17296,7 @@ Blocks.textgallery = {
         ${images.length > 1 ? `<div class="tg-satellite-dots">${dots}</div>` : ''}
       </div>
     </aside>` : '';
-    const tgAudioBtn = block.audio_url ? _lbAudioBarHTML() : '';
+    const tgAudioBtn = block.audio_url ? _lbAudioBarHTML() : _lbTtsBarHTML(block);
     return `<section class="block-wrap textgallery-block ${hasGallery?'has-gallery':'no-gallery'}">
       ${blockHeader(block,'Leitura', Icons.text, ctx)}
       ${tgAudioBtn}
@@ -17209,6 +17312,7 @@ Blocks.textgallery = {
   mount(stageEl, block, ctx){
     // Player de áudio (mesma barra/modal do LB de texto)
     if(block.audio_url) _lbAudioMount(stageEl, block, ctx);
+    else _lbTtsMount(stageEl, block, ctx);
     const sat = stageEl.querySelector('.tg-satellite');
     if(!sat) return;
     const slides = Array.from(sat.querySelectorAll('.tg-satellite-slide'));
