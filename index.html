@@ -8849,6 +8849,13 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .filter-btn .count{font-family:var(--mono);font-weight:500;font-size:.62rem;padding:.1rem .35rem;border-radius:2px;background:var(--accent);color:var(--bg);margin-left:.2rem}
 .filter-btn[disabled]{opacity:.4;cursor:default}
 .fcp-scope{display:inline-flex;align-items:center;gap:.4rem;font-family:var(--sans);font-size:.7rem;color:var(--accent);border:1px solid var(--accent-border);border-radius:var(--radius,4px);padding:.4rem .7rem}
+.fcp-lix-body{display:flex;flex-direction:column;gap:.5rem}
+.fcp-lix-item{display:flex;gap:.8rem;align-items:center;justify-content:space-between;border:1px solid var(--accent-border-soft);border-radius:8px;padding:.6rem .8rem;background:var(--bg-elevated)}
+.fcp-lix-txt{display:flex;flex-direction:column;gap:.15rem;min-width:0}
+.fcp-lix-txt b{font-weight:500;font-size:.85rem}
+.fcp-lix-txt i{font-style:normal;color:var(--text-dim);font-size:.78rem}
+.fcp-lix-txt small{color:var(--text-mute);font-family:var(--mono);font-size:.6rem;letter-spacing:.04em}
+.fcp-lix-acoes{display:flex;gap:.4rem;flex-shrink:0}
 .fcp-scope a{color:var(--text-mute);text-decoration:none;font-size:.9rem;line-height:1}
 .fcp-selbar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:.6rem 1.1rem;border-bottom:1px solid var(--accent-border);background:var(--accent-lo)}
 .fcp-selbar[hidden]{display:none}
@@ -13976,6 +13983,7 @@ const Store = (function(){
       tags: Array.isArray(c.tags) ? c.tags : [],
       user_tags: Array.isArray(c.userTags) ? c.userTags : [],
       fc_status: c.fcStatus || 'new',
+      deleted_at: c.deletedAt ? new Date(c.deletedAt).toISOString() : null,
       updated_at: new Date().toISOString()
     };
   }
@@ -13992,6 +14000,7 @@ const Store = (function(){
       blockId: r.block_id || null, blockTitle: r.block_title || '', blockType: r.block_type || '',
       topics: r.topics || [], tags: r.tags || [], userTags: r.user_tags || [],
       fcStatus: r.fc_status || 'new',
+      deletedAt: r.deleted_at ? new Date(r.deleted_at).getTime() : null,
       createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
       updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : Date.now()
     };
@@ -14015,6 +14024,17 @@ const Store = (function(){
       const { error } = await window._sb.schema('aluno').from('flashcards').update(row).eq('id', card.id).eq('user_id', userId);
       if(error) console.warn('[deck sync update]', error);
     }catch(e){ console.warn('[deck sync update exception]', e); }
+  }
+  // Lixeira: apagar/restaurar é UPDATE de deleted_at (o DELETE real é o purge)
+  async function _syncDeckLixeira(cardId, quando){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_UUID_RE.test(String(cardId || ''))) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('flashcards')
+        .update({ deleted_at: quando ? new Date(quando).toISOString() : null, updated_at: new Date().toISOString() })
+        .eq('id', cardId).eq('user_id', userId);
+      if(error){ console.warn('[deck lixeira sync]', error); if(window.ueToast) ueToast('A lixeira não sincronizou com o servidor. Confira a conexão.', 'warn'); }
+    }catch(e){ console.warn('[deck lixeira sync ex]', e); }
   }
   async function _syncDeckDeleteToSupabase(cardId){
     const userId = _currentSupaUserId();
@@ -14046,6 +14066,10 @@ const Store = (function(){
       console.log('[Store] deck hidratado:', _state.deck.length, 'cards');
       _persist(); _emit();
       _deckProntoMarca();
+      // faxina da lixeira: 30 dias depois, o apagamento vira real
+      const teto = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const vencidos = _state.deck.filter(c => c.deletedAt && c.deletedAt < teto).map(c => c.id);
+      if(vencidos.length) setTimeout(function(){ vencidos.forEach(function(id){ try{ window.Store && Store.deckPurge(id); }catch(_){} }); }, 1500);
     }catch(e){ console.warn('[hydrate deck exception]', e); }
   }
   /* ══ TAGS PRIVADAS (aluno.user_tags) ═══════════════════════════════════
@@ -15281,7 +15305,8 @@ const Store = (function(){
     /* ── Deck de flashcards do aluno (Fase 0) ── */
     // Guardas de _state: antes do login o Store ainda não iniciou (null) e
     // telas/modais podem consultar o deck — devolver vazio, nunca estourar.
-    deckList(){ return (_state && Array.isArray(_state.deck)) ? _state.deck.slice() : []; },
+    deckList(){ return (_state && Array.isArray(_state.deck)) ? _state.deck.filter(c => !c.deletedAt) : []; },
+    deckLixeira(){ return (_state && Array.isArray(_state.deck)) ? _state.deck.filter(c => c.deletedAt).sort((a, b) => b.deletedAt - a.deletedAt) : []; },
     deckAdd(payload){
       if(!_state) return null;
       const now = Date.now();
@@ -15306,7 +15331,28 @@ const Store = (function(){
       try{ document.dispatchEvent(new CustomEvent('ubq:fc-changed', { detail: { id: id, acao: 'update' } })); }catch(_){}
       return _state.deck[idx];
     },
+    // LIXEIRA: apagar ARQUIVA por 30 dias — agendamento, histórico e conexões
+    // ficam intactos (escondidos); deckPurge é o apagamento real (lixeira/30d).
     deckDelete(id){
+      if(!_state || !Array.isArray(_state.deck)) return;
+      const c = _state.deck.find(x => x.id === id);
+      if(!c || c.deletedAt) return;
+      c.deletedAt = Date.now(); c.updatedAt = Date.now();
+      try{ document.dispatchEvent(new CustomEvent('ubq:fc-changed', { detail: { id: id, acao: 'delete' } })); }catch(_){}
+      _persist(); _emit();
+      _syncDeckLixeira(id, c.deletedAt).catch(()=>{});
+    },
+    deckRestore(id){
+      if(!_state || !Array.isArray(_state.deck)) return null;
+      const c = _state.deck.find(x => x.id === id);
+      if(!c || !c.deletedAt) return null;
+      c.deletedAt = null; c.updatedAt = Date.now();
+      try{ document.dispatchEvent(new CustomEvent('ubq:fc-changed', { detail: { id: id, acao: 'restore' } })); }catch(_){}
+      _persist(); _emit();
+      _syncDeckLixeira(id, null).catch(()=>{});
+      return c;
+    },
+    deckPurge(id){
       if(!_state || !Array.isArray(_state.deck)) return;
       _state.deck = _state.deck.filter(c => c.id !== id);
       if(Array.isArray(_state.srs)) _state.srs = _state.srs.filter(x => x.cardId !== id);   // cascade no servidor
@@ -15334,10 +15380,18 @@ const Store = (function(){
     reviewsFor(cardId, ord, limit){ return _reviewsFor(cardId, ord, limit); },
     /* ── Sessão de prática ── */
     /* ── Conexões entre cards (Fase 6A) ── */
-    linksList(){ return (_state && Array.isArray(_state.fcLinks)) ? _state.fcLinks.slice() : []; },
+    linksList(){
+      if(!_state || !Array.isArray(_state.fcLinks)) return [];
+      const vivos = new Set((_state.deck || []).filter(c => !c.deletedAt).map(c => String(c.id)));
+      // card na lixeira: as conexões dele somem das telas mas NÃO são cortadas —
+      // restaurar traz a teia de volta inteira
+      return _state.fcLinks.filter(l => vivos.has(l.from) && vivos.has(l.to));
+    },
     linksFor(cardId){
       const id = String(cardId);
-      return ((_state && _state.fcLinks) || []).filter(l => l.from === id || l.to === id).map(l => JSON.parse(JSON.stringify(l)));
+      if(!_state) return [];
+      const vivos = new Set((_state.deck || []).filter(c => !c.deletedAt).map(c => String(c.id)));
+      return ((_state.fcLinks) || []).filter(l => (l.from === id || l.to === id) && vivos.has(l.from) && vivos.has(l.to)).map(l => JSON.parse(JSON.stringify(l)));
     },
     linkAdd(fromId, toId, tipo){
       if(!_state) return { ok: false, erro: 'Plataforma ainda carregando. Tente de novo.' };
@@ -36900,14 +36954,14 @@ window.TutorIA = (function(){
     _fcAvisoEl = document.createElement('div');
     _fcAvisoEl.className = 'fc-cad-aviso';
     _fcAvisoEl.setAttribute('data-fc-avi', chave);
-    _fcAvisoEl.innerHTML = '<span>' + n + (n === 1 ? ' flashcard saiu' : ' flashcards saíram') + ' do texto. Apagar de vez perde o agendamento e o histórico de revisões.</span>'
-      + '<span class="fc-cad-aviso-acoes"><button type="button" data-fc-av="apagar">Apagar ' + (n === 1 ? 'o card' : 'os ' + n + ' cards') + '</button>'
+    _fcAvisoEl.innerHTML = '<span>' + n + (n === 1 ? ' flashcard saiu' : ' flashcards saíram') + ' do texto. A lixeira guarda por 30 dias — agendamento e histórico preservados.</span>'
+      + '<span class="fc-cad-aviso-acoes"><button type="button" data-fc-av="apagar">' + (n === 1 ? 'Enviar para a lixeira' : 'Enviar os ' + n + ' para a lixeira') + '</button>'
       + '<button type="button" data-fc-av="restaurar">Restaurar no texto</button></span>';
     el.parentNode.insertBefore(_fcAvisoEl, el);
     _fcAvisoEl.querySelector('[data-fc-av="apagar"]').addEventListener('click', function(){
       ids.forEach(function(id){ Store.deckDelete(id); });
       _fcCadAvisoFechar();
-      if(window.ueToast) ueToast(n === 1 ? 'Flashcard apagado (agendamento e histórico incluídos).' : n + ' flashcards apagados (agendamentos e históricos incluídos).', 'info');
+      if(window.ueToast) ueToast(n === 1 ? 'Flashcard movido para a lixeira (30 dias para restaurar na página Flashcards).' : n + ' flashcards movidos para a lixeira (30 dias para restaurar na página Flashcards).', 'info');
     });
     _fcAvisoEl.querySelector('[data-fc-av="restaurar"]').addEventListener('click', function(){
       const el2 = _cadEl(); if(!el2) return;
@@ -37265,6 +37319,7 @@ window.TutorIA = (function(){
       const { data, error } = await window._sb.schema('aluno').from('caderno')
         .select('body').eq('user_id', uid).eq('unit_id', String(unitId)).maybeSingle();
       if(!error && data && data.body){ el.innerHTML = _cadSanitize(data.body); _cadFixChips(el); }
+      _cadVerBase[String(unitId)] = (data && data.body) || '';
     } catch(e){ console.warn('[caderno load]', e); }
     try{ _fcCadDedup(el); }catch(e){ console.warn('[fc caderno dedup]', e); }
     try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
@@ -37285,8 +37340,90 @@ window.TutorIA = (function(){
         .upsert({ user_id: uid, unit_id: String(_cadUnit), body: body, updated_at: new Date().toISOString() }, { onConflict: 'user_id,unit_id' });
       _cadStatus(error ? 'erro ao salvar' : 'salvo'); if(error) console.warn('[caderno save]', error);
       if(!error && window.Store && Store.upsertCadernoCache) Store.upsertCadernoCache(_cadUnit, body, Date.now());
+      if(!error) _cadVersionar(uid, _cadUnit, body);
     } catch(e){ _cadStatus('erro ao salvar'); console.warn('[caderno save ex]', e); }
   }
+  /* ── Histórico de versões do caderno (lixeira das anotações) ─────────────
+     Fotos do corpo em aluno.caderno_versions, guardadas por 30 dias:
+     a PRIMEIRA gravação da sessão preserva o estado ANTERIOR (o que estava
+     no servidor antes de você mexer), e depois no máximo 1 foto a cada
+     10 minutos de edição. Restaurar aplica a versão no editor (fotografando
+     o estado atual antes) e salva pelo fluxo normal. */
+  let _cadVerBase = {}, _cadVerSessao = {}, _cadVerUltima = {};
+  async function _cadVersionar(uid, unitId, bodyNovo){
+    if(!window._sb || !uid || !unitId) return;
+    const k = String(unitId);
+    try{
+      const agora = Date.now();
+      if(!_cadVerSessao[k]){
+        _cadVerSessao[k] = true; _cadVerUltima[k] = agora;
+        const antes = _cadVerBase[k] || '';
+        if(antes && antes !== bodyNovo){
+          await window._sb.schema('aluno').from('caderno_versions').insert({ user_id: uid, unit_id: k, body: antes });
+        }
+        // faxina: versões com mais de 30 dias saem (uma vez por sessão)
+        window._sb.schema('aluno').from('caderno_versions').delete().eq('user_id', uid)
+          .lt('created_at', new Date(agora - 30 * 24 * 60 * 60 * 1000).toISOString())
+          .then(function(){}, function(){});
+        return;
+      }
+      if(agora - (_cadVerUltima[k] || 0) >= 10 * 60 * 1000){
+        _cadVerUltima[k] = agora;
+        await window._sb.schema('aluno').from('caderno_versions').insert({ user_id: uid, unit_id: k, body: bodyNovo });
+      }
+    }catch(e){ console.warn('[caderno versões]', e); }
+  }
+  async function _cadHistoricoAbrir(){
+    const uid = await _cadUserId(); const unitId = _cadUnit;
+    if(!uid || !unitId || !window._sb){ if(window.ueToast) ueToast('Abra um caderno para ver o histórico.', 'info'); return; }
+    const el = document.createElement('div'); el.className = 'note-list-modal cad-hist open';
+    const fechar = function(){ el.remove(); };
+    el.innerHTML = '<div class="nlm-backdrop"></div><div class="nlm-panel"><div class="nlm-header"><span class="nlm-title">Histórico do caderno</span><button class="nlm-close" type="button" aria-label="Fechar">&times;</button></div><div class="nlm-body" id="cadHistBody"><div class="empty-body" style="padding:.8rem">Carregando…</div></div></div>';
+    el.querySelector('.nlm-backdrop').addEventListener('click', fechar);
+    el.querySelector('.nlm-close').addEventListener('click', fechar);
+    document.body.appendChild(el);
+    let versoes = [];
+    try{
+      const r = await window._sb.schema('aluno').from('caderno_versions')
+        .select('id, created_at').eq('user_id', uid).eq('unit_id', String(unitId))
+        .order('created_at', { ascending: false }).limit(40);
+      if(r.error) throw new Error(r.error.message);
+      versoes = r.data || [];
+    }catch(e){
+      const bd = el.querySelector('#cadHistBody');
+      if(bd) bd.innerHTML = '<div class="empty-body" style="padding:.8rem">Não consegui carregar o histórico (' + Util.esc(String(e && e.message || e)) + '). Se a tabela ainda não existe, rode o SQL da lixeira.</div>';
+      return;
+    }
+    const bd = el.querySelector('#cadHistBody');
+    if(!versoes.length){ bd.innerHTML = '<div class="empty" style="padding:1.2rem"><div class="empty-title">Sem versões ainda</div><div class="empty-body">O caderno fotografa o estado anterior na primeira gravação de cada sessão e depois a cada 10 minutos de edição. As fotos ficam 30 dias.</div></div>'; return; }
+    bd.innerHTML = '<div class="fcp-lix-body">' + versoes.map(function(v){
+      const d = new Date(v.created_at);
+      const rot = d.toLocaleDateString('pt-BR') + ' às ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      return '<div class="fcp-lix-item"><div class="fcp-lix-txt"><b>' + Util.esc(rot) + '</b></div>'
+        + '<span class="fcp-lix-acoes"><button type="button" class="nlm-save" data-cadv-rest="' + Util.attr(v.id) + '">Restaurar esta versão</button></span></div>';
+    }).join('') + '</div>';
+    bd.addEventListener('click', async function(e){
+      const b = e.target.closest('[data-cadv-rest]'); if(!b) return;
+      if(!confirm('Restaurar esta versão? O estado atual é fotografado antes, então nada se perde.')) return;
+      try{
+        const r = await window._sb.schema('aluno').from('caderno_versions')
+          .select('body').eq('id', b.getAttribute('data-cadv-rest')).eq('user_id', uid).maybeSingle();
+        if(r.error || !r.data) throw new Error(r.error ? r.error.message : 'versão não encontrada');
+        const ed = _cadEl(); if(!ed){ throw new Error('caderno fechado'); }
+        // fotografa o ATUAL antes de sobrescrever
+        await window._sb.schema('aluno').from('caderno_versions').insert({ user_id: uid, unit_id: String(unitId), body: _cadSanitize(ed.innerHTML) });
+        ed.innerHTML = _cadSanitize(r.data.body); _cadFixChips(ed);
+        try{ _fcCadDedup(ed); _fcCadProjetar(ed); _fcCadAdotar(ed); _fcVistaAplicar(ed); }catch(_){}
+        _emptyToggle(ed); _cadSchedule();
+        fechar();
+        if(window.ueToast) ueToast('Versão restaurada. O estado anterior ficou no histórico.', 'success');
+      }catch(err){ if(window.ueToast) ueToast('Não consegui restaurar: ' + String(err && err.message || err), 'error'); }
+    });
+  }
+  document.addEventListener('click', function(e){
+    const b = e.target.closest ? e.target.closest('[data-cad-hist]') : null;
+    if(b) _cadHistoricoAbrir();
+  });
   function _cadSchedule(){ _cadStatus('digitando…'); if(_cadTimer) clearTimeout(_cadTimer); _cadTimer = setTimeout(function(){ _cadTimer = null; _cadSave(); }, 1000); }
   function _onCadInput(){
     const el = _cadEl(); _emptyToggle(el);
@@ -38010,6 +38147,7 @@ window.TutorIA = (function(){
           + '<button type="button" data-cmd="insertOrderedList" data-tip="Lista numerada">1. Lista</button>'
           + _cadColorBtnsHtml()
           + '<button type="button" data-cmd="removeFormat" data-tip="Limpar formatação">⌫</button>'
+          + '<button type="button" data-cad-hist data-tip="Versões deste caderno (30 dias)">Histórico</button>'
         + '</div>'
         + '<div class="tutor-caderno-ed is-empty" id="cadernoInput" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="false" data-ph="Escreva suas anotações desta unidade…  (use [[ para linkar outra unidade)"></div>'
         + '<div class="tutor-caderno-foot"><span class="tutor-caderno-status" id="cadernoStatus"></span><span class="tutor-caderno-hint">[[ para linkar · salva sozinho</span></div>'
@@ -38372,6 +38510,7 @@ window.TutorIA = (function(){
         + '<button type="button" data-cmd="insertOrderedList" data-tip="Lista numerada">1. Lista</button>'
         + _cadColorBtnsHtml()
         + '<button type="button" data-cmd="removeFormat" data-tip="Limpar formatação">&#9003;</button>'
+        + '<button type="button" data-cad-hist data-tip="Versões deste caderno (30 dias)">Histórico</button>'
       + '</div>'
       + '<div class="tutor-caderno-ed cadmodal-ed is-empty" id="cadernoModalInput" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="false" data-ph="Escreva suas anotações desta unidade…  (use [[ para linkar outra unidade)"></div>'
       + '<div class="cadmodal-foot"><span class="tutor-caderno-status" id="cadernoModalStatus"></span>'
@@ -43957,7 +44096,7 @@ Renderers.notes.mount = function(stageEl, route){
   stageEl.querySelectorAll('[data-ufc-delete]').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      if(!confirm('Excluir este flashcard?')) return;
+      if(!confirm('Enviar este flashcard para a lixeira? Você tem 30 dias para restaurá-lo na página Flashcards.')) return;
       const noteId = btn.getAttribute('data-ufc-delete');
       Store.deckDelete(noteId);
       btn.closest('.ufc-card')?.remove();
@@ -52176,6 +52315,7 @@ const FlashcardsPage = (function(){
       <div class="tbl-bar">
         <div class="tbl-bar-search">${ICO.search}<input class="input" type="search" id="fcpQ" placeholder="Buscar nos cards…" value="${Util.attr(_t.q)}" aria-label="Buscar nos cards"></div>
         ${fb('todos', 'Todos')}${fb('vencidos', 'Vencidos')}${fb('novos', 'Novos')}${fb('aprendendo', 'Aprendendo')}${fb('dominados', 'Dominados')}${fb('sanguessugas', 'Sanguessugas')}${fb('desativados', 'Desativados')}${fb('conexoes', 'Conexões')}
+        <button type="button" class="filter-btn" id="fcpLixeira" data-tip="Cards apagados ficam 30 dias aqui antes da exclusão definitiva">Lixeira<span class="count">${Store.deckLixeira ? Store.deckLixeira().length : 0}</span></button>
         ${escopo}
       </div>
       <div class="fcp-selbar" id="fcpSelbar" hidden></div>
@@ -52279,6 +52419,8 @@ const FlashcardsPage = (function(){
     stage.querySelectorAll('.fcp-acc-a a').forEach(a => a.addEventListener('click', e => e.stopPropagation()));
     const inp = q('#fcpQ');
     if(inp){ let tm; inp.addEventListener('input', () => { clearTimeout(tm); tm = setTimeout(() => { _t.q = inp.value.trim(); _t.page = 0; _rerenderTable(); }, 180); }); }
+    const lx = q('#fcpLixeira');
+    if(lx) lx.addEventListener('click', _lixeiraAbrir);
     stage.querySelectorAll('[data-fcp-f]').forEach(b => b.addEventListener('click', () => {
       _t.filtro = b.getAttribute('data-fcp-f'); _t.page = 0;
       stage.querySelectorAll('[data-fcp-f]').forEach(x => x.classList.toggle('is-active', x === b));
@@ -52323,6 +52465,41 @@ const FlashcardsPage = (function(){
       _selbar();
     }
     if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(stage);
+  }
+  // Lixeira (30 dias): restaurar devolve o card COM agendamento, histórico e
+  // conexões; excluir de vez é o único apagamento real — e pede confirmação.
+  function _lixeiraAbrir(){
+    const el = document.createElement('div'); el.className = 'note-list-modal fcp-lix open';
+    const fechar = function(){ el.remove(); if(window.App && App.render) App.render(); };
+    const render = function(){
+      const ls = Store.deckLixeira ? Store.deckLixeira() : [];
+      const DIA = 24 * 60 * 60 * 1000;
+      const corpo = ls.length ? ls.map(function(c){
+        const frente = c.kind === 'cloze' ? String(c.clozeText || '').replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '[$1]') : (c.front || '');
+        const verso = c.kind === 'multi' ? (c.lines || []).join(' · ') : (c.back || '');
+        const dias = Math.max(0, Math.floor((Date.now() - c.deletedAt) / DIA));
+        const resta = Math.max(0, 30 - dias);
+        return '<div class="fcp-lix-item">'
+          + '<div class="fcp-lix-txt"><b>' + Util.esc(String(frente).slice(0, 90)) + '</b>' + (verso ? '<i>' + Util.esc(String(verso).slice(0, 90)) + '</i>' : '')
+          + '<small>' + Util.esc(c.unitTitle || '') + (c.unitTitle ? ' · ' : '') + 'apagado ' + (dias === 0 ? 'hoje' : 'há ' + dias + (dias === 1 ? ' dia' : ' dias')) + ' · some em ' + resta + (resta === 1 ? ' dia' : ' dias') + '</small></div>'
+          + '<span class="fcp-lix-acoes"><button type="button" class="nlm-save" data-lix-rest="' + Util.attr(c.id) + '">Restaurar</button>'
+          + '<button type="button" class="nlm-delete" data-lix-purge="' + Util.attr(c.id) + '">Excluir de vez</button></span></div>';
+      }).join('') : '<div class="empty" style="padding:1.2rem"><div class="empty-title">Lixeira vazia</div><div class="empty-body">Cards apagados ficam aqui por 30 dias antes da exclusão definitiva.</div></div>';
+      el.innerHTML = '<div class="nlm-backdrop"></div><div class="nlm-panel"><div class="nlm-header"><span class="nlm-title">Lixeira · ' + ls.length + ' card' + (ls.length === 1 ? '' : 's') + '</span><button class="nlm-close" type="button" aria-label="Fechar">&times;</button></div><div class="nlm-body fcp-lix-body">' + corpo + '</div></div>';
+      el.querySelector('.nlm-backdrop').addEventListener('click', fechar);
+      el.querySelector('.nlm-close').addEventListener('click', fechar);
+    };
+    el.addEventListener('click', function(e){
+      const r = e.target.closest('[data-lix-rest]');
+      if(r){ Store.deckRestore(r.getAttribute('data-lix-rest')); render(); if(window.ueToast) ueToast('Card restaurado — agendamento, histórico e conexões de volta.', 'success'); return; }
+      const pg = e.target.closest('[data-lix-purge]');
+      if(pg){
+        if(!confirm('Excluir DE VEZ? Sem volta: agendamento, histórico e conexões deste card serão apagados.')) return;
+        Store.deckPurge(pg.getAttribute('data-lix-purge')); render();
+      }
+    });
+    render();
+    document.body.appendChild(el);
   }
   // liga os botões Praticar/seta de QUALQUER container (página, unidade…)
   function bindPractice(root){
