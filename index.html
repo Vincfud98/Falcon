@@ -16705,8 +16705,14 @@ function _lbAudioMount(stageEl, block, ctx){
    Aparece quando o admin NÃO anexou áudio manual. Modelo híbrido: o mp3 é
    compartilhado por conteúdo, mas cada aluno paga o SEU desbloqueio e a
    leitura vira bem dele (replay grátis; texto atualizado = áudio novo
-   grátis pro dono; regenerar = grátis, conserta para todos). */
+   grátis pro dono; regenerar = grátis, conserta para todos).
+   A geração leva ~30-60s e o app PODE se re-renderizar nesse meio tempo:
+   por isso o estado "gerando" vive num mapa POR BLOCO (o botão continua
+   "Gerando…" após qualquer re-render) e a resposta procura a caixa ATUAL
+   no DOM — nunca a referência antiga. Cliques por delegação (sem rebind). */
 const _LB_TTS_PRECO_1K = 0.01;   // só EXIBIÇÃO — a fonte de verdade é a tabela_custos
+const _lbTtsGerando = {};
+const _lbTtsInfo = {};
 function _lbTtsChars(block){
   try{
     const c = block || {};
@@ -16717,66 +16723,83 @@ function _lbTtsChars(block){
     return out.replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim().length;
   }catch(_){ return 0; }
 }
+function _lbTtsInner(block){
+  const bid = String(block.id);
+  const chars = _lbTtsChars(block);
+  if(chars < 60) return '';
+  const FONE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>';
+  if(_lbTtsGerando[bid]){
+    return '<button type="button" class="icon-btn tb-tts-btn" disabled>' + FONE + ' Gerando a leitura… (pode levar ~1 min)</button>'
+      + '<div class="tb-audio-bar" hidden></div>';
+  }
+  const possui = window.Store && Store.leiturasTem && Store.leiturasTem('bloco', bid);
+  const custo = (Math.max(chars, 1000) / 1000 * _LB_TTS_PRECO_1K).toFixed(2).replace('.', ',');
+  return (possui
+    ? '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="ouvir" data-tip="Leitura sua — ouvir é grátis">' + FONE + ' Ouvir leitura</button>'
+      + '<button type="button" class="icon-btn tb-tts-regen" data-tts-a="regen" data-tip="Gerar novamente (grátis)">&#8635;</button>'
+    : '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="gerar" data-tip="Narração por IA — gera uma vez, é sua para sempre"><span class="ubt-sym">ⓤ</span> ' + custo + ' · Gerar leitura</button>')
+    + '<div class="tb-audio-bar" hidden></div>';
+}
 function _lbTtsBarHTML(block){
   try{
-    const chars = _lbTtsChars(block);
-    if(chars < 60) return '';
-    const possui = window.Store && Store.leiturasTem && Store.leiturasTem('bloco', String(block.id));
-    const custo = (Math.max(chars, 1000) / 1000 * _LB_TTS_PRECO_1K).toFixed(2).replace('.', ',');
-    const FONE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>';
-    return '<div class="tb-tts" data-tts-block="' + Util.attr(block.id) + '">'
-      + (possui
-        ? '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="ouvir" data-tip="Você já possui esta leitura — ouvir é grátis">' + FONE + ' Ouvir leitura</button>'
-          + '<button type="button" class="icon-btn tb-tts-regen" data-tts-a="regen" data-tip="Gerar o áudio novamente (grátis; conserta para todos)">&#8635;</button>'
-        : '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="gerar" data-tip="Narração deste bloco por IA. Gerou, é sua para sempre — ouvir de novo não custa nada."><span class="ubt-sym">ⓤ</span> ' + custo + ' · ' + 'Gerar leitura</button>')
-      + '<div class="tb-audio-bar" hidden></div></div>';
+    const inner = _lbTtsInner(block);
+    if(!inner) return '';
+    return '<div class="tb-tts" data-tts-block="' + Util.attr(block.id) + '">' + inner + '</div>';
   }catch(_){ return ''; }
 }
-async function _lbTtsMount(stageEl, block, ctx){
-  const box = stageEl.querySelector('.tb-tts[data-tts-block="' + String(block.id).replace(/"/g, '') + '"]') || stageEl.querySelector('.tb-tts');
-  if(!box || box.__tts) return; box.__tts = 1;
-  const bar = box.querySelector('.tb-audio-bar');
-  const unit = ctx && ctx.unit;
-  const tocar = function(url){
-    box.querySelectorAll('.tb-tts-btn, .tb-tts-regen').forEach(function(b){ b.hidden = true; });
-    bar.hidden = false;
-    if(window.LBAudio) LBAudio.register(bar, { src: url, cover: (unit && unit.cover) || '', title: 'Leitura · ' + (block.title || (unit && unit.title) || '') });
-  };
-  const pedir = async function(regen){
-    const btns = box.querySelectorAll('button');
-    btns.forEach(function(b){ b.disabled = true; });
-    const principal = box.querySelector('.tb-tts-btn');
-    const rotulo = principal ? principal.innerHTML : '';
-    if(principal) principal.textContent = regen ? 'Gerando de novo…' : 'Gerando a leitura… (pode levar ~30s)';
-    try{
-      const r = await window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'bloco', block_id: String(block.id), regenerar: !!regen } });
-      let d = r.data;
-      if(r.error){
-        try{ if(r.error.context && typeof r.error.context.json === 'function') d = await r.error.context.json(); }catch(_){}
-        if(!d) d = { ok: false, mensagem: r.error.message || 'A leitura falhou. Tente de novo.' };
-      }
-      if(!d || d.ok === false){
-        if(window.ueToast) ueToast(((d && d.mensagem) || 'A leitura falhou. Tente de novo.') + (d && d.detalhe ? ' — ' + String(d.detalhe).slice(0, 160) : ''), 'error');
-        btns.forEach(function(b){ b.disabled = false; });
-        if(principal) principal.innerHTML = rotulo;
-        return;
-      }
-      if(window.Store && Store.leituraMarca) Store.leituraMarca('bloco', String(block.id));
-      if(window.ueToast && d.custo > 0) ueToast('Leitura gerada por ' + String(d.custo).replace('.', ',') + ' ⓤ — agora é sua, ouvir de novo é grátis.', 'success');
-      tocar(d.url);
-    }catch(e){
-      if(window.ueToast) ueToast('A leitura falhou: ' + String(e && e.message || e), 'error');
-      btns.forEach(function(b){ b.disabled = false; });
-      if(principal) principal.innerHTML = rotulo;
-    }
-  };
-  box.addEventListener('click', function(e){
-    const b = e.target.closest('[data-tts-a]'); if(!b || b.disabled) return;
-    const a = b.getAttribute('data-tts-a');
-    if(a === 'regen'){ if(confirm('Gerar o áudio novamente? É grátis e substitui a leitura atual (para todos os alunos que a possuem).')) pedir(true); return; }
-    pedir(false);
-  });
+function _lbTtsBox(bid){
+  return document.querySelector('.tb-tts[data-tts-block="' + String(bid).replace(/"/g, '') + '"]');
 }
+function _lbTtsMount(stageEl, block, ctx){
+  _lbTtsInfo[String(block.id)] = { block: block, ctx: ctx || null };
+}
+function _lbTtsTocar(bid, url){
+  const box = _lbTtsBox(bid); if(!box) return;
+  const info = _lbTtsInfo[bid] || {};
+  box.querySelectorAll('[data-tts-a]').forEach(function(b){ b.hidden = true; });
+  const bar = box.querySelector('.tb-audio-bar'); if(!bar) return;
+  bar.hidden = false;
+  const unit = info.ctx && info.ctx.unit;
+  if(window.LBAudio) LBAudio.register(bar, { src: url, cover: (unit && unit.cover) || '', title: 'Leitura · ' + ((info.block && info.block.title) || (unit && unit.title) || '') });
+}
+async function _lbTtsPedir(bid, regen){
+  bid = String(bid);
+  if(_lbTtsGerando[bid]) return;
+  const info = _lbTtsInfo[bid]; if(!info) return;
+  _lbTtsGerando[bid] = true;
+  const box0 = _lbTtsBox(bid); if(box0) box0.innerHTML = _lbTtsInner(info.block);
+  let d = null;
+  try{
+    const r = await window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'bloco', block_id: bid, regenerar: !!regen } });
+    d = r.data;
+    if(r.error){
+      try{ if(r.error.context && typeof r.error.context.json === 'function') d = await r.error.context.json(); }catch(_){}
+      if(!d) d = { ok: false, mensagem: r.error.message || 'A leitura falhou. Tente de novo.' };
+    }
+  }catch(e){ d = { ok: false, mensagem: String(e && e.message || e) }; }
+  delete _lbTtsGerando[bid];
+  if(!d || d.ok === false){
+    if(window.ueToast) ueToast(((d && d.mensagem) || 'A leitura falhou. Tente de novo.') + (d && d.detalhe ? ' — ' + String(d.detalhe).slice(0, 160) : ''), 'error');
+    const box1 = _lbTtsBox(bid); if(box1) box1.innerHTML = _lbTtsInner(info.block);
+    return;
+  }
+  if(window.Store && Store.leituraMarca) Store.leituraMarca('bloco', bid);
+  if(window.ueToast && d.custo > 0) ueToast('Leitura gerada por ' + String(d.custo).replace('.', ',') + ' ⓤ — agora é sua, ouvir de novo é grátis.', 'success');
+  const box2 = _lbTtsBox(bid);
+  if(box2){ box2.innerHTML = _lbTtsInner(info.block); _lbTtsTocar(bid, d.url); }
+}
+document.addEventListener('click', function(e){
+  const b = e.target.closest ? e.target.closest('.tb-tts [data-tts-a]') : null;
+  if(!b || b.disabled) return;
+  const box = b.closest('.tb-tts'); const bid = box ? box.getAttribute('data-tts-block') : null;
+  if(!bid) return;
+  const a = b.getAttribute('data-tts-a');
+  if(a === 'regen'){
+    if(confirm('Gerar o áudio novamente? É grátis e substitui a leitura atual (para todos os alunos que a possuem).')) _lbTtsPedir(bid, true);
+    return;
+  }
+  _lbTtsPedir(bid, false);
+});
 
 /* TEXT */
 Blocks.text = {
