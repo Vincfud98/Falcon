@@ -8977,6 +8977,16 @@ a.pr-crumb:hover{color:var(--accent)}
 .pr-ai-badge.is-errado{color:#e87878;border-color:rgba(232,120,120,.45);background:rgba(232,120,120,.1)}
 .pr-rate.is-sug{box-shadow:0 0 0 2px currentColor inset;transform:translateY(-1px)}
 .pr-leech{font-family:var(--sans);font-size:.74rem;color:#d9a55a;background:rgba(217,165,90,.1);border:1px solid rgba(217,165,90,.4);border-radius:8px;padding:.45rem .7rem;margin-bottom:.8rem}
+/* Botão de narração do card (7B): discreto no canto, não disputa com o pr-kind
+   (que fica à esquerda). Na frente narra a pergunta; no verso, a resposta. */
+.pr-tts{position:absolute;top:.5rem;right:.6rem;z-index:3;display:inline-flex;align-items:center;gap:.35rem;padding:.3rem .55rem;background:transparent;border:1px solid var(--border);border-radius:999px;color:var(--text-dim);cursor:pointer;font-family:var(--mono);font-size:.58rem;transition:all .2s var(--ease)}
+.pr-tts:hover{color:var(--accent);border-color:var(--accent)}
+.pr-tts svg{display:block}
+.pr-tts .pr-tts-custo{color:var(--text-mute)}
+.pr-tts.is-tocando{color:var(--accent);border-color:var(--accent)}
+.pr-tts.is-tocando svg{animation:prTtsPulse .9s infinite alternate}
+.pr-tts.is-carregando{opacity:.5;pointer-events:none}
+@keyframes prTtsPulse{from{opacity:.45}to{opacity:1}}
 .pr-hist{display:flex;gap:.3rem;align-items:center;min-height:16px;margin:.2rem 0 .8rem}
 .pr-sq{width:14px;height:14px;border-radius:3px;display:inline-block}
 .pr-sq1{background:#c8524a}.pr-sq2{background:#d9a55a}.pr-sq3{background:#5dd49f}.pr-sq4{background:#6cb2e0}
@@ -51925,6 +51935,98 @@ const Practice = (function(){
   }
   function _unbindKeys(){ if(_keys){ document.removeEventListener('keydown', _keys); _keys = null; } document.removeEventListener('click', _docClick); }
   /* ── navegação na fila ── */
+  /* ── 7B: leitura do card em voz alta ─────────────────────────────────
+     Botão nas duas faces (frente = pergunta, verso = resposta) + item no
+     menu ··· (card inteiro) + narração automática. A POSSE é por card
+     (aluno.leituras escopo 'card'): desbloqueou uma vez, toda parte/voz é
+     dele de graça (os arquivos são por hash, como nos blocos). O endereço
+     assinado fica guardado por parte (Store.leiturasUrl, chave com #parte
+     e, na frente de cloze, #ord — cada grupo esconde uma lacuna diferente). */
+  const _prTts = { el: null, key: null, busy: null, autoUltimo: null };
+  function _prTtsChars(c, parte){
+    // impressão digital LOCAL do texto (só se compara consigo mesma no cache)
+    const limpa = function(x){ return String(x || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); };
+    if(c.kind === 'cloze') return limpa(String(c.clozeText || '')).length + parte.length;
+    if(c.kind === 'multi'){
+      const l = Array.isArray(c.lines) ? c.lines.join(' ') : '';
+      return limpa(parte === 'frente' ? c.front : (parte === 'verso' ? l : (c.front || '') + ' ' + l)).length;
+    }
+    return limpa(parte === 'frente' ? c.front : (parte === 'verso' ? c.back : (c.front || '') + ' ' + (c.back || ''))).length;
+  }
+  function _prTtsParar(){
+    if(_prTts.el){ try{ _prTts.el.pause(); }catch(_){ } }
+    _prTts.el = null; _prTts.key = null;
+    _prTtsSync();
+  }
+  function _prTtsSync(){
+    if(!_root) return;
+    const a = _s && _s.atual;
+    _root.querySelectorAll('[data-pr-tts]').forEach(function(b){
+      const key = a ? (a.cardId + '|' + a.ord + '|' + b.getAttribute('data-pr-tts')) : '';
+      b.classList.toggle('is-tocando', !!(_prTts.el && _prTts.key === key));
+      b.classList.toggle('is-carregando', _prTts.busy === key);
+    });
+  }
+  async function _prTtsOuvir(parte, auto){
+    const a = _s && _s.atual; if(!a || a.contexto) return;
+    const c = _cardDe(a.cardId); if(!c || !window._sb) return;
+    const key = a.cardId + '|' + a.ord + '|' + parte;
+    if(_prTts.key === key && _prTts.el){ _prTtsParar(); return; }   // toque de novo = parar
+    _prTtsParar();
+    if(_prTts.busy) return;
+    const chars = _prTtsChars(c, parte);
+    const refCache = String(c.id) + '#' + parte + (c.kind === 'cloze' && parte === 'frente' ? '#' + (a.ord || 0) : '');
+    const cache = (window.Store && Store.leituraUrlPega) ? Store.leituraUrlPega('card', refCache, chars) : null;
+    let url = cache && cache.url;
+    if(!url){
+      _prTts.busy = key; _prTtsSync();
+      let d = null;
+      try{
+        const voz = (window.Store && Store.prefsGet) ? Store.prefsGet('leitura_voice_id') : null;
+        const r = await window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'card', card_id: String(c.id), parte: parte, ord: a.ord || undefined, voice_id: voz || undefined } });
+        d = r.data;
+        if(r.error){
+          try{ if(r.error.context && typeof r.error.context.json === 'function') d = await r.error.context.json(); }catch(_){}
+          if(!d) d = { ok: false, mensagem: r.error.message || 'A narração falhou.' };
+        }
+      }catch(e){ d = { ok: false, mensagem: String(e && e.message || e) }; }
+      _prTts.busy = null;
+      if(!d || d.ok === false || !d.url){
+        _prTtsSync();
+        // no modo automático, erro passageiro não vira chuva de toast — só saldo
+        if(!auto || (d && d.codigo === 'SALDO_INSUFICIENTE')) toast(((d && d.mensagem) || 'Não consegui narrar agora.') + (d && d.detalhe ? ' — ' + String(d.detalhe).slice(0, 120) : ''), 'error');
+        return;
+      }
+      if(window.Store && Store.leituraMarca) Store.leituraMarca('card', String(c.id));
+      if(window.Store && Store.leituraUrlGuarda) Store.leituraUrlGuarda('card', refCache, d.url, ((window.Store && Store.prefsGet) ? (Store.prefsGet('leitura_voice_id') || '') : ''), chars);
+      if(d.custo > 0){
+        toast('Card desbloqueado para narração por ' + String(d.custo).replace('.', ',') + ' ⓤ — todas as narrações dele agora são grátis.', 'success');
+        if(_root) _root.querySelectorAll('.pr-tts-custo').forEach(function(el){ el.remove(); });
+      }
+      url = d.url;
+      // o aluno pode ter avançado durante a espera — não fala por cima do próximo
+      if(!_s || !_s.atual || _s.atual.cardId !== a.cardId || _s.atual.ord !== a.ord) return;
+      if(parte === 'frente' && _s.atual.face === 'back' && auto) return;   // já virou: a pergunta perdeu a vez
+    }
+    const el = new Audio(url);
+    _prTts.el = el; _prTts.key = key;
+    el.addEventListener('ended', function(){ if(_prTts.el === el){ _prTts.el = null; _prTts.key = null; _prTtsSync(); } });
+    el.play().catch(function(){ if(_prTts.el === el){ _prTts.el = null; _prTts.key = null; _prTtsSync(); } });
+    _prTtsSync();
+  }
+  function _prTtsAuto(parte){
+    if(!(window.Store && Store.prefsGet && Store.prefsGet('fc_auto_narrar'))) return;
+    const a = _s && _s.atual; if(!a || a.contexto) return;
+    const k = a.cardId + '|' + a.ord + '|' + parte;
+    if(_prTts.autoUltimo === k) return;
+    _prTts.autoUltimo = k;
+    _prTtsOuvir(parte, true);
+  }
+  function _prTtsBtnHtml(parte, possui){
+    const FONE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>';
+    return '<button type="button" class="pr-tts" data-pr-tts="' + parte + '" data-tip="' + (parte === 'frente' ? 'Ouvir a pergunta' : 'Ouvir a resposta') + '" aria-label="Ouvir">' + FONE
+      + (possui ? '' : '<span class="pr-tts-custo">0,01ⓤ</span>') + '</button>';
+  }
   function _proximo(){
     if(!_s.queue.length){ _finalizar(); return; }
     const it = _s.queue[0]; const card = _cardDe(it.cardId);
@@ -51940,6 +52042,10 @@ const Practice = (function(){
   }
   function _render(){
     const a = _s.atual, card = _cardDe(a.cardId), cfg = Store.srsSettings(), srs = _srsDe(a.cardId, a.ord);
+    // narração do card ANTERIOR não fala por cima do novo (re-render do mesmo card não corta)
+    if(_prTts.el && _prTts.key && _prTts.key.indexOf(a.cardId + '|' + a.ord + '|') !== 0) _prTtsParar();
+    const possuiTts = window.Store && Store.leiturasTem && Store.leiturasTem('card', String(a.cardId));
+    const autoNarrar = !!(window.Store && Store.prefsGet && Store.prefsGet('fc_auto_narrar'));
     const n = _s.done.length + 1, N = _s.done.length + _s.queue.length;
     const prev = cfg.showIntervals ? Scheduler.preview4(srs, Date.now(), cfg) : null;
     const k = card.kind || 'basic';
@@ -51990,6 +52096,8 @@ const Practice = (function(){
       + '<div class="pr-menu-wrap"><button type="button" class="icon-btn pr-menu-btn" id="prMenuBtn" aria-haspopup="menu" aria-label="Mais opções">&middot;&middot;&middot;</button>'
       + '<div class="pr-menu" id="prMenu" hidden role="menu">'
       + '<button type="button" data-pm="voltar"' + (_s.done.length ? '' : ' disabled') + '>Card anterior <kbd>Z</kbd></button>'
+      + '<button type="button" data-pm="ouvir">Ouvir o card inteiro' + (possuiTts ? '' : ' · <span class="ubt-sym">ⓤ</span> 0,01') + '</button>'
+      + '<button type="button" data-pm="autonarrar">' + (autoNarrar ? 'Desligar narração automática' : 'Ligar narração automática') + '</button>'
       + '<button type="button" data-pm="desativar">Desativar este card</button>'
       + (card.unitId && card.blockId && window._hrefDoBloco && _hrefDoBloco(card.unitId, card.blockId) ? '<a href="' + Util.attr(_hrefDoBloco(card.unitId, card.blockId)) + '" role="menuitem">Ver no texto</a>' : '')
       + '<button type="button" data-pm="srs">Editar dados de agendamento</button>'
@@ -51997,8 +52105,8 @@ const Practice = (function(){
       + '</div></div></div>'
       + _crumb(card)
       + '<div class="pr-card' + (a.face === 'back' ? ' flipped' : '') + '" id="prCard"><div class="pr-inner">'
-      + '<div class="pr-face pr-front"><span class="pr-kind">' + esc(kindTxt) + '</span>' + leech + '<div class="pr-q">' + frontHtml + '</div></div>'
-      + '<div class="pr-face pr-back"><span class="pr-kind">' + esc(kindTxt) + '</span>' + viaHtml + '<div class="pr-q pr-q-rep">' + frontHtml + '</div><div class="pr-sep">resposta</div><div class="pr-a">' + backHtml + '</div>' + conexHtml
+      + '<div class="pr-face pr-front"><span class="pr-kind">' + esc(kindTxt) + '</span>' + _prTtsBtnHtml('frente', possuiTts) + leech + '<div class="pr-q">' + frontHtml + '</div></div>'
+      + '<div class="pr-face pr-back"><span class="pr-kind">' + esc(kindTxt) + '</span>' + _prTtsBtnHtml('verso', possuiTts) + viaHtml + '<div class="pr-q pr-q-rep">' + frontHtml + '</div><div class="pr-sep">resposta</div><div class="pr-a">' + backHtml + '</div>' + conexHtml
       + '<div class="pr-typed" id="prTyped" hidden><span>Você escreveu:</span><div id="prTypedTxt"></div>'
       + '<div class="pr-ai" id="prAi"><button type="button" class="pr-ai-btn" id="prAiBtn">Conferir com a IA <span class="pr-ai-custo">0,01ⓤ</span></button><div class="pr-ai-res" id="prAiRes" hidden></div></div></div></div>'
       + '</div></div>'
@@ -52011,6 +52119,8 @@ const Practice = (function(){
     _bind(); _pintarHist();
     if(a.face === 'back') _restaurarVerso(a);
     if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(_root);
+    _prTtsSync();
+    _prTtsAuto(a.face === 'back' ? 'verso' : 'frente');
   }
   // Verso reconstruído (remontagem com o card já virado): revela o que _mostrar revelaria
   function _restaurarVerso(a){
@@ -52045,12 +52155,26 @@ const Practice = (function(){
     menu.querySelectorAll('[data-pm]').forEach(b => b.addEventListener('click', function(){
       menu.hidden = true; const k = b.getAttribute('data-pm');
       if(k === 'voltar') voltar();
+      else if(k === 'ouvir') _prTtsOuvir('tudo');
+      else if(k === 'autonarrar'){
+        const liga = !(window.Store && Store.prefsGet && Store.prefsGet('fc_auto_narrar'));
+        if(window.Store && Store.prefsSet) Store.prefsSet('fc_auto_narrar', liga ? true : null);
+        b.textContent = liga ? 'Desligar narração automática' : 'Ligar narração automática';
+        toast(liga
+          ? 'Narração automática ligada: a pergunta é narrada ao mostrar o card e a resposta ao virar. Cards ainda sem áudio são desbloqueados a 0,01 ⓤ (uma vez cada).'
+          : 'Narração automática desligada.', 'info');
+        if(liga) _prTtsAuto(_s.atual.face === 'back' ? 'verso' : 'frente');
+        else _prTtsParar();
+      }
       else if(k === 'desativar') _desativar();
       else if(k === 'srs') _editarSrs();
       else if(k === 'fullscreen'){ const el = document.documentElement; if(document.fullscreenElement) document.exitFullscreen(); else if(el.requestFullscreen) el.requestFullscreen(); }
     }));
     const ta = q('#prTypedIn'); if(ta) ta.addEventListener('input', function(){ _s.atual.typed = ta.value; });
     const aiBtn = q('#prAiBtn'); if(aiBtn) aiBtn.addEventListener('click', _conferirIA);
+    _root.querySelectorAll('[data-pr-tts]').forEach(function(b2){
+      b2.addEventListener('click', function(e){ e.stopPropagation(); _prTtsOuvir(b2.getAttribute('data-pr-tts')); });
+    });
   }
   async function _conferirIA(){
     const a = _s && _s.atual; if(!a || a.face !== 'back' || a.aiPedindo) return;
@@ -52087,6 +52211,8 @@ const Practice = (function(){
     const prev = cfg.showIntervals ? Scheduler.preview4(_srsDe(a.cardId, a.ord), Date.now(), cfg) : null;
     const acts = _root.querySelector('#prActions'); acts.innerHTML = _acoesHtml(prev);
     acts.querySelectorAll('[data-rate]').forEach(b => b.addEventListener('click', function(){ responder(parseInt(b.getAttribute('data-rate'), 10)); }));
+    if(window.Store && Store.prefsGet && Store.prefsGet('fc_auto_narrar')) _prTtsParar();
+    _prTtsAuto('verso');
   }
   function _pintarHist(){
     const a = _s.atual, key = a.cardId + '|' + a.ord, host = _root.querySelector('#prHist');
@@ -52170,6 +52296,7 @@ const Practice = (function(){
   function encerrar(){ _finalizar(); }
   function _finalizar(){
     if(!_s) return;
+    _prTtsParar();
     _stopTick(); _unbindKeys(); window.removeEventListener('hashchange', _aoSair);
     _s.status = 'concluida'; _s.endedAt = Date.now(); _s.atual = null;
     clearTimeout(_persistT);
