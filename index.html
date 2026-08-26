@@ -44232,7 +44232,7 @@ Renderers.notes = function(route){
       </div>
     </div>`;
   }).join('')}</div>` : `<div class="empty"><div class="empty-title">Nenhum flashcard criado</div><div class="empty-body">Selecione um trecho de texto e escolha "Flashcard" no modal de notas para criar seus próprios cartões de revisão.</div></div>`;
-  const fcFilterBar = `<div class="filter-bar">${fcModuleOpts}${fcUnitOpts}${fcStatusOpts}${fcKindOpts}${fcTopicOpts}${fcTagOpts}<button class="fb-clear" id="fcClear">Limpar</button><button class="fb-clear fb-export" id="fcExport" data-ids="${Util.attr(userFlashcards.map(fc => fc.id).join(','))}" data-tip="Baixa arquivos de texto que o Anki importa (o que está filtrado)">Exportar para o Anki</button><a class="fb-clear fb-export" href="#/flashcards" data-tip="Visão geral, tabela de cards e evolução">Página Flashcards</a><button class="fb-clear fb-export" id="fcSrsCfg" data-tip="Parâmetros do agendamento (SM-2), só seus">Configurações de revisão</button>${(function(){ const s = Store.sessionGet ? Store.sessionGet() : null; return (s && s.status === 'andamento' && s.queue && s.queue.length) ? `<button class="btn-primary fb-practice" id="fcResume" data-tip="Continuar de onde parou">Retomar sessão (${s.queue.length})</button>` : `<button class="btn-primary fb-practice" id="fcPracticeDue" data-tip="Cards vencidos e novos, pelo agendamento">Praticar pendentes</button>`; })()}<button class="fb-clear fb-export" id="fcPracticeList" data-ids="${Util.attr(userFlashcards.map(fc => fc.id).join(','))}" data-tip="Pratica exatamente a lista filtrada, mesmo o que não venceu">Praticar esta lista</button><span class="fb-count">${userFlashcards.length} flashcard${userFlashcards.length===1?'':'s'}</span></div>`;
+  const fcFilterBar = `<div class="filter-bar">${fcModuleOpts}${fcUnitOpts}${fcStatusOpts}${fcKindOpts}${fcTopicOpts}${fcTagOpts}<button class="fb-clear" id="fcClear">Limpar</button><button class="fb-clear fb-export" id="fcExport" data-ids="${Util.attr(userFlashcards.map(fc => fc.id).join(','))}" data-tip="Baixa arquivos de texto que o Anki importa (o que está filtrado)">Exportar para o Anki</button><a class="fb-clear fb-export" href="#/flashcards" data-tip="Visão geral, tabela de cards e evolução">Página Flashcards</a><button class="fb-clear fb-export" id="fcSrsCfg" data-tip="Parâmetros do agendamento (SM-2), só seus">Configurações de revisão</button><button class="btn-primary fb-practice" id="fcPracticeDue" data-tip="Cards vencidos e novos, pelo agendamento">Praticar pendentes</button><button class="fb-clear fb-export" id="fcPracticeList" data-ids="${Util.attr(userFlashcards.map(fc => fc.id).join(','))}" data-tip="Pratica exatamente a lista filtrada, mesmo o que não venceu">Praticar esta lista</button><span class="fb-count">${userFlashcards.length} flashcard${userFlashcards.length===1?'':'s'}</span></div>`;
 
   // Build highlights compilation with filters + links
   const allHighlights = Store.getHighlights();
@@ -44559,8 +44559,6 @@ Renderers.notes.mount = function(stageEl, route){
   });
   const fcDue = stageEl.querySelector('#fcPracticeDue');
   if(fcDue) fcDue.addEventListener('click', () => { if(window.Practice) Practice.iniciar({ tipo: 'pendentes' }); });
-  const fcResume = stageEl.querySelector('#fcResume');
-  if(fcResume) fcResume.addEventListener('click', () => { if(window.Practice) Practice.retomar(); });
   const fcList = stageEl.querySelector('#fcPracticeList');
   if(fcList) fcList.addEventListener('click', () => {
     const ids = String(fcList.getAttribute('data-ids') || '').split(',').filter(Boolean);
@@ -51766,9 +51764,12 @@ const FlashcardsGift = (function(){
 window.FlashcardsGift = FlashcardsGift;
 
 /* ══ PRÁTICA (Fase 5C) — tela de revisão com SM-2 ═══════════════════════════
-   Sessão = fila persistida (retomar de onde parou), respostas passam pelo
-   Scheduler e viram agendamento + log; "card anterior" desfaz; resumo no
-   fim; tempo entra na Rotina como Revisão. */
+   Respostas passam pelo Scheduler e viram agendamento + log card a card;
+   "card anterior" desfaz; resumo no fim; tempo entra na Rotina como Revisão.
+   SEM sessão pendurada (decisão do dono 2026-08-26): sair da prática encerra
+   em silêncio e a fila restante evapora — "Praticar pendentes" recalcula ao
+   vivo. A fila persistida serve SÓ pro reload no meio da prática (retoma se
+   tocada há <30min; mais velha, a faxina encerra). */
 const Practice = (function(){
   const NOMES = { 1: 'Errei', 2: 'Difícil', 3: 'Bom', 4: 'Fácil' };
   const CNT = { 1: 'errei', 2: 'dificil', 3: 'bom', 4: 'facil' };
@@ -51868,23 +51869,56 @@ const Practice = (function(){
       _proximo();
     } else Router.go('/flashcards/praticar');
   }
-  function retomar(){
-    const s = Store.sessionGet();
-    if(!s || s.status !== 'andamento' || !s.queue || !s.queue.length){ toast('Não há sessão para retomar.', 'info'); return false; }
-    _s = s; _s.atual = null; _hist = {};
-    _irParaTela();
-    return true;
-  }
   function sessao(){ return _s; }
   function _persistir(agora){
     clearTimeout(_persistT);
-    if(agora){ Store.sessionSet(_s); return; }
+    if(_s) _s.updatedAt = Date.now();   // régua de frescor pro reload retomar
+    if(agora){ if(_s) Store.sessionSet(_s); return; }
     _persistT = setTimeout(function(){ if(_s) Store.sessionSet(_s); }, 1500);
+  }
+  // Encerra a sessão SEM a tela de resumo (aluno saiu no meio da prática, ou
+  // faxina de sessão velha no armazenamento). NADA se perde: o SRS grava cada
+  // resposta na hora (card a card), o tempo vai pra Rotina e a sessão entra
+  // no histórico. A fila que sobrou evapora de propósito — "Praticar
+  // pendentes" recalcula ao vivo pelo agendamento, sem fila congelada.
+  function _encerrarSilencioso(sess){
+    const minha = !sess || sess === _s;
+    sess = sess || _s;
+    if(!sess) return;
+    if(minha && _s){
+      _prTtsParar();
+      _stopTick(); _unbindKeys(); window.removeEventListener('hashchange', _aoSair);
+      clearTimeout(_persistT);
+      _s = null;
+    }
+    sess.status = 'concluida'; sess.endedAt = sess.endedAt || Date.now(); sess.atual = null;
+    Store.sessionFinish(sess);
+    const min = Math.round(sess.durationMs / 60000);
+    if(sess.durationMs >= 30000 && sess.done.length){
+      Store.studyLog({ dia: _diaLocal(sess.startedAt), categoria: sess.scope && sess.scope.subjectId ? 'materia' : 'revisao',
+        subject_id: sess.scope && sess.scope.subjectId ? String(sess.scope.subjectId) : null, assunto: 'Flashcards',
+        unit_id: sess.scope && sess.scope.unitId ? String(sess.scope.unitId) : null, duration_min: Math.min(1440, Math.max(1, min)), source: 'auto' });
+    }
+    if(Store.fcDailyRefresh && sess.done.some(d => !d.livre)) setTimeout(function(){ Store.fcDailyRefresh(); }, 2500);
+  }
+  // Sessão pendurada no armazenamento (aba fechada no meio): fresca ainda
+  // pode voltar por um reload; velha é encerrada em silêncio aqui.
+  function faxina(){
+    if(_s) return;
+    const sess = Store.sessionGet ? Store.sessionGet() : null;
+    if(!sess || sess.status !== 'andamento') return;
+    if(sess.queue && sess.queue.length && (sess.updatedAt || 0) > Date.now() - 1800000) return;
+    _encerrarSilencioso(sess);
   }
   /* ── ciclo de vida na rota ── */
   function montar(stageEl){
     _root = stageEl.querySelector('#prRoot');
-    if(!_s){ const s = Store.sessionGet(); if(s && s.status === 'andamento' && s.queue && s.queue.length){ _s = s; _s.atual = null; } }
+    if(!_s){
+      const sess = Store.sessionGet();
+      // só um reload/aba-descartada RECENTE retoma; sessão velha é encerrada
+      if(sess && sess.status === 'andamento' && sess.queue && sess.queue.length && (sess.updatedAt || 0) > Date.now() - 1800000){ _s = sess; _s.atual = null; }
+      else if(sess && sess.status === 'andamento') _encerrarSilencioso(sess);
+    }
     if(!_s){
       _root.innerHTML = '<div class="empty" style="padding:3rem 1rem"><div class="empty-title">Nenhuma sessão em andamento</div><div class="empty-body">Comece pela página Flashcards: "Praticar pendentes" ou escolha uma matéria.</div><p style="margin-top:1rem"><a class="btn-ghost" href="#/flashcards">Ir para os flashcards</a></p></div>';
       return;
@@ -51900,8 +51934,8 @@ const Practice = (function(){
   function _aoSair(){
     if(/\/flashcards\/praticar/.test(location.hash)) return;
     window.removeEventListener('hashchange', _aoSair);
-    _stopTick(); _unbindKeys();
-    if(_s && _s.status === 'andamento') _persistir(true);
+    if(_s && _s.status === 'andamento') _encerrarSilencioso();
+    else { _stopTick(); _unbindKeys(); }
   }
   function _startTick(){
     _stopTick();
@@ -52307,20 +52341,9 @@ const Practice = (function(){
   function encerrar(){ _finalizar(); }
   function _finalizar(){
     if(!_s) return;
-    _prTtsParar();
-    _stopTick(); _unbindKeys(); window.removeEventListener('hashchange', _aoSair);
-    _s.status = 'concluida'; _s.endedAt = Date.now(); _s.atual = null;
-    clearTimeout(_persistT);
-    const s = _s; _s = null;
-    Store.sessionFinish(s);
-    const min = Math.round(s.durationMs / 60000);
-    if(s.durationMs >= 30000 && s.done.length){
-      Store.studyLog({ dia: _diaLocal(s.startedAt), categoria: s.scope && s.scope.subjectId ? 'materia' : 'revisao',
-        subject_id: s.scope && s.scope.subjectId ? String(s.scope.subjectId) : null, assunto: 'Flashcards',
-        unit_id: s.scope && s.scope.unitId ? String(s.scope.unitId) : null, duration_min: Math.min(1440, Math.max(1, min)), source: 'auto' });
-    }
-    _resumo(s);
-    if(Store.fcDailyRefresh && s.done.some(d => !d.livre)) setTimeout(function(){ Store.fcDailyRefresh(); }, 2500);
+    const sess = _s;
+    _encerrarSilencioso();
+    _resumo(sess);
   }
   function _resumo(s){
     const c = s.counts || {}, ctxN = s.done.filter(d => d.contexto).length;
@@ -52347,7 +52370,7 @@ const Practice = (function(){
     el.querySelector('#prResOk').addEventListener('click', fechar);
     const er = el.querySelector('#prResErr'); if(er) er.addEventListener('click', function(){ el.remove(); iniciar({ tipo: 'itens', itens: errados, cram: true, voltar: (s.scope && s.scope.voltar) || null }); });
   }
-  return { iniciar, retomar, sessao, montar, responder, voltar, encerrar, _comparadorOrdem };
+  return { iniciar, faxina, sessao, montar, responder, voltar, encerrar, _comparadorOrdem };
 })();
 window.Practice = Practice;
 
@@ -52595,8 +52618,8 @@ const FlashcardsPage = (function(){
     if(route.query && route.query.ag) _t.agrupar = route.query.ag === 'edital' ? 'edital' : 'unidade';
     _t.unit = (route.query && route.query.unit) || ''; _t.materia = (route.query && route.query.materia) || '';
     const ls = linhas(), k = kpis(ls);
-    const sess = Store.sessionGet ? Store.sessionGet() : null;
-    const ativa = sess && sess.status === 'andamento' && sess.queue && sess.queue.length;
+    // sessão pendurada de outro dia? encerra em silêncio (fora do render)
+    setTimeout(function(){ if(window.Practice && Practice.faxina) Practice.faxina(); }, 0);
     const tabBtn = (id, lab, n) => `<a class="perf-tab${tab === id ? ' is-active' : ''}" href="#/flashcards?tab=${id}">${lab}${n != null ? ` <span class="perf-tab-count">${n}</span>` : ''}</a>`;
     return `<div class="hero">
     <span class="s-label" data-a="1">Revisão espaçada</span>
@@ -52606,7 +52629,7 @@ const FlashcardsPage = (function(){
     <p class="s-body" data-a="5">Seus cards agendados pelo SM-2: o que vence hoje, o que é novo e o que você já domina. Crie cards em <a href="#/notes?fc=1">Notas</a> ou direto no texto das unidades.</p>
   </div>
   <div class="perf-tabs fcp-tabs">${tabBtn('visao', 'Visão geral')}${tabBtn('cards', 'Cards', k.cards)}${tabBtn('evolucao', 'Evolução')}</div>
-  <div class="fcp-body" id="fcpBody">${tab === 'cards' ? _cardsHtml(ls) : tab === 'evolucao' ? _evolucaoHtml() : _visaoHtml(ls, k, ativa ? sess : null)}</div>`;
+  <div class="fcp-body" id="fcpBody">${tab === 'cards' ? _cardsHtml(ls) : tab === 'evolucao' ? _evolucaoHtml() : _visaoHtml(ls, k)}</div>`;
   }
   /* ── botão dividido: Praticar (SM-2) + seta com os outros modos ── */
   const CHEV = '<svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
@@ -52689,12 +52712,10 @@ const FlashcardsPage = (function(){
     if(!x) return `<div class="fcp-g2" id="fcpGraf">${_skel('Sequência')}${_skel('Resumo da semana')}</div>`;
     return `<div class="fcp-g2" id="fcpGraf">${_cardSequencia(x, false)}${_cardSemana(x)}</div>`;
   }
-  function _visaoHtml(ls, k, sess){
+  function _visaoHtml(ls, k){
     const kpi = (lab, val, sub, cls) => `<div class="perf-summary-card${cls ? ' ' + cls : ''}"><div class="perf-summary-label">${lab}</div><div class="perf-summary-value">${val}</div>${sub ? `<div class="perf-summary-sub">${sub}</div>` : ''}</div>`;
     const pend = k.hoje + k.novos;
-    const cta = sess
-      ? `<button type="button" class="btn-primary fcp-cta" id="fcpResume">Retomar sessão <span class="fcp-cta-n">${sess.queue.length} restantes</span></button>`
-      : _split({ ids: '', subject: '', unit: '', pend: pend, total: k.itens - k.desativadosItens, label: 'Praticar pendentes', nome: 'Todos os flashcards', big: true });
+    const cta = _split({ ids: '', subject: '', unit: '', pend: pend, total: k.itens - k.desativadosItens, label: 'Praticar pendentes', nome: 'Todos os flashcards', big: true });
     // acordeão: matéria → tópico do edital (da unidade) → unidade, com barra de domínio
     const novoNo = extra => Object.assign({ cards: [], due: 0, novos: 0, learn: 0, dom: 0, rev: 0, itens: 0 }, extra);
     const soma = (n, l) => { n.cards.push(l.card.id); n.due += l.due; n.novos += l.novos; n.learn += l.learn; n.dom += l.dom; n.rev += l.rev; n.itens += l.suspenso ? 0 : l.ords; };
@@ -52935,7 +52956,6 @@ const FlashcardsPage = (function(){
   function mount(stage, route){
     _stage = stage;
     const q = sel => stage.querySelector(sel);
-    const res = q('#fcpResume'); if(res) res.addEventListener('click', () => Practice.retomar());
     const cfg = q('#fcpCfg'); if(cfg) cfg.addEventListener('click', () => SrsSettingsModal.abrir());
     bindPractice(stage);
     stage.querySelectorAll('[data-fcp-ag]').forEach(b => b.addEventListener('click', () => {
