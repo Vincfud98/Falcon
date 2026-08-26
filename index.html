@@ -16791,6 +16791,8 @@ function _lbAudioMount(stageEl, block, ctx){
 const _LB_TTS_PRECO_1K = 0.01;   // só EXIBIÇÃO — a fonte de verdade é a tabela_custos
 const _lbTtsGerando = {};        // bid → 'gera' | 'abre'
 const _lbTtsInfo = {};
+const _lbTtsPrecisaGerar = {};   // bid → true quando a sonda só-pronto disse que falta gerar
+const _lbTtsProbe = {};          // bid → timestamp da última sondagem (no máx. 1/min)
 function _vozesLeituraCarregar(){
   if(window.__vozesLeitura) return Promise.resolve(window.__vozesLeitura);
   if(window.__vozesLeituraP) return window.__vozesLeituraP;
@@ -16898,6 +16900,28 @@ function _lbTtsMount(stageEl, block, ctx){
   if(possui && !window.__vozesLeitura){
     _vozesLeituraCarregar().then(function(){ if(!_lbTtsGerando[bid] && _lbTtsBox(bid)) _lbTtsPintar(bid, false); });
   }
+  // Sondagem "só-pronto": quem possui a leitura mas está sem URL guardada
+  // pergunta ao servidor se o áudio existe — existindo, o player aparece
+  // SOZINHO, sem clique (inclusive depois das 6h da URL assinada). Se falta
+  // gerar (voz ou texto mudaram), marca pra que o clique em Ouvir mostre
+  // "Gerando…" com honestidade. A sonda NUNCA gera nem cobra no servidor.
+  if(possui && !cache && window._sb && !_lbTtsGerando[bid] && !(_lbTtsProbe[bid] > Date.now() - 60000)){
+    _lbTtsProbe[bid] = Date.now();
+    const vozSonda = _lbTtsVozAtual(bid);
+    window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'bloco', block_id: bid, so_pronto: true, voice_id: vozSonda || undefined } })
+      .then(function(r){
+        const d = r && r.data;
+        if(!d || d.ok === false || _lbTtsGerando[bid]) return;
+        if(d.pronto === true && d.url){
+          delete _lbTtsPrecisaGerar[bid];
+          const vozG = (window.Store && Store.leituraVoz) ? (Store.leituraVoz('bloco', bid) || '') : '';
+          if(window.Store && Store.leituraUrlGuarda) Store.leituraUrlGuarda('bloco', bid, d.url, vozG, _lbTtsChars(block));
+          _lbTtsPintar(bid, false);
+        } else if(d.pronto === false){
+          _lbTtsPrecisaGerar[bid] = true;
+        }
+      }).catch(function(){ });
+  }
 }
 // Menu de vozes do bloco: as com áudio pronto trocam na hora; as demais geram
 // (grátis para quem possui a leitura). Toggle no chip; fecha em clique fora.
@@ -16945,8 +16969,14 @@ async function _lbTtsPedir(bid, regen, vozEscolhida, modoHint){
   if(_lbTtsGerando[bid]) return;
   const info = _lbTtsInfo[bid]; if(!info) return;
   const possui = window.Store && Store.leiturasTem && Store.leiturasTem('bloco', bid);
-  _lbTtsGerando[bid] = modoHint || ((regen || !possui) ? 'gera' : 'abre');
+  _lbTtsGerando[bid] = modoHint || ((regen || !possui || _lbTtsPrecisaGerar[bid]) ? 'gera' : 'abre');
   _lbTtsPintar(bid, false);
+  // "Abrindo" que demora é porque o servidor está mesmo sintetizando (voz ou
+  // texto mudaram e a sonda não avisou) — o rótulo vira "Gerando…" pra não
+  // mentir a espera.
+  const timerRotulo = setTimeout(function(){
+    if(_lbTtsGerando[bid] === 'abre'){ _lbTtsGerando[bid] = 'gera'; _lbTtsPintar(bid, false); }
+  }, 4000);
   const voz = (vozEscolhida != null) ? vozEscolhida : _lbTtsVozAtual(bid);
   let d = null;
   try{
@@ -16957,6 +16987,7 @@ async function _lbTtsPedir(bid, regen, vozEscolhida, modoHint){
       if(!d) d = { ok: false, mensagem: r.error.message || 'A leitura falhou. Tente de novo.' };
     }
   }catch(e){ d = { ok: false, mensagem: String(e && e.message || e) }; }
+  clearTimeout(timerRotulo);
   delete _lbTtsGerando[bid];
   if(!d || d.ok === false){
     if(window.ueToast) ueToast(((d && d.mensagem) || 'A leitura falhou. Tente de novo.') + (d && d.detalhe ? ' — ' + String(d.detalhe).slice(0, 160) : ''), 'error');
@@ -16964,11 +16995,13 @@ async function _lbTtsPedir(bid, regen, vozEscolhida, modoHint){
     return;
   }
   if(window.Store && Store.leituraMarca) Store.leituraMarca('bloco', bid);
+  delete _lbTtsPrecisaGerar[bid];
   // '' = seguia a preferência da conta; id = escolha explícita pro bloco.
   const vozGuarda = (vozEscolhida != null) ? vozEscolhida
     : ((window.Store && Store.leituraVoz) ? (Store.leituraVoz('bloco', bid) || '') : '');
   if(window.Store && Store.leituraUrlGuarda) Store.leituraUrlGuarda('bloco', bid, d.url, vozGuarda, _lbTtsChars(info.block));
   if(window.ueToast && d.custo > 0) ueToast('Leitura gerada por ' + String(d.custo).replace('.', ',') + ' ⓤ — agora é sua, ouvir de novo é grátis.', 'success');
+  else if(window.ueToast && d.gerado) ueToast('Leitura pronta.', 'success');
   _lbTtsPintar(bid, true);
 }
 document.addEventListener('click', function(e){
