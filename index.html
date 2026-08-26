@@ -8860,6 +8860,17 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .tb-tts .tb-audio-bar{flex:1;margin:0}
 .tb-tts-btn{display:inline-flex;align-items:center;gap:.4rem}
 .tb-tts-regen{padding:.35rem .55rem}
+.tb-tts{position:relative}
+.tb-tts-voz{display:inline-flex;align-items:center;gap:.3rem;white-space:nowrap}
+.tts-voz-menu{position:absolute;top:calc(100% + .3rem);left:0;z-index:60;min-width:210px;max-height:262px;overflow:auto;display:flex;flex-direction:column;padding:.3rem;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:10px;box-shadow:0 12px 32px -10px rgba(0,0,0,.6)}
+.tts-voz-opt{display:flex;justify-content:space-between;align-items:center;gap:.6rem}
+.tts-voz-opt.is-atual{color:var(--accent)}
+.tts-voz-tag{font-size:.58rem;color:var(--text-dim);letter-spacing:.05em;text-transform:uppercase}
+.tts-voz-tag.pronta{color:var(--accent)}
+.tts-voz-carregando{padding:.5rem .55rem;font-size:.68rem;color:var(--text-dim);font-family:var(--sans)}
+.acc-voz-row{display:flex;gap:.5rem;align-items:center}
+.acc-voz-row .field-input{flex:1}
+#accVozAmostra{white-space:nowrap;flex:0 0 auto}
 .fcp-scope a{color:var(--text-mute);text-decoration:none;font-size:.9rem;line-height:1}
 .fcp-selbar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;padding:.6rem 1.1rem;border-bottom:1px solid var(--accent-border);background:var(--accent-lo)}
 .fcp-selbar[hidden]{display:none}
@@ -15363,6 +15374,37 @@ const Store = (function(){
       if(!_state.leituras.some(l => l.escopo === escopo && l.refId === String(refId))) _state.leituras.push({ escopo: escopo, refId: String(refId) });
       _persist();
     },
+    // Cache LOCAL da URL assinada do áudio (o servidor assina por 6h; guardamos
+    // 5h30) — é ele que faz o player aparecer já pronto ao recarregar a página,
+    // sem chamar a Edge Function. Mapa separado de _state.leituras de propósito:
+    // a hidratação SUBSTITUI _state.leituras e não pode levar o cache junto.
+    // voz: '' = segue a preferência da conta; id = escolha explícita pro item.
+    // chars: impressão digital fraca do texto — se o bloco mudou, cache não vale.
+    leituraUrlGuarda(escopo, refId, url, voz, chars){
+      if(!_state || !url) return;
+      if(!_state.leiturasUrl || typeof _state.leiturasUrl !== 'object') _state.leiturasUrl = {};
+      _state.leiturasUrl[escopo + ':' + String(refId)] = { url: url, exp: Date.now() + 19800000, voz: voz || '', chars: chars || 0 };
+      _persist();
+    },
+    leituraUrlPega(escopo, refId, chars){
+      const e = (_state && _state.leiturasUrl) ? _state.leiturasUrl[escopo + ':' + String(refId)] : null;
+      if(!e || !e.url || !(e.exp > Date.now())) return null;
+      if(chars && e.chars && e.chars !== chars) return null;
+      return e;
+    },
+    leituraVoz(escopo, refId){
+      const e = (_state && _state.leiturasUrl) ? _state.leiturasUrl[escopo + ':' + String(refId)] : null;
+      return e ? (e.voz || '') : null;
+    },
+    // Trocou a voz preferida da conta → as URLs guardadas que SEGUIAM a
+    // preferência caducam (senão o replay tocaria a voz velha e quebraria a
+    // promessa "refeitas na voz nova quando você ouvir"). Escolhas explícitas
+    // por item (voz preenchida) ficam.
+    leituraUrlLimpaPadrao(){
+      if(!_state || !_state.leiturasUrl) return;
+      Object.keys(_state.leiturasUrl).forEach(k => { if(!_state.leiturasUrl[k].voz) delete _state.leiturasUrl[k]; });
+      _persist();
+    },
     deckAdd(payload){
       if(!_state) return null;
       const now = Date.now();
@@ -16741,13 +16783,28 @@ function _lbAudioMount(stageEl, block, ctx){
    compartilhado por conteúdo, mas cada aluno paga o SEU desbloqueio e a
    leitura vira bem dele (replay grátis; texto atualizado = áudio novo
    grátis pro dono; regenerar = grátis, conserta para todos).
+   Estados: quem possui e tem a URL guardada (Store.leituraUrlPega) vê o
+   PLAYER pronto direto — sem botão e sem "gerando". "Gerando…" só quando o
+   servidor vai realmente sintetizar; buscar uma leitura pronta é "Abrindo…".
    A geração leva ~30-60s e o app PODE se re-renderizar nesse meio tempo:
-   por isso o estado "gerando" vive num mapa POR BLOCO (o botão continua
-   "Gerando…" após qualquer re-render) e a resposta procura a caixa ATUAL
-   no DOM — nunca a referência antiga. Cliques por delegação (sem rebind). */
+   por isso o estado vive num mapa POR BLOCO e a resposta procura a caixa
+   ATUAL no DOM — nunca a referência antiga. Cliques por delegação. */
 const _LB_TTS_PRECO_1K = 0.01;   // só EXIBIÇÃO — a fonte de verdade é a tabela_custos
-const _lbTtsGerando = {};
+const _lbTtsGerando = {};        // bid → 'gera' | 'abre'
 const _lbTtsInfo = {};
+function _vozesLeituraCarregar(){
+  if(window.__vozesLeitura) return Promise.resolve(window.__vozesLeitura);
+  if(window.__vozesLeituraP) return window.__vozesLeituraP;
+  if(!window._sb) return Promise.resolve([]);
+  window.__vozesLeituraP = window._sb.schema('ia').from('voice_vozes')
+    .select('voice_id, nome').eq('ativo', true).order('ordem')
+    .then(function(r){
+      if(r.error){ console.warn('[vozes leitura]', r.error); return []; }
+      window.__vozesLeitura = r.data || [];
+      return window.__vozesLeitura;
+    });
+  return window.__vozesLeituraP;
+}
 function _lbTtsChars(block){
   try{
     const c = block || {};
@@ -16758,21 +16815,43 @@ function _lbTtsChars(block){
     return out.replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim().length;
   }catch(_){ return 0; }
 }
+// Voz "vigente" do bloco: escolha explícita feita no menu > preferência da conta.
+function _lbTtsVozAtual(bid){
+  const escolha = (window.Store && Store.leituraVoz) ? Store.leituraVoz('bloco', bid) : null;
+  if(escolha) return escolha;
+  return (window.Store && Store.prefsGet) ? (Store.prefsGet('leitura_voice_id') || '') : '';
+}
+function _lbTtsVozNome(bid){
+  const voz = _lbTtsVozAtual(bid);
+  if(!voz) return 'Manfredo';
+  const lista = window.__vozesLeitura || [];
+  for(let i = 0; i < lista.length; i++){ if(lista[i].voice_id === voz) return lista[i].nome; }
+  return 'Voz';
+}
 function _lbTtsInner(block){
   const bid = String(block.id);
   const chars = _lbTtsChars(block);
   if(chars < 60) return '';
   const FONE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>';
-  if(_lbTtsGerando[bid]){
-    return '<button type="button" class="icon-btn tb-tts-btn" disabled>' + FONE + ' Gerando a leitura… (pode levar ~1 min)</button>'
-      + _lbAudioBarHTML(true);
+  const SETA = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+  const modo = _lbTtsGerando[bid];
+  if(modo){
+    return '<button type="button" class="icon-btn tb-tts-btn" disabled>' + FONE + ' '
+      + (modo === 'abre' ? 'Abrindo a leitura…' : 'Gerando a leitura… (pode levar ~1 min)')
+      + '</button>' + _lbAudioBarHTML(true);
   }
   const possui = window.Store && Store.leiturasTem && Store.leiturasTem('bloco', bid);
+  if(possui){
+    const cache = (window.Store && Store.leituraUrlPega) ? Store.leituraUrlPega('bloco', bid, chars) : null;
+    const vozBtn = '<button type="button" class="icon-btn tb-tts-voz" data-tts-a="voz" data-tip="Trocar a voz desta leitura">'
+      + Util.esc(_lbTtsVozNome(bid)) + ' ' + SETA + '</button>';
+    const regenBtn = '<button type="button" class="icon-btn tb-tts-regen" data-tts-a="regen" data-tip="Gerar novamente (grátis)">&#8635;</button>';
+    if(cache) return vozBtn + regenBtn + _lbAudioBarHTML();
+    return '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="ouvir" data-tip="Leitura sua — ouvir é grátis">' + FONE + ' Ouvir leitura</button>'
+      + vozBtn + regenBtn + _lbAudioBarHTML(true);
+  }
   const custo = (Math.max(chars, 1000) / 1000 * _LB_TTS_PRECO_1K).toFixed(2).replace('.', ',');
-  return (possui
-    ? '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="ouvir" data-tip="Leitura sua — ouvir é grátis">' + FONE + ' Ouvir leitura</button>'
-      + '<button type="button" class="icon-btn tb-tts-regen" data-tts-a="regen" data-tip="Gerar novamente (grátis)">&#8635;</button>'
-    : '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="gerar" data-tip="Narração por IA — gera uma vez, é sua para sempre"><span class="ubt-sym">ⓤ</span> ' + custo + ' · Gerar leitura</button>')
+  return '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="gerar" data-tip="Narração por IA — gera uma vez, é sua para sempre"><span class="ubt-sym">ⓤ</span> ' + custo + ' · Gerar leitura</button>'
     + _lbAudioBarHTML(true);
 }
 function _lbTtsBarHTML(block){
@@ -16785,29 +16864,93 @@ function _lbTtsBarHTML(block){
 function _lbTtsBox(bid){
   return document.querySelector('.tb-tts[data-tts-block="' + String(bid).replace(/"/g, '') + '"]');
 }
-function _lbTtsMount(stageEl, block, ctx){
-  _lbTtsInfo[String(block.id)] = { block: block, ctx: ctx || null };
-}
-function _lbTtsTocar(bid, url){
-  const box = _lbTtsBox(bid); if(!box) return;
+// Liga a barra do player (LBAudio) na caixa; autoplay opcional.
+function _lbTtsLigar(bid, url, autoplay, boxOpt){
+  const box = boxOpt || _lbTtsBox(bid); if(!box) return;
   const info = _lbTtsInfo[bid] || {};
-  box.querySelectorAll('[data-tts-a]').forEach(function(b){ b.hidden = true; });
   const bar = box.querySelector('.tb-audio-bar'); if(!bar) return;
   bar.hidden = false;
   const unit = info.ctx && info.ctx.unit;
   if(window.LBAudio) LBAudio.register(bar, { src: url, cover: (unit && unit.cover) || '', title: 'Leitura · ' + ((info.block && info.block.title) || (unit && unit.title) || '') });
-  const play = bar.querySelector('.tb-audio-play');
-  if(play) play.click();
+  if(autoplay){
+    const play = bar.querySelector('.tb-audio-play');
+    if(play) play.click();
+  }
 }
-async function _lbTtsPedir(bid, regen){
+// Repinta a caixa no estado atual e, se há URL guardada válida, liga o player.
+function _lbTtsPintar(bid, autoplay){
+  bid = String(bid);
+  const box = _lbTtsBox(bid); const info = _lbTtsInfo[bid];
+  if(!box || !info) return;
+  box.innerHTML = _lbTtsInner(info.block);
+  if(_lbTtsGerando[bid]) return;
+  const cache = (window.Store && Store.leituraUrlPega) ? Store.leituraUrlPega('bloco', bid, _lbTtsChars(info.block)) : null;
+  if(cache) _lbTtsLigar(bid, cache.url, !!autoplay, box);
+}
+function _lbTtsMount(stageEl, block, ctx){
+  const bid = String(block.id);
+  _lbTtsInfo[bid] = { block: block, ctx: ctx || null };
+  const box = stageEl.querySelector('.tb-tts[data-tts-block="' + bid.replace(/"/g, '') + '"]');
+  if(!box) return;
+  const cache = (window.Store && Store.leituraUrlPega) ? Store.leituraUrlPega('bloco', bid, _lbTtsChars(block)) : null;
+  if(cache && !_lbTtsGerando[bid]) _lbTtsLigar(bid, cache.url, false, box);
+  // Nome da voz no chip: se a lista ainda não chegou, repinta quando chegar.
+  const possui = window.Store && Store.leiturasTem && Store.leiturasTem('bloco', bid);
+  if(possui && !window.__vozesLeitura){
+    _vozesLeituraCarregar().then(function(){ if(!_lbTtsGerando[bid] && _lbTtsBox(bid)) _lbTtsPintar(bid, false); });
+  }
+}
+// Menu de vozes do bloco: as com áudio pronto trocam na hora; as demais geram
+// (grátis para quem possui a leitura). Toggle no chip; fecha em clique fora.
+async function _lbTtsMenuVozes(box, bid){
+  const aberto = box.querySelector('.tts-voz-menu');
+  document.querySelectorAll('.tts-voz-menu').forEach(function(m){ m.remove(); });
+  if(aberto) return;
+  const menu = document.createElement('div');
+  menu.className = 'tts-voz-menu';
+  menu.innerHTML = '<div class="tts-voz-carregando">Carregando vozes…</div>';
+  box.appendChild(menu);
+  let vozes = [], prontas = [];
+  try{
+    const res = await Promise.all([
+      _vozesLeituraCarregar(),
+      window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'vozes', ref_escopo: 'bloco', ref_id: String(bid) } })
+        .catch(function(){ return null; })
+    ]);
+    vozes = res[0] || [];
+    const rv = res[1];
+    if(rv && rv.data && Array.isArray(rv.data.vozes)) prontas = rv.data.vozes;
+  }catch(_){ }
+  if(!menu.parentNode) return;   // fechado enquanto carregava
+  if(!vozes.length){ menu.innerHTML = '<div class="tts-voz-carregando">Não consegui carregar as vozes agora.</div>'; return; }
+  const atual = _lbTtsVozAtual(bid);
+  menu.innerHTML = vozes.map(function(v){
+    const pronta = prontas.indexOf(v.voice_id) !== -1;
+    const ehAtual = atual === v.voice_id;
+    return '<button type="button" class="vd-opt tts-voz-opt' + (ehAtual ? ' is-atual' : '') + '" data-voz="' + Util.attr(v.voice_id) + '" data-pronta="' + (pronta ? '1' : '0') + '">'
+      + '<span>' + Util.esc(v.nome) + '</span>'
+      + '<span class="tts-voz-tag' + (pronta ? ' pronta' : '') + '">' + (pronta ? 'pronta' : 'grátis') + '</span>'
+      + '</button>';
+  }).join('');
+  menu.addEventListener('click', function(ev){
+    const op = ev.target.closest ? ev.target.closest('.tts-voz-opt') : null;
+    if(!op) return;
+    const voz = op.getAttribute('data-voz');
+    const pronta = op.getAttribute('data-pronta') === '1';
+    menu.remove();
+    _lbTtsPedir(bid, false, voz, pronta ? 'abre' : 'gera');
+  });
+}
+async function _lbTtsPedir(bid, regen, vozEscolhida, modoHint){
   bid = String(bid);
   if(_lbTtsGerando[bid]) return;
   const info = _lbTtsInfo[bid]; if(!info) return;
-  _lbTtsGerando[bid] = true;
-  const box0 = _lbTtsBox(bid); if(box0) box0.innerHTML = _lbTtsInner(info.block);
+  const possui = window.Store && Store.leiturasTem && Store.leiturasTem('bloco', bid);
+  _lbTtsGerando[bid] = modoHint || ((regen || !possui) ? 'gera' : 'abre');
+  _lbTtsPintar(bid, false);
+  const voz = (vozEscolhida != null) ? vozEscolhida : _lbTtsVozAtual(bid);
   let d = null;
   try{
-    const voz = (window.Store && Store.prefsGet) ? Store.prefsGet('leitura_voice_id') : null;
     const r = await window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'bloco', block_id: bid, regenerar: !!regen, voice_id: voz || undefined } });
     d = r.data;
     if(r.error){
@@ -16818,20 +16961,27 @@ async function _lbTtsPedir(bid, regen){
   delete _lbTtsGerando[bid];
   if(!d || d.ok === false){
     if(window.ueToast) ueToast(((d && d.mensagem) || 'A leitura falhou. Tente de novo.') + (d && d.detalhe ? ' — ' + String(d.detalhe).slice(0, 160) : ''), 'error');
-    const box1 = _lbTtsBox(bid); if(box1) box1.innerHTML = _lbTtsInner(info.block);
+    _lbTtsPintar(bid, false);
     return;
   }
   if(window.Store && Store.leituraMarca) Store.leituraMarca('bloco', bid);
+  // '' = seguia a preferência da conta; id = escolha explícita pro bloco.
+  const vozGuarda = (vozEscolhida != null) ? vozEscolhida
+    : ((window.Store && Store.leituraVoz) ? (Store.leituraVoz('bloco', bid) || '') : '');
+  if(window.Store && Store.leituraUrlGuarda) Store.leituraUrlGuarda('bloco', bid, d.url, vozGuarda, _lbTtsChars(info.block));
   if(window.ueToast && d.custo > 0) ueToast('Leitura gerada por ' + String(d.custo).replace('.', ',') + ' ⓤ — agora é sua, ouvir de novo é grátis.', 'success');
-  const box2 = _lbTtsBox(bid);
-  if(box2){ box2.innerHTML = _lbTtsInner(info.block); _lbTtsTocar(bid, d.url); }
+  _lbTtsPintar(bid, true);
 }
 document.addEventListener('click', function(e){
+  // clique fora fecha o menu de vozes (o chip tem toggle próprio)
+  const noMenu = e.target.closest ? e.target.closest('.tts-voz-menu, [data-tts-a="voz"]') : null;
+  if(!noMenu) document.querySelectorAll('.tts-voz-menu').forEach(function(m){ m.remove(); });
   const b = e.target.closest ? e.target.closest('.tb-tts [data-tts-a]') : null;
   if(!b || b.disabled) return;
   const box = b.closest('.tb-tts'); const bid = box ? box.getAttribute('data-tts-block') : null;
   if(!bid) return;
   const a = b.getAttribute('data-tts-a');
+  if(a === 'voz'){ _lbTtsMenuVozes(box, bid); return; }
   if(a === 'regen'){
     if(confirm('Gerar o áudio novamente? É grátis e substitui a leitura atual (para todos os alunos que a possuem).')) _lbTtsPedir(bid, true);
     return;
@@ -24232,8 +24382,11 @@ Renderers.account = function(route){
       <section class="account-fields-section" style="margin-top:1.2rem">
         <div class="field">
           <label for="accVozLeitura">Voz da leitura em voz alta</label>
-          <select class="field-input" id="accVozLeitura"><option value="">Padrão da plataforma (Manfredo)</option></select>
-          <span class="field-help">Usada no "Gerar leitura" dos textos. Trocar não custa nada: as leituras que você já possui são refeitas na voz nova, de graça, na próxima vez que ouvir. Salva sozinho.</span>
+          <div class="acc-voz-row">
+            <select class="field-input" id="accVozLeitura"><option value="">Padrão da plataforma (Manfredo)</option></select>
+            <button class="icon-btn" id="accVozAmostra" type="button">Ouvir amostra</button>
+          </div>
+          <span class="field-help">Usada no "Gerar leitura" dos textos. Toque em "Ouvir amostra" para conhecer a voz selecionada. Trocar não custa nada: as leituras que você já possui são refeitas na voz nova, de graça, na próxima vez que ouvir. Salva sozinho.</span>
         </div>
       </section>
     </div>`;
@@ -24452,18 +24605,50 @@ Renderers.account.mount = function(stageEl){
       sel.value = atual;
       if(sel.value !== atual) sel.value = '';   // voz salva saiu da lista → padrão
     };
-    if(window.__vozesLeitura) pinta(window.__vozesLeitura);
-    else window._sb.schema('ia').from('voice_vozes').select('voice_id, nome').eq('ativo', true).order('ordem')
-      .then(function(r){
-        if(r.error){ console.warn('[vozes leitura]', r.error); return; }
-        window.__vozesLeitura = r.data || [];
-        pinta(window.__vozesLeitura);
-      });
+    _vozesLeituraCarregar().then(pinta);
     sel.addEventListener('change', function(){
       if(window.Store && Store.prefsSet) Store.prefsSet('leitura_voice_id', sel.value || null);
+      // as URLs guardadas que seguiam a preferência caducam (a voz nova vale já)
+      if(window.Store && Store.leituraUrlLimpaPadrao) Store.leituraUrlLimpaPadrao();
       if(window.ueToast) ueToast(sel.value
         ? 'Voz de leitura atualizada. As leituras que você já possui serão refeitas na voz nova, de graça, quando você ouvir.'
         : 'Voz de leitura de volta ao padrão da plataforma.', 'success');
+    });
+    // ── Ouvir amostra da voz selecionada (frase curta, gerada 1x por voz) ──
+    const btnAm = stageEl.querySelector('#accVozAmostra');
+    if(btnAm) btnAm.addEventListener('click', async function(){
+      if(btnAm.disabled) return;
+      if(window._amostraAudio && !window._amostraAudio.paused){ window._amostraAudio.pause(); return; }
+      btnAm.disabled = true; btnAm.textContent = 'Preparando…';
+      let d = null;
+      try{
+        const r = await window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'amostra', voice_id: sel.value || undefined } });
+        d = r.data;
+        if(r.error){
+          try{ if(r.error.context && typeof r.error.context.json === 'function') d = await r.error.context.json(); }catch(_){}
+          if(!d) d = { ok: false, mensagem: r.error.message || 'A amostra falhou.' };
+        }
+      }catch(e){ d = { ok: false, mensagem: String(e && e.message || e) }; }
+      btnAm.disabled = false;
+      if(!d || d.ok === false || !d.url){
+        btnAm.textContent = 'Ouvir amostra';
+        // EF antiga não conhece o escopo 'amostra' e devolve BLOCO_AUSENTE
+        const msg = (d && d.codigo === 'BLOCO_AUSENTE')
+          ? 'A amostra precisa da versão nova da função gerar-leitura publicada no servidor.'
+          : ((d && d.mensagem) || 'Não consegui tocar a amostra agora.');
+        if(window.ueToast) ueToast(msg + (d && d.detalhe ? ' — ' + String(d.detalhe).slice(0, 160) : ''), 'error');
+        return;
+      }
+      try{ if(window._amostraAudio) window._amostraAudio.pause(); }catch(_){ }
+      const a = new Audio(d.url);
+      window._amostraAudio = a;
+      btnAm.textContent = 'Tocando…';
+      a.addEventListener('ended', function(){ btnAm.textContent = 'Ouvir amostra'; });
+      a.addEventListener('pause', function(){ btnAm.textContent = 'Ouvir amostra'; });
+      a.play().catch(function(){
+        btnAm.textContent = 'Ouvir amostra';
+        if(window.ueToast) ueToast('Toque de novo para ouvir (o navegador segurou o play automático).', 'error');
+      });
     });
   })();
 
