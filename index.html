@@ -8973,7 +8973,15 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cadp-meta-v{display:flex;flex-wrap:wrap;gap:.3rem;align-items:center;min-width:0}
 .cadp-chip{display:inline-flex;align-items:center;gap:.25rem;background:var(--accent-lo);border:1px solid var(--accent-border-soft);border-radius:99px;padding:.12rem .5rem;font-family:var(--sans);font-size:.66rem;color:var(--accent)}
 .cadp-chip button{background:transparent;border:none;color:var(--accent);cursor:pointer;font-size:.75rem;padding:0;line-height:1}
-.cadp-meta-add{background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text-dim);font-family:var(--sans);font-size:.64rem;padding:.15rem .3rem;max-width:280px}
+.cadp-meta-add{background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text-dim);font-family:var(--sans);font-size:.64rem;padding:.15rem .45rem;max-width:280px;cursor:pointer}
+.cadp-meta-add:hover{border-color:var(--accent-border);color:var(--accent)}
+.cadp-pick{position:fixed;z-index:1200;min-width:300px;max-width:460px;max-height:340px;display:flex;flex-direction:column;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:10px;box-shadow:0 12px 32px -10px rgba(0,0,0,.6);padding:.3rem}
+.cadp-pick-l{overflow:auto;display:flex;flex-direction:column;overscroll-behavior:contain}
+.cadp-pick-opt{display:block;width:100%;text-align:left;background:transparent;border:none;color:var(--text-dim);font-family:var(--sans);font-size:.68rem;padding:.3rem .7rem;border-radius:6px;cursor:pointer;line-height:1.35}
+.cadp-pick-opt:hover{background:var(--bg-elevated);color:var(--text)}
+.cadp-pick-h{font-family:var(--sans);font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;color:var(--accent);padding:.4rem .7rem .15rem}
+.cadp-pick-busca{margin:.2rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--sans);font-size:.68rem;padding:.3rem .5rem}
+.cadp-pick-nada{font-family:var(--sans);font-size:.64rem;color:var(--text-mute);font-style:italic;padding:.5rem .7rem}
 .cadp-meta-in{background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--sans);font-size:.66rem;padding:.15rem .4rem;width:170px}
 .cadp-meta-dica{font-family:var(--sans);font-size:.62rem;color:var(--text-mute);font-style:italic}
 /* o host do editor preenche o painel: toolbar/rodapé fixos, o TEXTO rola por
@@ -53866,7 +53874,38 @@ const CadernosPage = (function(){
   function _editalPorMateria(){
     if(_edCacheMat) return _edCacheMat;
     const St = window.UbiqueStore || {};
-    const topics = (St.edital_topics && St.edital_topics.list) ? (St.edital_topics.list() || []) : [];
+    const all = (St.edital_topics && St.edital_topics.list) ? (St.edital_topics.list() || []) : [];
+    // Edital do CONCURSO ativo (mesma resolução da página Edital: exam_id, ou
+    // o id do concurso dentro do name). Sem casamento, não filtra (catálogo).
+    const editais = (St.editais && St.editais.list) ? (St.editais.list() || []) : [];
+    const examId = (typeof window.activeExamId === 'function') ? window.activeExamId() : '';
+    let permitidos = null;
+    if(examId && editais.length){
+      const low = String(examId).toLowerCase();
+      permitidos = new Set();
+      editais.forEach(function(e){
+        if(e.exam_id && String(e.exam_id).toLowerCase() === low){ permitidos.add(e.id); return; }
+        if(String(e.name || '').toLowerCase().indexOf(low) >= 0) permitidos.add(e.id);
+      });
+      if(!permitidos.size) permitidos = null;
+    }
+    const topics = permitidos ? all.filter(function(t2){ return permitidos.has(t2.edital_id); }) : all;
+    const filhos = {};
+    topics.forEach(function(t2){
+      const pk = t2.parent_id == null ? '' : String(t2.parent_id);
+      (filhos[pk] = filhos[pk] || []).push(t2);
+    });
+    const ordena = function(arr){
+      arr.sort(function(a, b){
+        return String(a.code || '').localeCompare(String(b.code || ''), 'pt-BR', { numeric: true })
+          || String(a.title || '').localeCompare(String(b.title || ''), 'pt-BR');
+      });
+      return arr;
+    };
+    const rot = {};
+    topics.forEach(function(t2){ rot[String(t2.id)] = ((t2.code ? t2.code + ' ' : '') + (t2.title || '')).trim() || String(t2.id); });
+    // Fallback da ponte raiz→matéria quando o FK subject_id não foi preenchido:
+    // maioria das unidades vinculadas aos descendentes (padrão b do banco).
     const expand = (typeof window._expandTopicUnitLinks === 'function') ? window._expandTopicUnitLinks() : {};
     const unitSubj = {};
     (window.COURSES || []).forEach(function(c){
@@ -53877,18 +53916,74 @@ const CadernosPage = (function(){
         });
       });
     });
-    const porMat = {}, rot = {};
-    topics.forEach(function(t2){
-      rot[String(t2.id)] = ((t2.number ? t2.number + ' ' : '') + (t2.title || '')).trim() || String(t2.id);
-      const units = expand[String(t2.id)];
-      if(!units) return;
-      const mats = new Set();
-      units.forEach(function(su){ const sid = unitSubj[String(su)]; if(sid) mats.add(sid); });
-      mats.forEach(function(sid){ (porMat[sid] = porMat[sid] || []).push({ id: String(t2.id), rotulo: rot[String(t2.id)] }); });
+    const porMat = {};
+    ordena(filhos[''] || []).forEach(function(raiz){
+      const out = [], votos = {};
+      const anda = function(pid, depth){
+        ordena(filhos[String(pid)] || []).forEach(function(t2){
+          out.push({ id: String(t2.id), rotulo: rot[String(t2.id)], depth: depth });
+          (expand[String(t2.id)] || []).forEach(function(su){
+            const sid = unitSubj[String(su)];
+            if(sid) votos[sid] = (votos[sid] || 0) + 1;
+          });
+          anda(t2.id, depth + 1);
+        });
+      };
+      anda(raiz.id, 0);
+      let sid = raiz.subject_id != null ? String(raiz.subject_id) : null;
+      if(!sid){
+        let melhor = 0;
+        Object.keys(votos).forEach(function(k){ if(votos[k] > melhor){ melhor = votos[k]; sid = k; } });
+      }
+      if(!sid || !out.length) return;
+      porMat[sid] = (porMat[sid] || []).concat(out);
     });
-    Object.keys(porMat).forEach(function(k){ porMat[k].sort(function(a, b){ return a.rotulo.localeCompare(b.rotulo, 'pt-BR', { numeric: true }); }); });
     _edCacheMat = porMat; _edCacheRot = rot;
     return porMat;
+  }
+  // Painel de escolha da casa (substitui o <select> nativo): fixo, ancorado no
+  // botão, com hierarquia indentada e filtro quando a lista é longa.
+  function _pickAbrir(btn, opcoes, aoEscolher){
+    const velho = document.getElementById('cadpPick'); if(velho) velho.remove();
+    const p2 = document.createElement('div');
+    p2.className = 'cadp-pick'; p2.id = 'cadpPick';
+    const lista = document.createElement('div'); lista.className = 'cadp-pick-l';
+    const monta = function(filtro){
+      const q = _norm(filtro || '');
+      lista.innerHTML = opcoes
+        .filter(function(o){ return q ? (!o.header && _norm(o.rotulo).indexOf(q) !== -1) : true; })
+        .map(function(o){
+          if(o.header) return '<div class="cadp-pick-h">' + Util.esc(o.rotulo) + '</div>';
+          return '<button type="button" class="cadp-pick-opt" data-pick="' + Util.attr(o.id) + '" style="padding-left:' + (0.7 + (o.depth || 0) * 0.9) + 'rem">' + Util.esc(o.rotulo) + '</button>';
+        }).join('') || '<div class="cadp-pick-nada">nenhum tópico encontrado</div>';
+    };
+    if(opcoes.filter(function(o){ return !o.header; }).length > 12){
+      const bin = document.createElement('input');
+      bin.type = 'search'; bin.className = 'cadp-pick-busca'; bin.placeholder = 'Filtrar tópicos…';
+      bin.addEventListener('input', function(){ monta(bin.value); });
+      p2.appendChild(bin);
+    }
+    p2.appendChild(lista); monta('');
+    document.body.appendChild(p2);
+    const r = btn.getBoundingClientRect();
+    p2.style.left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - p2.offsetWidth - 12))) + 'px';
+    const h2 = p2.offsetHeight;
+    p2.style.top = (r.bottom + 6 + h2 > window.innerHeight - 8)
+      ? Math.max(8, Math.round(r.top - 6 - h2)) + 'px'
+      : Math.round(r.bottom + 6) + 'px';
+    const bq = p2.querySelector('.cadp-pick-busca'); if(bq) bq.focus();
+    p2.addEventListener('click', function(ev){
+      ev.stopPropagation();
+      const b = ev.target.closest('[data-pick]'); if(!b) return;
+      p2.remove(); aoEscolher(b.getAttribute('data-pick'));
+    });
+    setTimeout(function(){
+      document.addEventListener('click', function fecha(ev){
+        if(!document.getElementById('cadpPick')){ document.removeEventListener('click', fecha); return; }
+        if(ev.target.closest('#cadpPick') || ev.target === btn) return;
+        p2.remove(); document.removeEventListener('click', fecha);
+      });
+    }, 0);
   }
   function _edRotulo(id){ _editalPorMateria(); return (_edCacheRot && _edCacheRot[String(id)]) || String(id); }
   async function _metaSalvarUnit(unitId, meta){
@@ -53911,23 +54006,29 @@ const CadernosPage = (function(){
     const host = main.querySelector('#cadpMeta');
     if(!host) return;
     function render(){
+      const vPick = document.getElementById('cadpPick'); if(vPick) vPick.remove();
       const porMat = _editalPorMateria();
       const matSel = (meta.materias || []).map(String);
       const topSel = (meta.edital || []).map(String);
       const matOpts = mats.filter(function(m){ return matSel.indexOf(m.id) === -1; });
       let topOpts = [];
       matSel.forEach(function(sid){
-        (porMat[sid] || []).forEach(function(t2){ if(topSel.indexOf(t2.id) === -1 && !topOpts.some(function(x){ return x.id === t2.id; })) topOpts.push(t2); });
+        const doMat = (porMat[sid] || []).filter(function(t2){
+          return topSel.indexOf(t2.id) === -1 && !topOpts.some(function(x){ return !x.header && x.id === t2.id; });
+        });
+        if(!doMat.length) return;
+        if(matSel.length > 1) topOpts.push({ header: true, rotulo: nomeMat(sid) });
+        topOpts = topOpts.concat(doMat);
       });
       host.innerHTML =
         '<div class="cadp-meta-l"><span class="cadp-meta-k">Matérias</span><span class="cadp-meta-v">'
           + matSel.map(function(id){ return '<span class="cadp-chip">' + Util.esc(nomeMat(id)) + '<button type="button" data-mm-del="' + Util.attr(id) + '" aria-label="Remover">&times;</button></span>'; }).join('')
-          + (matOpts.length ? '<select class="cadp-meta-add" data-mm-add><option value="">adicionar…</option>' + matOpts.map(function(m){ return '<option value="' + Util.attr(m.id) + '">' + Util.esc(m.nome) + '</option>'; }).join('') + '</select>' : '')
+          + (matOpts.length ? '<button type="button" class="cadp-meta-add" data-mm-open>adicionar…</button>' : '')
         + '</span></div>'
         + '<div class="cadp-meta-l"><span class="cadp-meta-k">Tópicos do edital</span><span class="cadp-meta-v">'
           + topSel.map(function(id){ return '<span class="cadp-chip">' + Util.esc(_edRotulo(id)) + '<button type="button" data-mt-del="' + Util.attr(id) + '" aria-label="Remover">&times;</button></span>'; }).join('')
-          + (topOpts.length ? '<select class="cadp-meta-add" data-mt-add><option value="">adicionar…</option>' + topOpts.map(function(t2){ return '<option value="' + Util.attr(t2.id) + '">' + Util.esc(t2.rotulo.slice(0, 80)) + '</option>'; }).join('') + '</select>'
-            : (matSel.length ? '' : '<span class="cadp-meta-dica">escolha uma matéria primeiro</span>'))
+          + (topOpts.length ? '<button type="button" class="cadp-meta-add" data-mt-open>adicionar…</button>'
+            : (matSel.length ? '<span class="cadp-meta-dica">todos os tópicos desta matéria já foram adicionados</span>' : '<span class="cadp-meta-dica">escolha uma matéria primeiro</span>'))
         + '</span></div>'
         + (tipo === 'avulso'
           ? '<div class="cadp-meta-l"><span class="cadp-meta-k">Aliases</span><span class="cadp-meta-v">'
@@ -53939,10 +54040,16 @@ const CadernosPage = (function(){
       host.querySelectorAll('[data-mm-del]').forEach(function(b){ b.addEventListener('click', function(){ meta.materias = matSel.filter(function(x){ return x !== b.getAttribute('data-mm-del'); }); salvar(); }); });
       host.querySelectorAll('[data-mt-del]').forEach(function(b){ b.addEventListener('click', function(){ meta.edital = topSel.filter(function(x){ return x !== b.getAttribute('data-mt-del'); }); salvar(); }); });
       host.querySelectorAll('[data-ma-del]').forEach(function(b){ b.addEventListener('click', function(){ meta.aliases = (meta.aliases || []).filter(function(x){ return x !== b.getAttribute('data-ma-del'); }); salvar(); }); });
-      const mmAdd = host.querySelector('[data-mm-add]');
-      if(mmAdd) mmAdd.addEventListener('change', function(){ if(!mmAdd.value) return; meta.materias = matSel.concat([mmAdd.value]); salvar(); });
-      const mtAdd = host.querySelector('[data-mt-add]');
-      if(mtAdd) mtAdd.addEventListener('change', function(){ if(!mtAdd.value) return; meta.edital = topSel.concat([mtAdd.value]); salvar(); });
+      const mmB = host.querySelector('[data-mm-open]');
+      if(mmB) mmB.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        _pickAbrir(mmB, matOpts.map(function(m){ return { id: m.id, rotulo: m.nome }; }), function(id){ meta.materias = matSel.concat([id]); salvar(); });
+      });
+      const mtB = host.querySelector('[data-mt-open]');
+      if(mtB) mtB.addEventListener('click', function(ev){
+        ev.stopPropagation();
+        _pickAbrir(mtB, topOpts, function(id){ meta.edital = topSel.concat([id]); salvar(); });
+      });
       const maIn = host.querySelector('[data-ma-in]');
       if(maIn) maIn.addEventListener('keydown', function(ev){
         if(ev.key !== 'Enter') return;
@@ -53993,6 +54100,7 @@ const CadernosPage = (function(){
       window.removeEventListener('hashchange', aoSair);
       clearTimeout(_mountTimer);
       if(_mountUnsub){ _mountUnsub(); _mountUnsub = null; }
+      const pk = document.getElementById('cadpPick'); if(pk) pk.remove();
       if(window.TutorIA && TutorIA.desmontarCaderno) TutorIA.desmontarCaderno();
     };
     window.removeEventListener('hashchange', aoSair);
