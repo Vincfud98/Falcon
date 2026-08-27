@@ -8974,13 +8974,15 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cadp-paneb-body{flex:1;min-height:0;display:flex;flex-direction:column}
 .cadp-leitura{flex:1;overflow:auto;overscroll-behavior:contain;font-family:var(--sans);font-size:.85rem;line-height:1.65;padding:.2rem .4rem;white-space:pre-wrap;word-break:break-word}
 .cadp-portal{flex:1;width:100%;border:1px solid var(--border);border-radius:8px;background:#111}
-.cadp-pane-grafo{flex:1;min-height:0;position:relative;overflow:hidden}
+.cadp-pane-grafo{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.cadp-paneb-ed{flex:1;min-height:0;display:flex;flex-direction:column}
+.tutor-cad-paneb-ed{flex:1;min-height:0;display:flex;flex-direction:column}
 .cadp-pane-vazio{color:var(--text-mute);font-family:var(--sans);font-size:.72rem;font-style:italic;padding:1rem .4rem}
 /* ── D2f: arrastar cadernos entre pastas ── */
 .cadp-item[draggable="true"]{cursor:grab}
 .cadp-item[draggable="true"]:active{cursor:grabbing}
 .cadp-pasta-h.is-drop{background:var(--accent-lo);border-radius:7px;outline:1px dashed var(--accent-border)}
-.cadp-tree.is-drop{outline:1px dashed var(--accent-border-soft);outline-offset:-3px;border-radius:8px}
+.cadp-side.is-drop-raiz{outline:1px dashed var(--accent-border-soft);outline-offset:-4px}
 .cadp-meta{flex-shrink:0;margin-bottom:.5rem;border:1px solid var(--border);border-radius:8px;padding:.3rem .6rem;background:var(--bg-elevated)}
 .cadp-meta summary{font-family:var(--sans);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-mute);cursor:pointer;padding:.15rem 0;list-style:none}
 .cadp-meta summary::-webkit-details-marker{display:none}
@@ -37576,6 +37578,32 @@ window.TutorIA = (function(){
   // O modal da página Notas registra a sua aqui pra reusar TODA a máquina
   // (carregar/salvar/[[ ]]/aliases/backlinks) sem reescrever nada.
   let _cadActiveEl = null, _cadActiveStatusEl = null, _cadActiveBl = null;
+  // D2e-2: DOIS editores vivos (split). Cada superfície registrada guarda a
+  // sua identidade; o FOCO decide quem é a ativa (só existe um caret). Ao
+  // trocar, o pendente da anterior é salvo com a identidade capturada.
+  let _cadSurfs = [];
+  function _cadSurfReg(el, info){
+    if(!el) return;
+    _cadSurfs = _cadSurfs.filter(function(x){ return x.el !== el && x.el.isConnected; });
+    _cadSurfs.push(Object.assign({ el: el }, info));
+    if(!window.__cadFocusBound){
+      window.__cadFocusBound = true;
+      document.addEventListener('focusin', function(ev){
+        const surf = _cadSurfs.find(function(x){ return x.el === ev.target || (x.el.contains && x.el.contains(ev.target)); });
+        if(surf) _cadFocarSurf(surf);
+      });
+    }
+  }
+  function _cadFocarSurf(surf){
+    _activeEd = surf.el;
+    if(_cadActiveEl === surf.el) return;
+    if(_cadTimer){ clearTimeout(_cadTimer); _cadTimer = null; try{ _cadSave(); }catch(_){ } }
+    _cadActiveEl = surf.el;
+    _cadActiveStatusEl = surf.statusEl || null;
+    _cadActiveBl = surf.bl || null;
+    if(surf.tipo === 'unit'){ _cadUnit = surf.unitId; _cadDocId = null; }
+    else if(surf.tipo === 'doc'){ _cadDocId = surf.docId; _cadUnit = null; }
+  }
   function _cadEl(){ return _cadActiveEl || document.getElementById('cadernoInput'); }
 
   /* ── Fase 6F-1b: o caderno é EDITOR de flashcards ─────────────────────────
@@ -38225,7 +38253,7 @@ window.TutorIA = (function(){
     }
     _fcChipBtnSync(el, sel, node);
   });
-  function _cadStatus(t){ const s = _cadActiveStatusEl || document.getElementById('cadernoStatus'); if(s) s.textContent = t || ''; }
+  function _cadStatus(t, elOpt){ const s = elOpt || _cadActiveStatusEl || document.getElementById('cadernoStatus'); if(s) s.textContent = t || ''; }
   async function _cadUserId(){
     if(_cadUid) return _cadUid;
     try { const r = await window._sb.auth.getUser(); _cadUid = (r && r.data && r.data.user) ? r.data.user.id : null; } catch(_){ _cadUid = null; }
@@ -38422,6 +38450,9 @@ window.TutorIA = (function(){
   async function _cadLoad(unitId){
     const el = _cadEl(); if(!el) return;
     _cadDocId = null; _cadUnit = unitId; _fcCadConhecidos = new Set(); el.innerHTML = ''; _emptyToggle(el); _cadStatus('carregando…');
+    const blNaCarga = _cadActiveBl || { sec: document.getElementById('cadernoBacklinks'), list: document.getElementById('cadernoBlList'), count: document.getElementById('cadernoBlCount') };
+    _cadSurfReg(el, { tipo: 'unit', unitId: String(unitId),
+      statusEl: _cadActiveStatusEl || document.getElementById('cadernoStatus'), bl: blNaCarga });
     const uid = await _cadUserId();
     if(!uid || !window._sb || !unitId){ _cadStatus(''); _emptyToggle(el); return; }
     try {
@@ -38435,7 +38466,7 @@ window.TutorIA = (function(){
     try{ _fcCadAdotar(el); }catch(e){ console.warn('[fc caderno adoção]', e); }
     try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); }
     _emptyToggle(el); _cadStatus('');
-    _cadLoadBacklinks(unitId);
+    _cadLoadBacklinks(unitId, null, blNaCarga);
   }
   /* ── D2a: identidade POR LINHA (célula) ─────────────────────────────────
      Cada linha do caderno ganha um id estável data-cel, invisível — o
@@ -38465,32 +38496,36 @@ window.TutorIA = (function(){
   }
   async function _cadSave(){
     const el = _cadEl(); if(!el || (!_cadUnit && !_cadDocId)) return;
+    // IDENTIDADE CAPTURADA NA ENTRADA: com 2 painéis editáveis o foco pode
+    // trocar durante os awaits — sem isto, o corpo de um caderno cairia na
+    // linha do OUTRO (corrupção silenciosa).
+    const unitAlvo = _cadUnit, docAlvo = _cadDocId, stAlvo = _cadActiveStatusEl;
     // O ciclo de flashcards (::) é DA UNIDADE — card precisa de unitId.
     // No avulso, :: fica como texto (decisão em aberto registrada).
-    if(_cadUnit){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
+    if(unitAlvo){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
     try{ _cadCelCarimbar(el); }catch(e){ console.warn('[cad cel]', e); }
     const body = _cadSanitize(el.innerHTML);   // corpo CRU: o ciclo des-renderizou
-    if(_cadUnit){ try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); } }
-    if(_cadDocId){
+    if(unitAlvo){ try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); } }
+    if(docAlvo){
       // caderno AVULSO: salva pelo Store (sync embutido) + versões em 'doc:'+id
-      _cadStatus('salvando…');
-      const doc = (window.Store && Store.cadAvulsoSalvar) ? Store.cadAvulsoSalvar(_cadDocId, { body: body }) : null;
-      _cadStatus(doc ? 'salvo' : 'erro ao salvar');
+      _cadStatus('salvando…', stAlvo);
+      const doc = (window.Store && Store.cadAvulsoSalvar) ? Store.cadAvulsoSalvar(docAlvo, { body: body }) : null;
+      _cadStatus(doc ? 'salvo' : 'erro ao salvar', stAlvo);
       if(doc){ try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ } }
       const uid0 = await _cadUserId();
-      if(doc && uid0) _cadVersionar(uid0, 'doc:' + _cadDocId, body);
+      if(doc && uid0) _cadVersionar(uid0, 'doc:' + docAlvo, body);
       return;
     }
     const uid = await _cadUserId(); if(!uid || !window._sb) return;
-    _cadStatus('salvando…');
+    _cadStatus('salvando…', stAlvo);
     try {
       const { error } = await window._sb.schema('aluno').from('caderno')
-        .upsert({ user_id: uid, unit_id: String(_cadUnit), body: body, updated_at: new Date().toISOString() }, { onConflict: 'user_id,unit_id' });
-      _cadStatus(error ? 'erro ao salvar' : 'salvo'); if(error) console.warn('[caderno save]', error);
-      if(!error && window.Store && Store.upsertCadernoCache) Store.upsertCadernoCache(_cadUnit, body, Date.now());
-      if(!error) _cadVersionar(uid, _cadUnit, body);
+        .upsert({ user_id: uid, unit_id: String(unitAlvo), body: body, updated_at: new Date().toISOString() }, { onConflict: 'user_id,unit_id' });
+      _cadStatus(error ? 'erro ao salvar' : 'salvo', stAlvo); if(error) console.warn('[caderno save]', error);
+      if(!error && window.Store && Store.upsertCadernoCache) Store.upsertCadernoCache(unitAlvo, body, Date.now());
+      if(!error) _cadVersionar(uid, unitAlvo, body);
       if(!error){ try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ } }
-    } catch(e){ _cadStatus('erro ao salvar'); console.warn('[caderno save ex]', e); }
+    } catch(e){ _cadStatus('erro ao salvar', stAlvo); console.warn('[caderno save ex]', e); }
   }
   /* ── Histórico de versões do caderno (lixeira das anotações) ─────────────
      Fotos do corpo em aluno.caderno_versions, guardadas por 30 dias:
@@ -38655,7 +38690,7 @@ window.TutorIA = (function(){
       if(_cadUnit !== _ctx.unitId) _cadLoad(_ctx.unitId);
       const el = _cadEl(); if(el) setTimeout(function(){ el.focus(); }, 30);
     }
-    if(grf){ _grafoOpen(); }
+    if(grf){ _grafoRoot = d.querySelector('#tutorGrafo'); _grafoFocoId = _ctx.unitId || null; _grafoOpen(); }
     else if(_fg){ try { _fg.pauseAnimation(); } catch(_){} }
   }
 
@@ -38805,11 +38840,12 @@ window.TutorIA = (function(){
     });
     return byId;
   }
-  async function _cadLoadBacklinks(unitId, alvoAttr){
+  async function _cadLoadBacklinks(unitId, alvoAttr, blSurf){
     const atributo = alvoAttr || 'data-unit-id';
-    const sec = _cadActiveBl ? _cadActiveBl.sec : document.getElementById('cadernoBacklinks');
-    const listEl = _cadActiveBl ? _cadActiveBl.list : document.getElementById('cadernoBlList');
-    const countEl = _cadActiveBl ? _cadActiveBl.count : document.getElementById('cadernoBlCount');
+    const _bl = blSurf || _cadActiveBl;
+    const sec = _bl ? _bl.sec : document.getElementById('cadernoBacklinks');
+    const listEl = _bl ? _bl.list : document.getElementById('cadernoBlList');
+    const countEl = _bl ? _bl.count : document.getElementById('cadernoBlCount');
     if(!sec || !listEl) return;
     sec.hidden = true; sec.classList.remove('is-open'); listEl.hidden = true; listEl.innerHTML = '';
     const uid = await _cadUserId(); if(!uid || !window._sb || !unitId) return;
@@ -38925,6 +38961,14 @@ window.TutorIA = (function(){
   // ── ABA "CONEXÕES" — grafo (force-graph vanilla, Canvas) — FASE 3A ──
   const _GRAFO_PALETTE = ['#c8a97e','#7ea9c8','#86c88a','#c87e9e','#b59ad6','#d6b85a','#69b9a8','#d68a6a','#9aa0d6','#c86a6a','#7ec8c0'];
   let _fg = null, _fgRO = null, _fgScriptP = null;
+  // Raiz ATIVA do grafo (drawer #tutorGrafo ou painel do split) + host do
+  // canvas + foco (unidade/caderno atual, pro recorte opcional dos Ajustes).
+  let _grafoRoot = null, _grafoHostEl = null, _grafoFocoId = null;
+  function _gEl(id){
+    const r = (_grafoRoot && _grafoRoot.isConnected) ? _grafoRoot : null;
+    if(r) return r.querySelector('#' + id) || r.querySelector('[data-gid="' + id + '"]');
+    return document.getElementById(id);
+  }
   function _loadForceGraph(){
     if(window.ForceGraph) return Promise.resolve();
     if(_fgScriptP) return _fgScriptP;
@@ -38939,7 +38983,7 @@ window.TutorIA = (function(){
   }
   function _grafoShort(s){ return (s && s.length > 24) ? (s.slice(0, 23) + '…') : (s || ''); }
   function _grafoLegend(subjects){
-    const el = document.getElementById('grafoLegend'); if(!el) return;
+    const el = _gEl('grafoLegend'); if(!el) return;
     el.innerHTML = (subjects || []).map(function(s){ return '<span class="lg"><i style="background:' + s.color + '"></i>' + _esc(s.sigla) + '</span>'; }).join('');
   }
   // ── Estado do grafo (3B) ──
@@ -38994,13 +39038,19 @@ window.TutorIA = (function(){
       try { const { data, error } = await window._sb.schema('aluno').from('caderno').select('unit_id, body').eq('user_id', uid); if(error){ console.warn('[grafo]', error); return null; } rows = data || []; }
       catch(e){ console.warn('[grafo ex]', e); return null; }
     }
+    // D2d: cadernos PRÓPRIOS entram no mapa — como fonte (chips no corpo) e
+    // como nó ('doc:<id>').
+    const avDocs = (window.Store && Store.cadAvulsosLista) ? (Store.cadAvulsosLista() || []) : [];
+    avDocs.forEach(function(d2){ rows.push({ unit_id: 'doc:' + d2.id, body: d2.body || '' }); });
     const idx = _buildUnitIndex();
     const tmp = document.createElement('div'), refMap = {}, linkedUnits = new Set();
     rows.forEach(function(row){
       const src = String(row.unit_id); if(!row.body) return;
       tmp.innerHTML = _cadSanitize(row.body);
       Array.prototype.forEach.call(tmp.querySelectorAll('.tutor-ref'), function(c){
-        const tgt = String(c.getAttribute('data-unit-id') || ''); if(!tgt || tgt === src) return;
+        const tDoc = c.getAttribute('data-doc-id');
+        const tgt = tDoc ? ('doc:' + tDoc) : String(c.getAttribute('data-unit-id') || '');
+        if(!tgt || tgt === 'doc:' || tgt === src) return;
         linkedUnits.add(src); linkedUnits.add(tgt);
         const host = (c.closest && c.closest('div,p,li,h1,h2,h3')) || tmp;
         const sentence = (host.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 280);
@@ -39037,9 +39087,18 @@ window.TutorIA = (function(){
     const showUnits = idx.flat.filter(function(u){ return studentSubj.has(String(u.subjectId)) || linkedUnits.has(String(u.id)); });
     if(!showUnits.length) return { units: [], subjects: [], refs: [], colorBase: {}, degree: {} };
     const units = showUnits.map(function(u){ return { id: String(u.id), subjectId: String(u.subjectId), label: [u.sigla, u.number, u.title].filter(Boolean).join(' · '), degree: degree[String(u.id)] || 0 }; });
+    // nós dos cadernos próprios: cluster da matéria vinculada, ou o sol
+    // "Cadernos" quando sem matéria
+    avDocs.forEach(function(d2){
+      units.push({ id: 'doc:' + d2.id, subjectId: d2.subjectId ? String(d2.subjectId) : '_doc', label: '\u270E ' + (d2.titulo || 'Sem título'), degree: degree['doc:' + d2.id] || 0 });
+    });
     const subjIds = [...new Set(units.map(function(u){ return u.subjectId; }))].sort();
     const colorBase = {}; subjIds.forEach(function(s, i){ colorBase[s] = _GRAFO_PALETTE[i % _GRAFO_PALETTE.length]; });
-    const subjects = subjIds.map(function(s){ const sample = showUnits.find(function(u){ return String(u.subjectId) === s; }); return { id: s, sigla: sample ? (sample.sigla || s) : s }; });
+    const subjects = subjIds.map(function(s){
+      if(s === '_doc') return { id: s, sigla: 'Cadernos' };
+      const sample = showUnits.find(function(u){ return String(u.subjectId) === s; });
+      return { id: s, sigla: sample ? (sample.sigla || s) : s };
+    });
     return { units: units, subjects: subjects, refs: refs, colorBase: colorBase, degree: degree };
   }
   // Conjunto de unidades VISÍVEIS dado o filtro (vizinhança) + recolhimento.
@@ -39055,6 +39114,17 @@ window.TutorIA = (function(){
         if(_grafoActive.has(subjById[e.source])) base.add(e.target);
         if(_grafoActive.has(subjById[e.target])) base.add(e.source);
       });
+    }
+    // Opção dos Ajustes: só a unidade/caderno ATUAL e as ligadas a ela.
+    if((_grafoPrefs.display || {}).soAtual && _grafoFocoId){
+      const foco = String(_grafoFocoId);
+      const perto = new Set([foco]);
+      _grafoRefsAtivos().forEach(function(e2){
+        if(String(e2.source) === foco) perto.add(String(e2.target));
+        if(String(e2.target) === foco) perto.add(String(e2.source));
+      });
+      const base2 = new Set(); base.forEach(function(id){ if(perto.has(id)) base2.add(id); });
+      base = base2;
     }
     const vis = new Set();
     base.forEach(function(id){ const s = subjById[id]; if(_grafoCollapsed[s] && (m.degree[id] || 0) === 0) return; vis.add(id); }); // recolhe só as unidades sem conexão
@@ -39112,7 +39182,7 @@ window.TutorIA = (function(){
       l.curvature = (_pares[_parKey(String(l.source), String(l.target))] > 1) ? 0.22 : 0;
     });
     _fg.graphData({ nodes: nodes, links: links });
-    const statusEl = document.getElementById('grafoStatus'); if(statusEl) statusEl.textContent = sunSubj.size + ' matéria(s) · ' + vis.size + ' unidades · passe o mouse nas linhas';
+    const statusEl = _gEl('grafoStatus'); if(statusEl) statusEl.textContent = sunSubj.size + ' matéria(s) · ' + vis.size + ' unidades · passe o mouse nas linhas';
     _grafoLegend(m.subjects.filter(function(s){ return sunSubj.has(s.id); }).map(function(s){ return { sigla: s.sigla, color: _grafoColor(s.id) }; }));
   }
   // ── DEMO DO TOUR (conexões) ──
@@ -39166,7 +39236,7 @@ window.TutorIA = (function(){
     try{
       _fg.graphData({ nodes: nodes, links: links });
       _grafoLegend([{ sigla:sg1, color:c1 }, { sigla:sg2, color:c2 }]);
-      const st = document.getElementById('grafoStatus');
+      const st = _gEl('grafoStatus');
       if(st) st.textContent = 'Exemplo ilustrativo — suas conexões aparecem conforme você usa [[ ]] no Caderno';
     }catch(e){ console.warn('[tour demo grafo]', e); return false; }
     return true;
@@ -39185,16 +39255,17 @@ window.TutorIA = (function(){
   }
   function _grafoPoke(){ if(_fg){ try { _fg.nodeRelSize(_fg.nodeRelSize()); } catch(_){} } }
   function _grafoRenderPanel(){
-    const body = document.getElementById('grafoPanelBody'); const m = _grafoModel; if(!body || !m) return;
+    const body = _gEl('grafoPanelBody'); const m = _grafoModel; if(!body || !m) return;
     body.innerHTML = '';
     const sec = function(title){ const d = document.createElement('div'); d.className = 'gp-sec'; const h = document.createElement('div'); h.className = 'gp-h'; h.textContent = title; d.appendChild(h); body.appendChild(d); return d; };
     const row = function(parent){ const r = document.createElement('label'); r.className = 'gp-row'; parent.appendChild(r); return r; };
     // Tipos de conexão (Fase 6C): cadernos [[ ]] × flashcards ⇆
     const sC = sec('Conexões');
-    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showFc', 'Flashcards ⇆ — tracejada']].forEach(function(par){
+    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showFc', 'Flashcards ⇆ — tracejada'], ['soAtual', 'Só a unidade/caderno atual']].forEach(function(par){
       const r0 = row(sC);
       const cb0 = document.createElement('input'); cb0.type = 'checkbox';
-      cb0.checked = (_grafoPrefs.display || {})[par[0]] !== false;
+      // soAtual nasce DESLIGADO (grafo inteiro é o padrão da casa)
+      cb0.checked = par[0] === 'soAtual' ? !!(_grafoPrefs.display || {})[par[0]] : (_grafoPrefs.display || {})[par[0]] !== false;
       const sp0 = document.createElement('span'); sp0.className = 'gp-row-l'; sp0.textContent = par[1];
       r0.appendChild(cb0); r0.appendChild(sp0);
       cb0.addEventListener('change', function(){
@@ -39259,7 +39330,8 @@ window.TutorIA = (function(){
     const title = isUnit ? node.name : ('Matéria · ' + node.name);
     const pinLabel = node.pinned ? 'Soltar' : 'Fixar no canvas';
     const collapsed = _grafoCollapsed[node.subjectId];
-    const secondLabel = isUnit ? 'Abrir unidade' : (collapsed ? 'Expandir matéria' : 'Recolher matéria');
+    const ehDocNode = isUnit && String(node.unitId || '').indexOf('doc:') === 0;
+    const secondLabel = isUnit ? (ehDocNode ? 'Abrir caderno' : 'Abrir unidade') : (collapsed ? 'Expandir matéria' : 'Recolher matéria');
     const secondIcon = isUnit ? _SVG_OPEN : _SVG_FOLD;
     pop.innerHTML =
       '<div class="tutor-ref-pop-name">' + _esc(title) + '</div>' +
@@ -39273,7 +39345,10 @@ window.TutorIA = (function(){
     pop.style.left = left + 'px'; pop.style.top = top + 'px';
     pop.querySelector('[data-act="pin"]').addEventListener('click', function(){ _grafoTogglePin(node); _grafoCloseNodeMenu(); });
     pop.querySelector('[data-act="second"]').addEventListener('click', function(){
-      if(isUnit){ const href = _unitHref(node.unitId); _grafoCloseNodeMenu(); if(href){ close(); location.hash = href; } }
+      if(isUnit){
+        const href = ehDocNode ? ('#/cadernos?doc=' + encodeURIComponent(String(node.unitId).slice(4))) : _unitHref(node.unitId);
+        _grafoCloseNodeMenu(); if(href){ close(); location.hash = href; }
+      }
       else { _grafoCollapsed[node.subjectId] = !_grafoCollapsed[node.subjectId]; _grafoCloseNodeMenu(); _grafoApply(); }
     });
     setTimeout(function(){ document.addEventListener('mousedown', _grafoMenuOutside, true); }, 0);
@@ -39291,33 +39366,37 @@ window.TutorIA = (function(){
     const n = parseInt(h, 16); if(isNaN(n)) return 'rgba(200,169,126,' + a + ')';
     return 'rgba(' + ((n>>16)&255) + ',' + ((n>>8)&255) + ',' + (n&255) + ',' + a + ')';
   }
-  // D2e: monta o grafo num host de FORA (painel do split) e re-desenha quando
-  // um caderno é salvo (evento ubq:cad-salvo, com folga de 1,5s).
+  // D2e: o MESMO grafo (uma instância, mesma estética, mesmos Ajustes) em
+  // outro host — a raiz decide onde os elementos moram e o _grafoOpen é o
+  // mesmo da aba Conexões. Grafo vivo: re-desenha ao salvar caderno.
   let _grafoPaneTimer = null;
-  async function grafoMontarEm(host){
+  function grafoMontarEm(host, focoId){
     if(!host) return;
-    try{
-      await _loadForceGraph();
-      _grafoModel = await _grafoBuildModel();
-      if(_fg){ try{ if(_fg._destructor) _fg._destructor(); }catch(_){ } _fg = null; }
-      _fg = _grafoBuild2D(host);
-      _grafoApply();
-      const r = host.getBoundingClientRect();
-      if(r.width && r.height) _fg.width(r.width).height(r.height);
-      if(!window.__grafoPaneBound){
-        window.__grafoPaneBound = true;
-        document.addEventListener('ubq:cad-salvo', function(){
-          clearTimeout(_grafoPaneTimer);
-          _grafoPaneTimer = setTimeout(async function(){
-            const h = document.getElementById('cadpGrafoHost');
-            if(!h || !document.body.contains(h) || !_fg) return;
-            try{ _grafoModel = await _grafoBuildModel(); _grafoApply(); }catch(_){ }
-          }, 1500);
-        });
-      }
-    }catch(e){
-      console.warn('[grafo pane]', e);
-      host.innerHTML = '<div class="cadp-pane-vazio">Não deu para montar o grafo agora.</div>';
+    if(!host.querySelector('[data-gid="grafoCanvas"]')){
+      host.innerHTML =
+        '<div class="tutor-grafo-canvas" data-gid="grafoCanvas"></div>'
+        + '<div class="tutor-grafo-foot"><span class="tutor-grafo-status" data-gid="grafoStatus">Carregando…</span><span class="tutor-grafo-legend" data-gid="grafoLegend"></span></div>'
+        + '<div class="tutor-grafo-panel" data-gid="grafoPanel"><button type="button" class="tutor-grafo-panel-h" data-gid="grafoPanelToggle" aria-expanded="false"><span class="tutor-grafo-panel-chev">&#9656;</span> Ajustes <span class="tutor-grafo-panel-sub">filtros · cores · forças</span></button><div class="tutor-grafo-panel-body" data-gid="grafoPanelBody" hidden></div></div>';
+      const tg = host.querySelector('[data-gid="grafoPanelToggle"]');
+      tg.addEventListener('click', function(){
+        const sec = host.querySelector('[data-gid="grafoPanel"]'), body = host.querySelector('[data-gid="grafoPanelBody"]');
+        const aberto = sec.classList.toggle('is-open'); if(body) body.hidden = !aberto;
+        tg.setAttribute('aria-expanded', aberto ? 'true' : 'false');
+        if(aberto && _fg){ setTimeout(function(){ const h = host.querySelector('[data-gid="grafoCanvas"]'); const r = h && h.getBoundingClientRect(); if(r && r.width && r.height) _fg.width(r.width).height(r.height); }, 60); }
+      });
+    }
+    _grafoRoot = host;
+    _grafoFocoId = focoId || null;
+    _grafoOpen();
+    if(!window.__grafoVivoBound){
+      window.__grafoVivoBound = true;
+      document.addEventListener('ubq:cad-salvo', function(){
+        clearTimeout(_grafoPaneTimer);
+        _grafoPaneTimer = setTimeout(async function(){
+          if(!_fg || !_grafoHostEl || !_grafoHostEl.isConnected) return;
+          try{ _grafoModel = await _grafoBuildModel(); _grafoApply(); }catch(_){ }
+        }, 1500);
+      });
     }
   }
   function _grafoBuild2D(host){
@@ -39399,10 +39478,14 @@ window.TutorIA = (function(){
     if(_fg){ try { if(typeof _fg._destructor === 'function') _fg._destructor(); else _fg.pauseAnimation(); } catch(_){} }
     host.innerHTML = ''; _grafoNodeObj = {};
     _fg = _grafoBuild2D(host);
-    if(!_fgRO){ _fgRO = new ResizeObserver(function(){ const r = host.getBoundingClientRect(); if(r.width && r.height && _fg){ _fg.width(r.width).height(r.height); } }); _fgRO.observe(host); }
+    _grafoHostEl = host;
+    // o observador SEGUE o host ativo (antes ficava preso no primeiro pra sempre)
+    if(_fgRO) _fgRO.disconnect();
+    _fgRO = new ResizeObserver(function(){ const r = host.getBoundingClientRect(); if(r.width && r.height && _fg){ _fg.width(r.width).height(r.height); } });
+    _fgRO.observe(host);
   }
   async function _grafoOpen(){
-    const host = document.getElementById('grafoCanvas'), statusEl = document.getElementById('grafoStatus');
+    const host = _gEl('grafoCanvas'), statusEl = _gEl('grafoStatus');
     if(!host) return;
     if(statusEl) statusEl.textContent = 'Carregando…';
     _grafoModel = await _grafoBuildModel();
@@ -39413,13 +39496,13 @@ window.TutorIA = (function(){
       if(!emptyEl){ emptyEl = document.createElement('div'); emptyEl.className = 'tutor-grafo-empty'; host.appendChild(emptyEl); }
       emptyEl.textContent = 'Ainda não há unidades pra mostrar.';
       if(statusEl) statusEl.textContent = ''; _grafoLegend([]);
-      const pb = document.getElementById('grafoPanelBody'); if(pb) pb.innerHTML = ''; return;
+      const pb = _gEl('grafoPanelBody'); if(pb) pb.innerHTML = ''; return;
     }
     if(emptyEl) emptyEl.remove();
     await _grafoPrefsLoad();
     try { await _loadForceGraph(); }
     catch(_){ if(statusEl) statusEl.textContent = 'Não consegui carregar o mapa (sem conexão?).'; return; }
-    if(!_fg){ _grafoSwitchTo(host); }
+    if(!_fg || _grafoHostEl !== host){ _grafoSwitchTo(host); }
     try { _fg.resumeAnimation(); } catch(_){}
     const r = host.getBoundingClientRect();
     _fg.width(r.width || 360).height(r.height || 360);
@@ -39551,7 +39634,7 @@ window.TutorIA = (function(){
       const sec = d.querySelector('#grafoPanel'), body = d.querySelector('#grafoPanelBody');
       const open = sec.classList.toggle('is-open'); if(body) body.hidden = !open;
       _gpT.setAttribute('aria-expanded', open ? 'true' : 'false');
-      if(open && _fg){ setTimeout(function(){ const h = document.getElementById('grafoCanvas'); const r = h && h.getBoundingClientRect(); if(r && r.width && r.height) _fg.width(r.width).height(r.height); }, 60); }
+      if(open && _fg){ setTimeout(function(){ const h = d.querySelector('#grafoCanvas'); const r = h && h.getBoundingClientRect(); if(r && r.width && r.height) _fg.width(r.width).height(r.height); }, 60); }
     });
     if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(d);
     return d;
@@ -39828,6 +39911,9 @@ window.TutorIA = (function(){
   function _cadLoadDoc(docId){
     const el = _cadEl(); if(!el) return;
     _cadDocId = String(docId); _cadUnit = null; _fcCadConhecidos = new Set();
+    const blDoc = _cadActiveBl || { sec: document.getElementById('cadernoBacklinks'), list: document.getElementById('cadernoBlList'), count: document.getElementById('cadernoBlCount') };
+    _cadSurfReg(el, { tipo: 'doc', docId: String(docId),
+      statusEl: _cadActiveStatusEl || document.getElementById('cadernoStatus'), bl: blDoc });
     const doc = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(docId) : null;
     el.innerHTML = _cadSanitize((doc && doc.body) || '');
     _cadFixChips(el);
@@ -39835,7 +39921,7 @@ window.TutorIA = (function(){
     _cadStatus('');
     _cadVerBase['doc:' + String(docId)] = (doc && doc.body) || '';
     // D2d: Referências do caderno próprio — quem cita este doc.
-    _cadLoadBacklinks(String(docId), 'data-doc-id');
+    _cadLoadBacklinks(String(docId), 'data-doc-id', blDoc);
   }
   /* ── D2e: split HORIZONTAL dentro do drawer ─────────────────────────────
      Metade de cima = o caderno DESTA unidade (editor). Metade de baixo =
@@ -39854,17 +39940,17 @@ window.TutorIA = (function(){
     const al = _drawerSplit;
     const fechar = '<button type="button" class="cadp-mini" data-dsp-x data-tip="Fechar a metade">&times;</button>';
     let titulo = '', corpo = '', abrirHash = null;
-    if(al.tipo === 'doccad'){
-      const doc = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(al.id) : null;
-      titulo = '\u270E ' + ((doc && doc.titulo) || 'Caderno');
-      abrirHash = '#/cadernos?doc=' + encodeURIComponent(al.id);
-      corpo = '<div class="tutor-cad-leitura">' + (doc && doc.body ? _cadSanitize(doc.body) : '<div class="cadp-pane-vazio">Este caderno ainda está vazio.</div>') + '</div>';
-    } else if(al.tipo === 'unitcad'){
-      const u = _buildUnitIndex().flat.find(function(x){ return String(x.id) === String(al.id); });
-      titulo = (u && u.label) || 'Caderno da unidade';
-      abrirHash = '#/cadernos?u=' + encodeURIComponent(al.id);
-      const cad = ((window.Store && Store.listCadernos) ? Store.listCadernos() : []).find(function(x){ return String(x.unitId) === String(al.id); });
-      corpo = '<div class="tutor-cad-leitura">' + (cad && cad.body ? _cadSanitize(cad.body) : '<div class="cadp-pane-vazio">Este caderno ainda está vazio.</div>') + '</div>';
+    if(al.tipo === 'doccad' || al.tipo === 'unitcad'){
+      const ehDoc = al.tipo === 'doccad';
+      const doc = ehDoc && (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(al.id) : null;
+      const u = ehDoc ? null : _buildUnitIndex().flat.find(function(x){ return String(x.id) === String(al.id); });
+      titulo = ehDoc ? ('\u270E ' + ((doc && doc.titulo) || 'Caderno')) : ((u && u.label) || 'Caderno da unidade');
+      abrirHash = ehDoc ? ('#/cadernos?doc=' + encodeURIComponent(al.id)) : ('#/cadernos?u=' + encodeURIComponent(al.id));
+      // editável (mesma máquina; o foco decide o editor ativo) — a não ser
+      // que seja o MESMO caderno da metade de cima
+      const mesmo = !ehDoc && String(al.id) === String(_cadUnit || (_ctx && _ctx.unitId) || '');
+      corpo = mesmo ? '<div class="cadp-pane-vazio">É o caderno desta unidade — ele já está aberto acima.</div>'
+                    : '<div class="tutor-cad-paneb-ed" data-dsp-ed></div>';
     } else {
       const u2 = _buildUnitIndex().flat.find(function(x){ return String(x.id) === String(al.id); });
       titulo = (u2 && u2.label) || 'Unidade';
@@ -39877,6 +39963,8 @@ window.TutorIA = (function(){
     const x = b.querySelector('[data-dsp-x]'); if(x) x.addEventListener('click', function(){ _drawerSplitAbrir(null); });
     const op = b.querySelector('[data-dsp-open]');
     if(op) op.addEventListener('click', function(){ _drawerSplitAbrir(null); _cadSave(); close(); if(abrirHash) location.hash = abrirHash; });
+    const edH = b.querySelector('[data-dsp-ed]');
+    if(edH) montarCadernoEm(edH, al.tipo === 'doccad' ? { tipo: 'avulso', id: al.id } : { tipo: 'unit', unitId: al.id });
   }
   let _cadMenuEl = null;
   function _cadMenuFechar(){ if(_cadMenuEl){ _cadMenuEl.remove(); _cadMenuEl = null; } }
@@ -39970,10 +40058,11 @@ window.TutorIA = (function(){
   // superfície ativa pro padrão (drawer). O corpo é lido de forma síncrona,
   // então funciona mesmo com o DOM antigo já destacado.
   function desmontarCaderno(){
-    if(!_cadActiveEl) return;
+    if(!_cadActiveEl){ _cadSurfs = _cadSurfs.filter(function(x){ return x.el.isConnected; }); return; }
     if(_cadTimer){ clearTimeout(_cadTimer); _cadTimer = null; }
     try{ _cadSave(); }catch(_){ }
     _cadActiveEl = null; _cadActiveStatusEl = null; _cadActiveBl = null; _cadDocId = null;
+    _cadSurfs = [];
   }
   function openCadernoModal(ctx){
     _ensureStyles();
@@ -40035,7 +40124,8 @@ window.TutorIA = (function(){
   }
   // Abre o mapa de Conexões já filtrado na matéria daquele caderno (da página Notas).
   function openConexoesFor(ctx, subjectId){
-    if(subjectId != null) _grafoActive = new Set([String(subjectId)]);
+    // (2026-08-27, decisão do dono) SEM pré-filtro por matéria: o grafo abre
+    // INTEIRO sempre; recorte é escolha do aluno nos Ajustes ("só a atual").
     return open(ctx).then(function(){
       _setTab('grafo');
       setTimeout(function(){ try { _grafoApply(); _grafoRenderPanel(); } catch(_){} }, 500);
@@ -53905,8 +53995,8 @@ const CadernosPage = (function(){
   function _paneBRender(b){
     if(!_split) return;
     const fechar = '<button type="button" class="cadp-mini" data-pane-x data-tip="Fechar o painel">&times;</button>';
-    const san = (window.TutorIA && TutorIA.sanitize) ? TutorIA.sanitize : function(h){ return h; };
     let head = '', corpo = '';
+    const selAtual = _sel(_route || { query: {} });
     if(_split.tipo === 'grafo'){
       head = '<span class="cadp-paneb-t">Grafo — conexões dos seus cadernos</span><span class="cadp-paneb-acts">' + fechar + '</span>';
       corpo = '<div class="cadp-pane-grafo" id="cadpGrafoHost"></div>';
@@ -53917,17 +54007,19 @@ const CadernosPage = (function(){
         + (href ? '<button type="button" class="cadp-mini" data-pane-full data-tip="Sair do split e abrir a unidade na tela toda">abrir inteira</button>' : '') + fechar + '</span>';
       corpo = href ? '<iframe class="cadp-portal" src="' + Util.attr('index.html' + href) + '"></iframe>'
         : '<div class="cadp-pane-vazio">Unidade não encontrada.</div>';
-    } else if(_split.tipo === 'doccad'){
-      const doc = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(_split.id) : null;
-      head = '<span class="cadp-paneb-t">&#9998; ' + Util.esc((doc && doc.titulo) || 'Caderno') + '</span><span class="cadp-paneb-acts">'
-        + '<button type="button" class="cadp-mini" data-pane-edit data-tip="Troca os lados: este caderno vira o editor">editar aqui</button>' + fechar + '</span>';
-      corpo = '<div class="cadp-leitura">' + (doc && doc.body ? san(doc.body) : '<div class="cadp-pane-vazio">Este caderno ainda está vazio.</div>') + '</div>';
     } else {
-      const rot = _rotuloUnidade(_split.id) || 'Caderno da unidade';
-      const cad = ((window.Store && Store.listCadernos) ? Store.listCadernos() : []).find(function(x){ return String(x.unitId) === String(_split.id); });
+      // caderno EDITÁVEL no 2º painel (decisão do dono: os dois lados editam;
+      // o foco decide onde o caret está — copiar/colar entre eles é natural)
+      const ehDoc = _split.tipo === 'doccad';
+      const doc = ehDoc && (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(_split.id) : null;
+      const rot = ehDoc ? ('\u270E ' + ((doc && doc.titulo) || 'Caderno')) : (_rotuloUnidade(_split.id) || 'Caderno da unidade');
+      const mesmo = selAtual && ((ehDoc && selAtual.tipo === 'avulso' && String(selAtual.id) === String(_split.id))
+        || (!ehDoc && selAtual.tipo === 'unit' && String(selAtual.unitId) === String(_split.id)));
       head = '<span class="cadp-paneb-t">' + Util.esc(rot) + '</span><span class="cadp-paneb-acts">'
-        + '<button type="button" class="cadp-mini" data-pane-edit data-tip="Troca os lados: este caderno vira o editor">editar aqui</button>' + fechar + '</span>';
-      corpo = '<div class="cadp-leitura">' + (cad && cad.body ? san(cad.body) : '<div class="cadp-pane-vazio">Este caderno ainda está vazio.</div>') + '</div>';
+        + '<button type="button" class="cadp-mini" data-pane-inv data-tip="Inverter os lados">&#8646; inverter</button>' + fechar + '</span>';
+      corpo = mesmo
+        ? '<div class="cadp-pane-vazio">Este caderno já está aberto no outro painel.</div>'
+        : '<div class="cadp-paneb-ed" data-pane-ed></div>';
     }
     b.innerHTML = '<div class="cadp-paneb-h">' + head + '</div><div class="cadp-paneb-body">' + corpo + '</div>';
     const x = b.querySelector('[data-pane-x]');
@@ -53937,9 +54029,16 @@ const CadernosPage = (function(){
       const href = (window.TutorIA && TutorIA.unitHref) ? TutorIA.unitHref(_split.id) : null;
       if(href){ _split = null; location.hash = href; }
     });
-    const ed = b.querySelector('[data-pane-edit]');
-    if(ed) ed.addEventListener('click', _paneBTrocar);
-    if(_split.tipo === 'grafo' && window.TutorIA && TutorIA.grafoMontarEm) TutorIA.grafoMontarEm(b.querySelector('#cadpGrafoHost'));
+    const inv = b.querySelector('[data-pane-inv]');
+    if(inv) inv.addEventListener('click', _paneBTrocar);
+    const edHost = b.querySelector('[data-pane-ed]');
+    if(edHost && window.TutorIA && TutorIA.montarCadernoEm){
+      TutorIA.montarCadernoEm(edHost, _split.tipo === 'doccad' ? { tipo: 'avulso', id: _split.id } : { tipo: 'unit', unitId: _split.id });
+    }
+    if(_split.tipo === 'grafo' && window.TutorIA && TutorIA.grafoMontarEm){
+      const foco = selAtual ? (selAtual.tipo === 'avulso' ? ('doc:' + selAtual.id) : String(selAtual.unitId)) : null;
+      TutorIA.grafoMontarEm(b.querySelector('#cadpGrafoHost'), foco);
+    }
   }
   function splitAbrir(alvo){
     _split = alvo || null;
@@ -54108,24 +54207,26 @@ const CadernosPage = (function(){
     });
     side.addEventListener('dragover', function(e){
       if(!e.dataTransfer || Array.prototype.indexOf.call(e.dataTransfer.types, 'text/ubq-doc') === -1) return;
-      const alvo = e.target.closest ? e.target.closest('[data-drop-mat],[data-drop-pasta],.cadp-tree') : null;
-      if(!alvo) return;
+      // a BARRA INTEIRA aceita: pasta = entra nela; fora de pasta = raiz
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
+      const alvo = e.target.closest ? e.target.closest('[data-drop-mat],[data-drop-pasta]') : null;
       side.querySelectorAll('.is-drop').forEach(function(x){ if(x !== alvo) x.classList.remove('is-drop'); });
-      if(alvo.classList) alvo.classList.add('is-drop');
+      side.classList.toggle('is-drop-raiz', !alvo);
+      if(alvo && alvo.classList) alvo.classList.add('is-drop');
     });
     side.addEventListener('dragleave', function(e){
       if(e.target && e.target.classList && e.target.classList.contains('is-drop')) e.target.classList.remove('is-drop');
+      if(!side.contains(e.relatedTarget)) side.classList.remove('is-drop-raiz');
     });
     side.addEventListener('drop', function(e){
       const id = e.dataTransfer ? e.dataTransfer.getData('text/ubq-doc') : '';
       if(!id) return;
       e.preventDefault();
       side.querySelectorAll('.is-drop').forEach(function(x){ x.classList.remove('is-drop'); });
+      side.classList.remove('is-drop-raiz');
       const mat = e.target.closest ? e.target.closest('[data-drop-mat]') : null;
       const pst = e.target.closest ? e.target.closest('[data-drop-pasta]') : null;
-      if(!mat && !pst && !(e.target.closest && e.target.closest('.cadp-tree'))) return;
       if(window.Store && Store.cadAvulsoSalvar){
         if(mat) Store.cadAvulsoSalvar(id, { subjectId: mat.getAttribute('data-drop-mat') });
         else if(pst) Store.cadAvulsoSalvar(id, { pastaId: pst.getAttribute('data-drop-pasta') });
