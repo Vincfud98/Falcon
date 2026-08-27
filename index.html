@@ -14786,7 +14786,7 @@ const Store = (function(){
         meta: row.meta || {},
         updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now()
       }));
-      if(_state.cadernos.length) console.log('[Store] hydrated cadernos:', _state.cadernos.length);
+      console.log('[Store] hydrated cadernos:', _state.cadernos.length);
       _emit();
     }catch(e){ console.warn('[hydrate cadernos exception]', e); }
   }
@@ -14818,7 +14818,7 @@ const Store = (function(){
         _state.cadAvulsos.filter(c => c.deletedAt && c.deletedAt < limite)
           .forEach(c => { _syncCadAvulsoDelete(c.id).catch(()=>{}); });
         _state.cadAvulsos = _state.cadAvulsos.filter(c => !(c.deletedAt && c.deletedAt < limite));
-        if(_state.cadAvulsos.length) console.log('[Store] cadernos avulsos:', _state.cadAvulsos.length);
+        console.log('[Store] cadernos avulsos:', _state.cadAvulsos.length);
       }
       if(pastasR.error){ console.warn('[hydrate cad pastas]', pastasR.error); }
       else {
@@ -15208,7 +15208,14 @@ const Store = (function(){
 
   return {
     init(userId, course){
-      _key = `ubique.coursePlatform.v3.${userId}.${course.id}`;
+      const novaChave = `ubique.coursePlatform.v3.${userId}.${course.id}`;
+      // IDEMPOTENTE (armadilha de 23/08): o init roda de novo em vários
+      // gatilhos (boot, pós-hidratação, eventos de conteúdo). Re-init do
+      // MESMO usuário no MESMO curso NÃO pode trocar o _state — a troca
+      // apagava os espelhos só-de-memória (cadernos de unidade sumiam da
+      // página Cadernos) — nem re-disparar a rajada de ~20 hidratações.
+      if(_state && _key === novaChave) return _state;
+      _key = novaChave;
       const existing = _load();
       if(existing && existing.version === 3){
         _state = existing;
@@ -53957,15 +53964,35 @@ const CadernosPage = (function(){
       b.addEventListener('click', function(){ menu.hidden = true; _expor(b.getAttribute('data-exp'), titulo, pegaBody() || ''); });
     });
   }
+  let _mountUnsub = null, _mountTimer = null;
   function mount(stageEl, route){
     // troca de documento/re-render: descarrega o pendente do editor anterior
     if(window.TutorIA && TutorIA.desmontarCaderno) TutorIA.desmontarCaderno();
     _bindSidebar(stageEl, route);
     _painel(stageEl, route);
+    // Sidebar VIVA: se a hidratação dos cadernos terminar DEPOIS do mount
+    // (ou qualquer dado do Store mudar), a barra se reconstrói sozinha —
+    // nunca mais nasce vazia e fica. Só a barra; o painel (editor) não é
+    // tocado. Pausa enquanto o foco está nela (ex.: digitando na busca).
+    if(_mountUnsub){ _mountUnsub(); _mountUnsub = null; }
+    clearTimeout(_mountTimer);
+    if(window.Store && Store.subscribe){
+      _mountUnsub = Store.subscribe(function(){
+        clearTimeout(_mountTimer);
+        _mountTimer = setTimeout(function(){
+          const side = stageEl.querySelector('#cadpSide');
+          if(!side || !document.body.contains(side)) return;
+          if(side.contains(document.activeElement)) return;
+          _bindSidebar(stageEl, route);
+        }, 400);
+      });
+    }
     // sair da página descarrega também
     const aoSair = function(){
       if(/^#\/cadernos/.test(location.hash)) return;
       window.removeEventListener('hashchange', aoSair);
+      clearTimeout(_mountTimer);
+      if(_mountUnsub){ _mountUnsub(); _mountUnsub = null; }
       if(window.TutorIA && TutorIA.desmontarCaderno) TutorIA.desmontarCaderno();
     };
     window.removeEventListener('hashchange', aoSair);
