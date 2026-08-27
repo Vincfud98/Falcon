@@ -14689,6 +14689,89 @@ const Store = (function(){
     }catch(e){ console.warn('[hydrate cadernos exception]', e); }
   }
 
+  // ── D2a: cadernos AVULSOS + pastas (página Cadernos) ──────────────────────
+  // Espelho em memória (como os cadernos de unidade — corpo é grande demais
+  // pro localStorage); lixeira de 30 dias com faxina pós-hidratação.
+  async function _hydrateCadernosAvulsosFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      // paginado desde o berço (armadilha nº3: corte silencioso em 1000)
+      const [docsR, pastasR] = await Promise.all([
+        window._fetchAllRows(() => window._sb.schema('aluno').from('cadernos_avulsos').select('*').eq('user_id', userId), 'id', 'cadernos_avulsos'),
+        window._sb.schema('aluno').from('cadernos_pastas').select('*').eq('user_id', userId)
+      ]);
+      if(docsR.error){ console.warn('[hydrate cad avulsos]', docsR.error); }
+      else {
+        _state.cadAvulsos = (docsR.data || []).map(r => ({
+          id: String(r.id), titulo: r.titulo || 'Sem título', body: r.body || '',
+          pastaId: r.pasta_id ? String(r.pasta_id) : null,
+          subjectId: r.subject_id ? String(r.subject_id) : null,
+          meta: r.meta || {},
+          deletedAt: r.deleted_at ? new Date(r.deleted_at).getTime() : null,
+          createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
+          updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : Date.now()
+        }));
+        const limite = Date.now() - 30 * 24 * 60 * 60 * 1000;
+        _state.cadAvulsos.filter(c => c.deletedAt && c.deletedAt < limite)
+          .forEach(c => { _syncCadAvulsoDelete(c.id).catch(()=>{}); });
+        _state.cadAvulsos = _state.cadAvulsos.filter(c => !(c.deletedAt && c.deletedAt < limite));
+        if(_state.cadAvulsos.length) console.log('[Store] cadernos avulsos:', _state.cadAvulsos.length);
+      }
+      if(pastasR.error){ console.warn('[hydrate cad pastas]', pastasR.error); }
+      else {
+        _state.cadPastas = (pastasR.data || []).map(r => ({
+          id: String(r.id), nome: r.nome || 'Pasta',
+          subjectId: r.subject_id ? String(r.subject_id) : null, ordem: r.ordem || 0
+        }));
+      }
+      _emit();
+    }catch(e){ console.warn('[hydrate cad avulsos ex]', e); }
+  }
+  async function _syncCadAvulsoUpsert(doc){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !doc) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('cadernos_avulsos').upsert({
+        id: doc.id, user_id: userId, titulo: doc.titulo || 'Sem título', body: doc.body || '',
+        pasta_id: doc.pastaId || null, subject_id: doc.subjectId || null,
+        meta: doc.meta || {},
+        deleted_at: doc.deletedAt ? new Date(doc.deletedAt).toISOString() : null,
+        updated_at: new Date(doc.updatedAt || Date.now()).toISOString()
+      }, { onConflict: 'id' });
+      if(error) console.warn('[cad avulso sync]', error);
+    }catch(e){ console.warn('[cad avulso sync ex]', e); }
+  }
+  async function _syncCadAvulsoDelete(id){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !id) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('cadernos_avulsos')
+        .delete().eq('id', id).eq('user_id', userId);
+      if(error) console.warn('[cad avulso del]', error);
+    }catch(e){ console.warn('[cad avulso del ex]', e); }
+  }
+  async function _syncCadPastaUpsert(pasta){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !pasta) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('cadernos_pastas').upsert({
+        id: pasta.id, user_id: userId, nome: pasta.nome || 'Pasta',
+        subject_id: pasta.subjectId || null, ordem: pasta.ordem || 0
+      }, { onConflict: 'id' });
+      if(error) console.warn('[cad pasta sync]', error);
+    }catch(e){ console.warn('[cad pasta sync ex]', e); }
+  }
+  async function _syncCadPastaDelete(id){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !id) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('cadernos_pastas')
+        .delete().eq('id', id).eq('user_id', userId);
+      if(error) console.warn('[cad pasta del]', error);
+    }catch(e){ console.warn('[cad pasta del ex]', e); }
+  }
+
   // ────────────────────────────────────────────────────────────────────
   // Fase 4h — Flashcards (aluno.flashcard_state) + Simulados (aluno.simulado_attempts)
   // ────────────────────────────────────────────────────────────────────
@@ -15062,6 +15145,8 @@ const Store = (function(){
       _hydrateFlashcardsFromSupabase().catch(()=>{});
       // Cadernos (aba "Cadernos" da página Notas)
       _hydrateCadernosFromSupabase().catch(()=>{});
+      // D2a — cadernos avulsos + pastas (página Cadernos)
+      _hydrateCadernosAvulsosFromSupabase().catch(()=>{});
       // Encadeia: depois das tentativas, hidrata as respostas item-a-item da última.
       _hydrateSimuladosFromSupabase()
         .then(() => Promise.all([
@@ -15082,6 +15167,86 @@ const Store = (function(){
       const rec = { unitId: uid, body: body || '', updatedAt: updatedAt || Date.now() };
       const i = _state.cadernos.findIndex(c => String(c.unitId) === uid);
       if(i >= 0) _state.cadernos[i] = rec; else _state.cadernos.push(rec);
+    },
+    /* ── Cadernos avulsos + pastas (D2a) ── */
+    cadAvulsosLista(){ return (_state && Array.isArray(_state.cadAvulsos)) ? _state.cadAvulsos.filter(c => !c.deletedAt) : []; },
+    cadAvulsosLixeira(){ return (_state && Array.isArray(_state.cadAvulsos)) ? _state.cadAvulsos.filter(c => c.deletedAt).sort((a, b) => b.deletedAt - a.deletedAt) : []; },
+    cadAvulsoPega(id){ return (_state && Array.isArray(_state.cadAvulsos)) ? (_state.cadAvulsos.find(c => String(c.id) === String(id)) || null) : null; },
+    cadAvulsoCriar(dados){
+      if(!_state) return null;
+      dados = dados || {};
+      const agora = Date.now();
+      const doc = { id: _genUuid() || ('cad' + agora), titulo: String(dados.titulo || 'Sem título'), body: '',
+        pastaId: dados.pastaId || null, subjectId: dados.subjectId || null,
+        meta: {}, deletedAt: null, createdAt: agora, updatedAt: agora };
+      if(!Array.isArray(_state.cadAvulsos)) _state.cadAvulsos = [];
+      _state.cadAvulsos.push(doc);
+      _emit();
+      _syncCadAvulsoUpsert(doc).catch(()=>{});
+      return doc;
+    },
+    cadAvulsoSalvar(id, patch){
+      const doc = (_state && Array.isArray(_state.cadAvulsos)) ? _state.cadAvulsos.find(c => String(c.id) === String(id)) : null;
+      if(!doc) return null;
+      ['titulo', 'body', 'meta'].forEach(k => { if(patch && patch[k] !== undefined) doc[k] = patch[k]; });
+      // pasta e matéria são mutuamente exclusivos (raiz = os dois vazios)
+      if(patch && patch.pastaId !== undefined){ doc.pastaId = patch.pastaId || null; if(doc.pastaId) doc.subjectId = null; }
+      if(patch && patch.subjectId !== undefined){ doc.subjectId = patch.subjectId || null; if(doc.subjectId) doc.pastaId = null; }
+      doc.updatedAt = Date.now();
+      _emit();
+      _syncCadAvulsoUpsert(doc).catch(()=>{});
+      return doc;
+    },
+    cadAvulsoApagar(id){
+      const doc = (_state && Array.isArray(_state.cadAvulsos)) ? _state.cadAvulsos.find(c => String(c.id) === String(id)) : null;
+      if(!doc) return;
+      doc.deletedAt = Date.now(); doc.updatedAt = Date.now();
+      _emit();
+      _syncCadAvulsoUpsert(doc).catch(()=>{});
+    },
+    cadAvulsoRestaurar(id){
+      const doc = (_state && Array.isArray(_state.cadAvulsos)) ? _state.cadAvulsos.find(c => String(c.id) === String(id)) : null;
+      if(!doc) return;
+      doc.deletedAt = null; doc.updatedAt = Date.now();
+      _emit();
+      _syncCadAvulsoUpsert(doc).catch(()=>{});
+    },
+    cadAvulsoPurge(id){
+      if(!_state || !Array.isArray(_state.cadAvulsos)) return;
+      _state.cadAvulsos = _state.cadAvulsos.filter(c => String(c.id) !== String(id));
+      _emit();
+      _syncCadAvulsoDelete(id).catch(()=>{});
+    },
+    cadPastasLista(){
+      return (_state && Array.isArray(_state.cadPastas))
+        ? _state.cadPastas.slice().sort((a, b) => ((a.ordem || 0) - (b.ordem || 0)) || String(a.nome).localeCompare(String(b.nome), 'pt-BR'))
+        : [];
+    },
+    cadPastaCriar(nome, subjectId){
+      if(!_state) return null;
+      const pasta = { id: _genUuid() || ('pst' + Date.now()), nome: String(nome || 'Pasta'), subjectId: subjectId || null, ordem: (Array.isArray(_state.cadPastas) ? _state.cadPastas.length : 0) };
+      if(!Array.isArray(_state.cadPastas)) _state.cadPastas = [];
+      _state.cadPastas.push(pasta);
+      _emit();
+      _syncCadPastaUpsert(pasta).catch(()=>{});
+      return pasta;
+    },
+    cadPastaRenomear(id, nome){
+      const pasta = (_state && Array.isArray(_state.cadPastas)) ? _state.cadPastas.find(x => String(x.id) === String(id)) : null;
+      if(!pasta) return;
+      pasta.nome = String(nome || pasta.nome);
+      _emit();
+      _syncCadPastaUpsert(pasta).catch(()=>{});
+    },
+    cadPastaApagar(id){
+      if(!_state || !Array.isArray(_state.cadPastas)) return;
+      _state.cadPastas = _state.cadPastas.filter(x => String(x.id) !== String(id));
+      // cadernos que moravam nela voltam pra raiz (nada se perde)
+      (_state.cadAvulsos || []).forEach(c => {
+        if(String(c.pastaId) === String(id)){ c.pastaId = null; c.updatedAt = Date.now(); _syncCadAvulsoUpsert(c).catch(()=>{}); }
+      });
+      _emit();
+      _syncCadPastaDelete(id).catch(()=>{});
     },
     reset(course){
       _state = window.defaultUserState(course);
@@ -38071,9 +38236,36 @@ window.TutorIA = (function(){
     _emptyToggle(el); _cadStatus('');
     _cadLoadBacklinks(unitId);
   }
+  /* ── D2a: identidade POR LINHA (célula) ─────────────────────────────────
+     Cada linha do caderno ganha um id estável data-cel, invisível — o
+     alicerce das células (D4: referenciar bloco, comentários) sem migração
+     dolorosa depois. Carimbado no salvar; o Enter clona atributos do div
+     (armadilha conhecida do caderno), então ids duplicados são
+     desduplicados: a 1ª ocorrência fica com o id, as cópias ganham novo.
+     Em listas, a célula é cada <li>. O _cadSanitize preserva data-* (só
+     arranca handlers), então o id persiste no corpo salvo. */
+  function _cadCelId(){ return 'c' + Math.random().toString(36).slice(2, 10); }
+  function _cadCelCarimbar(rootEl){
+    if(!rootEl) return;
+    const vistos = new Set();
+    const marca = function(el){
+      let id = el.getAttribute('data-cel');
+      if(!id || vistos.has(id)){ id = _cadCelId(); el.setAttribute('data-cel', id); }
+      vistos.add(id);
+    };
+    Array.prototype.forEach.call(rootEl.children, function(li){
+      if(li.nodeType !== 1) return;
+      if(li.tagName === 'UL' || li.tagName === 'OL'){
+        Array.prototype.forEach.call(li.children, function(item){ if(item.tagName === 'LI') marca(item); });
+        return;
+      }
+      marca(li);
+    });
+  }
   async function _cadSave(){
     const el = _cadEl(); if(!el || !_cadUnit) return;
     try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); }
+    try{ _cadCelCarimbar(el); }catch(e){ console.warn('[cad cel]', e); }
     const body = _cadSanitize(el.innerHTML);   // corpo CRU: o ciclo des-renderizou
     try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); }
     const uid = await _cadUserId(); if(!uid || !window._sb) return;
