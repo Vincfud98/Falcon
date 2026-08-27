@@ -9028,6 +9028,15 @@ a.pr-crumb:hover{color:var(--accent)}
 .pr-tts.is-tocando svg{animation:prTtsPulse .9s infinite alternate}
 .pr-tts.is-carregando{opacity:.5;pointer-events:none}
 @keyframes prTtsPulse{from{opacity:.45}to{opacity:1}}
+/* 7D — barra fixa da prática por voz (sobrevive aos re-renders do card) */
+.pr-voz{position:fixed;top:calc(var(--nav-h, 56px) + 10px);left:50%;transform:translateX(-50%);z-index:1200;display:flex;align-items:center;gap:.5rem;background:var(--bg-card);border:1px solid var(--accent-border);border-radius:999px;padding:.35rem .7rem;box-shadow:0 14px 40px -14px rgba(0,0,0,.7);font-family:var(--sans);font-size:.72rem;color:var(--text)}
+.pr-voz-dot{width:8px;height:8px;border-radius:50%;background:#3fa46a;animation:prVozPulso 1.4s infinite alternate}
+.pr-voz-dot.speaking{background:var(--accent)}
+@keyframes prVozPulso{from{opacity:.4}to{opacity:1}}
+.pr-voz-timer{font-family:var(--mono);font-size:.64rem;color:var(--text-dim)}
+.pr-voz-btn{background:transparent;border:1px solid var(--border);border-radius:50%;width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;color:var(--text-dim);cursor:pointer}
+.pr-voz-btn:hover{color:var(--accent);border-color:var(--accent)}
+.pr-voz-btn.on{color:var(--accent);border-color:var(--accent);background:var(--accent-lo)}
 .pr-hist{display:flex;gap:.3rem;align-items:center;min-height:16px;margin:.2rem 0 .8rem}
 .pr-sq{width:14px;height:14px;border-radius:3px;display:inline-block}
 .pr-sq1{background:#c8524a}.pr-sq2{background:#d9a55a}.pr-sq3{background:#5dd49f}.pr-sq4{background:#6cb2e0}
@@ -52178,6 +52187,7 @@ const Practice = (function(){
     if(!sess) return;
     if(minha && _s){
       _prTtsParar();
+      _prVozParar(true);
       _stopTick(); _unbindKeys(); window.removeEventListener('hashchange', _aoSair);
       clearTimeout(_persistT);
       _s = null;
@@ -52351,6 +52361,7 @@ const Practice = (function(){
     _prTtsSync();
   }
   function _prTtsAuto(parte){
+    if(_prVoz.live) return;   // o Examinador é quem fala na prática por voz
     if(!(window.Store && Store.prefsGet && Store.prefsGet('fc_auto_narrar'))) return;
     const a = _s && _s.atual; if(!a || a.contexto) return;
     const k = a.cardId + '|' + a.ord + '|' + parte;
@@ -52362,6 +52373,162 @@ const Practice = (function(){
     const FONE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>';
     return '<button type="button" class="pr-tts" data-pr-tts="' + parte + '" data-tip="' + (parte === 'frente' ? 'Ouvir a pergunta' : 'Ouvir a resposta') + '" aria-label="Ouvir">' + FONE
       + (possui ? '' : '<span class="pr-tts-custo">0,01ⓤ</span>') + '</button>';
+  }
+  /* ── 7D: prática por voz — o Examinador conduz a sessão ──────────────
+     Sessão ElevenLabs (mesmo motor do tutor Manfredo) com FERRAMENTAS que o
+     agente aciona no app: virar_card (a tela vira), registrar_nota (passa
+     pelo responder() normal — SM-2 intacto — e o RETORNO já leva o próximo
+     card pro agente), pular_card e encerrar_sessao. Cards de contexto são
+     pulados sozinhos (não se avaliam). Cobrança por minuto pelo webhook do
+     tutor de voz (voice_token vai nas dynamicVariables). */
+  const _prVoz = { conv: null, live: false, abrindo: false, startMs: 0, maxMin: null, timer: null };
+  function _prVozTextoCard(c, ord){
+    const limpa = function(x){ return String(x || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim(); };
+    if(c.kind === 'cloze'){
+      const cz = String(c.clozeText || '');
+      const pergunta = limpa(cz.replace(/\{\{c(\d+)::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, function(_m, n, resp){
+        return (!ord || Number(n) === Number(ord)) ? ' (lacuna a completar) ' : resp;
+      }));
+      const resposta = limpa(cz.replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '$1'));
+      return { pergunta: pergunta, resposta: resposta, tipo: 'lacunas' };
+    }
+    if(c.kind === 'multi'){
+      const linhas = (Array.isArray(c.lines) ? c.lines : []).map(function(l, i){
+        return (c.listStyle === 'number' ? (i + 1) + '. ' : '- ') + limpa(l);
+      });
+      return { pergunta: limpa(c.front), resposta: linhas.join('\n'), tipo: 'lista' };
+    }
+    return { pergunta: limpa(c.front), resposta: limpa(c.back), tipo: 'tradicional' };
+  }
+  function _prVozCardAtual(){
+    const a = _s && _s.atual; if(!a) return null;
+    const c = _cardDe(a.cardId); if(!c) return null;
+    const srs = _srsDe(a.cardId, a.ord);
+    const tx = _prVozTextoCard(c, a.ord);
+    return { pergunta: tx.pergunta, resposta: tx.resposta, tipo: tx.tipo, lapsos: (srs && srs.lapses) || 0 };
+  }
+  function _prVozProximoPayload(){
+    while(_s && _s.atual && _s.atual.contexto) _entendi();   // contexto não se avalia por voz
+    if(!_s || !_s.atual){
+      return { sessao_acabou: true, mensagem: 'A fila terminou. Faça um fechamento breve e chame encerrar_sessao.' };
+    }
+    return { proximo_card: _prVozCardAtual(), cards_restantes: _s.queue.length };
+  }
+  const _prVozTools = {
+    virar_card: async function(){
+      if(!_s || !_s.atual) return { erro: 'A sessão acabou.' };
+      if(_s.atual.face !== 'back') _mostrar();
+      const card = _prVozCardAtual();
+      return { ok: true, resposta_oficial: card ? card.resposta : '' };
+    },
+    registrar_nota: async function(p){
+      const mapa = { errei: 1, dificil: 2, bom: 3, facil: 4 };
+      const nota = mapa[String((p && p.nota) || '').toLowerCase().trim()];
+      if(!nota) return { erro: 'Nota inválida. Use exatamente: errei, dificil, bom ou facil.' };
+      if(!_s || !_s.atual) return { sessao_acabou: true };
+      if(_s.atual.face !== 'back') _mostrar();
+      responder(nota);
+      return _prVozProximoPayload();
+    },
+    pular_card: async function(){
+      if(!_s || !_s.atual) return { sessao_acabou: true };
+      _s.queue.shift(); _persistir();
+      _proximo();
+      return _prVozProximoPayload();
+    },
+    encerrar_sessao: async function(){
+      // deixa a despedida terminar de tocar antes de derrubar a conexão
+      setTimeout(function(){ _prVozParar(true); }, 2000);
+      return { ok: true };
+    }
+  };
+  async function _prVozIniciar(){
+    if(_prVoz.live || _prVoz.abrindo) return;
+    if(!_s || !_s.atual){ toast('Comece uma prática para usar a voz.', 'info'); return; }
+    _prVoz.abrindo = true;
+    toast('Conectando com o Examinador…', 'info');
+    try{
+      const { data: tok, error } = await window._sb.functions.invoke('voice-tutor', { body: { mode: 'start', flashcards: true } });
+      if(error || !tok || !tok.ok){
+        toast((tok && tok.error === 'saldo_insuficiente')
+          ? 'Saldo de UbiTokens insuficiente para a prática por voz.'
+          : 'Não consegui iniciar a prática por voz agora. Tente de novo.', 'error');
+        return;
+      }
+      _prTtsParar();   // a narração automática cala enquanto o Examinador fala
+      while(_s && _s.atual && _s.atual.contexto) _entendi();   // começa num card avaliável
+      const primeiro = _prVozCardAtual();
+      if(!primeiro){ toast('Não há cards para praticar por voz.', 'info'); return; }
+      const mod = window.__ElevenLabsClient || await import('https://esm.sh/@elevenlabs/client');
+      const Conversation = mod.Conversation || (mod.default && mod.default.Conversation);
+      const conv = await Conversation.startSession({
+        signedUrl: tok.signed_url,
+        dynamicVariables: {
+          apelido: tok.apelido || 'candidato',
+          genero_usuario: tok.genero_usuario || 'neutro',
+          voice_token: tok.voice_token || '',
+          total_cards: String(_s.queue.length),
+          primeiro_card: JSON.stringify(primeiro),
+          primeira_pergunta: primeiro.pergunta || ''
+        },
+        clientTools: _prVozTools,
+        onConnect: function(){ _prVozBadge('listening'); },
+        onModeChange: function(m){ _prVozBadge(m && m.mode === 'speaking' ? 'speaking' : 'listening'); },
+        onDisconnect: function(){ if(_prVoz.live) _prVozParar(); },
+        onError: function(err){ console.warn('[prVoz] erro', err); }
+      });
+      _prVoz.conv = conv; _prVoz.live = true;
+      _prVoz.startMs = Date.now();
+      _prVoz.maxMin = tok.ilimitado ? null : Number(tok.minutos_max);
+      _prVoz.timer = setInterval(_prVozTick, 1000);
+      _prVozBarra();
+    }catch(e){
+      console.warn('[prVoz] start ex', e);
+      toast('Não consegui acessar o microfone ou conectar. Verifique a permissão do microfone do navegador.', 'error');
+    }finally{ _prVoz.abrindo = false; }
+  }
+  function _prVozBarra(){
+    let el = document.querySelector('.pr-voz');
+    if(!el){
+      el = document.createElement('div');
+      el.className = 'pr-voz';
+      el.innerHTML = '<span class="pr-voz-dot" id="prVozDot"></span><span class="pr-voz-t">Examinador</span><span class="pr-voz-timer" id="prVozTimer">0:00</span>'
+        + '<button type="button" class="pr-voz-btn" id="prVozMute" data-tip="Mudo" aria-label="Mudo"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg></button>'
+        + '<button type="button" class="pr-voz-btn pr-voz-x" id="prVozEnd" aria-label="Encerrar a voz"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>';
+      document.body.appendChild(el);
+      el.querySelector('#prVozEnd').addEventListener('click', function(){ _prVozParar(); });
+      const mute = el.querySelector('#prVozMute');
+      mute.addEventListener('click', function(){
+        const on = !mute.classList.contains('on');
+        try{ if(_prVoz.conv && _prVoz.conv.setMicMuted) _prVoz.conv.setMicMuted(on); }catch(_){ }
+        mute.classList.toggle('on', on);
+      });
+      if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(el);
+    }
+    el.hidden = false;
+  }
+  function _prVozBadge(modo){
+    const dot = document.querySelector('#prVozDot');
+    if(dot) dot.classList.toggle('speaking', modo === 'speaking');
+  }
+  function _prVozTick(){
+    if(!_prVoz.live) return;
+    const sec = Math.floor((Date.now() - _prVoz.startMs) / 1000);
+    const el = document.querySelector('#prVozTimer');
+    if(el) el.textContent = Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+    if(_prVoz.maxMin != null && sec >= _prVoz.maxMin * 60){
+      _prVozParar();
+      toast('Seus minutos de UbiTokens acabaram — a prática por voz foi encerrada. A prática normal continua.', 'warn');
+    }
+  }
+  function _prVozParar(peloAgente){
+    if(!_prVoz.live && !_prVoz.conv) return;
+    _prVoz.live = false;
+    clearTimeout(_prVoz.timer); clearInterval(_prVoz.timer); _prVoz.timer = null;
+    const conv = _prVoz.conv; _prVoz.conv = null;
+    try{ if(conv && conv.endSession) conv.endSession(); }catch(_){ }
+    const el = document.querySelector('.pr-voz'); if(el) el.remove();
+    if(!peloAgente) toast('Prática por voz encerrada.', 'info');
   }
   function _proximo(){
     if(!_s.queue.length){ _finalizar(); return; }
@@ -52434,6 +52601,7 @@ const Practice = (function(){
       + '<button type="button" data-pm="voltar"' + (_s.done.length ? '' : ' disabled') + '>Card anterior <kbd>Z</kbd></button>'
       + '<button type="button" data-pm="ouvir">Ouvir o card inteiro' + (possuiTts ? '' : ' · <span class="ubt-sym">ⓤ</span> 0,01') + '</button>'
       + '<button type="button" data-pm="autonarrar">' + (autoNarrar ? 'Desligar narração automática' : 'Ligar narração automática') + '</button>'
+      + '<button type="button" data-pm="voz">Praticar por voz · <span class="ubt-sym">ⓤ</span> 0,12/min</button>'
       + '<button type="button" data-pm="desativar">Desativar este card</button>'
       + (card.unitId && card.blockId && window._hrefDoBloco && _hrefDoBloco(card.unitId, card.blockId) ? '<a href="' + Util.attr(_hrefDoBloco(card.unitId, card.blockId)) + '" role="menuitem">Ver no texto</a>' : '')
       + '<button type="button" data-pm="srs">Editar dados de agendamento</button>'
@@ -52491,6 +52659,7 @@ const Practice = (function(){
     menu.querySelectorAll('[data-pm]').forEach(b => b.addEventListener('click', function(){
       menu.hidden = true; const k = b.getAttribute('data-pm');
       if(k === 'voltar') voltar();
+      else if(k === 'voz') _prVozIniciar();
       else if(k === 'ouvir') _prTtsOuvir('tudo');
       else if(k === 'autonarrar'){
         const liga = !(window.Store && Store.prefsGet && Store.prefsGet('fc_auto_narrar'));
