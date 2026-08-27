@@ -36344,6 +36344,13 @@ window.TutorIA = (function(){
     .tutor-caderno-bl-unit:hover{ text-decoration:underline; }
     .tutor-caderno-bl-quote{ font-family:var(--sans); font-weight:300; font-size:.76rem; line-height:1.5; color:var(--text-dim); }
     .tutor-caderno-bl-quote .tutor-ref{ cursor:default; }
+    .tutor-caderno-bl-quote .tutor-ref.bl-hit{ background:var(--accent); color:var(--bg); border-color:var(--accent); }
+    .tutor-caderno-bl-rev{ align-self:flex-start; margin-bottom:.55rem; font-size:.62rem; }
+    .tutor-caderno-bl-unit{ display:flex; align-items:center; gap:.45rem; flex-wrap:wrap; }
+    .bl-crumb{ min-width:0; }
+    .bl-tipo{ font-family:var(--mono); font-size:.52rem; letter-spacing:.1em; text-transform:uppercase; color:var(--text-mute); border:1px solid var(--border); border-radius:2px; padding:.08rem .3rem; flex-shrink:0; }
+    .bl-tipo.is-card{ color:var(--accent); border-color:var(--accent-border-soft); }
+    .bl-data{ font-family:var(--mono); font-size:.56rem; color:var(--text-mute); margin-left:auto; flex-shrink:0; }
     .tutor-caderno-bl-empty{ font-family:var(--sans); font-size:.72rem; color:var(--text-mute); font-style:italic; }
     /* Popover de apelido (alias) ao clicar num chip [[ ]] */
     .tutor-ref-pop{ position:fixed; z-index:1300; background:var(--bg-card); border:1px solid var(--accent-border); border-radius:10px; box-shadow:0 14px 34px -14px rgba(0,0,0,.6); padding:.6rem; width:260px; font-family:var(--sans); }
@@ -38316,7 +38323,42 @@ window.TutorIA = (function(){
     setTimeout(function(){ document.addEventListener('mousedown', _aliasOutside, true); }, 0);
   }
 
-  // ── BACKLINKS "Mencionada em" — outras unidades cujo caderno linka PRA esta ──
+  // ── D1: REFERÊNCIAS (estilo RemNote) — quem cita esta unidade ─────────────
+  // Coleta PURA (recebe as listas; testável isolada): cadernos de outras
+  // unidades + flashcards cujo texto rico carrega o chip [[ ]] da unidade.
+  // Marca os chips-alvo com .bl-hit pro trecho sair com a citação destacada.
+  function _cadRefsColeta(unitId, cadernos, cards, san){
+    const alvo = String(unitId);
+    const tmp = document.createElement('div');
+    const fontesCaderno = [];
+    (cadernos || []).forEach(function(row){
+      if(String(row.unit_id) === alvo || !row.body) return;
+      if(row.body.indexOf(alvo) < 0) return;              // atalho: nem cita o id
+      tmp.innerHTML = san(row.body);
+      const chips = Array.prototype.filter.call(tmp.querySelectorAll('.tutor-ref'), function(c){ return String(c.getAttribute('data-unit-id')) === alvo; });
+      if(!chips.length) return;
+      const vistos = new Set(); const trechos = [];
+      chips.forEach(function(c){
+        c.classList.add('bl-hit');
+        const host = (c.closest && c.closest('div,p,li,h1,h2,h3')) || tmp;
+        const chave = (host.textContent || '').replace(/\s+/g, ' ').trim();
+        if(!chave || vistos.has(chave)) return;
+        vistos.add(chave);
+        trechos.push(host.innerHTML);
+      });
+      if(trechos.length) fontesCaderno.push({ unitId: String(row.unit_id), trechos: trechos, quando: row.updated_at || null });
+    });
+    const fontesCard = [];
+    const marca = 'data-unit-id="' + alvo + '"';
+    (cards || []).forEach(function(c){
+      if(!c || c.deletedAt) return;
+      const r = c.rich || {};
+      const campos = [r.front, r.back, r.cloze].concat(Array.isArray(r.lines) ? r.lines : []);
+      if(!campos.some(function(h){ return h && String(h).indexOf(marca) !== -1; })) return;
+      fontesCard.push(c);
+    });
+    return { cadernos: fontesCaderno, cards: fontesCard };
+  }
   async function _cadLoadBacklinks(unitId){
     const sec = _cadActiveBl ? _cadActiveBl.sec : document.getElementById('cadernoBacklinks');
     const listEl = _cadActiveBl ? _cadActiveBl.list : document.getElementById('cadernoBlList');
@@ -38326,55 +38368,93 @@ window.TutorIA = (function(){
     const uid = await _cadUserId(); if(!uid || !window._sb || !unitId) return;
     let rows = [];
     try {
-      const { data, error } = await window._sb.schema('aluno').from('caderno').select('unit_id, body').eq('user_id', uid);
-      if(error){ console.warn('[backlinks]', error); return; }
+      const { data, error } = await window._sb.schema('aluno').from('caderno').select('unit_id, body, updated_at').eq('user_id', uid);
+      if(error){ console.warn('[referencias]', error); return; }
       rows = data || [];
-    } catch(e){ console.warn('[backlinks ex]', e); return; }
-    const tmp = document.createElement('div'), items = [];
-    rows.forEach(function(row){
-      if(String(row.unit_id) === String(unitId) || !row.body) return;
-      if(row.body.indexOf(String(unitId)) < 0) return; // atalho: nem cita o id
-      tmp.innerHTML = _cadSanitize(row.body);
-      const chips = Array.prototype.filter.call(tmp.querySelectorAll('.tutor-ref'), function(c){ return String(c.getAttribute('data-unit-id')) === String(unitId); });
-      if(!chips.length) return;
-      const frases = new Set();
-      chips.forEach(function(c){
-        const host = (c.closest && c.closest('div,p,li,h1,h2,h3')) || tmp;
-        const f = (host.textContent || '').replace(/\s+/g, ' ').trim();
-        if(f) frases.add(f.slice(0, 280));
-      });
-      items.push({ unitId: row.unit_id, frases: [...frases] });
-    });
-    if(!items.length) return;
-    // Resolve sigla/número/título da unidade-fonte pelo índice (tem a sigla da matéria).
+    } catch(e){ console.warn('[referencias ex]', e); return; }
+    const deck = (window.Store && Store.deckList) ? Store.deckList() : [];
+    const refs = _cadRefsColeta(unitId, rows, deck, _cadSanitize);
+    if(!refs.cadernos.length && !refs.cards.length) return;
     const idx = _buildUnitIndex(); const byId = {}; idx.flat.forEach(function(u){ byId[String(u.id)] = u; });
-    items.forEach(function(it){ it.info = byId[String(it.unitId)] || null; });
-    const sigs = [...new Set(items.map(function(it){ return it.info && it.info.sigla; }).filter(Boolean))].sort();
+    refs.cadernos.forEach(function(it){ it.info = byId[String(it.unitId)] || null; });
+    const cardInfo = function(c){ return byId[String(c.unitId)] || null; };
+    const fmtData = function(v){ try{ const d = v ? new Date(v) : null; return (d && !isNaN(d)) ? d.toLocaleDateString('pt-BR') : ''; }catch(_){ return ''; } };
+    const sigs = [...new Set(
+      refs.cadernos.map(function(it){ return it.info && it.info.sigla; })
+        .concat(refs.cards.map(function(c){ const i2 = cardInfo(c); return i2 && i2.sigla; }))
+        .filter(Boolean))].sort();
     listEl.innerHTML = '';
+    // Herança de flashcards: "Revisar · N" pratica os cards que CITAM este
+    // caderno — é um FILTRO sobre os mesmos cards (agendamento compartilhado).
+    if(refs.cards.length){
+      const rev = document.createElement('button');
+      rev.type = 'button'; rev.className = 'btn-primary tutor-caderno-bl-rev';
+      rev.textContent = 'Revisar · ' + refs.cards.length;
+      rev.setAttribute('data-tip', 'Pratica os flashcards que citam este caderno — mesmo agendamento de sempre');
+      rev.addEventListener('click', function(){
+        const ids = refs.cards.map(function(c){ return String(c.id); });
+        _cadSave(); close();
+        if(window.Practice) Practice.iniciar({ tipo: 'ids', ids: ids, subjectId: null, unitId: null, modo: 'srs', registrar: true });
+      });
+      listEl.appendChild(rev);
+    }
     let filterEl = null;
     if(sigs.length > 1){
       filterEl = document.createElement('select'); filterEl.className = 'tutor-caderno-bl-filter';
       filterEl.appendChild(new Option('Todas as matérias', ''));
-      sigs.forEach(function(s){ filterEl.appendChild(new Option(s, s)); });
+      sigs.forEach(function(s2){ filterEl.appendChild(new Option(s2, s2)); });
       listEl.appendChild(filterEl);
     }
     const itemsBox = document.createElement('div'); itemsBox.className = 'tutor-caderno-bl-items'; listEl.appendChild(itemsBox);
     function renderItems(sig){
       itemsBox.innerHTML = '';
-      items.filter(function(it){ return !sig || (it.info && it.info.sigla === sig); }).forEach(function(it){
+      refs.cadernos.filter(function(it){ return !sig || (it.info && it.info.sigla === sig); }).forEach(function(it){
         const info = it.info;
         const label = info ? [info.sigla, info.number, info.title].filter(Boolean).join(' · ') : ('Unidade ' + it.unitId);
         const wrap = document.createElement('div'); wrap.className = 'tutor-caderno-bl-item';
-        const a = document.createElement('div'); a.className = 'tutor-caderno-bl-unit'; a.textContent = label;
+        const a = document.createElement('div'); a.className = 'tutor-caderno-bl-unit';
+        a.innerHTML = '<span class="bl-crumb">' + Util.esc(label) + '</span><span class="bl-tipo">Caderno</span>'
+          + (it.quando ? '<span class="bl-data">' + Util.esc(fmtData(it.quando)) + '</span>' : '');
         a.addEventListener('click', function(){ const href = _unitHref(it.unitId); if(href){ _cadSave(); close(); location.hash = href; } });
         wrap.appendChild(a);
-        it.frases.forEach(function(f){ const q = document.createElement('div'); q.className = 'tutor-caderno-bl-quote'; q.textContent = '“' + f + '”'; wrap.appendChild(q); });
+        it.trechos.forEach(function(h){ const q = document.createElement('div'); q.className = 'tutor-caderno-bl-quote'; q.innerHTML = h; wrap.appendChild(q); });
+        itemsBox.appendChild(wrap);
+      });
+      refs.cards.filter(function(c){ if(!sig) return true; const i2 = cardInfo(c); return i2 && i2.sigla === sig; }).forEach(function(c){
+        const info = cardInfo(c);
+        const label = info ? [info.sigla, info.number, info.title].filter(Boolean).join(' · ') : 'Flashcard';
+        const wrap = document.createElement('div'); wrap.className = 'tutor-caderno-bl-item is-card';
+        const a = document.createElement('div'); a.className = 'tutor-caderno-bl-unit';
+        a.innerHTML = '<span class="bl-crumb">' + Util.esc(label) + '</span><span class="bl-tipo is-card">Flashcard</span>'
+          + (c.createdAt ? '<span class="bl-data">' + Util.esc(fmtData(c.createdAt)) + '</span>' : '');
+        a.setAttribute('data-tip', 'Abrir o card para editar');
+        a.addEventListener('click', function(){
+          if(window.DeckEditModal) DeckEditModal.open(c, function(patch){ if(window.Store && Store.deckUpdate) Store.deckUpdate(c.id, patch); });
+        });
+        wrap.appendChild(a);
+        // trecho do card = o campo rico que carrega a citação
+        const r = c.rich || {};
+        const marca = 'data-unit-id="' + String(unitId).replace(/"/g, '') + '"';
+        let trecho = '';
+        [r.cloze, r.front, r.back].concat(Array.isArray(r.lines) ? r.lines : []).some(function(h){
+          if(h && String(h).indexOf(marca) !== -1){ trecho = String(h); return true; }
+          return false;
+        });
+        if(trecho){
+          if(r.cloze && trecho === String(r.cloze) && window.FcSintaxe && FcSintaxe.clozeParaChaves) trecho = FcSintaxe.clozeParaChaves(trecho);
+          const tmp2 = document.createElement('div'); tmp2.innerHTML = _cadSanitize(trecho);
+          Array.prototype.forEach.call(tmp2.querySelectorAll('.tutor-ref'), function(ch){
+            if(String(ch.getAttribute('data-unit-id')) === String(unitId)) ch.classList.add('bl-hit');
+          });
+          const q = document.createElement('div'); q.className = 'tutor-caderno-bl-quote'; q.innerHTML = tmp2.innerHTML;
+          wrap.appendChild(q);
+        }
         itemsBox.appendChild(wrap);
       });
     }
     if(filterEl) filterEl.addEventListener('change', function(){ renderItems(filterEl.value); });
     renderItems('');
-    if(countEl) countEl.textContent = items.length;
+    if(countEl) countEl.textContent = refs.cadernos.length + refs.cards.length;
     sec.hidden = false;
   }
 
@@ -38887,7 +38967,7 @@ window.TutorIA = (function(){
         + '</div>'
         + '<div class="tutor-caderno-ed is-empty" id="cadernoInput" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="false" data-ph="Escreva suas anotações desta unidade…  (use [[ para linkar outra unidade)"></div>'
         + '<div class="tutor-caderno-foot"><span class="tutor-caderno-status" id="cadernoStatus"></span><span class="tutor-caderno-hint">[[ para linkar · salva sozinho</span></div>'
-        + '<div class="tutor-caderno-bl" id="cadernoBacklinks" hidden><button type="button" class="tutor-caderno-bl-h" id="cadernoBlToggle" aria-expanded="false"><span class="tutor-caderno-bl-chev">&#9656;</span> Mencionada em <span class="tutor-caderno-bl-count" id="cadernoBlCount">0</span></button><div class="tutor-caderno-bl-list" id="cadernoBlList" hidden></div></div>'
+        + '<div class="tutor-caderno-bl" id="cadernoBacklinks" hidden><button type="button" class="tutor-caderno-bl-h" id="cadernoBlToggle" aria-expanded="false"><span class="tutor-caderno-bl-chev">&#9656;</span> Referências <span class="tutor-caderno-bl-count" id="cadernoBlCount">0</span></button><div class="tutor-caderno-bl-list" id="cadernoBlList" hidden></div></div>'
       + '</div>'
       + '<div class="tutor-grafo" id="tutorGrafo" hidden><div class="tutor-grafo-canvas" id="grafoCanvas"></div><div class="tutor-grafo-foot"><span class="tutor-grafo-status" id="grafoStatus">Carregando…</span><span class="tutor-grafo-legend" id="grafoLegend"></span></div><div class="tutor-grafo-panel" id="grafoPanel"><button type="button" class="tutor-grafo-panel-h" id="grafoPanelToggle" aria-expanded="false"><span class="tutor-grafo-panel-chev">&#9656;</span> Ajustes <span class="tutor-grafo-panel-sub">filtros · cores · forças</span></button><div class="tutor-grafo-panel-body" id="grafoPanelBody" hidden></div></div></div>'
       + '</div>';
@@ -39252,7 +39332,7 @@ window.TutorIA = (function(){
       + '<div class="cadmodal-foot"><span class="tutor-caderno-status" id="cadernoModalStatus"></span>'
         + '<div class="cadmodal-foot-r"><span class="tutor-caderno-hint">[[ para linkar · salva sozinho</span>'
         + '<a class="cadmodal-openunit" id="cadModalOpenUnit" href="#">Abrir unidade &rarr;</a></div></div>'
-      + '<div class="tutor-caderno-bl" id="cadModalBacklinks" hidden><button type="button" class="tutor-caderno-bl-h" id="cadModalBlToggle" aria-expanded="false"><span class="tutor-caderno-bl-chev">&#9656;</span> Mencionada em <span class="tutor-caderno-bl-count" id="cadModalBlCount">0</span></button><div class="tutor-caderno-bl-list" id="cadModalBlList" hidden></div></div>'
+      + '<div class="tutor-caderno-bl" id="cadModalBacklinks" hidden><button type="button" class="tutor-caderno-bl-h" id="cadModalBlToggle" aria-expanded="false"><span class="tutor-caderno-bl-chev">&#9656;</span> Referências <span class="tutor-caderno-bl-count" id="cadModalBlCount">0</span></button><div class="tutor-caderno-bl-list" id="cadModalBlList" hidden></div></div>'
       + '</div>';
     document.body.appendChild(back);
     _cadModalEl = back;
@@ -53735,15 +53815,20 @@ const FcRico = (function(){
           f.remove(); return;
         }
         const hl = f.getAttribute('data-hl-color'), fc = f.getAttribute('data-fc');
+        const refId = f.getAttribute('data-unit-id'), refTitle = f.getAttribute('data-unit-title');
         const eGrifo = f.classList.contains('hl-mark') && hl && HL_OK[hl];
         const eCor = f.classList.contains('cad-fc') && fc && FC_OK[fc];
+        // D1: o chip de citação [[ ]] SOBREVIVE no card — é ele que liga o
+        // card ao caderno citado (herança de flashcards nas Referências).
+        const eRef = f.classList.contains('tutor-ref') && refId;
         Array.prototype.slice.call(f.attributes).forEach(function(at){ f.removeAttribute(at.name); });
-        if((tag === 'SPAN' || tag === 'MARK') && !eGrifo && !eCor){
+        if((tag === 'SPAN' || tag === 'MARK') && !eGrifo && !eCor && !eRef){
           while(f.firstChild) no.insertBefore(f.firstChild, f);
           f.remove(); return;
         }
         if(eGrifo){ f.className = 'hl-mark'; f.setAttribute('data-hl-color', hl); }
         else if(eCor){ f.className = 'cad-fc'; f.setAttribute('data-fc', fc); }
+        else if(eRef){ f.className = 'tutor-ref'; f.setAttribute('data-unit-id', refId); if(refTitle) f.setAttribute('data-unit-title', refTitle); }
       });
     };
     anda(tpl.content);
