@@ -15329,11 +15329,15 @@ const Store = (function(){
       if(!doc) return null;
       ['titulo', 'body', 'meta'].forEach(k => { if(patch && patch[k] !== undefined) doc[k] = patch[k]; });
       // pasta e matéria são mutuamente exclusivos (raiz = os dois vazios)
-      if(patch && patch.pastaId !== undefined){ doc.pastaId = patch.pastaId || null; if(doc.pastaId) doc.subjectId = null; }
-      if(patch && patch.subjectId !== undefined){ doc.subjectId = patch.subjectId || null; if(doc.subjectId) doc.pastaId = null; }
+      let mudouOrganizacao = false;
+      if(patch && patch.pastaId !== undefined){ doc.pastaId = patch.pastaId || null; if(doc.pastaId) doc.subjectId = null; mudouOrganizacao = true; }
+      if(patch && patch.subjectId !== undefined){ doc.subjectId = patch.subjectId || null; if(doc.subjectId) doc.pastaId = null; mudouOrganizacao = true; }
       doc.updatedAt = Date.now();
-      // SEM _emit() de propósito: o autosave roda a cada ~1s durante a
-      // digitação e um re-render da página mataria o caret do editor.
+      // SEM _emit() pra corpo/título de propósito: o autosave roda a cada ~1s
+      // durante a digitação e um re-render mataria o caret. ORGANIZAÇÃO
+      // (pasta/matéria) vem de arrastar — aí o _emit é seguro, e o grafo e a
+      // sidebar se atualizam sozinhos.
+      if(mudouOrganizacao) _emit();
       _syncCadAvulsoUpsert(doc).catch(()=>{});
       return doc;
     },
@@ -39087,17 +39091,29 @@ window.TutorIA = (function(){
     const showUnits = idx.flat.filter(function(u){ return studentSubj.has(String(u.subjectId)) || linkedUnits.has(String(u.id)); });
     if(!showUnits.length) return { units: [], subjects: [], refs: [], colorBase: {}, degree: {} };
     const units = showUnits.map(function(u){ return { id: String(u.id), subjectId: String(u.subjectId), label: [u.sigla, u.number, u.title].filter(Boolean).join(' · '), degree: degree[String(u.id)] || 0 }; });
-    // nós dos cadernos próprios: cluster da matéria vinculada, ou o sol
-    // "Cadernos" quando sem matéria
+    // nós dos cadernos próprios: quem está numa PASTA orbita a pasta (sol,
+    // como a matéria); arrastado pra matéria orbita a matéria; solto fica
+    // solto — só a citação o puxa. A cor papel é a marca de caderno criado.
+    const pastasAll = (window.Store && Store.cadPastasLista) ? (Store.cadPastasLista() || []) : [];
+    const pastaById = {}; pastasAll.forEach(function(p2){ pastaById[String(p2.id)] = p2; });
     avDocs.forEach(function(d2){
-      units.push({ id: 'doc:' + d2.id, subjectId: '_doc', label: '\u270E ' + (d2.titulo || 'Sem título'), degree: degree['doc:' + d2.id] || 0 });
+      const grupo = (d2.pastaId && pastaById[String(d2.pastaId)]) ? ('pasta:' + d2.pastaId)
+        : (d2.subjectId ? String(d2.subjectId) : '_doc');
+      units.push({ id: 'doc:' + d2.id, subjectId: grupo, doc: true, label: '\u270E ' + (d2.titulo || 'Sem título'), degree: degree['doc:' + d2.id] || 0 });
     });
     const subjIds = [...new Set(units.map(function(u){ return u.subjectId; }))].sort();
     const colorBase = {}; subjIds.forEach(function(s, i){ colorBase[s] = _GRAFO_PALETTE[i % _GRAFO_PALETTE.length]; });
     // caderno criado tem cor PRÓPRIA (papel) — é ela que o marca no mapa
     if(colorBase['_doc']) colorBase['_doc'] = '#dfd9cf';
+    // sol de pasta: herda a cor da matéria vinculada; sem matéria, papel
+    subjIds.forEach(function(s2){
+      if(String(s2).indexOf('pasta:') !== 0) return;
+      const p2 = pastaById[String(s2).slice(6)];
+      colorBase[s2] = (p2 && p2.subjectId && colorBase[String(p2.subjectId)]) ? colorBase[String(p2.subjectId)] : '#dfd9cf';
+    });
     const subjects = subjIds.map(function(s){
       if(s === '_doc') return { id: s, sigla: 'Cadernos' };
+      if(String(s).indexOf('pasta:') === 0){ const p2 = pastaById[String(s).slice(6)]; return { id: s, sigla: (p2 && p2.nome) || 'Pasta' }; }
       const sample = showUnits.find(function(u){ return String(u.subjectId) === s; });
       return { id: s, sigla: sample ? (sample.sigla || s) : s };
     });
@@ -39148,7 +39164,7 @@ window.TutorIA = (function(){
     const nodes = [];
     function nodeFor(id, props){ let o = _grafoNodeObj[id]; if(!o){ o = { id: id }; _grafoNodeObj[id] = o; } Object.assign(o, props); nodes.push(o); return o; }
     m.subjects.forEach(function(s){ if(s.id !== '_doc' && sunSubj.has(s.id)) nodeFor('subj:' + s.id, { kind: 'sun', name: s.sigla, subjectId: s.id, color: _grafoColor(s.id), val: 9 }); });
-    m.units.forEach(function(u){ if(!vis.has(u.id)) return; nodeFor(u.id, { kind: 'unit', name: u.label, unitId: u.id, subjectId: u.subjectId, color: _grafoColor(u.subjectId), val: _grafoPrefs.display.sizeByDegree ? (2 + u.degree) : 3 }); });
+    m.units.forEach(function(u){ if(!vis.has(u.id)) return; nodeFor(u.id, { kind: 'unit', name: u.label, unitId: u.id, subjectId: u.subjectId, color: u.doc ? '#dfd9cf' : _grafoColor(u.subjectId), val: _grafoPrefs.display.sizeByDegree ? (2 + u.degree) : 3 }); });
     const links = [];
     m.units.forEach(function(u){ if(u.subjectId !== '_doc' && vis.has(u.id) && sunSubj.has(u.subjectId)) links.push({ source: 'subj:' + u.subjectId, target: u.id, kind: 'member' }); });
     _grafoRefsAtivos().forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: e.fc ? 'fcref' : 'ref', n: e.n || 1, sentence: e.sentence }); });
@@ -39276,7 +39292,7 @@ window.TutorIA = (function(){
       });
     });
     // Matérias (filtro + cor)
-    const sM = sec('Matérias');
+    const sM = sec('Matérias e pastas');
     m.subjects.forEach(function(s){
       const r = row(sM);
       const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !_grafoActive || _grafoActive.has(s.id);
@@ -39329,11 +39345,12 @@ window.TutorIA = (function(){
     const isUnit = node.kind === 'unit';
     const pop = document.createElement('div');
     pop.className = 'tutor-ref-pop grafo-node-pop';
-    const title = isUnit ? node.name : ('Matéria · ' + node.name);
+    const ehPastaSun = !isUnit && String(node.subjectId || '').indexOf('pasta:') === 0;
+    const title = isUnit ? node.name : ((ehPastaSun ? 'Pasta · ' : 'Matéria · ') + node.name);
     const pinLabel = node.pinned ? 'Soltar' : 'Fixar no canvas';
     const collapsed = _grafoCollapsed[node.subjectId];
     const ehDocNode = isUnit && String(node.unitId || '').indexOf('doc:') === 0;
-    const secondLabel = isUnit ? (ehDocNode ? 'Abrir caderno' : 'Abrir unidade') : (collapsed ? 'Expandir matéria' : 'Recolher matéria');
+    const secondLabel = isUnit ? (ehDocNode ? 'Abrir caderno' : 'Abrir unidade') : (collapsed ? 'Expandir grupo' : 'Recolher grupo');
     const secondIcon = isUnit ? _SVG_OPEN : _SVG_FOLD;
     pop.innerHTML =
       '<div class="tutor-ref-pop-name">' + _esc(title) + '</div>' +
@@ -39390,16 +39407,6 @@ window.TutorIA = (function(){
     _grafoRoot = host;
     _grafoFocoId = focoId || null;
     _grafoOpen();
-    if(!window.__grafoVivoBound){
-      window.__grafoVivoBound = true;
-      document.addEventListener('ubq:cad-salvo', function(){
-        clearTimeout(_grafoPaneTimer);
-        _grafoPaneTimer = setTimeout(async function(){
-          if(!_fg || !_grafoHostEl || !_grafoHostEl.isConnected) return;
-          try{ _grafoModel = await _grafoBuildModel(); _grafoApply(); }catch(_){ }
-        }, 1500);
-      });
-    }
   }
   function _grafoBuild2D(host){
     const g = ForceGraph()(host)
@@ -39486,7 +39493,22 @@ window.TutorIA = (function(){
     _fgRO = new ResizeObserver(function(){ const r = host.getBoundingClientRect(); if(r.width && r.height && _fg){ _fg.width(r.width).height(r.height); } });
     _fgRO.observe(host);
   }
+  function _grafoVivoArmar(){
+    if(window.__grafoVivoBound) return;
+    window.__grafoVivoBound = true;
+    const pede = function(){
+      clearTimeout(_grafoPaneTimer);
+      _grafoPaneTimer = setTimeout(async function(){
+        if(!_fg || !_grafoHostEl || !_grafoHostEl.isConnected) return;
+        if(_grafoHostEl.offsetParent === null) return;   // escondido: o open refaz
+        try{ _grafoModel = await _grafoBuildModel(); _grafoApply(); }catch(_){ }
+      }, 1200);
+    };
+    document.addEventListener('ubq:cad-salvo', pede);
+    if(window.Store && Store.subscribe) Store.subscribe(pede);
+  }
   async function _grafoOpen(){
+    _grafoVivoArmar();
     const host = _gEl('grafoCanvas'), statusEl = _gEl('grafoStatus');
     if(!host) return;
     if(statusEl) statusEl.textContent = 'Carregando…';
@@ -54000,7 +54022,7 @@ const CadernosPage = (function(){
     let head = '', corpo = '';
     const selAtual = _sel(_route || { query: {} });
     if(_split.tipo === 'grafo'){
-      head = '<span class="cadp-paneb-t">Grafo — conexões dos seus cadernos</span><span class="cadp-paneb-acts">' + fechar + '</span>';
+      head = '<span class="cadp-paneb-t">Conexões — o mapa dos seus cadernos</span><span class="cadp-paneb-acts">' + fechar + '</span>';
       corpo = '<div class="cadp-pane-grafo" id="cadpGrafoHost"></div>';
     } else if(_split.tipo === 'unitfull'){
       const rot = _rotuloUnidade(_split.id) || 'Unidade';
@@ -54400,7 +54422,7 @@ const CadernosPage = (function(){
       + '<button type="button" class="vd-opt" data-exp="md">Exportar Markdown</button>'
       + '<button type="button" class="vd-opt" data-exp="pdf">Exportar PDF (imprimir)</button>'
       + '<button type="button" class="vd-opt" data-split-pick>Abrir em splitscreen&hellip;</button>'
-      + '<button type="button" class="vd-opt" data-split-grafo>Grafo em splitscreen</button>'
+      + '<button type="button" class="vd-opt" data-split-grafo>Conexões em splitscreen</button>'
       + '</div></span>';
   }
   // ── D2c-2: Propriedades do caderno (metadados) ───────────────────────────
