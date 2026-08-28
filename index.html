@@ -38968,6 +38968,9 @@ window.TutorIA = (function(){
   // Raiz ATIVA do grafo (drawer #tutorGrafo ou painel do split) + host do
   // canvas + foco (unidade/caderno atual, pro recorte opcional dos Ajustes).
   let _grafoRoot = null, _grafoHostEl = null, _grafoFocoId = null;
+  // Hover (realce de vizinhança) + easing do esmaecer + enquadrar ao abrir.
+  let _gHover = null, _gHoverIds = new Set(), _gHoverLinks = new Set();
+  let _gFade = 0, _gFrameT = 0, _gNeedsFit = false, _gLastClick = { id: null, t: 0 };
   function _gEl(id){
     const r = (_grafoRoot && _grafoRoot.isConnected) ? _grafoRoot : null;
     if(r) return r.querySelector('#' + id) || r.querySelector('[data-gid="' + id + '"]');
@@ -39144,6 +39147,13 @@ window.TutorIA = (function(){
       const base2 = new Set(); base.forEach(function(id){ if(perto.has(id)) base2.add(id); });
       base = base2;
     }
+    // Ajustes: esconder órfãos (sem nenhuma conexão VISÍVEL pelos filtros)
+    if((_grafoPrefs.display || {}).semOrfaos){
+      const ligados = new Set();
+      _grafoRefsAtivos().forEach(function(e3){ ligados.add(String(e3.source)); ligados.add(String(e3.target)); });
+      const base3 = new Set(); base.forEach(function(id){ if(ligados.has(String(id))) base3.add(id); });
+      base = base3;
+    }
     const vis = new Set();
     base.forEach(function(id){ const s = subjById[id]; if(_grafoCollapsed[s] && (m.degree[id] || 0) === 0) return; vis.add(id); }); // recolhe só as unidades sem conexão
     return { base: base, vis: vis, subjById: subjById };
@@ -39162,9 +39172,9 @@ window.TutorIA = (function(){
     // recolhidas) — assim dá pra clicar de novo e expandir.
     const sunSubj = new Set(); base.forEach(function(id){ sunSubj.add(subjById[id]); });
     const nodes = [];
-    function nodeFor(id, props){ let o = _grafoNodeObj[id]; if(!o){ o = { id: id }; _grafoNodeObj[id] = o; } Object.assign(o, props); nodes.push(o); return o; }
+    function nodeFor(id, props){ let o = _grafoNodeObj[id]; if(!o){ o = { id: id, __born: (typeof performance !== 'undefined' ? performance.now() : Date.now()) }; _grafoNodeObj[id] = o; } Object.assign(o, props); nodes.push(o); return o; }
     m.subjects.forEach(function(s){ if(s.id !== '_doc' && sunSubj.has(s.id)) nodeFor('subj:' + s.id, { kind: 'sun', name: s.sigla, subjectId: s.id, color: _grafoColor(s.id), val: 9 }); });
-    m.units.forEach(function(u){ if(!vis.has(u.id)) return; nodeFor(u.id, { kind: 'unit', name: u.label, unitId: u.id, subjectId: u.subjectId, color: u.doc ? '#dfd9cf' : _grafoColor(u.subjectId), val: _grafoPrefs.display.sizeByDegree ? (2 + u.degree) : 3 }); });
+    m.units.forEach(function(u){ if(!vis.has(u.id)) return; nodeFor(u.id, { kind: 'unit', doc: !!u.doc, name: u.label, unitId: u.id, subjectId: u.subjectId, color: u.doc ? '#dfd9cf' : _grafoColor(u.subjectId), val: _grafoPrefs.display.sizeByDegree ? (2 + u.degree) : 3 }); });
     const links = [];
     m.units.forEach(function(u){ if(u.subjectId !== '_doc' && vis.has(u.id) && sunSubj.has(u.subjectId)) links.push({ source: 'subj:' + u.subjectId, target: u.id, kind: 'member' }); });
     _grafoRefsAtivos().forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: e.fc ? 'fcref' : 'ref', n: e.n || 1, sentence: e.sentence }); });
@@ -39279,11 +39289,11 @@ window.TutorIA = (function(){
     const row = function(parent){ const r = document.createElement('label'); r.className = 'gp-row'; parent.appendChild(r); return r; };
     // Tipos de conexão (Fase 6C): cadernos [[ ]] × flashcards ⇆
     const sC = sec('Conexões');
-    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showFc', 'Flashcards ⇆ — tracejada'], ['soAtual', 'Só a unidade/caderno atual']].forEach(function(par){
+    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showFc', 'Flashcards ⇆ — tracejada'], ['soAtual', 'Só a unidade/caderno atual'], ['semOrfaos', 'Esconder sem conexões']].forEach(function(par){
       const r0 = row(sC);
       const cb0 = document.createElement('input'); cb0.type = 'checkbox';
-      // soAtual nasce DESLIGADO (grafo inteiro é o padrão da casa)
-      cb0.checked = par[0] === 'soAtual' ? !!(_grafoPrefs.display || {})[par[0]] : (_grafoPrefs.display || {})[par[0]] !== false;
+      // soAtual/semOrfaos nascem DESLIGADOS (grafo inteiro é o padrão da casa)
+      cb0.checked = (par[0] === 'soAtual' || par[0] === 'semOrfaos') ? !!(_grafoPrefs.display || {})[par[0]] : (_grafoPrefs.display || {})[par[0]] !== false;
       const sp0 = document.createElement('span'); sp0.className = 'gp-row-l'; sp0.textContent = par[1];
       r0.appendChild(cb0); r0.appendChild(sp0);
       cb0.addEventListener('change', function(){
@@ -39341,6 +39351,15 @@ window.TutorIA = (function(){
   const _SVG_FOLD = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="8" y1="12" x2="16" y2="12"/></svg>';
   function _grafoClickNode(node, event){
     if(!node) return;
+    // duplo-clique: centraliza e aproxima (o menu fica pro clique simples)
+    const agoraDC = Date.now();
+    if(_gLastClick.id === node.id && agoraDC - _gLastClick.t < 350){
+      _gLastClick = { id: null, t: 0 };
+      _grafoCloseNodeMenu();
+      if(_fg && isFinite(node.x)){ try{ _fg.centerAt(node.x, node.y, 500); _fg.zoom(Math.max(_fg.zoom(), 2.4), 500); }catch(_){ } }
+      return;
+    }
+    _gLastClick = { id: node.id, t: agoraDC };
     _grafoCloseNodeMenu();
     const isUnit = node.kind === 'unit';
     const pop = document.createElement('div');
@@ -39373,10 +39392,12 @@ window.TutorIA = (function(){
     setTimeout(function(){ document.addEventListener('mousedown', _grafoMenuOutside, true); }, 0);
   }
   function _grafoLinkColor(l){
-    if(l.kind === 'member') return 'rgba(255,255,255,0.05)';
+    // hover: só as conexões do nó ficam acesas; o resto esmaece (com easing)
+    const dimF = _gHover ? (_gHoverLinks.has(l) ? 1 : Math.max(0.08, 1 - _gFade * 0.9)) : 1;
+    if(l.kind === 'member') return 'rgba(255,255,255,' + (0.05 * dimF).toFixed(3) + ')';
     const sid = (l.source && typeof l.source === 'object') ? l.source.subjectId : null; // cor da matéria de ORIGEM
     const c = sid ? _grafoColor(sid) : null;
-    return (c && /^#/.test(c)) ? (c + '9c') : 'rgba(200,169,126,0.5)';
+    return (c && /^#/.test(c)) ? _grafoHexA(c, 0.61 * dimF) : 'rgba(200,169,126,' + (0.5 * dimF).toFixed(3) + ')';
   }
   // #rrggbb (+ alpha) → rgba() — usado no halo/glow dos nós.
   function _grafoHexA(hex, a){
@@ -39440,9 +39461,23 @@ window.TutorIA = (function(){
         // loop de render → grafo em branco até trocar de aba. Pula o nó até ter
         // posição finita (no frame seguinte já desenha).
         if(!isFinite(node.x) || !isFinite(node.y)) return;
+        const nowMs = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        // easing do esmaecer — 1x por frame (o 1º nó do frame atualiza)
+        if(nowMs - _gFrameT > 8){
+          const alvoF = _gHover ? 1 : 0;
+          _gFade += (alvoF - _gFade) * 0.18;
+          if(Math.abs(alvoF - _gFade) < 0.01) _gFade = alvoF;
+          _gFrameT = nowMs;
+        }
         const isSun = node.kind === 'sun';
         const r = Math.sqrt(node.val || 1) * 4;
-        const col = _grafoColor(node.subjectId);
+        const col = node.doc ? '#dfd9cf' : _grafoColor(node.subjectId);
+        // nascimento em fade (600ms) + esmaecer de vizinhança
+        const nasc = node.__born ? Math.min(1, (nowMs - node.__born) / 600) : 1;
+        const emFoco = !_gHover || _gHoverIds.has(node.id);
+        const dimA = (emFoco ? 1 : Math.max(0.1, 1 - _gFade * 0.86)) * nasc;
+        ctx.save();
+        ctx.globalAlpha = dimA;
         // "BOIAR" delicado: micro-deriva senoidal por nó (puramente visual, não
         // mexe na física; cada nó com fase própria = flutuação orgânica; pinado
         // não boia). As linhas ligam no centro real — a deriva é pequena demais
@@ -39465,13 +39500,21 @@ window.TutorIA = (function(){
         ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill();
         // anel de fixado
         if(node.pinned){ ctx.beginPath(); ctx.arc(node.x, node.y, r + 2.5 / scale, 0, 2 * Math.PI); ctx.strokeStyle = 'rgba(255,255,255,0.92)'; ctx.lineWidth = 1.5 / scale; ctx.stroke(); }
-        // rótulo
-        if(!isSun){ if(!_grafoPrefs.display.labels || scale < 1.2) return; }
-        const fontSize = (isSun ? 12 : 9.5) / scale;
-        ctx.font = (isSun ? '600 ' : '') + fontSize + 'px ' + (isSun ? 'Georgia, serif' : 'sans-serif');
-        ctx.fillStyle = isSun ? col : 'rgba(240,236,228,0.82)';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-        ctx.fillText(isSun ? node.name : _grafoShort(node.name), x, y + r + 2 / scale);
+        // rótulo — fade contínuo por zoom (longe = só bolinhas); hover mostra
+        // sempre; com a preferência de rótulos desligada, só hover e sóis.
+        let la = 0;
+        if(isSun) la = 1;
+        else if(_gHover && _gHoverIds.has(node.id)) la = 1;
+        else if(_grafoPrefs.display.labels !== false) la = Math.max(0, Math.min(1, (scale - 1.0) / 0.8));
+        if(la > 0.02){
+          const fontSize = (isSun ? 12 : 9.5) / scale;
+          ctx.font = (isSun ? '600 ' : '') + fontSize + 'px ' + (isSun ? 'Georgia, serif' : 'sans-serif');
+          ctx.globalAlpha = dimA * la;
+          ctx.fillStyle = isSun ? col : 'rgba(240,236,228,0.82)';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+          ctx.fillText(isSun ? node.name : _grafoShort(node.name), x, y + r + 2 / scale);
+        }
+        ctx.restore();
       })
       // Área de clique/hover = só o NÚCLEO (o halo não captura o ponteiro).
       .nodePointerAreaPaint(function(node, color, ctx){
@@ -39479,8 +39522,22 @@ window.TutorIA = (function(){
         ctx.fillStyle = color; ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 2 * Math.PI); ctx.fill();
       })
       .onNodeClick(function(node, event){ _grafoClickNode(node, event); })
-      .onNodeHover(function(node){ host.style.cursor = node ? 'pointer' : 'default'; });
+      .onNodeHover(function(node){
+        host.style.cursor = node ? 'pointer' : 'default';
+        _gHover = node || null;
+        _gHoverIds = new Set(); _gHoverLinks = new Set();
+        if(node){
+          _gHoverIds.add(node.id);
+          (g.graphData().links || []).forEach(function(l){
+            const a = (l.source && l.source.id != null) ? l.source.id : l.source;
+            const b = (l.target && l.target.id != null) ? l.target.id : l.target;
+            if(a === node.id || b === node.id){ _gHoverLinks.add(l); _gHoverIds.add(a); _gHoverIds.add(b); }
+          });
+        }
+      });
     try { g.d3Force('gravity', _grafoGravity()); } catch(_){}
+    // física com mais deslize (a "gelatina" orgânica do assentar)
+    try { g.d3AlphaDecay(0.015); g.d3VelocityDecay(0.3); } catch(_){}
     return g;
   }
   function _grafoSwitchTo(host){
@@ -39488,6 +39545,7 @@ window.TutorIA = (function(){
     host.innerHTML = ''; _grafoNodeObj = {};
     _fg = _grafoBuild2D(host);
     _grafoHostEl = host;
+    _gNeedsFit = true;
     // o observador SEGUE o host ativo (antes ficava preso no primeiro pra sempre)
     if(_fgRO) _fgRO.disconnect();
     _fgRO = new ResizeObserver(function(){ const r = host.getBoundingClientRect(); if(r.width && r.height && _fg){ _fg.width(r.width).height(r.height); } });
@@ -39533,6 +39591,11 @@ window.TutorIA = (function(){
     _grafoApply();
     _grafoApplyForces();
     _grafoRenderPanel();
+    // enquadra sozinho na 1ª abertura deste host (a física já assentou um pouco)
+    if(_gNeedsFit){
+      _gNeedsFit = false;
+      setTimeout(function(){ try{ if(_fg) _fg.zoomToFit(600, 48); }catch(_){ } }, 700);
+    }
   }
 
   function _drawer(){
