@@ -38599,18 +38599,25 @@ window.TutorIA = (function(){
   }
   async function _cadLoad(unitId){
     const el = _cadEl(); if(!el) return;
+    // CORRIDA (SQL do dono provou: corpos zerados): um autosave pendente do
+    // caderno ANTERIOR não pode disparar depois que o editor foi limpo e a
+    // identidade trocada — gravaria VAZIO por cima. Timer morre AQUI e o
+    // editor fica travado até o conteúdo chegar.
+    if(_cadTimer){ clearTimeout(_cadTimer); _cadTimer = null; }
+    el.__cadCarregando = true;
     _cadDocId = null; _cadUnit = unitId; _fcCadConhecidos = new Set(); el.innerHTML = ''; _emptyToggle(el); _cadStatus('carregando…');
     const blNaCarga = _cadActiveBl || { sec: document.getElementById('cadernoBacklinks'), list: document.getElementById('cadernoBlList'), count: document.getElementById('cadernoBlCount') };
     _cadSurfReg(el, { tipo: 'unit', unitId: String(unitId),
       statusEl: _cadActiveStatusEl || document.getElementById('cadernoStatus'), bl: blNaCarga });
     const uid = await _cadUserId();
-    if(!uid || !window._sb || !unitId){ _cadStatus(''); _emptyToggle(el); return; }
+    if(!uid || !window._sb || !unitId){ el.__cadCarregando = false; _cadStatus(''); _emptyToggle(el); return; }
     try {
       const { data, error } = await window._sb.schema('aluno').from('caderno')
         .select('body').eq('user_id', uid).eq('unit_id', String(unitId)).maybeSingle();
       if(!error && data && data.body){ el.innerHTML = _cadSanitize(data.body); _cadFixChips(el); }
       _cadVerBase[String(unitId)] = (data && data.body) || '';
     } catch(e){ console.warn('[caderno load]', e); }
+    el.__cadCarregando = false;
     try{ _fcCadDedup(el); }catch(e){ console.warn('[fc caderno dedup]', e); }
     try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
     try{ _fcCadAdotar(el); }catch(e){ console.warn('[fc caderno adoção]', e); }
@@ -38650,7 +38657,9 @@ window.TutorIA = (function(){
     // IDENTIDADE CAPTURADA NA ENTRADA: com 2 painéis editáveis o foco pode
     // trocar durante os awaits — sem isto, o corpo de um caderno cairia na
     // linha do OUTRO (corrupção silenciosa).
+    if(el.__cadCarregando) return;   // conteúdo ainda não chegou — nada do aluno pra salvar
     const unitAlvo = _cadUnit, docAlvo = _cadDocId, stAlvo = _cadActiveStatusEl;
+    if(!docAlvo && (!unitAlvo || String(unitAlvo) === 'null')) return;
     // O ciclo de flashcards (::) é DA UNIDADE — card precisa de unitId.
     // No avulso, :: fica como texto (decisão em aberto registrada).
     if(unitAlvo){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
@@ -40276,6 +40285,7 @@ window.TutorIA = (function(){
   // ── D2b: caderno AVULSO no editor (mesma máquina, outro destino) ──
   function _cadLoadDoc(docId){
     const el = _cadEl(); if(!el) return;
+    if(_cadTimer){ clearTimeout(_cadTimer); _cadTimer = null; }
     _cadDocId = String(docId); _cadUnit = null; _fcCadConhecidos = new Set();
     const blDoc = _cadActiveBl || { sec: document.getElementById('cadernoBacklinks'), list: document.getElementById('cadernoBlList'), count: document.getElementById('cadernoBlCount') };
     _cadSurfReg(el, { tipo: 'doc', docId: String(docId),
@@ -54774,6 +54784,14 @@ const CadernosPage = (function(){
   function _materias(){
     const cadPorUnit = {};
     ((window.Store && Store.listCadernos) ? Store.listCadernos() : []).forEach(function(c){ cadPorUnit[String(c.unitId)] = c; });
+    // caderno cujo conteúdo são FLASHCARDS (linhas ::) pode ter corpo curto/
+    // vazio no banco — os cards anchorados nele CONTAM como conteúdo
+    const fcCad = new Set();
+    try{
+      ((window.Store && Store.deckList) ? Store.deckList() : []).forEach(function(c){
+        if(c && c.origin === 'caderno' && c.unitId) fcCad.add(String(c.unitId));
+      });
+    }catch(_){ }
     return (window.COURSES || []).map(function(c){
       const unidades = [];
       (c.modules || []).forEach(function(m){
@@ -54784,7 +54802,8 @@ const CadernosPage = (function(){
           unidades.push({ unitId: String(u.id), number: String(u.number || ''), title: String(u.title || ''),
             topics: (u.topics || []).map(String), cover: u.cover || '',
             storeId: (u._storeId != null) ? String(u._storeId) : null,
-            tem: !!(cad && _txt(cad.body)), busca: _norm((u.number || '') + ' ' + (u.title || '') + ' ' + (cad ? _txt(cad.body).slice(0, 400) : '')) });
+            tem: !!(cad && _txt(cad.body)) || fcCad.has(String(u.id)) || (u._storeId != null && fcCad.has('u' + u._storeId)),
+            busca: _norm((u.number || '') + ' ' + (u.title || '') + ' ' + (cad ? _txt(cad.body).slice(0, 400) : '')) });
         });
       });
       return { subjectId: String(c._subjectId), sigla: c.sigla || '', nome: c.title || c.sigla || 'Matéria', unidades: unidades };
@@ -55785,6 +55804,7 @@ const CadernosPage = (function(){
   }
   function _edRotulo(id){ _editalPorMateria(); return (_edCacheRot && _edCacheRot[String(id)]) || 'Tópico removido do edital'; }
   async function _metaSalvarUnit(unitId, meta){
+    if(!unitId || String(unitId) === 'null') return;
     try{
       const u = await window._sb.auth.getUser();
       const uid = u && u.data && u.data.user && u.data.user.id;
