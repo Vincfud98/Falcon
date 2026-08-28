@@ -14905,7 +14905,7 @@ const Store = (function(){
   // aqui só guardamos o espelho da sessão (não persistimos em localStorage).
   // Servidor engasgado (onda do Supabase) NÃO pode deixar a sessão inteira sem
   // cadernos: erro agenda nova tentativa (3x, folga crescente).
-  let _cadHidrTent = 0, _cadHidrTimer = null;
+  let _cadHidrTent = 0, _cadHidrTimer = null, _cadReidrUlt = 0;
   function _cadHidrRetry(){
     if(_cadHidrTent >= 3) return;
     _cadHidrTent++;
@@ -14931,15 +14931,19 @@ const Store = (function(){
         data = r2.data; error = r2.error;
       }
       if(error){ console.warn('[hydrate cadernos]', error); _cadHidrRetry(); return; }
-      _state.cadernos = (data || []).map(row => ({
+      const novosCad = (data || []).map(row => ({
         unitId: String(row.unit_id),
         body: row.body || '',
         meta: row.meta || {},
         updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now()
       }));
-      console.log('[Store] hydrated cadernos:', _state.cadernos.length);
       _cadHidrTent = 0;
-      _emit();
+      // só EMITE quando o dado mudou — emitir sempre criava laço de
+      // re-render (mount → rehidratar → emit → mount...) e a tela piscava
+      const mudouCad = JSON.stringify(novosCad) !== JSON.stringify(_state.cadernos || []);
+      _state.cadernos = novosCad;
+      console.log('[Store] hydrated cadernos:', novosCad.length + (mudouCad ? '' : ' (sem mudança)'));
+      if(mudouCad) _emit();
     }catch(e){ console.warn('[hydrate cadernos exception]', e); _cadHidrRetry(); }
   }
 
@@ -14979,7 +14983,8 @@ const Store = (function(){
           subjectId: r.subject_id ? String(r.subject_id) : null, ordem: r.ordem || 0
         }));
       }
-      _emit();
+      const marcaAv = JSON.stringify([_state.cadAvulsos || [], _state.cadPastas || []]);
+      if(marcaAv !== _state.__avulsosMarca){ _state.__avulsosMarca = marcaAv; _emit(); }
     }catch(e){ console.warn('[hydrate cad avulsos ex]', e); _cadHidrRetry(); }
   }
   async function _syncCadAvulsoUpsert(doc){
@@ -15421,6 +15426,9 @@ const Store = (function(){
     // A página Cadernos chama ao abrir: re-busca do servidor (idempotente,
     // 2 selects) — garante sidebar completa mesmo se o boot pegou onda ruim.
     rehidratarCadernos(){
+      const agora = Date.now();
+      if(agora - _cadReidrUlt < 30000) return;   // folga: montar não vira martelo
+      _cadReidrUlt = agora;
       _hydrateCadernosFromSupabase().catch(()=>{});
       _hydrateCadernosAvulsosFromSupabase().catch(()=>{});
     },
@@ -40435,6 +40443,24 @@ window.TutorIA = (function(){
         if(novoCel && novoCel !== c.cel){
           c.cel = novoCel;
           try{ window._sb.schema('aluno').from('caderno_comentarios').update({ cel: novoCel }).eq('id', c.id).then(function(){}); }catch(_){ }
+        }
+      }
+      // marca também morreu? re-ancora pelo TEXTO citado (âncora de texto,
+      // como os grifos): primeira linha que contém o trecho adota o fio.
+      if(c.trecho_txt && !el.querySelector('[data-cel="' + c.cel + '"]')){
+        const alvoTxt = _gNorm(c.trecho_txt);
+        if(alvoTxt.length >= 6){
+          const linhas2 = el.querySelectorAll('[data-cel]');
+          for(let i2 = 0; i2 < linhas2.length; i2++){
+            if(_gNorm(linhas2[i2].textContent || '').indexOf(alvoTxt) !== -1){
+              const novoCel2 = linhas2[i2].getAttribute('data-cel');
+              if(novoCel2){
+                c.cel = novoCel2;
+                try{ window._sb.schema('aluno').from('caderno_comentarios').update({ cel: novoCel2 }).eq('id', c.id).then(function(){}); }catch(_){ }
+              }
+              break;
+            }
+          }
         }
       }
       (porCel[c.cel] = porCel[c.cel] || []).push(c);
