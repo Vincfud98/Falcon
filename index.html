@@ -9122,7 +9122,7 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
    pro texto digitado (era o "apaguei a seta e escrevi com o estilo dela") */
 .tutor-caderno-ed .cad-toggle>summary::before{content:"\25B8";position:absolute;left:0;top:0;display:inline-block;width:1.15rem;color:var(--accent);transition:transform .2s var(--ease);pointer-events:none}
 .tutor-caderno-ed details.cad-toggle[open]>summary::before{transform:rotate(90deg)}
-.tutor-caderno-ed .cad-toggle>summary:empty::after{content:"Título do toggle";color:var(--text-mute);opacity:.5}
+.tutor-caderno-ed .cad-toggle>summary[data-vazio]::after{content:"Título do toggle";position:absolute;left:1.15rem;top:0;color:var(--text-mute);opacity:.5;pointer-events:none}
 .tutor-caderno-ed .cad-toggle>summary.cad-tg-h2{font-family:var(--serif);font-weight:400;font-size:1.35rem;color:var(--text)}
 .tutor-caderno-ed .cad-toggle>summary.cad-tg-h3{font-family:var(--sans);font-weight:600;font-size:1.02rem;color:var(--text)}
 .tutor-caderno-ed .cad-toggle>summary.cad-tg-h4{font-family:var(--sans);font-size:.9rem;letter-spacing:.03em;color:var(--text-dim)}
@@ -38672,7 +38672,7 @@ window.TutorIA = (function(){
     try {
       const { data, error } = await window._sb.schema('aluno').from('caderno')
         .select('body').eq('user_id', uid).eq('unit_id', String(unitId)).maybeSingle();
-      if(!error && data && data.body){ el.innerHTML = _cadSanitize(data.body); _cadFixChips(el); }
+      if(!error && data && data.body){ el.innerHTML = _cadSanitize(data.body); _cadFixChips(el); _cadNormalizarBlocos(el); }
       _cadVerBase[String(unitId)] = (data && data.body) || '';
     } catch(e){ console.warn('[caderno load]', e); }
     el.__cadCarregando = false;
@@ -38815,7 +38815,7 @@ window.TutorIA = (function(){
         const ed = _cadEl(); if(!ed){ throw new Error('caderno fechado'); }
         // fotografa o ATUAL antes de sobrescrever
         await window._sb.schema('aluno').from('caderno_versions').insert({ user_id: uid, unit_id: String(unitId), body: _cadSanitize(ed.innerHTML) });
-        ed.innerHTML = _cadSanitize(r.data.body); _cadFixChips(ed);
+        ed.innerHTML = _cadSanitize(r.data.body); _cadFixChips(ed); _cadNormalizarBlocos(ed);
         try{ _fcCadDedup(ed); _fcCadProjetar(ed); _fcCadAdotar(ed); _fcVistaAplicar(ed); }catch(_){}
         _emptyToggle(ed); _cadSchedule();
         fechar();
@@ -38885,9 +38885,28 @@ window.TutorIA = (function(){
   function _cadNormalizarBlocos(el){
     if(!el) return;
     el.querySelectorAll('.cad-toggle-chev').forEach(function(c2){ c2.remove(); });
-    el.querySelectorAll('details.cad-toggle > summary').forEach(function(sm){
-      if(sm.childNodes.length && !String(sm.textContent || '').replace(/[\s\u200b]/g, '')
-         && !sm.querySelector('img,span[data-fc-id],.tutor-ref')) sm.innerHTML = '';
+    el.querySelectorAll('details.cad-toggle').forEach(function(det){
+      // TÍTULO: o navegador apaga o <summary> junto com o texto dele, e
+      // <details> sem <summary> é o bloco nativo "Details". Reconstrói.
+      let sm = det.querySelector(':scope > summary');
+      if(!sm){
+        sm = document.createElement('summary');
+        sm.innerHTML = '<br>';
+        det.insertBefore(sm, det.firstChild);
+      }
+      const vazio = !String(sm.textContent || '').replace(/[\s\u200b]/g, '')
+        && !sm.querySelector('img,.tutor-ref,[data-fc-id]');
+      if(vazio){
+        if(!sm.firstChild) sm.appendChild(document.createElement('br'));
+        sm.setAttribute('data-vazio', '1');       // sombra do placeholder
+      } else sm.removeAttribute('data-vazio');
+      // CORPO: idem — sem ele o toggle vira uma casca sem onde escrever
+      if(!det.querySelector(':scope > .cad-toggle-corpo')){
+        const corpo = document.createElement('div');
+        corpo.className = 'cad-toggle-corpo';
+        corpo.innerHTML = '<div><br></div>';
+        det.appendChild(corpo);
+      }
     });
   }
   const _TIPOS_BLOCO = [['texto', 'Texto simples'], ['h2', 'Título 1'], ['h3', 'Título 2'], ['h4', 'Título 3'],
@@ -38948,6 +38967,15 @@ window.TutorIA = (function(){
       const r = document.createRange(); r.setStart(pai, idx); r.collapse(true);
       const sl = window.getSelection(); sl.removeAllRanges(); sl.addRange(r);
     }catch(_){ }
+  }
+  function _caretNoInicioDe(el){
+    const sl = window.getSelection();
+    if(!sl || !sl.rangeCount || !sl.isCollapsed) return false;
+    try{
+      const r = sl.getRangeAt(0), r2 = document.createRange();
+      r2.selectNodeContents(el); r2.setEnd(r.startContainer, r.startOffset);
+      return !String(r2.toString()).replace(/\s/g, '');
+    }catch(_){ return false; }
   }
   function _caretNoFimDe(el){
     const sl = window.getSelection();
@@ -39184,6 +39212,17 @@ window.TutorIA = (function(){
     }
     if(e.key === 'Enter' && !e.shiftKey && noCaderno){
       if(_cadEnterEstrutura(e, edK, eSel)) return;
+    }
+    /* Backspace no COMEÇO do título desfaz o toggle (saída natural, como no
+       Notion). Sem isso o usuário apaga letra a letra até o navegador comer
+       o <summary> — e aí o bloco virava o "Details" nativo. */
+    if(e.key === 'Backspace' && noCaderno && eSel && eSel.closest){
+      const sumB = eSel.closest('details.cad-toggle > summary');
+      if(sumB && edK.contains(sumB) && _caretNoInicioDe(sumB)){
+        e.preventDefault();
+        _blocoTransformar(edK, sumB.parentElement, 'texto');
+        return;
+      }
     }
     const open = _refPickerEl && !_refPickerEl.hidden;
     if(e.key === 'Escape'){ if(open){ e.preventDefault(); _hideRefPicker(); } return; }
@@ -40709,6 +40748,7 @@ window.TutorIA = (function(){
     const doc = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(docId) : null;
     el.innerHTML = _cadSanitize((doc && doc.body) || '');
     _cadFixChips(el);
+    _cadNormalizarBlocos(el);
     _emptyToggle(el);
     _cadStatus('');
     _cadVerBase['doc:' + String(docId)] = (doc && doc.body) || '';
@@ -41248,7 +41288,9 @@ window.TutorIA = (function(){
         novo.setAttribute('open', '');
         const sum = document.createElement('summary');
         while(linha.firstChild) sum.appendChild(linha.firstChild);   // move o rico
-        if(!String(sum.textContent || '').replace(/[\s\u200b]/g, '')) sum.innerHTML = '';  // vazio = sombra
+        if(!String(sum.textContent || '').replace(/[\s\u200b]/g, '')){
+          sum.innerHTML = '<br>'; sum.setAttribute('data-vazio', '1');   // vazio = sombra
+        }
         const corpo = document.createElement('div');
         corpo.className = 'cad-toggle-corpo'; corpo.innerHTML = '<div><br></div>';
         novo.appendChild(sum); novo.appendChild(corpo);
