@@ -9161,6 +9161,15 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .tutor-caderno-ed.is-colresize table.cad-tab td{cursor:col-resize}
 .tutor-caderno-ed table.cad-tab td{border:1px solid var(--border);padding:.3rem .55rem;min-width:60px}
 .tutor-caderno-ed table.cad-tab tr:first-child td{background:var(--bg-elevated);font-weight:600}
+/* ── PORTAL: a mesma célula vista de outro caderno ──────────────────────
+   Barrinha discreta na margem (você precisa saber que o que edita vive em
+   outro lugar) e pulso sutil enquanto o cursor está dentro. */
+.tutor-caderno-ed .cad-portal{position:relative;padding-left:.6rem;margin:.1rem 0;border-left:2px solid var(--accent-border-soft);border-radius:2px;transition:border-color .2s var(--ease),background .2s var(--ease)}
+.tutor-caderno-ed .cad-portal:hover{border-left-color:var(--accent-border)}
+.tutor-caderno-ed .cad-portal.is-dentro{border-left-color:var(--accent);background:var(--accent-lo);animation:cadPortalPulso 2.4s var(--ease) infinite}
+.tutor-caderno-ed .cad-portal::after{content:attr(data-po-rotulo);position:absolute;right:.2rem;top:-.55rem;font-family:var(--sans);font-size:.55rem;letter-spacing:.06em;color:var(--text-mute);opacity:0;pointer-events:none;transition:opacity .2s var(--ease)}
+.tutor-caderno-ed .cad-portal:hover::after,.tutor-caderno-ed .cad-portal.is-dentro::after{opacity:.75}
+@keyframes cadPortalPulso{0%{border-left-color:var(--accent)}50%{border-left-color:var(--accent-border-soft)}100%{border-left-color:var(--accent)}}
 .tutor-caderno-ed .cad-cols{display:flex;gap:1rem}
 .tutor-caderno-ed .cad-col{flex:1;min-width:0;border:1px dashed transparent;border-radius:8px;padding:.3rem .5rem;transition:border-color .15s var(--ease)}
 .tutor-caderno-ed:focus .cad-col,.tutor-caderno-ed:focus-within .cad-col{border-color:var(--border)}
@@ -38486,6 +38495,14 @@ window.TutorIA = (function(){
     // o menu do // vive PRESO ao cursor: saiu da linha, ele fecha
     if(typeof _slashEl !== 'undefined' && _slashEl) _slashSync();
     const el = _cadEl(); if(!el || !el.isConnected) return;
+    // pulso sutil: você está editando algo que vive em outro caderno
+    try{
+      const sel0 = window.getSelection();
+      const no0 = sel0 && sel0.anchorNode ? (sel0.anchorNode.nodeType === 1 ? sel0.anchorNode : sel0.anchorNode.parentElement) : null;
+      const dentro = no0 && no0.closest ? no0.closest('.cad-portal') : null;
+      document.querySelectorAll('.cad-portal.is-dentro').forEach(function(x){ if(x !== dentro) x.classList.remove('is-dentro'); });
+      if(dentro && el.contains(dentro)) dentro.classList.add('is-dentro');
+    }catch(_){ }
     const sel = window.getSelection();
     Array.prototype.forEach.call(el.querySelectorAll('.fc-line-active'), function(n){ n.classList.remove('fc-line-active'); });
     let node = null;
@@ -38709,6 +38726,8 @@ window.TutorIA = (function(){
         .select('body').eq('user_id', uid).eq('unit_id', String(unitId)).maybeSingle();
       if(!error && data && data.body){ el.innerHTML = _cadSanitize(data.body); _cadFixChips(el); _cadNormalizarBlocos(el); }
       _cadVerBase[String(unitId)] = (data && data.body) || '';
+      el.__poCitAntes = null;
+      await _portaisRender(el, String(unitId));
     } catch(e){ console.warn('[caderno load]', e); }
     el.__cadCarregando = false;
     try{ _fcCadDedup(el); }catch(e){ console.warn('[fc caderno dedup]', e); }
@@ -38745,6 +38764,244 @@ window.TutorIA = (function(){
       marca(li);
     });
   }
+  /* ══ PORTAL ══════════════════════════════════════════════════════════════
+     Vocabulário: ORIGEM = caderno onde a célula foi escrita (dono do texto);
+     DESTINO = caderno citado, que guarda o buraco. Chave de caderno segue a
+     do resto do app: 'doc:<id>' para caderno próprio, '<unitId>' para o da
+     unidade. */
+  const _PO_SEP = '\u0001';
+  function _poChaveDe(surf){ return surf ? (surf.tipo === 'doc' ? ('doc:' + surf.docId) : String(surf.unitId)) : null; }
+  function _poChaveAtual(){ return _cadDocId ? ('doc:' + _cadDocId) : (_cadUnit ? String(_cadUnit) : null); }
+  function _poOffMapa(){ return ((window.Store && Store.prefsGet) ? Store.prefsGet('cad_portais_off') : null) || {}; }
+  function _poOffChave(destino, origem, cel){ return destino + _PO_SEP + origem + _PO_SEP + cel; }
+  function _poDispensado(destino, origem, cel){ return !!_poOffMapa()[_poOffChave(destino, origem, cel)]; }
+  function _poDispensar(destino, origem, cel, valor){
+    const m = _poOffMapa(), k = _poOffChave(destino, origem, cel);
+    if(valor) m[k] = 1; else delete m[k];
+    if(window.Store && Store.prefsSet) Store.prefsSet('cad_portais_off', m);
+  }
+  async function _cadCorpoLer(chave){
+    const c = String(chave || '');
+    if(!c) return null;
+    if(c.indexOf('doc:') === 0){
+      const d = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(c.slice(4)) : null;
+      return d ? (d.body || '') : null;
+    }
+    const uid = await _cadUserId(); if(!uid || !window._sb) return null;
+    try{
+      const { data, error } = await window._sb.schema('aluno').from('caderno')
+        .select('body').eq('user_id', uid).eq('unit_id', c).maybeSingle();
+      if(error){ console.warn('[portal ler]', error); return null; }
+      return (data && data.body) || '';
+    }catch(e){ console.warn('[portal ler ex]', e); return null; }
+  }
+  async function _cadCorpoGravar(chave, body){
+    const c = String(chave || '');
+    if(!c) return false;
+    if(c.indexOf('doc:') === 0){
+      if(window.Store && Store.cadAvulsoSalvar){ Store.cadAvulsoSalvar(c.slice(4), { body: body }); return true; }
+      return false;
+    }
+    const uid = await _cadUserId(); if(!uid || !window._sb) return false;
+    try{
+      const { error } = await window._sb.schema('aluno').from('caderno')
+        .upsert({ user_id: uid, unit_id: c, body: body, updated_at: new Date().toISOString() }, { onConflict: 'user_id,unit_id' });
+      if(error){ console.warn('[portal gravar]', error); return false; }
+      if(window.Store && Store.upsertCadernoCache) Store.upsertCadernoCache(c, body, Date.now());
+      return true;
+    }catch(e){ console.warn('[portal gravar ex]', e); return false; }
+  }
+  function _poRotuloDe(chave){
+    const c = String(chave || '');
+    if(c.indexOf('doc:') === 0){
+      const d = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(c.slice(4)) : null;
+      return (d && d.titulo) || 'Caderno';
+    }
+    const u = _buildUnitIndex().flat.find(function(x){ return String(x.id) === c; });
+    return (u && u.label) || ('Unidade ' + c);
+  }
+  // A célula e seus FILHOS: as linhas seguintes com recuo MAIOR que o dela
+  // (bloco recolhível já carrega os filhos dentro de si).
+  function _poFatiaCelula(raiz, cel){
+    const alvo = raiz.querySelector('[data-cel="' + (window.CSS && CSS.escape ? CSS.escape(cel) : cel) + '"]');
+    if(!alvo || alvo.parentElement !== raiz) return null;
+    const out = [alvo];
+    const indDe = function(el2){ return parseInt(el2.getAttribute('data-ind') || '0', 10) || 0; };
+    const base = indDe(alvo);
+    let n = alvo.nextElementSibling;
+    while(n && indDe(n) > base && !n.classList.contains('cad-portal')){ out.push(n); n = n.nextElementSibling; }
+    return out;
+  }
+  function _poHtmlDaCelula(bodyHtml, cel){
+    const d = document.createElement('div');
+    d.innerHTML = _cadSanitize(bodyHtml || '');
+    const fatia = _poFatiaCelula(d, cel);
+    if(!fatia) return null;
+    return fatia.map(function(el2){ return el2.outerHTML; }).join('');
+  }
+  function _poTrocarCelula(bodyHtml, cel, htmlNovo){
+    const d = document.createElement('div');
+    d.innerHTML = _cadSanitize(bodyHtml || '');
+    const fatia = _poFatiaCelula(d, cel);
+    if(!fatia) return null;
+    const tmp2 = document.createElement('div');
+    tmp2.innerHTML = htmlNovo || '';
+    const pai = fatia[0].parentElement;
+    Array.prototype.slice.call(tmp2.childNodes).forEach(function(n2){ pai.insertBefore(n2, fatia[0]); });
+    fatia.forEach(function(el2){ el2.remove(); });
+    return d.innerHTML;
+  }
+  /* Ao ABRIR: cada buraco busca a célula na origem e a mostra como conteúdo.
+     O snapshot serve para saber, na hora de salvar, se você editou. */
+  async function _portaisRender(el, chaveDestino){
+    if(!el) return;
+    const marcas = Array.prototype.slice.call(el.querySelectorAll(':scope > .cad-portal[data-po-src]'));
+    if(!marcas.length){ el.__poSnap = {}; return; }
+    const corpos = {};
+    el.__poSnap = {};
+    for(let i = 0; i < marcas.length; i++){
+      const m = marcas[i];
+      const org = m.getAttribute('data-po-src'), cel = m.getAttribute('data-po-cel');
+      if(!org || !cel){ m.remove(); continue; }
+      if(!(org in corpos)) corpos[org] = await _cadCorpoLer(org);
+      const html = corpos[org] == null ? null : _poHtmlDaCelula(corpos[org], cel);
+      if(html == null){
+        // a célula sumiu na origem: o buraco não tem mais o que mostrar
+        m.remove();
+        continue;
+      }
+      m.innerHTML = html;
+      m.setAttribute('data-po-rotulo', _poRotuloDe(org));
+      m.setAttribute('data-tip', 'De: ' + _poRotuloDe(org) + ' — editar aqui muda em todos');
+      el.__poSnap[org + _PO_SEP + cel] = m.innerHTML;
+    }
+    el.__poIniciais = marcas.filter(function(m){ return m.isConnected; })
+      .map(function(m){ return m.getAttribute('data-po-src') + _PO_SEP + m.getAttribute('data-po-cel'); });
+    try{ _cadFixChips(el); }catch(_){ }
+  }
+  /* Ao SALVAR: o que mudou dentro de um buraco vai para a ORIGEM, e o corpo
+     do destino guarda o buraco VAZIO (nunca uma cópia do texto). */
+  async function _portaisAntesDeSalvar(el, chaveDestino){
+    const marcas = Array.prototype.slice.call(el.querySelectorAll(':scope > .cad-portal[data-po-src]'));
+    const snap = el.__poSnap || {};
+    for(let i = 0; i < marcas.length; i++){
+      const m = marcas[i];
+      const org = m.getAttribute('data-po-src'), cel = m.getAttribute('data-po-cel');
+      const k = org + _PO_SEP + cel;
+      const agora = m.innerHTML;
+      if(!(k in snap) || snap[k] === agora) continue;
+      const corpo = await _cadCorpoLer(org);
+      if(corpo == null) continue;
+      const novo = _poTrocarCelula(corpo, cel, agora);
+      if(novo == null) continue;
+      const ok = await _cadCorpoGravar(org, novo);
+      if(ok){
+        snap[k] = agora;
+        try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ }
+      }
+    }
+    // buraco que o dono apagou não volta (o sync respeita a dispensa)
+    const vivos = marcas.map(function(m){ return m.getAttribute('data-po-src') + _PO_SEP + m.getAttribute('data-po-cel'); });
+    (el.__poIniciais || []).forEach(function(k2){
+      if(vivos.indexOf(k2) !== -1) return;
+      const par = k2.split(_PO_SEP);
+      _poDispensar(chaveDestino, par[0], par[1], true);
+    });
+    el.__poIniciais = vivos;
+  }
+  // O corpo que vai para o banco leva os buracos VAZIOS.
+  function _poCorpoParaSalvar(el){
+    const clone = el.cloneNode(true);
+    Array.prototype.forEach.call(clone.querySelectorAll('.cad-portal[data-po-src]'), function(m){
+      m.innerHTML = '';
+      m.removeAttribute('data-tip'); m.removeAttribute('data-po-rotulo'); m.removeAttribute('class');
+      m.className = 'cad-portal';
+    });
+    return clone.innerHTML;
+  }
+  /* Citou → nasce o buraco no caderno citado, no fim do que existe lá
+     naquele momento (ordem natural de chegada, decisão do dono). */
+  async function _portaisSincronizar(el, chaveOrigem){
+    if(!el || !chaveOrigem) return;
+    const porCel = {};
+    Array.prototype.forEach.call(el.children, function(li){
+      if(li.nodeType !== 1 || li.classList.contains('cad-portal')) return;   // portal não gera portal
+      const cel = li.getAttribute('data-cel'); if(!cel) return;
+      const alvos = [];
+      Array.prototype.forEach.call(li.querySelectorAll('.tutor-ref'), function(c2){
+        const d2 = c2.getAttribute('data-doc-id');
+        const k = d2 ? ('doc:' + d2) : String(c2.getAttribute('data-unit-id') || '');
+        if(k && k !== 'doc:' && k !== String(chaveOrigem) && alvos.indexOf(k) === -1) alvos.push(k);
+      });
+      if(alvos.length) porCel[cel] = alvos;
+    });
+    const antes = el.__poCitAntes || null;
+    el.__poCitAntes = porCel;
+    const chaves = Object.keys(porCel);
+    // primeira passada da sessão: só registra (evita reescrever tudo à toa)
+    const mudou = [];
+    chaves.forEach(function(cel){
+      const de = (antes && antes[cel]) || [];
+      porCel[cel].forEach(function(alvo){ if(de.indexOf(alvo) === -1) mudou.push({ cel: cel, alvo: alvo }); });
+    });
+    if(antes){
+      Object.keys(antes).forEach(function(cel){
+        (antes[cel] || []).forEach(function(alvo){
+          if((porCel[cel] || []).indexOf(alvo) === -1) mudou.push({ cel: cel, alvo: alvo, tirar: true });
+        });
+      });
+    }
+    if(!antes || !mudou.length){
+      // sem histórico ainda: garante os buracos que faltam (idempotente)
+      for(let i = 0; i < chaves.length; i++){
+        const cel = chaves[i];
+        for(let j = 0; j < porCel[cel].length; j++) await _poGarantirBuraco(porCel[cel][j], chaveOrigem, cel);
+      }
+      return;
+    }
+    for(let i = 0; i < mudou.length; i++){
+      const mv = mudou[i];
+      if(mv.tirar) await _poTirarBuraco(mv.alvo, chaveOrigem, mv.cel);
+      else await _poGarantirBuraco(mv.alvo, chaveOrigem, mv.cel);
+    }
+  }
+  async function _poGarantirBuraco(destino, origem, cel){
+    if(_poDispensado(destino, origem, cel)) return;
+    const corpo = await _cadCorpoLer(destino);
+    if(corpo == null) return;
+    const d = document.createElement('div');
+    d.innerHTML = _cadSanitize(corpo);
+    if(d.querySelector('.cad-portal[data-po-src="' + origem + '"][data-po-cel="' + cel + '"]')) return;
+    const m = document.createElement('div');
+    m.className = 'cad-portal';
+    m.setAttribute('data-po-src', origem);
+    m.setAttribute('data-po-cel', cel);
+    d.appendChild(m);
+    await _cadCorpoGravar(destino, d.innerHTML);
+    // se o destino está ABERTO agora, mostra na hora
+    const elDest = _cadEl();
+    if(elDest && _poChaveAtual() === String(destino)){
+      const m2 = m.cloneNode(true);
+      elDest.appendChild(m2);
+      await _portaisRender(elDest, String(destino));
+    }
+    try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ }
+  }
+  async function _poTirarBuraco(destino, origem, cel){
+    const corpo = await _cadCorpoLer(destino);
+    if(corpo == null) return;
+    const d = document.createElement('div');
+    d.innerHTML = _cadSanitize(corpo);
+    const m = d.querySelector('.cad-portal[data-po-src="' + origem + '"][data-po-cel="' + cel + '"]');
+    if(!m) return;
+    m.remove();
+    await _cadCorpoGravar(destino, d.innerHTML);
+    const elDest = _cadEl();
+    if(elDest && _poChaveAtual() === String(destino)){
+      const vivo = elDest.querySelector('.cad-portal[data-po-src="' + origem + '"][data-po-cel="' + cel + '"]');
+      if(vivo) vivo.remove();
+    }
+  }
   async function _cadSave(){
     const el = _cadEl(); if(!el || (!_cadUnit && !_cadDocId)) return;
     // IDENTIDADE CAPTURADA NA ENTRADA: com 2 painéis editáveis o foco pode
@@ -38758,12 +39015,17 @@ window.TutorIA = (function(){
     if(unitAlvo){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
     try{ _cadNormalizarBlocos(el); }catch(_){ }
     try{ _cadCelCarimbar(el); }catch(e){ console.warn('[cad cel]', e); }
-    const body = _cadSanitize(el.innerHTML);   // corpo CRU: o ciclo des-renderizou
+    // PORTAL: o que você editou dentro de um buraco vai para a ORIGEM, e o
+    // corpo daqui guarda só o buraco (nunca uma cópia).
+    const chavePo = docAlvo ? ('doc:' + docAlvo) : String(unitAlvo);
+    try{ await _portaisAntesDeSalvar(el, chavePo); }catch(e){ console.warn('[portal salvar]', e); }
+    const body = _cadSanitize(_poCorpoParaSalvar(el));   // corpo CRU: o ciclo des-renderizou
     if(unitAlvo){ try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); } }
     if(docAlvo){
       // caderno AVULSO: salva pelo Store (sync embutido) + versões em 'doc:'+id
       _cadStatus('salvando…', stAlvo);
       const doc = (window.Store && Store.cadAvulsoSalvar) ? Store.cadAvulsoSalvar(docAlvo, { body: body }) : null;
+      if(doc) _portaisSincronizar(el, 'doc:' + docAlvo).catch(function(e2){ console.warn('[portal sync]', e2); });
       _cadStatus(doc ? 'salvo' : 'erro ao salvar', stAlvo);
       if(doc){ try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ } }
       const uid0 = await _cadUserId();
@@ -38777,6 +39039,7 @@ window.TutorIA = (function(){
         .upsert({ user_id: uid, unit_id: String(unitAlvo), body: body, updated_at: new Date().toISOString() }, { onConflict: 'user_id,unit_id' });
       _cadStatus(error ? 'erro ao salvar' : 'salvo', stAlvo); if(error) console.warn('[caderno save]', error);
       if(!error && window.Store && Store.upsertCadernoCache) Store.upsertCadernoCache(unitAlvo, body, Date.now());
+      if(!error) _portaisSincronizar(el, String(unitAlvo)).catch(function(e2){ console.warn('[portal sync]', e2); });
       if(!error) _cadVersionar(uid, unitAlvo, body);
       if(!error){ try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ } }
     } catch(e){ _cadStatus('erro ao salvar', stAlvo); console.warn('[caderno save ex]', e); }
@@ -40814,6 +41077,8 @@ window.TutorIA = (function(){
     el.innerHTML = _cadSanitize((doc && doc.body) || '');
     _cadFixChips(el);
     _cadNormalizarBlocos(el);
+    el.__poCitAntes = null;
+    _portaisRender(el, 'doc:' + String(docId)).catch(function(e2){ console.warn('[portal render]', e2); });
     _emptyToggle(el);
     _cadStatus('');
     _cadVerBase['doc:' + String(docId)] = (doc && doc.body) || '';
@@ -41456,6 +41721,11 @@ window.TutorIA = (function(){
       + '<button type="button" class="vd-opt" data-al="fc">Virar flashcard (::)</button>'
       + '<div class="tutor-cad-menu-sep"></div>'
       + _tiposHtml('data-al', 't:', _tiposAtivos(linha0))
+      + (linha0.classList && linha0.classList.contains('cad-portal')
+        ? '<div class="tutor-cad-menu-sep"></div>'
+          + '<button type="button" class="vd-opt" data-al="po-abrir">Abrir o caderno de origem</button>'
+          + '<button type="button" class="vd-opt" data-al="po-fora">Não mostrar neste caderno</button>'
+        : '')
       + (linha0.tagName === 'TABLE'
         ? '<div class="tutor-cad-menu-sep"></div>'
           + '<button type="button" class="vd-opt" data-al="tb:linha+">Tabela: + linha abaixo</button>'
@@ -41470,6 +41740,21 @@ window.TutorIA = (function(){
       const b = ev.target.closest('[data-al]'); if(!b) return;
       const acao = b.getAttribute('data-al');
       _alcaMenuFechar();
+      if(acao === 'po-abrir'){
+        const org = linha0.getAttribute('data-po-src') || '';
+        location.hash = org.indexOf('doc:') === 0
+          ? ('#/cadernos?doc=' + encodeURIComponent(org.slice(4)))
+          : ('#/cadernos?unit=' + encodeURIComponent(org));
+        return;
+      }
+      if(acao === 'po-fora'){
+        const org = linha0.getAttribute('data-po-src') || '', cel2 = linha0.getAttribute('data-po-cel') || '';
+        const dest = _poChaveAtual();
+        if(dest){ _poDispensar(dest, org, cel2, true); }
+        linha0.remove();
+        _cadSchedule();
+        return;
+      }
       if(acao.indexOf('tb:') === 0){ if(linha0.tagName === 'TABLE') _tabOp(linha0, acao.slice(3)); return; }
       if(acao.indexOf('t:') === 0){ _blocoTransformar(ed, linha0, acao.slice(2)); return; }
       if(acao === 'comentar'){
@@ -56446,6 +56731,7 @@ const CadernosPage = (function(){
       + 'table.cad-tab{border-collapse:collapse;margin:.6rem 0;width:100%}table.cad-tab td{border:1px solid #d8c9a8;padding:.35rem .55rem;font-size:13.5px}table.cad-tab tr:first-child td{background:#f4eee1;font-weight:600}'
       + '.cad-cols{display:flex;gap:1.2rem}.cad-col{flex:1;min-width:0}'
       + '.cad-toggle-corpo{padding-left:.95rem}'
+      + '.cad-portal{border-left:2px solid #e2d7bd;padding-left:.6rem;margin:.1rem 0}'
       + '[data-ind="1"]{margin-left:1.6rem}[data-ind="2"]{margin-left:3.2rem}[data-ind="3"]{margin-left:4.8rem}[data-ind="4"]{margin-left:6.4rem}[data-ind="5"]{margin-left:8rem}'
       + 'ul,ol{margin:.5rem 0 .5rem 1.5rem}'
       + 'p,div{margin:.15rem 0}'
