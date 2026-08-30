@@ -9050,6 +9050,7 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cadp-meta-editbtn:hover{border-color:var(--accent-border);color:var(--accent)}
 .cadp-meta-ro{font-family:var(--sans);font-size:.7rem;color:var(--text);padding-top:.15rem;word-break:break-word}
 .cadp-meta-vazio{font-family:var(--sans);font-size:.64rem;color:var(--text-mute);font-style:italic;padding:.2rem 0}
+.tutor-refopt-ctx{margin-left:.4rem;font-size:.6rem;color:var(--text-mute)}
 .cadp-chip-ref{background:var(--accent-lo);border-color:var(--accent-border)}
 .cadp-chip-ref .cadp-ref-btn{background:transparent;border:none;color:var(--accent);font-family:var(--sans);font-size:.66rem;padding:0;cursor:pointer;text-decoration:underline;text-decoration-color:var(--accent-border-soft);text-underline-offset:2px}
 .cadp-chip-ref .cadp-ref-btn:hover{text-decoration-color:var(--accent)}
@@ -37693,8 +37694,15 @@ window.TutorIA = (function(){
         return alvo2.indexOf(q) >= 0;
       }).slice(0, 5);
       if(dcands.length){
+        // nomes iguais na lista: mostra de onde cada um é, senão você cita
+        // o caderno errado sem perceber
+        const cont = {};
+        dcands.forEach(function(d2){ const k = _nomeNormRef(d2.titulo); cont[k] = (cont[k] || 0) + 1; });
         docsHtml = '<div class="tutor-refsec">Cadernos próprios</div>' + dcands.map(function(d2){
-          return '<button type="button" class="tutor-refopt doc-refopt" data-did="' + Util.attr(d2.id) + '" data-dt="' + Util.attr(d2.titulo || 'Sem título') + '">&#9998; ' + _esc(d2.titulo || 'Sem título') + '</button>';
+          const tit = d2.titulo || 'Sem título';
+          const ctx = cont[_nomeNormRef(d2.titulo)] > 1 ? (' \u00b7 ' + _docCtxRef(d2)) : '';
+          return '<button type="button" class="tutor-refopt doc-refopt" data-did="' + Util.attr(d2.id) + '" data-dt="' + Util.attr(tit) + '">&#9998; ' + _esc(tit)
+            + (ctx ? '<span class="tutor-refopt-ctx">' + _esc(ctx) + '</span>' : '') + '</button>';
         }).join('');
       }
     }catch(e){ console.warn('[doc refpick]', e); }
@@ -38522,6 +38530,20 @@ window.TutorIA = (function(){
     if(_cadUid) return _cadUid;
     try { const r = await window._sb.auth.getUser(); _cadUid = (r && r.data && r.data.user) ? r.data.user.id : null; } catch(_){ _cadUid = null; }
     return _cadUid;
+  }
+  function _nomeNormRef(x){
+    return String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+  function _docCtxRef(d){
+    if(d.pastaId){
+      const p2 = ((window.Store && Store.cadPastasLista) ? Store.cadPastasLista() : []).find(function(x){ return String(x.id) === String(d.pastaId); });
+      if(p2) return p2.nome || 'pasta';
+    }
+    if(d.subjectId){
+      const c = (window.COURSES || []).find(function(c2){ return String(c2._subjectId) === String(d.subjectId); });
+      if(c) return c.sigla || c.title || '';
+    }
+    return 'sem pasta';
   }
   function _cadChip(uid, title){
     const chip = document.createElement('span');
@@ -56450,9 +56472,14 @@ const CadernosPage = (function(){
     if(capaRem) capaRem.addEventListener('click', function(){ salvaCapa(null); });
     const tin = main.querySelector('#cadpTitulo');
     tin.addEventListener('change', function(){
-      if(window.Store && Store.cadAvulsoSalvar) Store.cadAvulsoSalvar(doc.id, { titulo: tin.value.trim() || 'Sem título' });
-      const row = stageEl.querySelector('.cadp-item[data-doc="' + String(doc.id).replace(/"/g, '') + '"] .cadp-item-t');
-      if(row) row.textContent = tin.value.trim() || 'Sem título';
+      const novo = tin.value.trim() || 'Sem título';
+      const aplica = function(){
+        if(window.Store && Store.cadAvulsoSalvar) Store.cadAvulsoSalvar(doc.id, { titulo: novo });
+        const row = stageEl.querySelector('.cadp-item[data-doc="' + String(doc.id).replace(/"/g, '') + '"] .cadp-item-t');
+        if(row) row.textContent = novo;
+      };
+      // nome repetido: avisa e deixa escolher (nunca bloqueia calado)
+      _avisoHomonimo(tin, doc, novo, function(res){ if(res === 'ok') aplica(); });
     });
     main.querySelector('#cadpLix').addEventListener('click', function(){
       if(!confirm('Enviar este caderno para a lixeira? Ele fica 30 dias lá e pode ser restaurado.')) return;
@@ -56869,6 +56896,137 @@ const CadernosPage = (function(){
      Esqueleto de estudo por matéria e por tipo. É SUGESTÃO: nasce como
      conteúdo normal e o aluno apaga o que não usar. */
   let _metaCorrente = null;
+  /* ── NOMES REPETIDOS ─────────────────────────────────────────────────────
+     Dois cadernos com o mesmo nome espalham o conteúdo que devia estar num
+     lugar só — e, com o portal, a frase vai parar no caderno errado. Não
+     proibimos (há homônimos legítimos: a Revolução Francesa como evento e
+     como conceito); avisamos na hora certa e oferecemos juntar. */
+  function _nomeNorm(x){
+    return String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+  function _docsHomonimos(titulo, exceto){
+    const alvo = _nomeNorm(titulo);
+    if(!alvo || alvo === 'sem titulo') return [];
+    const lista = (window.Store && Store.cadAvulsosLista) ? Store.cadAvulsosLista() : [];
+    return lista.filter(function(d){
+      if(String(d.id) === String(exceto || '')) return false;
+      if(_nomeNorm(d.titulo) === alvo) return true;
+      return (((d.meta || {}).aliases) || []).some(function(a2){ return _nomeNorm(a2) === alvo; });
+    });
+  }
+  function _docContexto(d){
+    if(d.pastaId){
+      const p2 = ((window.Store && Store.cadPastasLista) ? Store.cadPastasLista() : []).find(function(x){ return String(x.id) === String(d.pastaId); });
+      if(p2) return p2.nome || 'pasta';
+    }
+    if(d.subjectId){
+      const c = (window.COURSES || []).find(function(c2){ return String(c2._subjectId) === String(d.subjectId); });
+      if(c) return c.sigla || c.title || '';
+    }
+    return 'sem pasta';
+  }
+  /* JUNTAR: o conteúdo do antigo entra no que fica, e TUDO que apontava
+     para o antigo (citações [[ ]] e buracos de portal) passa a apontar
+     para o que fica — senão a fusão deixaria vínculos quebrados. */
+  async function _cadJuntar(idFica, idSai){
+    const S = window.Store;
+    if(!S || !S.cadAvulsoPega) return false;
+    const fica = S.cadAvulsoPega(idFica), sai = S.cadAvulsoPega(idSai);
+    if(!fica || !sai) return false;
+    const de = 'doc:' + String(idSai), para = 'doc:' + String(idFica);
+    // 1. conteúdo
+    const corpoNovo = String(fica.body || '') + String(sai.body || '');
+    S.cadAvulsoSalvar(idFica, { body: corpoNovo });
+    // 2. metadados que não colidem (apelidos e tipo somam)
+    const mF = fica.meta || {}, mS = sai.meta || {};
+    const junta = function(a2, b2){ return [...new Set((a2 || []).concat(b2 || []).map(String))]; };
+    S.cadAvulsoSalvar(idFica, { meta: Object.assign({}, mS, mF, {
+      aliases: junta(mF.aliases, (mS.aliases || []).concat(sai.titulo && _nomeNorm(sai.titulo) !== _nomeNorm(fica.titulo) ? [sai.titulo] : [])),
+      tags: junta(mF.tags, mS.tags),
+      materias: junta(mF.materias, mS.materias),
+      edital: junta(mF.edital, mS.edital)
+    }) });
+    // 3. quem apontava pro antigo passa a apontar pro que fica
+    const troca = function(html){
+      const d = document.createElement('div');
+      d.innerHTML = String(html || '');
+      let mudou = false;
+      d.querySelectorAll('.tutor-ref[data-doc-id="' + idSai + '"]').forEach(function(c2){ c2.setAttribute('data-doc-id', String(idFica)); mudou = true; });
+      d.querySelectorAll('.cad-portal[data-po-src="' + de + '"]').forEach(function(m2){ m2.setAttribute('data-po-src', para); mudou = true; });
+      return mudou ? d.innerHTML : null;
+    };
+    const docs = S.cadAvulsosLista ? S.cadAvulsosLista() : [];
+    for(let i = 0; i < docs.length; i++){
+      if(String(docs[i].id) === String(idSai)) continue;
+      const novo = troca(docs[i].body);
+      if(novo != null) S.cadAvulsoSalvar(docs[i].id, { body: novo });
+    }
+    const uid = (window._sb && window.TutorIA) ? null : null;
+    try{
+      const u = await window._sb.auth.getUser();
+      const uid2 = u && u.data && u.data.user && u.data.user.id;
+      if(uid2){
+        const { data } = await window._sb.schema('aluno').from('caderno').select('unit_id, body').eq('user_id', uid2);
+        const linhas = data || [];
+        for(let i = 0; i < linhas.length; i++){
+          const novo = troca(linhas[i].body);
+          if(novo == null) continue;
+          await window._sb.schema('aluno').from('caderno')
+            .update({ body: novo, updated_at: new Date().toISOString() })
+            .eq('user_id', uid2).eq('unit_id', linhas[i].unit_id);
+          if(S.upsertCadernoCache) S.upsertCadernoCache(linhas[i].unit_id, novo, Date.now());
+        }
+      }
+    }catch(e){ console.warn('[juntar unidades]', e); }
+    // 4. o antigo vai pra lixeira (dá pra restaurar se algo der errado)
+    if(S.cadAvulsoApagar) S.cadAvulsoApagar(idSai);
+    return true;
+  }
+  function _avisoHomonimo(ancora, doc, titulo, aoResolver){
+    const iguais = _docsHomonimos(titulo, doc.id);
+    if(!iguais.length){ aoResolver('ok'); return; }
+    const outro = iguais[0];
+    const velho = document.getElementById('cadpHomo'); if(velho) velho.remove();
+    const cx = document.createElement('div');
+    cx.className = 'cadp-tagcfg'; cx.id = 'cadpHomo';
+    cx.innerHTML = '<div class="cadp-capa-pick-h">Já existe um caderno com este nome</div>'
+      + '<div class="cadp-meta-dica">' + Util.esc(outro.titulo || 'Sem título') + ' · ' + Util.esc(_docContexto(outro)) + '</div>'
+      + '<div class="cad-com-ed-acts">'
+      + '<button type="button" class="cadp-mini" data-h="abrir">Abrir o que existe</button>'
+      + '<button type="button" class="cadp-mini" data-h="juntar">Juntar os dois</button>'
+      + '<button type="button" class="cadp-mini" data-h="assim">Criar assim mesmo</button>'
+      + '</div>';
+    document.body.appendChild(cx);
+    const r = ancora.getBoundingClientRect();
+    cx.style.left = Math.round(Math.max(8, Math.min(r.left, window.innerWidth - cx.offsetWidth - 12))) + 'px';
+    cx.style.top = Math.round(r.bottom + 6) + 'px';
+    cx.addEventListener('click', async function(ev){
+      const b = ev.target.closest ? ev.target.closest('[data-h]') : null;
+      if(!b) return;
+      const acao = b.getAttribute('data-h');
+      cx.remove();
+      if(acao === 'abrir'){ location.hash = '#/cadernos?doc=' + encodeURIComponent(outro.id); aoResolver('abriu'); return; }
+      if(acao === 'juntar'){
+        if(window.ueToast) ueToast('Juntando os dois cadernos…', 'ok');
+        const ok2 = await _cadJuntar(outro.id, doc.id);
+        if(ok2){
+          if(window.ueToast) ueToast('Juntados. O outro foi para a lixeira, e as citações agora apontam para este.', 'ok');
+          location.hash = '#/cadernos?doc=' + encodeURIComponent(outro.id);
+        }
+        aoResolver('juntou');
+        return;
+      }
+      aoResolver('ok');
+    });
+    setTimeout(function(){
+      document.addEventListener('click', function fecha(ev2){
+        if(!document.getElementById('cadpHomo')){ document.removeEventListener('click', fecha); return; }
+        if(ev2.target.closest('#cadpHomo')) return;
+        cx.remove(); document.removeEventListener('click', fecha);
+      });
+    }, 0);
+  }
   const _TPL_LINHA = function(txt, ind){ return '<div' + (ind ? ' data-ind="' + ind + '"' : '') + '>' + (txt || '<br>') + '</div>'; };
   const _CAD_TPL = {
     historia: {
@@ -57756,6 +57914,7 @@ const CadernosPage = (function(){
   }
   return { html: html, mount: mount, paraMd: _cadParaMd, limparCorpo: _expLimparCorpo,
     tplEscolher: _tplEscolher, tplAplicar: _tplAplicar, tplVazio: _tplVazio,
+    homonimos: _docsHomonimos, juntar: _cadJuntar, nomeNorm: _nomeNorm,
     splitAbrir: splitAbrir, splitEscolher: splitEscolher, expor: _expor };
 })();
 window.CadernosPage = CadernosPage;
