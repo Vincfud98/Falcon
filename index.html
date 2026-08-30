@@ -8941,6 +8941,10 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cadp-capa-add:hover{color:var(--accent)}
 .cadp-capa-pick{position:fixed;z-index:1200;width:470px;max-width:92vw;max-height:440px;display:flex;flex-direction:column;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:10px;box-shadow:0 12px 32px -10px rgba(0,0,0,.6);padding:.5rem}
 .cadp-capa-pick-h{font-family:var(--sans);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-mute);padding:.2rem .3rem .4rem;flex-shrink:0}
+.cadp-capa-url{display:flex;flex-wrap:wrap;gap:.3rem;align-items:center;padding:.1rem .3rem .45rem;flex-shrink:0}
+.cadp-capa-url-in{flex:1;min-width:180px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:var(--sans);font-size:.7rem;padding:.3rem .5rem}
+.cadp-capa-url-in:focus{outline:none;border-color:var(--accent-border)}
+.cadp-capa-url-msg{width:100%;font-family:var(--sans);font-size:.62rem;color:var(--text-mute);padding:.1rem .1rem 0}
 .cadp-capa-busca{flex-shrink:0;margin:0 .1rem .45rem;background:var(--bg-elevated);border:1px solid var(--border);border-radius:7px;color:var(--text);font-family:var(--sans);font-size:.7rem;padding:.3rem .55rem}
 .cadp-capa-busca:focus{outline:none;border-color:var(--accent-border)}
 .cadp-capa-body{overflow:auto;overscroll-behavior:contain;min-height:0}
@@ -56798,6 +56802,40 @@ const CadernosPage = (function(){
     });
     return acervo;
   }
+  /* Link colado → endereço que o navegador consegue exibir.
+     - Drive: o link de compartilhamento abre uma PÁGINA, não a imagem; o
+       que serve é o endereço direto do arquivo pelo id.
+     - Dropbox/OneDrive: idem, com o parâmetro de download direto.
+     Devolve null se não for http(s) — nada de javascript: no src. */
+  function _capaUrlNormalizar(bruta){
+    const u = String(bruta || '').trim();
+    if(!u) return null;
+    if(!/^https?:\/\//i.test(u)) return null;
+    // Google Drive: /file/d/ID/, ?id=ID, /d/ID
+    const drive = u.match(/drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?[^#]*id=)([A-Za-z0-9_-]{10,})/)
+      || u.match(/drive\.google\.com\/.*\/d\/([A-Za-z0-9_-]{10,})/);
+    if(drive) return 'https://drive.google.com/thumbnail?id=' + drive[1] + '&sz=w2000';
+    if(/docs\.google\.com\/uc\?/.test(u)){
+      const id2 = u.match(/id=([A-Za-z0-9_-]{10,})/);
+      if(id2) return 'https://drive.google.com/thumbnail?id=' + id2[1] + '&sz=w2000';
+    }
+    if(/dropbox\.com\//.test(u)) return u.replace(/[?&]dl=\d/, '').replace(/[?&]raw=\d/, '') + (u.indexOf('?') >= 0 ? '&' : '?') + 'raw=1';
+    if(/1drv\.ms|onedrive\.live\.com/.test(u)) return u + (u.indexOf('?') >= 0 ? '&' : '?') + 'download=1';
+    return u;
+  }
+  // testa de verdade antes de virar capa (link quebrado ou privado avisa)
+  function _capaTestar(url){
+    return new Promise(function(res){
+      const img = new Image();
+      let fim = false;
+      const acaba = function(ok){ if(fim) return; fim = true; res(ok); };
+      img.onload = function(){ acaba(img.naturalWidth > 1); };
+      img.onerror = function(){ acaba(false); };
+      setTimeout(function(){ acaba(false); }, 8000);
+      img.referrerPolicy = 'no-referrer';
+      img.src = url;
+    });
+  }
   function _capaEscolher(btn, materiaIds, aoEscolher){
     const velho = document.getElementById('cadpCapaPick'); if(velho) velho.remove();
     const acervo = _capaAcervo(materiaIds);
@@ -56805,6 +56843,11 @@ const CadernosPage = (function(){
     const p2 = document.createElement('div');
     p2.className = 'cadp-capa-pick'; p2.id = 'cadpCapaPick';
     p2.innerHTML = '<div class="cadp-capa-pick-h">Capas — imagens das suas unidades' + (materiaIds && materiaIds.length ? ' (matérias do caderno)' : '') + '</div>'
+      + '<div class="cadp-capa-url">'
+        + '<input type="url" class="cadp-capa-url-in" placeholder="ou cole o link de uma imagem (Drive, Dropbox, site…)" autocomplete="off">'
+        + '<button type="button" class="cadp-mini" data-capa-url>usar</button>'
+        + '<div class="cadp-capa-url-msg" hidden></div>'
+      + '</div>'
       + (total
         ? '<input type="search" class="cadp-capa-busca" placeholder="Buscar imagem pelo título…" autocomplete="off">'
           + '<div class="cadp-capa-body">' + acervo.map(function(m){
@@ -56820,6 +56863,28 @@ const CadernosPage = (function(){
           }).join('') + '</div>'
         : '<div class="cadp-pane-vazio">Ainda não há imagens nas unidades dessas matérias.</div>');
     document.body.appendChild(p2);
+    const urlIn = p2.querySelector('.cadp-capa-url-in');
+    const urlMsg = p2.querySelector('.cadp-capa-url-msg');
+    const urlBt = p2.querySelector('[data-capa-url]');
+    const usarUrl = async function(){
+      const bruta = (urlIn.value || '').trim();
+      if(!bruta) return;
+      const url = _capaUrlNormalizar(bruta);
+      urlMsg.hidden = false;
+      if(!url){ urlMsg.textContent = 'O link precisa começar com http:// ou https://'; return; }
+      urlMsg.textContent = 'conferindo a imagem…';
+      urlBt.disabled = true;
+      const ok = await _capaTestar(url);
+      urlBt.disabled = false;
+      if(!ok){
+        urlMsg.innerHTML = 'Não consegui carregar essa imagem. Se for do Google Drive, abra <b>Compartilhar</b> e deixe como <b>“Qualquer pessoa com o link”</b>.';
+        return;
+      }
+      p2.remove();
+      aoEscolher(url);
+    };
+    if(urlBt) urlBt.addEventListener('click', function(ev){ ev.stopPropagation(); usarUrl(); });
+    if(urlIn) urlIn.addEventListener('keydown', function(ev){ if(ev.key === 'Enter'){ ev.preventDefault(); usarUrl(); } });
     const busca = p2.querySelector('.cadp-capa-busca');
     if(busca) busca.addEventListener('input', function(){
       const q = _norm(busca.value.trim());
@@ -59146,7 +59211,7 @@ const CadernosPage = (function(){
   }
   return { html: html, mount: mount, paraMd: _cadParaMd, limparCorpo: _expLimparCorpo,
     tplEscolher: _tplEscolher, tplAplicar: _tplAplicar, tplVazio: _tplVazio,
-    tplSet: _tplSet, tplDoTipo: _tplDoTipo, icoGrade: _icoGradeHtml,
+    tplSet: _tplSet, tplDoTipo: _tplDoTipo, icoGrade: _icoGradeHtml, capaUrl: _capaUrlNormalizar,
     homonimos: _docsHomonimos, juntar: _cadJuntar, nomeNorm: _nomeNorm,
     recorrencia: _recorDoCaderno,
     fichaDoTipo: function(tag){ return _FICHAS[_tagTipoFicha(tag)] || null; },
