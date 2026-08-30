@@ -24202,6 +24202,29 @@ function _fichaItens(v){
   const s2 = String(v == null ? '' : v).trim();
   return s2 ? [{ t: 'txt', v: s2 }] : [];
 }
+/* Índice de unidades: GLOBAL de propósito — o tutor, a página de Cadernos
+   e o painel de propriedades leem o mesmo índice. Enquanto era local do
+   tutor, quem chamava de fora quebrava (ou engolia no try/catch). */
+function _buildUnitIndex(){
+  const flat = [], bySubj = {};
+  // sem depender do _coursesAll do tutor (que é local dele)
+  const cursos = (window.COURSES_ALL && window.COURSES_ALL.length) ? window.COURSES_ALL : (window.COURSES || []);
+  cursos.forEach(function(c){
+    const sigla = c.sigla || '', sid = String(c._subjectId);
+    const arr = bySubj[sid] = (bySubj[sid] || []);
+    (c.modules || []).forEach(function(m){
+      const items = (window.Util && Util.unitsOfModule) ? (Util.unitsOfModule(m) || []) : [];
+      items.forEach(function(e){
+        const u = e.unit || e; if(!u || !u.id) return;
+        const o = { id: String(u.id), storeId: (u._storeId != null ? String(u._storeId) : null), sigla: sigla, number: String(u.number || ''), title: String(u.title || ''), subjectId: sid, topics: (u.topics || []).map(String) };
+        o.label = (sigla ? sigla + ' ' : '') + (o.number ? o.number + ' · ' : '') + o.title;
+        o.idx = arr.length; arr.push(o); flat.push(o);
+      });
+    });
+  });
+  return { flat: flat, bySubj: bySubj };
+}
+
 function _unitMetaById(unitId){
   if(!unitId) return null;
   const courses = window.COURSES_ALL || window.COURSES || [];
@@ -37526,23 +37549,6 @@ window.TutorIA = (function(){
   // Índice de TODAS as unidades de TODAS as matérias (cross-linking). Cada
   // unidade: { id, sigla, number, title, subjectId, idx (posição na matéria), label }.
   function _coursesAll(){ return (window.COURSES_ALL && window.COURSES_ALL.length) ? window.COURSES_ALL : (window.COURSES || []); }
-  function _buildUnitIndex(){
-    const flat = [], bySubj = {};
-    _coursesAll().forEach(function(c){
-      const sigla = c.sigla || '', sid = String(c._subjectId);
-      const arr = bySubj[sid] = (bySubj[sid] || []);
-      (c.modules || []).forEach(function(m){
-        const items = (window.Util && Util.unitsOfModule) ? (Util.unitsOfModule(m) || []) : [];
-        items.forEach(function(e){
-          const u = e.unit || e; if(!u || !u.id) return;
-          const o = { id: String(u.id), storeId: (u._storeId != null ? String(u._storeId) : null), sigla: sigla, number: String(u.number || ''), title: String(u.title || ''), subjectId: sid, topics: (u.topics || []).map(String) };
-          o.label = (sigla ? sigla + ' ' : '') + (o.number ? o.number + ' · ' : '') + o.title;
-          o.idx = arr.length; arr.push(o); flat.push(o);
-        });
-      });
-    });
-    return { flat: flat, bySubj: bySubj };
-  }
   // Sem busca: prioriza as unidades MAIS PRÓXIMAS da atual (mesma matéria),
   // depois o resto da matéria, depois outras matérias.
   function _nearbyUnits(idx){
@@ -57415,12 +57421,42 @@ const CadernosPage = (function(){
       const pct = Math.round((conta[melhor] / total) * 100);
       const nomeTema = (porId[melhor] && (porId[melhor].title || porId[melhor].name)) || 'este tema';
       const rotulo = nivel === 3 ? 'Precisa estar bem seguro' : (nivel === 2 ? 'Precisa saber bem' : 'Seria o diferencial');
+      /* O NÚMERO é do tópico DESTE caderno (com os subtópicos dele), não do
+         tema inteiro: a faixa diz o peso do bloco, o número diz o peso do
+         assunto que você está estudando. */
+      const filhosDe = {};
+      todos.forEach(function(t2){
+        const pk = t2.parent_id == null ? '' : String(t2.parent_id);
+        (filhosDe[pk] = filhosDe[pk] || []).push(String(t2.id));
+      });
+      const alvo = new Set();
+      (function desce(ids){
+        ids.forEach(function(id){
+          if(alvo.has(String(id))) return;
+          alvo.add(String(id));
+          desce(filhosDe[String(id)] || []);
+        });
+      })(tops.map(String));
+      let nTop = 0; const anosTop = new Set();
+      _QBank.questions.forEach(function(q2){
+        if(!ehProva(q2)) return;
+        const ts = porQ[String(q2.id)] || [];
+        if(!ts.some(function(x){ return alvo.has(String(x)); })) return;
+        nTop++;
+        if(q2.year) anosTop.add(String(q2.year));
+      });
+      const nomeTop = tops.length === 1 ? ((porId[String(tops[0])] && (porId[String(tops[0])].title || porId[String(tops[0])].name)) || 'este tópico') : 'os tópicos deste caderno';
       return {
-        nivel: nivel, rotulo: rotulo, n: conta[melhor], anos: (anosPorTema[melhor] || new Set()).size,
-        dica: nomeTema + ': ' + pct + '% das questões de prova da matéria. '
-          + (nivel === 3 ? 'Está entre os temas que somam a metade da prova.'
-             : nivel === 2 ? 'Entra nos temas que somam 80% da prova.'
-             : 'Fora dos 80% mais cobrados — é onde se ganha diferencial.')
+        nivel: nivel, rotulo: rotulo,
+        n: nTop, anos: anosTop.size,
+        nTema: conta[melhor], anosTema: (anosPorTema[melhor] || new Set()).size, pctTema: pct, tema: nomeTema,
+        dica: nomeTema + ': ' + pct + '% das questões de prova da matéria ('
+          + conta[melhor] + (conta[melhor] > 1 ? ' questões' : ' questão') + '). '
+          + (nivel === 3 ? 'Está entre os temas que somam a metade da prova. '
+             : nivel === 2 ? 'Entra nos temas que somam 80% da prova. '
+             : 'Fora dos 80% mais cobrados — é onde se ganha diferencial. ')
+          + 'Neste caderno (' + nomeTop + '): ' + nTop + (nTop === 1 ? ' questão' : ' questões')
+          + (anosTop.size ? (' em ' + anosTop.size + (anosTop.size > 1 ? ' anos' : ' ano')) : '') + '.'
       };
     }catch(_){ return null; }
   }
@@ -58033,8 +58069,11 @@ const CadernosPage = (function(){
         ? '<div class="cadp-meta-l"><span class="cadp-meta-k">Recorrência em prova</span><span class="cadp-meta-v">'
           + '<span class="cadp-recor n' + recor.nivel + '" data-tip="' + Util.attr(recor.dica) + '">'
           + '<i></i><i></i><i></i><b>' + Util.esc(recor.rotulo) + '</b></span>'
-          + '<span class="cadp-meta-dica">' + recor.n + (recor.n > 1 ? ' questões' : ' questão')
-          + (recor.anos ? (' \u00b7 ' + recor.anos + (recor.anos > 1 ? ' anos' : ' ano')) : '') + '</span>'
+          + '<span class="cadp-meta-dica">' + (recor.n
+              ? (recor.n + (recor.n > 1 ? ' questões' : ' questão')
+                 + (recor.anos ? (' \u00b7 ' + recor.anos + (recor.anos > 1 ? ' anos' : ' ano')) : '') + ' neste tópico')
+              : 'sem questão etiquetada neste tópico ainda')
+          + ' \u00b7 tema com ' + recor.pctTema + '% da matéria</span>'
           + '</span></div>'
         : '';
       const pctRow = (extras && extras.pct !== undefined)
