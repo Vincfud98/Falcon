@@ -38659,7 +38659,33 @@ window.TutorIA = (function(){
       .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
       .replace(/(href|src)\s*=\s*"javascript:[^"]*"/gi, '$1="#"');
   }
-  function _cadFixChips(el){ el.querySelectorAll('.tutor-ref').forEach(function(c){ c.contentEditable = 'false'; }); }
+  /* O chip de caderno guarda uma CÓPIA do nome (no data-unit-title e no texto).
+     Renomeou o caderno e a cópia envelhece: o aluno lê um nome ERRADO num link
+     que aponta para o lugar certo. Aqui o rótulo é reconciliado com o nome
+     ATUAL — mas só quando ele estava exibindo o nome; apelido escolhido de
+     propósito (o "Como exibir" do popover) é respeitado. */
+  function _cadRotularChip(c){
+    const did = c.getAttribute('data-doc-id'); if(!did) return false;
+    const d = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(did) : null;
+    const nome = (d && d.titulo) ? String(d.titulo).trim() : '';
+    if(!nome) return false;
+    const velho = String(c.getAttribute('data-unit-title') || '').trim();
+    let mudou = false;
+    if(velho !== nome){ c.setAttribute('data-unit-title', nome); mudou = true; }
+    const txt = (c.textContent || '').trim();
+    if(txt && velho && txt === velho && txt !== nome){ c.textContent = nome; mudou = true; }
+    return mudou;
+  }
+  function _cadFixChips(el){
+    let mudou = false;
+    el.querySelectorAll('.tutor-ref').forEach(function(c){
+      c.contentEditable = 'false';
+      try{ if(_cadRotularChip(c)) mudou = true; }catch(_){ }
+    });
+    // conserto na tela tem que VIRAR DADO: senão o export e a busca continuam
+    // com o nome velho até o aluno por acaso editar aquele caderno.
+    if(mudou && !el.__tplLivre && _cadEl() === el){ try{ _cadSchedule(); }catch(_){ } }
+  }
 
   /* ── GRIFO e COR DA LETRA no Caderno ───────────────────────────────────
      As MESMAS 6 cores da floating toolbar do texto da unidade. O grifo usa a
@@ -39012,10 +39038,31 @@ window.TutorIA = (function(){
     const corpos = {};
     el.__poSnap = {};
     for(let i = 0; i < marcas.length; i++){
+      const o0 = marcas[i].getAttribute('data-po-src');
+      if(o0 && !(o0 in corpos)) corpos[o0] = await _cadCorpoLer(o0);
+    }
+    /* Buraco REDUNDANTE: a célula dele já vem DENTRO da fatia de outro buraco
+       da mesma origem (é filha por recuo) — a frase apareceria duas vezes.
+       Sai ANTES do snapshot, senão o salvar contaria como "apagado pelo dono"
+       e viraria dispensa permanente. */
+    const cobertaPor = {};
+    marcas.forEach(function(m0){
+      const o = m0.getAttribute('data-po-src'), c0 = m0.getAttribute('data-po-cel');
+      if(!o || !c0 || corpos[o] == null) return;
+      const dOrg = document.createElement('div');
+      dOrg.innerHTML = _cadSanitize(corpos[o]);
+      const fat = _poFatiaCelula(dOrg, c0);
+      if(!fat) return;
+      fat.slice(1).forEach(function(f){
+        const cf = f.getAttribute ? f.getAttribute('data-cel') : null;
+        if(cf) cobertaPor[o + _PO_SEP + cf] = c0;
+      });
+    });
+    for(let i = 0; i < marcas.length; i++){
       const m = marcas[i];
       const org = m.getAttribute('data-po-src'), cel = m.getAttribute('data-po-cel');
       if(!org || !cel){ m.remove(); continue; }
-      if(!(org in corpos)) corpos[org] = await _cadCorpoLer(org);
+      if(cobertaPor[org + _PO_SEP + cel]){ m.remove(); continue; }
       const html = corpos[org] == null ? null : _poHtmlDaCelula(corpos[org], cel);
       if(html == null){
         // a célula sumiu na origem: o buraco não tem mais o que mostrar
@@ -39075,18 +39122,41 @@ window.TutorIA = (function(){
      naquele momento (ordem natural de chegada, decisão do dono). */
   async function _portaisSincronizar(el, chaveOrigem){
     if(!el || !chaveOrigem) return;
-    const porCel = {};
+    const bruto = {}, ancestrais = {}, pilha = [];
     Array.prototype.forEach.call(el.children, function(li){
-      if(li.nodeType !== 1 || li.classList.contains('cad-portal')) return;   // portal não gera portal
+      if(li.nodeType !== 1) return;
+      // a fatia de uma célula PARA no primeiro portal (_poFatiaCelula): daí em
+      // diante ninguém de cima é mais pai de ninguém
+      if(li.classList.contains('cad-portal')){ pilha.length = 0; return; }   // portal não gera portal
       const cel = li.getAttribute('data-cel'); if(!cel) return;
+      const ind = parseInt(li.getAttribute('data-ind') || '0', 10) || 0;
+      while(pilha.length && pilha[pilha.length - 1].ind >= ind) pilha.pop();
+      ancestrais[cel] = pilha.map(function(p){ return p.cel; });
+      pilha.push({ ind: ind, cel: cel });
       const alvos = [];
       Array.prototype.forEach.call(li.querySelectorAll('.tutor-ref'), function(c2){
         const d2 = c2.getAttribute('data-doc-id');
         const k = d2 ? ('doc:' + d2) : String(c2.getAttribute('data-unit-id') || '');
         if(k && k !== 'doc:' && k !== String(chaveOrigem) && alvos.indexOf(k) === -1) alvos.push(k);
       });
-      if(alvos.length) porCel[cel] = alvos;
+      if(alvos.length) bruto[cel] = alvos;
     });
+    /* Um FILHO não abre buraco próprio para quem o PAI já cita: o portal do
+       pai leva a fatia inteira (célula + filhos indentados), então o buraco do
+       filho repetiria a MESMA frase logo abaixo no destino. Se ele já existe
+       (gravado antes desta regra), é recolhido aqui. */
+    const porCel = {}, redundantes = [];
+    Object.keys(bruto).forEach(function(cel){
+      const fica = bruto[cel].filter(function(a){
+        const paiCobre = (ancestrais[cel] || []).some(function(pai){ return (bruto[pai] || []).indexOf(a) !== -1; });
+        if(paiCobre) redundantes.push({ cel: cel, alvo: a });
+        return !paiCobre;
+      });
+      if(fica.length) porCel[cel] = fica;
+    });
+    for(let i = 0; i < redundantes.length; i++){
+      await _poTirarBuraco(redundantes[i].alvo, chaveOrigem, redundantes[i].cel);
+    }
     const antes = el.__poCitAntes || null;
     el.__poCitAntes = porCel;
     const chaves = Object.keys(porCel);
@@ -43383,7 +43453,7 @@ window.TutorIA = (function(){
       if(uid !== _openedUnit) _resetForLeave();
     });
   }
-  return { open: open, openCaderno: openCaderno, openCadernoModal: openCadernoModal, montarCadernoEm: montarCadernoEm, desmontarCaderno: desmontarCaderno, unitHref: _unitHref, openConexoesFor: openConexoesFor, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, renderComment: renderComment, ensureStyles: _ensureStyles, sanitize: _cadSanitize, grafoMontarEm: grafoMontarEm, grafoTelaCheia: grafoTelaCheia, aliasPopover: _aliasPopover,
+  return { open: open, openCaderno: openCaderno, openCadernoModal: openCadernoModal, montarCadernoEm: montarCadernoEm, desmontarCaderno: desmontarCaderno, unitHref: _unitHref, openConexoesFor: openConexoesFor, close: close, ask: ask, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, renderComment: renderComment, ensureStyles: _ensureStyles, sanitize: _cadSanitize, grafoMontarEm: grafoMontarEm, grafoTelaCheia: grafoTelaCheia, aliasPopover: _aliasPopover, fixChips: _cadFixChips,
   montarEditorLivre: montarEditorLivre };
 })();
 
@@ -57235,8 +57305,12 @@ const CadernosPage = (function(){
     const tin = main.querySelector('#cadpTitulo');
     tin.addEventListener('change', function(){
       const novo = tin.value.trim() || 'Sem título';
+      const velho = String(((window.Store && Store.cadAvulsoPega) ? (Store.cadAvulsoPega(doc.id) || doc) : doc).titulo || '').trim();
       const aplica = function(){
         if(window.Store && Store.cadAvulsoSalvar) Store.cadAvulsoSalvar(doc.id, { titulo: novo });
+        _cadRenomearPropaga(doc.id, velho, novo).then(function(qt){
+          if(qt && window.ueToast) ueToast('Nome trocado também nas citações (' + qt + (qt === 1 ? ' caderno' : ' cadernos') + ').', 'ok');
+        }).catch(function(e){ console.warn('[renomear]', e); });
         const row = stageEl.querySelector('.cadp-item[data-doc="' + String(doc.id).replace(/"/g, '') + '"] .cadp-item-t');
         if(row) row.textContent = novo;
       };
@@ -57792,6 +57866,58 @@ const CadernosPage = (function(){
     // 4. o antigo vai pra lixeira (dá pra restaurar se algo der errado)
     if(S.cadAvulsoApagar) S.cadAvulsoApagar(idSai);
     return true;
+  }
+  /* RENOMEAR é operação de identidade: o nome do caderno aparece COPIADO em
+     toda citação [[ ]] (texto do chip + data-unit-title). Sem propagar, o
+     aluno lê o nome antigo — e o erro persiste no export, na busca e no
+     markdown. Mesma varredura do "juntar": cadernos próprios no Store e
+     cadernos de unidade no banco. Apelido (texto ≠ nome antigo) fica intacto. */
+  async function _cadRenomearPropaga(docId, velho, novo){
+    const S = window.Store;
+    const vAntigo = String(velho || '').trim(), vNovo = String(novo || '').trim();
+    if(!S || !vNovo || vAntigo === vNovo) return 0;
+    const id = String(docId);
+    let n = 0;
+    const troca = function(html){
+      const d = document.createElement('div');
+      d.innerHTML = String(html || '');
+      let mudou = false;
+      Array.prototype.forEach.call(d.querySelectorAll('.tutor-ref[data-doc-id]'), function(c){
+        if(String(c.getAttribute('data-doc-id')) !== id) return;
+        if(String(c.getAttribute('data-unit-title') || '').trim() !== vNovo){
+          c.setAttribute('data-unit-title', vNovo); mudou = true;
+        }
+        if((c.textContent || '').trim() === vAntigo){ c.textContent = vNovo; mudou = true; }
+      });
+      return mudou ? d.innerHTML : null;
+    };
+    const docs = S.cadAvulsosLista ? S.cadAvulsosLista() : [];
+    for(let i = 0; i < docs.length; i++){
+      const corpoNovo = troca(docs[i].body);
+      if(corpoNovo != null && S.cadAvulsoSalvar){ S.cadAvulsoSalvar(docs[i].id, { body: corpoNovo }); n++; }
+    }
+    try{
+      const u = await window._sb.auth.getUser();
+      const uid = u && u.data && u.data.user && u.data.user.id;
+      if(uid){
+        const { data } = await window._sb.schema('aluno').from('caderno').select('unit_id, body').eq('user_id', uid);
+        const linhas = data || [];
+        for(let i = 0; i < linhas.length; i++){
+          const corpoNovo = troca(linhas[i].body);
+          if(corpoNovo == null) continue;
+          await window._sb.schema('aluno').from('caderno')
+            .update({ body: corpoNovo, updated_at: new Date().toISOString() })
+            .eq('user_id', uid).eq('unit_id', linhas[i].unit_id);
+          if(S.upsertCadernoCache) S.upsertCadernoCache(linhas[i].unit_id, corpoNovo, Date.now());
+          n++;
+        }
+      }
+    }catch(e){ console.warn('[renomear citações]', e); }
+    // editores abertos agora (painel A/B, drawer) acompanham na hora
+    document.querySelectorAll('.cadpage-ed, #cadernoInput').forEach(function(ed){
+      try{ if(window.TutorIA && TutorIA.fixChips) TutorIA.fixChips(ed); }catch(_){ }
+    });
+    return n;
   }
   function _avisoHomonimo(ancora, doc, titulo, aoResolver){
     const iguais = _docsHomonimos(titulo, doc.id);
