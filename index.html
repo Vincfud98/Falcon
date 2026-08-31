@@ -33150,6 +33150,7 @@ Renderers.provas.mount = function(stageEl, route){
    Pontuação do CACD: acerto +1, erro −0,25, em branco 0, anulada neutra. */
 const PF_BRANCO = 'branco';
 window._provaItens = window._provaItens || {};
+window._provaItensSeq = window._provaItensSeq || 0;
 async function _provaItensLer(id){
   if(window._provaItens[id]) return window._provaItens[id];
   if(!window._sb) return null;
@@ -33182,6 +33183,7 @@ async function _provaItensLer(id){
       };
     });
     window._provaItens[id] = itens;
+    window._provaItensSeq = (window._provaItensSeq || 0) + 1;   // invalida o set de anuladas
     return itens;
   }catch(e){ console.warn('[prova itens ex]', e); return null; }
 }
@@ -33380,6 +33382,100 @@ function _pfBarraFimHtml(id, itens, travada){
       + '</div>'
     + '<button type="button" class="sim-submit-btn" data-pf-fim="1">Finalizar e ver o desempenho</button>'
     + '</div>';
+}
+/* ── ITENS PRÓPRIOS → BLOCOS ─────────────────────────────────────────────────
+   A peça que faz o simulado por JSON rodar no renderer que já existe: quem
+   desenha a questão não precisa saber se ela veio do banco ou do JSON.
+   O formato de saída é o MESMO que resolveBankGroup produz — item com
+   assertion/comments/options/key/anulada, grupo com enunciado e texto de
+   referência, bloco quiz por seção e um bloco essay por discursiva.
+   O id do item é o NÚMERO na prova, de propósito: é o mesmo id que a folha usa
+   para gravar a resposta, então a mesma marcação é achada pelos dois caminhos
+   (e pela hidratação do banco, que grava por item_id). */
+function _examItemCE(it){
+  return {
+    id: String(it.numero),
+    assertion: it.assertiva || '',
+    comments: it.comentario || '',
+    origin: '',
+    source_type: 'past_exam',
+    exam_id: null,
+    year: null,
+    options: ['Certo', 'Errado'],
+    // anulada não tem C nem E verdadeiro; o flag é que manda
+    key: (it.gab === 'E') ? 'Errado' : 'Certo',
+    anulada: it.gab === 'anulada',
+    tags: [], topics: []
+  };
+}
+function _examItemEssay(it){
+  return {
+    id: String(it.numero),
+    command: it.assertiva || '',
+    maxLength: 3000,
+    references: [],
+    /* criteria no formato que a correção por IA já espera: label/maxScore/
+       description. O JSON usa nome/peso/descricao porque é o que o admin
+       escreve — a tradução é aqui, não lá. */
+    criteria: (it.criterios || []).map(function(c, i){
+      return { id: 'c' + (i + 1), label: c.nome || ('Critério ' + (i + 1)),
+               maxScore: (c.peso != null ? c.peso : null), description: c.descricao || '' };
+    }),
+    modelAnswer: it.modeloResposta || '',
+    officialAnswer: it.respostaOficial || '',
+    maxScore: (it.pontuacaoMaxima != null) ? it.pontuacaoMaxima : null,
+    show_official_answer: true,
+    show_criteria: true,
+    show_model_answers: true
+  };
+}
+function _examItensParaBlocks(itens){
+  const blocks = [];
+  let objCount = 0, essayCount = 0;
+  const secs = [], porSec = {};
+  (itens || []).forEach(function(it){
+    const s = it.secao || 'Sem matéria';
+    if(!porSec[s]){ porSec[s] = []; secs.push(s); }
+    porSec[s].push(it);
+  });
+  secs.forEach(function(sec, si){
+    let grupos = [], atual = null, qn = 0;
+    /* Fecha o bloco de C/E aberto. A discursiva interrompe a sequência: se ela
+       cair no meio da seção, saem dois blocos quiz (antes e depois), e a ordem
+       na tela continua sendo a ordem da prova. */
+    const fechaQuiz = function(){
+      if(!grupos.length) return;
+      blocks.push({
+        id: 'ei-sec-' + si + '-q' + (++qn), type: 'quiz', title: sec,
+        groups: grupos.map(function(g, gi){
+          return { id: 'ei-g-' + si + '-' + qn + '-' + gi, enunciado: g.enunciado,
+                   reference_text: g.reference_text, items: g.items };
+        })
+      });
+      grupos = []; atual = null;
+    };
+    porSec[sec].forEach(function(it){
+      if(it.tipo === 'discursiva'){
+        fechaQuiz();
+        essayCount++;
+        blocks.push({ id: 'ei-sec-' + si + '-e' + essayCount, type: 'essay', title: sec,
+                      items: [_examItemEssay(it)] });
+        return;
+      }
+      /* O GRUPO é o comando da banca, exatamente como na folha (_pfGrupos):
+         itens seguidos sob o mesmo comando são um grupo só. Sem grupo no dado,
+         cai no texto de apoio repetido, que é a melhor pista que sobra. */
+      const chave = it.grupo ? ('g:' + it.grupo) : ('t:' + (it.apoio || ''));
+      if(!atual || atual.chave !== chave){
+        atual = { chave: chave, enunciado: it.comando || '', reference_text: it.apoio || '', items: [] };
+        grupos.push(atual);
+      }
+      atual.items.push(_examItemCE(it));
+      objCount++;
+    });
+    fechaQuiz();
+  });
+  return { blocks: blocks, objCount: objCount, essayCount: essayCount };
 }
 /* ── TENTATIVAS DA PROVA ─────────────────────────────────────────────────────
    A prova passada nasceu com uma tentativa só: a folha fixava attempt = 1 e
@@ -37915,19 +38011,30 @@ function _getDerivedEBankMap(){
 // vez do que ficou gravado na resposta — é isso que faz as respostas ANTIGAS,
 // dadas antes de a questão ser anulada, também saírem da conta, sem migração.
 // O _QBank é hidratado com select('*'), então a coluna chega sozinha.
-let _annulSetCache = null, _annulSetBank = null;
+let _annulSetCache = null, _annulSetBank = null, _annulSetSeq = -1;
 function _annulledIdSet(){
   const bank = window._QBank;
-  if(!bank) return null;
-  if(_annulSetCache && _annulSetBank === bank) return _annulSetCache;   // invalida se re-hidratar
+  const seq = window._provaItensSeq || 0;
+  /* Itens próprios (exam_items) são a SEGUNDA origem de item anulado. Entram na
+     mesma fonte em vez de ganhar um caminho paralelo — senão a anulada de um
+     simulado por JSON seria contada por um lugar e ignorada por outro.
+     O cache invalida quando o banco re-hidrata OU quando entra prova nova. */
+  if(!bank && !seq) return null;
+  if(_annulSetCache && _annulSetBank === bank && _annulSetSeq === seq) return _annulSetCache;
   const qAnul = new Set();
-  (bank.questions || []).forEach(function(q){ if(q && q.anulada) qAnul.add(String(q.id)); });
+  ((bank && bank.questions) || []).forEach(function(q){ if(q && q.anulada) qAnul.add(String(q.id)); });
   const set = new Set(qAnul);                       // MC: o item É a questão
-  (bank.tfItems || []).forEach(function(t){
+  ((bank && bank.tfItems) || []).forEach(function(t){
     if(!t) return;
     if(t.anulada || qAnul.has(String(t.question_id))) set.add(String(t.id));   // item ou grupo anulado
   });
-  _annulSetCache = set; _annulSetBank = bank;
+  const prop = window._provaItens || {};
+  Object.keys(prop).forEach(function(k){
+    (prop[k] || []).forEach(function(it){
+      if(it && it.gab === 'anulada' && it.numero != null) set.add(String(it.numero));
+    });
+  });
+  _annulSetCache = set; _annulSetBank = bank; _annulSetSeq = seq;
   return set;
 }
 // Recebe o id do item respondível (tf_item_id na C/E; question_id na MC).
