@@ -11831,6 +11831,10 @@ window.TAG_REGISTRY = {
         if(!ok) return;
         try{
           if(typeof window.rebuildCourses === 'function') window.rebuildCourses();
+          // Os SIMULADOS também dependem do banco: eles são montados resolvendo
+          // cada questão no _QBank. Sem remontar aqui, quem foi hidratado antes
+          // do banco chegar ficava sem questões e sem matéria — e sumia da lista.
+          if(typeof window.rebuildSimulados === 'function') window.rebuildSimulados();
           if(window.App && App.render) App.render();
         }catch(e){ console.warn('[qbank] re-render pós-carga falhou:', e); }
       });
@@ -11849,12 +11853,25 @@ window.TAG_REGISTRY = {
           csb2.from('mock_exam_files').select('*').order('position').then(r => r, () => ({ data: [] })),
         ]);
         if(meR.error) throw meR.error;
+        /* CORRIDA DO CARREGAMENTO (corrigido em 31/08/2026): a montagem abaixo
+           resolve cada questão no _QBank. Como o banco de questões saiu do
+           caminho crítico do boot (Fase 1) e pesa ~1,45 MB, ele quase NUNCA
+           chega antes daqui — e o `if(!q) return` descartava TODAS as questões,
+           deixando o simulado sem blocos e, por tabela, sem matéria. Aí o filtro
+           por concurso escondia a lista inteira: "3 simulados" na aba e nenhum
+           card na tela, para sempre.
+           Correção: guardamos o material cru e REMONTAMOS quando o banco
+           completo chega (window._ensureQBank já avisa). A lista aparece na
+           hora com o que houver e se completa sozinha. */
+        window._simRaw = { me: meR.data || [], secs: secR.data || [], meq: mqR.data || [], files: (filesR && filesR.data) || [] };
+        window.rebuildSimulados = function(){
+        const raw = window._simRaw; if(!raw) return;
         const _bank = window._QBank || {};
         const qById = {}; (_bank.questions || []).forEach(function(q){ qById[String(q.id)] = q; });
-        const allSecs = secR.data || [];
-        const allMeq = mqR.data || [];
-        const allFiles = (filesR && filesR.data) || [];
-        const sims = (meR.data || []).map(function(me){
+        const allSecs = raw.secs;
+        const allMeq = raw.meq;
+        const allFiles = raw.files;
+        const sims = (raw.me || []).map(function(me){
           const secs = allSecs.filter(function(s){ return String(s.mock_exam_id) === String(me.id); })
                               .sort(function(a,b){ return (a.ordem||0)-(b.ordem||0); });
           const myQ = allMeq.filter(function(m){ return String(m.mock_exam_id) === String(me.id); });
@@ -11963,7 +11980,10 @@ window.TAG_REGISTRY = {
         // o filtro de concurso a esconderia sem explicação).
         window.SIMULADOS = sims.filter(function(s2){ return s2.kind !== 'prova'; });
         window.PROVAS = sims.filter(function(s2){ return s2.kind === 'prova'; });
-        console.log('[hydrate simulados] ✅', { simulados: window.SIMULADOS.length, provas: window.PROVAS.length });
+        return { simulados: window.SIMULADOS.length, provas: window.PROVAS.length,
+                 comBanco: !!(window._QBank && window._QBank.completo) };
+        };
+        console.log('[hydrate simulados] ✅', window.rebuildSimulados());
         // _QBank já está carregado aqui → recomputa COURSES pra a contagem de
         // objetivas (afirmativas do banco) ficar correta nos cards, e re-renderiza.
         try{ if(typeof window.rebuildCourses === 'function'){ window.rebuildCourses(); if(window.App && App.render) App.render(); } }catch(_){}
@@ -32595,7 +32615,12 @@ Renderers.simulados = function(route, opts){
     ? window.coursesInExams((window.COURSES||[]).filter(Boolean), [_examId])
     : ((window.COURSES||[]).filter(Boolean));
   const _concursoSubjIds = new Set(_concursoCourses.map(c => String(c._subjectId)));
-  const _examSims = _concursoSubjIds.size ? sims.filter(s => _simSubjIds(s).some(id => _concursoSubjIds.has(id))) : sims.slice();
+  // Simulado cuja matéria ainda não pôde ser derivada (banco de questões a
+  // caminho) NÃO é descartado: informação ausente não é prova de que ele não
+  // pertence ao concurso. Descartar era o que deixava a lista vazia em silêncio.
+  const _examSims = _concursoSubjIds.size
+    ? sims.filter(s => { const _ids = _simSubjIds(s); return !_ids.length || _ids.some(id => _concursoSubjIds.has(id)); })
+    : sims.slice();
   // Pré-seleciona a matéria ATIVA do concurso (mesmo sem simulados → lista zera e
   // mostra "Nenhum simulado encontrado"). Matéria fora do concurso é ignorada.
   if(!filters.subject){
@@ -32606,7 +32631,8 @@ Renderers.simulados = function(route, opts){
 
   // Apply filters — matéria casa por id contido em subjectIds ("contém o conteúdo")
   let filtered = _examSims.slice();
-  if(filters.subject) filtered = filtered.filter(s => _simSubjIds(s).includes(String(filters.subject)));
+  // idem no filtro de matéria: só esconde quem SABIDAMENTE é de outra
+  if(filters.subject) filtered = filtered.filter(s => { const _ids = _simSubjIds(s); return !_ids.length || _ids.includes(String(filters.subject)); });
   if(filters.difficulty) filtered = filtered.filter(s => s.difficulty === filters.difficulty);
   // Faxina — filtro de acesso usa o campo real do S5 (accessType included/paid);
   // o antigo s.category era resquício do mock e deixava a lista vazia.
