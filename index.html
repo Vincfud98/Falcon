@@ -33154,8 +33154,9 @@ async function _provaItensLer(id){
   if(window._provaItens[id]) return window._provaItens[id];
   if(!window._sb) return null;
   try{
-    const { data, error } = await window._sb.schema('conteudo').from('past_exam_items')
-      .select('ordem, numero, secao, texto_apoio, assertiva, gabarito, comentario, edital_topic_id, grupo, comando')
+    const { data, error } = await window._sb.schema('conteudo').from('exam_items')
+      .select('ordem, numero, secao, texto_apoio, assertiva, gabarito, comentario, edital_topic_id, grupo, comando,'
+            + ' tipo, criterios, modelo_resposta, resposta_oficial, pontuacao_maxima')
       .eq('mock_exam_id', id).order('ordem');
     if(error){ console.warn('[prova itens]', error.message || error); return null; }
     const itens = (data || []).map(function(r, i){
@@ -33169,7 +33170,15 @@ async function _provaItensLer(id){
         comentario: r.comentario || '',
         edital_topic_id: r.edital_topic_id ? String(r.edital_topic_id) : null,
         grupo: r.grupo != null ? String(r.grupo) : null,
-        comando: r.comando || ''
+        comando: r.comando || '',
+        /* Item discursivo: os campos vão com o nome que a correção por IA já
+           usa (statement/criteria/modelAnswer/officialAnswer), para a Edge
+           Function correct-essay receber o mesmo objeto que recebe do banco. */
+        tipo: (r.tipo === 'discursiva') ? 'discursiva' : 'ce',
+        criterios: Array.isArray(r.criterios) ? r.criterios : [],
+        modeloResposta: r.modelo_resposta || '',
+        respostaOficial: r.resposta_oficial || '',
+        pontuacaoMaxima: (r.pontuacao_maxima != null) ? parseFloat(r.pontuacao_maxima) : null
       };
     });
     window._provaItens[id] = itens;
@@ -33188,9 +33197,10 @@ function _pfResposta(id, numero){
    antes da resposta. */
 function _pfPlacar(id, itens){
   const c = _pfCrit(id);
+  const ce = (itens || []).filter(function(x){ return x.tipo !== 'discursiva'; });
   const p = { certos: 0, errados: 0, brancos: 0, anuladas: 0, anuladasFeitas: 0,
-              respondidos: 0, total: itens.length, pontos: 0, crit: c };
-  itens.forEach(function(it){
+              respondidos: 0, total: ce.length, pontos: 0, crit: c };
+  ce.forEach(function(it){
     const r = _pfResposta(id, it.numero);
     const marcou = !!(r && r.selected != null);
     if(it.gab === 'anulada'){
@@ -33544,7 +33554,10 @@ Renderers.provaFolha.mount = async function(stageEl, route){
   if(!p) return;
   const folhaEl = stageEl.querySelector('#pfFolha'), mapaEl = stageEl.querySelector('#pfMapa');
   if(!folhaEl) return;
-  const itens = await _provaItensLer(id);
+  const todos = await _provaItensLer(id);
+  /* Só C/E por enquanto: a folha não sabe desenhar discursiva (Fase 2). Filtrar
+     aqui, na entrada, poupa grupos/mapa/números/barra de saberem disso. */
+  const itens = (todos || []).filter(function(x){ return x.tipo !== 'discursiva'; });
   if(!itens || !itens.length){
     folhaEl.innerHTML = '<div class="empty"><div class="empty-title">Esta prova ainda não tem itens</div>'
       + '<div class="empty-sub">O gabarito ainda não foi cadastrado. Você já pode baixar o PDF e fazer no papel.</div></div>';
@@ -33733,6 +33746,10 @@ function _pfTopico(id){
   return all.find(function(t){ return String(t.id) === String(id); }) || null;
 }
 function _pfContaItem(agg, it, r){
+  /* Discursiva não entra na conta de C/E: ela tem nota própria (0 a N), não
+     acerto/erro. A tela de discursivas é a Fase 3 — até lá o item existe no
+     banco, mas não polui o placar nem as tabelas. */
+  if(it.tipo === 'discursiva') return;
   const c = agg.crit || PF_CRIT_PADRAO;
   agg.total++;
   const marcou = !!(r && r.selected != null);
@@ -34400,7 +34417,8 @@ Renderers.provaResultado.mount = async function(stageEl, route){
   const p = (window.PROVAS || []).find(function(x){ return String(x.id) === id; }) || null;
   const host = stageEl.querySelector('#pfRes');
   if(!host) return;
-  const itens = await _provaItensLer(id);
+  const todos = await _provaItensLer(id);
+  const itens = (todos || []).filter(function(x){ return x.tipo !== 'discursiva'; });
   if(!itens || !itens.length){
     host.innerHTML = '<div class="empty"><div class="empty-title">Esta prova ainda não tem itens</div></div>';
     return;
