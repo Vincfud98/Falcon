@@ -12206,7 +12206,13 @@ window.TAG_REGISTRY = {
             durationSuggestedMinutes: me.duration_suggested_minutes || null,
             timeLimitMinutes: me.time_limit_minutes || null,
             instructions: me.instructions || '',
-            questionCount: objCount,
+            /* Itens PRÓPRIOS (exam_items): o mock_exam não resolve nada no
+               banco de questões. Não dá para carregá-los no boot — são centenas
+               de linhas por prova, e foi justamente isso que tiramos do caminho
+               crítico. Então aqui só marcamos que existem (item_count vem da
+               tabela) e a tela carrega sob demanda. */
+            temItensProprios: !!(me.item_count > 0),
+            questionCount: (me.item_count > 0) ? me.item_count : objCount,
             essayCount: essayCount,
             attemptMode: (me.attempt_mode === 'estudo') ? 'estudo' : 'prova',
             // Critério de pontuação e notas de corte — cadastrados por prova no
@@ -33429,6 +33435,30 @@ function _examItemEssay(it){
     show_model_answers: true
   };
 }
+/* Garante que um simulado de itens próprios tenha os blocos montados.
+   Resolve true quando montou AGORA (aí o chamador re-renderiza) e false quando
+   não havia o que fazer. A trava _itensCarregando existe porque o mount pode
+   rodar duas vezes (re-render): sem ela, duas cargas simultâneas montariam os
+   blocos duas vezes e o simulado apareceria com as questões dobradas. */
+function _simGarantirItens(sim){
+  if(!sim || !sim.temItensProprios || sim._itensProntos || sim._itensCarregando){
+    return Promise.resolve(false);
+  }
+  sim._itensCarregando = true;
+  return _provaItensLer(sim.id).then(function(itens){
+    const r = _examItensParaBlocks(itens || []);
+    sim.blocks = r.blocks;
+    sim.questionCount = r.objCount;
+    sim.essayCount = r.essayCount;
+    sim._itensProntos = true;
+    sim._itensCarregando = false;
+    return true;
+  }).catch(function(e){
+    sim._itensCarregando = false;
+    console.warn('[simulado itens próprios]', e);
+    return false;
+  });
+}
 function _examItensParaBlocks(itens){
   const blocks = [];
   let objCount = 0, essayCount = 0;
@@ -34900,6 +34930,18 @@ Renderers.simuladoDetail = function(route){
   const sims = window.SIMULADOS || [];
   const sim = sims.find(s => s.id === route.params.simuladoId);
   if(!sim) return `<div class="empty"><div class="empty-title">Simulado não encontrado</div></div>`;
+  /* Itens próprios chegam depois (carga sob demanda). Enquanto não chegam, a
+     tela mostra o mesmo esqueleto de carregamento que o resto do app usa — e o
+     mount avisa quando terminar. Sem isto o render veria blocks vazio e diria
+     "simulado sem questões", que é mentira. */
+  if(sim.temItensProprios && !sim._itensProntos){
+    return `<div class="hero">
+      <span class="s-label" data-a="1">Simulado</span>
+      <h1 class="s-title hero" data-a="2">${Util.esc(sim.name)}</h1>
+      <div class="s-divider" data-a="3"></div>
+    </div>
+    <div class="sem-map-loading" data-a="4">Carregando as questões…</div>`;
+  }
   // S5 — bloqueio de acesso (incluído por matéria / pago avulso)
   const _acc = _simAccessState(sim);
   if(_acc.locked){
@@ -35444,7 +35486,20 @@ function _applySimViewMode(stageEl){
 Renderers.simuladoDetail.mount = function(stageEl, route){
   const sims = window.SIMULADOS || [];
   const sim = sims.find(s => s.id === route.params.simuladoId);
-  if(!sim || _simAccessState(sim).locked || !sim.blocks) return;
+  if(!sim || _simAccessState(sim).locked) return;
+  /* Primeira visita a um simulado de itens próprios: carrega, monta os blocos
+     no formato que o renderer já conhece e pede um render novo. A trava
+     _itensCarregando existe porque mount pode rodar duas vezes (re-render), e
+     duas cargas simultâneas montariam os blocos duas vezes. */
+  if(sim.temItensProprios && !sim._itensProntos){
+    _simGarantirItens(sim).then(function(montou){
+      if(montou){ if(window.App && App.render) App.render(); return; }
+      const st = stageEl.querySelector('.sem-map-loading');
+      if(st && !sim._itensCarregando) st.textContent = 'Não foi possível carregar as questões deste simulado.';
+    });
+    return;
+  }
+  if(!sim.blocks) return;
   const simState = Store.getSimuladoState(sim.id);
   const isEstudo = sim.attemptMode === 'estudo';
   const activeAttempt = (window._simCurrentAttempt && window._simCurrentAttempt[sim.id]) || 1;
