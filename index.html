@@ -10258,6 +10258,9 @@ a.pr-crumb:hover{color:var(--accent)}
 /* ── Nota de corte ──────────────────────────────────────────────────────────
    Uma régua de 0 até a nota máxima da prova, com a barra da nota do aluno e um
    risco no corte. A cor da borda diz o veredito sem precisar ler. */
+/* Nome da prova, logo abaixo do apelido, no card do radar. */
+.perf-radar-sub{ font-family:var(--sans); font-weight:300; font-size:.62rem; letter-spacing:.18em;
+  text-transform:uppercase; color:var(--text-mute); margin-top:.3rem; text-align:center; }
 .pf-corte{ border:1px solid var(--border); border-left:3px solid var(--text-mute); border-radius:4px;
   background:var(--bg-card); padding:1.3rem 1.5rem; }
 .pf-corte.is-dentro{ border-left-color:#88c391; }
@@ -34168,13 +34171,53 @@ function _pfRecomendaHtml(res){
     + '<p class="pf-res-aviso">Os tópicos em que você errou, do mais urgente para o menos, com as aulas da plataforma que tratam de cada um.</p>'
     + '<div class="pf-rec">' + blocos + '</div></section>';
 }
+/* ── Radar da prova (mesmo card da página Desempenho) ────────────────────────
+   Cada ponta é uma SEÇÃO da prova. O valor é o acerto BRUTO (acertos sobre o
+   total de itens da seção): é sempre de 0 a 100, enquanto a nota líquida pode
+   ficar negativa e viraria o polígono do avesso. A líquida está no número
+   grande, que é a nota que vale. */
+function _pfSigla(nome){
+  const c = (window.COURSES || []).find(function(x){ return _pfNorm(x.title) === _pfNorm(nome); });
+  if(typeof subjectSigla === 'function') return subjectSigla(c || { title: nome });
+  return String(nome || '?').slice(0, 3).toUpperCase();
+}
+function _pfRadarHtml(prova, g, porSecao){
+  const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  const prof = (u && window.UserDirectory && UserDirectory.getById) ? UserDirectory.getById(u.id) : null;
+  const nome = (prof && (prof.nickname || prof.displayName || prof.handle))
+    || (u && (u.nickname || u.name)) || 'Aluno';
+  const foto = (prof && prof.photoUrl) || '';
+  const tf = (prof && prof.photoTransform) ? JSON.stringify(prof.photoTransform) : '';
+  const iniciais = (window.Util && Util.initials) ? Util.initials(nome) : '';
+  const crit = g.crit || PF_CRIT_PADRAO;
+  const max = g.total * crit.right;
+  const eixos = (porSecao || []).map(function(a){
+    return { sig: _pfSigla(a.nome), full: a.nome, value: _pfPctBruto(a) };
+  });
+  const temDados = g.respondidos > 0 && eixos.length >= 2;
+  return '<div class="perf-radar-id">'
+    + '<div class="perf-radar-idtop">'
+    + '<div class="perf-radar-avatar" data-radar-avatar data-photo="' + Util.attr(foto)
+    + '" data-transform="' + Util.attr(tf) + '">' + (foto ? '' : Util.esc(iniciais)) + '</div>'
+    + '<div class="perf-radar-overall"><strong>' + _pfNum(g.pontos) + '</strong>'
+    + '<span class="perf-radar-pct">/' + _pfNum(max) + '</span></div></div>'
+    + '<div class="perf-radar-line"></div>'
+    + '<div class="perf-radar-name">' + Util.esc(nome) + '</div>'
+    + '<div class="perf-radar-sub">' + Util.esc((prova && prova.name) || 'Prova') + '</div>'
+    + '</div>'
+    + '<div class="perf-radar-chart">'
+    + ((temDados && typeof _svgRadar === 'function') ? _svgRadar(eixos)
+        : '<div class="perf-radar-empty">Preencha a folha de respostas para ver seu radar por matéria.</div>')
+    + '</div>';
+}
 Renderers.provaResultado = function(route){
   const p = (window.PROVAS || []).find(x => String(x.id) === String(route.params.provaId));
   if(!p) return `<div class="empty"><div class="empty-title">Prova não encontrada</div>
     <div class="empty-sub"><a href="#/provas">Voltar para as provas</a>.</div></div>`;
   /* Mesma casca das outras telas de desempenho: hero + seções .perf-*. Antes
      era um HTML próprio, encostado à esquerda e fora do padrão. */
-  return `<div class="hero">
+  return `<div class="perf-top">
+  <div class="hero">
     <span class="s-label" data-a="1">Desempenho da prova</span>
     <h1 class="s-title hero" data-a="2">${Util.esc(p.name)}</h1>
     <div class="s-divider" data-a="3"></div>
@@ -34183,6 +34226,10 @@ Renderers.provaResultado = function(route){
       <a class="btn-ghost" href="#/simulados/${Util.attr(p.id)}/ranking">Ranking</a>
       <a class="btn-ghost" href="#/provas">${Icons.chevron || '‹'} Todas as provas</a>
     </div>
+  </div>
+  <aside class="perf-radar-card" id="pfRadar" data-a="4">
+    <div class="perf-radar-empty">Calculando…</div>
+  </aside>
   </div>
   <div id="pfRes" data-a="5"><div class="sem-map-loading">Calculando…</div></div>`;
 };
@@ -34198,6 +34245,22 @@ Renderers.provaResultado.mount = async function(stageEl, route){
   }
   const res = _pfResumo(id, itens);
   const g = res.geral;
+  const radarEl = stageEl.querySelector('#pfRadar');
+  if(radarEl) try{
+    radarEl.innerHTML = _pfRadarHtml(p, g, res.porSecao);
+    // mesma regra do Desempenho: a foto entra com o enquadramento do usuário
+    const av = radarEl.querySelector('[data-radar-avatar]');
+    if(av && typeof renderAvatarInto === 'function'){
+      const ph = av.getAttribute('data-photo') || '';
+      let tf = null;
+      try{ const raw = av.getAttribute('data-transform'); if(raw) tf = JSON.parse(raw); }catch(e){}
+      if(ph) renderAvatarInto(av, ph, tf);
+    }
+  }catch(e){
+    // o radar é acessório — não pode derrubar as tabelas e os gráficos
+    console.warn('[radar da prova]', e);
+    radarEl.innerHTML = '<div class="perf-radar-empty">Não foi possível montar o radar.</div>';
+  }
   const pctVoce = g.respondidos ? Math.round(g.certos / g.respondidos * 100) : 0;
   const pc = function(n){ return g.total ? (n / g.total * 100) : 0; };
   const c1 = pc(g.certos), c2 = c1 + pc(g.errados), c3 = c2 + pc(g.brancos);
