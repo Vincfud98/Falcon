@@ -32984,12 +32984,24 @@ function _pfResposta(id, numero){
   try{ return Store.getQuizAnswer(_pfChaveUnidade(id), 'folha', String(numero)); }catch(_){ return null; }
 }
 // Anulada não conta a favor nem contra — para ninguém, tenha marcado o que tiver.
+/* PONTUAÇÃO — critério Cebraspe: acerto +1, erro −0,25, em branco 0 e
+   ITEM ANULADO VALE PONTO PARA TODOS. O ponto da anulada só entra depois que o
+   aluno marca alguma coisa nela: dar antes (ou já contar o item como resolvido)
+   revelaria quais são as anuladas, e é justamente isso que não pode aparecer
+   antes da resposta. */
 function _pfPlacar(id, itens){
-  const p = { certos: 0, errados: 0, brancos: 0, anuladas: 0, respondidos: 0, total: itens.length, pontos: 0 };
+  const p = { certos: 0, errados: 0, brancos: 0, anuladas: 0, anuladasFeitas: 0,
+              respondidos: 0, total: itens.length, pontos: 0 };
   itens.forEach(function(it){
-    if(it.gab === 'anulada'){ p.anuladas++; return; }
     const r = _pfResposta(id, it.numero);
-    if(!r || r.selected == null) return;
+    const marcou = !!(r && r.selected != null);
+    if(it.gab === 'anulada'){
+      p.anuladas++;
+      if(!marcou) return;
+      p.respondidos++; p.anuladasFeitas++; p.certos++; p.pontos += 1;
+      return;
+    }
+    if(!marcou) return;
     p.respondidos++;
     if(r.selected === PF_BRANCO){ p.brancos++; return; }
     if(r.selected === it.gab){ p.certos++; p.pontos += 1; }
@@ -33008,7 +33020,7 @@ function _pfDetalheHtml(it, r){
   const com = it.comentario ? '<div class="qz-sat-com">' + it.comentario + '</div>' : '';
   let cab;
   if(it.gab === 'anulada'){
-    cab = '<div class="qz-sat-veredito is-anulada"><strong>Item anulado pela banca.</strong> Não conta a favor nem contra.</div>';
+    cab = '<div class="qz-sat-veredito is-anulada"><strong>Item anulado pela banca.</strong> Pelo critério do Cebraspe, ele vale ponto para todos — inclusive para você.</div>';
   } else if(r.selected === PF_BRANCO){
     cab = '<div class="qz-sat-veredito is-branco"><strong>Em branco.</strong> Sem ponto e sem desconto — o gabarito é <strong>'
         + _pfGabTxt(it.gab) + '</strong>.</div>';
@@ -33080,7 +33092,7 @@ function _pfItemHtml(id, it){
                       : '<span class="q-result q-result-wrong" title="Incorreto">&#10007;</span>')
     : '';
   const selo = anuladaVisivel
-    ? '<div class="q-badges"><span class="q-badge q-badge-anulada" data-tip="Item anulado na prova original — não conta como acerto nem como erro">Anulada · não conta</span></div>'
+    ? '<div class="q-badges"><span class="q-badge q-badge-anulada" data-tip="Item anulado na prova original — o Cebraspe dá o ponto a todos os candidatos">Anulada · ponto para todos</span></div>'
     : '';
   return '<article class="q-item is-tf' + cls + '" data-pf-item="' + Util.attr(it.numero) + '" id="pfitem-' + Util.attr(it.numero) + '">'
     + '<div class="q-num">' + Util.esc(it.numero) + '</div>'
@@ -33107,20 +33119,21 @@ function _pfFolhaHtml(id, itens){
 }
 /* Placar fixo no canto: o aluno acompanha a nota mudando enquanto preenche,
    sem ter de subir até o mapa. Só a contagem de anuladas fica de fora — ela
-   entregaria quantos itens não valem antes de o aluno responder. */
 /* Os números vivem DENTRO do satélite (o painel que já acompanha a rolagem):
    dois quadros no mesmo canto competiam pela atenção e repetiam informação. */
 function _pfNumerosHtml(id, itens){
   const p = _pfPlacar(id, itens);
-  const validos = p.total - p.anuladas;
-  const falta = Math.max(0, validos - p.respondidos);
+  const falta = Math.max(0, p.total - p.respondidos);
   return '<div class="pf-num-linha"><span>Certos</span><strong class="pf-ok">' + p.certos + '</strong></div>'
     + '<div class="pf-num-linha"><span>Errados</span><strong class="pf-bad">' + p.errados + '</strong></div>'
     + '<div class="pf-num-linha"><span>Em branco</span><strong>' + p.brancos + '</strong></div>'
     + '<div class="pf-num-linha pf-num-pt"><span>Pontos</span><strong>'
       + (Math.round(p.pontos * 100) / 100).toFixed(2) + '</strong></div>'
+    // só as anuladas que o aluno JÁ respondeu — dizer quantas existem no total
+    // entregaria o que ele ainda não viu
     + '<div class="pf-num-nota">' + (falta ? falta + ' por preencher' : 'folha completa')
-      + (p.anuladas ? ' · ' + p.anuladas + ' anulada' + (p.anuladas === 1 ? '' : 's') + ' fora da conta' : '') + '</div>';
+      + (p.anuladasFeitas ? ' · ' + p.anuladasFeitas + ' anulada' + (p.anuladasFeitas === 1 ? '' : 's')
+         + ' com ponto para todos' : '') + '</div>';
 }
 function _pfMapaHtml(id, itens, secAtiva){
   const secs = [];
@@ -33142,7 +33155,7 @@ function _pfMapaHtml(id, itens, secAtiva){
 }
 function _pfBarraFimHtml(id, itens){
   const pl = _pfPlacar(id, itens);
-  const validos = pl.total - pl.anuladas;
+  const validos = pl.total;
   const faltam = Math.max(0, validos - pl.respondidos);
   const st = (window.Store && Store.getSimuladoState) ? Store.getSimuladoState(id) : null;
   const jaFez = !!(st && st.submittedAt);
@@ -33227,7 +33240,7 @@ Renderers.provaFolha.mount = async function(stageEl, route){
   const pintaMapa = function(){ if(mapaEl) mapaEl.innerHTML = _pfMapaHtml(id, itens, secAtiva); };
   const pintaSat = function(){
     const p2 = _pfPlacar(id, itens);
-    const validos = p2.total - p2.anuladas;
+    const validos = p2.total;
     const c = stageEl.querySelector('#pfSatCount'), b = stageEl.querySelector('#pfSatBar'),
           nums = stageEl.querySelector('#pfSatNumeros'), d = stageEl.querySelector('#pfSatDetalhe');
     // "corretas de 226" e não de 240: as 14 anuladas não entram na conta de
@@ -33273,7 +33286,7 @@ Renderers.provaFolha.mount = async function(stageEl, route){
     const fim = ev.target.closest ? ev.target.closest('[data-pf-fim]') : null;
     if(fim){
       const pl = _pfPlacar(id, itens);
-      const validos = pl.total - pl.anuladas;
+      const validos = pl.total;
       const faltam = validos - pl.respondidos;
       if(faltam > 0 && !confirm('Ainda faltam ' + faltam + ' ite' + (faltam === 1 ? 'm' : 'ns')
          + ' por preencher.\n\nFinalizar assim mesmo?')) return;
@@ -33353,8 +33366,14 @@ function _pfTopicoRaiz(id){
 }
 function _pfContaItem(agg, it, r){
   agg.total++;
-  if(it.gab === 'anulada'){ agg.anuladas++; return; }
-  if(!r || r.selected == null) return;
+  const marcou = !!(r && r.selected != null);
+  if(it.gab === 'anulada'){
+    agg.anuladas++;
+    if(!marcou) return;
+    agg.respondidos++; agg.certos++; agg.pontos += 1;   // Cebraspe: ponto para todos
+    return;
+  }
+  if(!marcou) return;
   agg.respondidos++;
   if(r.selected === PF_BRANCO){ agg.brancos++; return; }
   if(r.selected === it.gab){ agg.certos++; agg.pontos += 1; }
@@ -33364,7 +33383,7 @@ function _pfAggNovo(nome){
   return { nome: nome, total: 0, respondidos: 0, certos: 0, errados: 0, brancos: 0, anuladas: 0, pontos: 0 };
 }
 function _pfResumo(id, itens){
-  const porSecao = [], porTopico = [], porTema = [];
+  const porSecao = [], porTopico = [];
   const acha = function(lista, chave, nome){
     let a = lista.find(function(x){ return x.chave === chave; });
     if(!a){ a = _pfAggNovo(nome); a.chave = chave; lista.push(a); }
@@ -33375,39 +33394,30 @@ function _pfResumo(id, itens){
     _pfContaItem(acha(porSecao, it.secao, it.secao), it, r);
     const t = _pfTopico(it.edital_topic_id);
     const nomeT = t ? ((t.code ? t.code + ' ' : '') + (t.title || '')) : 'Sem tópico do edital';
-    _pfContaItem(acha(porTopico, t ? String(t.id) : '__sem', nomeT), it, r);
-    const raiz = it.edital_topic_id ? _pfTopicoRaiz(it.edital_topic_id) : null;
-    const nomeR = raiz ? (raiz.title || 'Tema') : 'Sem tópico do edital';
-    _pfContaItem(acha(porTema, raiz ? String(raiz.id) : '__sem', nomeR), it, r);
+    const aggT = acha(porTopico, t ? String(t.id) : '__sem', nomeT);
+    aggT.code = t ? (t.code || '') : 'zzz';
+    aggT.materia = t ? (_pfTopicoMateria(t.id) || it.secao) : 'Sem tópico do edital';
+    _pfContaItem(aggT, it, r);
   });
   const geral = _pfAggNovo('Total');
   itens.forEach(function(it){ _pfContaItem(geral, it, _pfResposta(id, it.numero)); });
-  porTopico.sort(function(a, b){ return b.total - a.total || a.nome.localeCompare(b.nome, 'pt-BR'); });
-  porTema.sort(function(a, b){ return b.total - a.total; });
-  return { geral: geral, porSecao: porSecao, porTopico: porTopico, porTema: porTema };
+  return { geral: geral, porSecao: porSecao, porTopico: porTopico };
 }
 function _pfPct(a){
   const base = a.certos + a.errados;
   return base ? Math.round(a.certos / base * 100) : null;
 }
-function _pfPizzaHtml(temas, totalItens){
-  const vivos = temas.filter(function(t){ return t.total > 0; });
-  if(!vivos.length || !totalItens) return '';
-  let acc = 0;
-  const partes = vivos.map(function(t, i){
-    const ini = acc, fim = acc + (t.total / totalItens * 100);
-    acc = fim;
-    return PF_CORES[i % PF_CORES.length] + ' ' + ini + '% ' + fim + '%';
-  });
-  const leg = vivos.map(function(t, i){
-    const pc = Math.round(t.total / totalItens * 100);
-    return '<div class="ustats-leg"><span class="ustats-dot" style="background:' + PF_CORES[i % PF_CORES.length] + '"></span>'
-      + '<span>' + Util.esc(t.nome) + '</span><strong>' + t.total + ' <span class="pf-leg-pc">(' + pc + '%)</span></strong></div>';
-  }).join('');
-  return '<div class="ustats-pie-row">'
-    + '<div class="qd-pie ustats-pie" style="background:conic-gradient(' + partes.join(',') + ')" role="img" aria-label="Temas que caíram na prova">'
-    + '<span class="qd-pie-center"><strong>' + vivos.length + '</strong><small>temas</small></span></div>'
-    + '<div class="ustats-legend">' + leg + '</div></div>';
+/* Ordena os tópicos como o edital: por MATÉRIA e, dentro dela, pelo código
+   (1.1, 1.2, 1.10 — não "1.10 antes de 1.2"). Antes a tabela vinha ordenada
+   por quantidade de itens e misturava matérias, o que não se lê. */
+function _pfOrdCodigo(code){
+  return String(code || '').split('.').map(function(x){
+    return String(parseInt(x, 10) || 0).padStart(4, '0');
+  }).join('.');
+}
+function _pfTopicoMateria(id){
+  const raiz = _pfTopicoRaiz(id);
+  return raiz ? (raiz.title || '') : '';
 }
 function _pfTabelaHtml(linhas, rotCol, comPontos){
   const linha = function(a, cls){
@@ -33420,21 +33430,53 @@ function _pfTabelaHtml(linhas, rotCol, comPontos){
       + (comPontos ? '<td class="pf-tab-pt">' + (Math.round(a.pontos * 100) / 100).toFixed(2) + '</td>' : '')
       + '<td class="pf-tab-barra">' + barra + '</td></tr>';
   };
-  return '<div class="pf-tab-wrap"><table class="pf-tab">'
+  return '<div class="perf-table-wrap"><table class="perf-table pf-tab">'
     + '<thead><tr><th class="pf-tab-nome">' + rotCol + '</th><th>Itens</th><th>Resp.</th>'
     + '<th>Certos</th><th>Errados</th>' + (comPontos ? '<th>Pontos</th>' : '') + '<th>Acerto</th></tr></thead>'
-    + '<tbody>' + linhas.map(function(a){ return linha(a); }).join('') + '</tbody></table></div>';
+    + '<tbody>' + linhas.map(function(a){ return linha(a, a._sub ? 'pf-tab-sub' : ''); }).join('') + '</tbody></table></div>';
+}
+/* Tabela do edital: agrupada por matéria, com uma linha-título por matéria. */
+function _pfTabelaTopicos(porTopico){
+  const porMat = {};
+  porTopico.forEach(function(a){
+    const m = a.materia || 'Sem tópico do edital';
+    (porMat[m] = porMat[m] || []).push(a);
+  });
+  const nomes = Object.keys(porMat).sort(function(x, y){
+    if(x === 'Sem tópico do edital') return 1;
+    if(y === 'Sem tópico do edital') return -1;
+    return x.localeCompare(y, 'pt-BR');
+  });
+  const linhas = [];
+  nomes.forEach(function(m){
+    const its = porMat[m].slice().sort(function(a, b){ return _pfOrdCodigo(a.code).localeCompare(_pfOrdCodigo(b.code)); });
+    const soma = _pfAggNovo(m);
+    its.forEach(function(a){
+      soma.total += a.total; soma.respondidos += a.respondidos;
+      soma.certos += a.certos; soma.errados += a.errados; soma.pontos += a.pontos;
+    });
+    linhas.push(soma);
+    its.forEach(function(a){ a._sub = true; linhas.push(a); });
+  });
+  return _pfTabelaHtml(linhas, 'Matéria e tópico do edital', false);
 }
 Renderers.provaResultado = function(route){
   const p = (window.PROVAS || []).find(x => String(x.id) === String(route.params.provaId));
   if(!p) return `<div class="empty"><div class="empty-title">Prova não encontrada</div>
     <div class="empty-sub"><a href="#/provas">Voltar para as provas</a>.</div></div>`;
-  return `<div class="pf-topo">
-    <a class="btn-ghost pf-voltar" href="#/provas/${Util.attr(p.id)}">${Icons.chevron || '‹'} Voltar à folha</a>
-    <div class="pf-topo-t"><span class="s-label">Desempenho</span><h1 class="pf-titulo">${Util.esc(p.name)}</h1></div>
-    <a class="btn-ghost" href="#/simulados/${Util.attr(p.id)}/ranking">Ranking</a>
+  /* Mesma casca das outras telas de desempenho: hero + seções .perf-*. Antes
+     era um HTML próprio, encostado à esquerda e fora do padrão. */
+  return `<div class="hero">
+    <span class="s-label" data-a="1">Desempenho da prova</span>
+    <h1 class="s-title hero" data-a="2">${Util.esc(p.name)}</h1>
+    <div class="s-divider" data-a="3"></div>
+    <div class="cta-row" data-a="4">
+      <a class="btn-ghost" href="#/provas/${Util.attr(p.id)}">${Icons.chevron || '‹'} Voltar à folha</a>
+      <a class="btn-ghost" href="#/simulados/${Util.attr(p.id)}/ranking">Ranking</a>
+      <a class="btn-ghost" href="#/provas">${Icons.chevron || '‹'} Todas as provas</a>
+    </div>
   </div>
-  <div class="pf-res" id="pfRes"><div class="sem-map-loading">Calculando…</div></div>`;
+  <div id="pfRes" data-a="5"><div class="sem-map-loading">Calculando…</div></div>`;
 };
 Renderers.provaResultado.mount = async function(stageEl, route){
   const id = String(route.params.provaId);
@@ -33447,32 +33489,78 @@ Renderers.provaResultado.mount = async function(stageEl, route){
   }
   const res = _pfResumo(id, itens);
   const g = res.geral;
-  const validos = g.total - g.anuladas;
+  const pctVoce = g.respondidos ? Math.round(g.certos / g.respondidos * 100) : 0;
+  const pc = function(n){ return g.total ? (n / g.total * 100) : 0; };
+  const c1 = pc(g.certos), c2 = c1 + pc(g.errados), c3 = c2 + pc(g.brancos);
+  const pieStyle = 'background:conic-gradient(#4f8a55 0 ' + c1 + '%,'
+    + '#b3524c ' + c1 + '% ' + c2 + '%,'
+    + '#8a8478 ' + c2 + '% ' + c3 + '%,'
+    + 'rgba(255,255,255,.06) ' + c3 + '% 100%)';
+  const faltam = Math.max(0, g.total - g.respondidos);
   const semTopico = res.porTopico.some(function(t){ return t.chave === '__sem'; });
+
   host.innerHTML =
-    '<div class="pf-res-cartoes">'
-    + '<div class="pf-res-card"><span>Certos</span><strong class="pf-ok">' + g.certos + '</strong></div>'
-    + '<div class="pf-res-card"><span>Errados</span><strong class="pf-bad">' + g.errados + '</strong></div>'
-    + '<div class="pf-res-card"><span>Em branco</span><strong>' + g.brancos + '</strong></div>'
-    + '<div class="pf-res-card pf-res-card-pt"><span>Pontos</span><strong>' + (Math.round(g.pontos * 100) / 100).toFixed(2) + '</strong>'
-    + '<small>de ' + validos + ' possíveis</small></div>'
-    + '</div>'
-    + (g.respondidos < validos
-        ? '<p class="pf-res-aviso">Você ainda tem ' + (validos - g.respondidos) + ' ite'
-          + ((validos - g.respondidos) === 1 ? 'm' : 'ns') + ' por preencher — o desempenho abaixo considera só o que já foi marcado.</p>'
-        : '')
-    + '<h2 class="pf-res-h">Por matéria</h2>'
-    + _pfTabelaHtml(res.porSecao, 'Matéria', true)
-    + '<h2 class="pf-res-h">Temas do edital que caíram</h2>'
-    + (res.porTema.length ? _pfPizzaHtml(res.porTema, g.total)
-        : '<p class="pf-res-aviso">Os itens desta prova ainda não foram ligados ao edital.</p>')
-    + '<h2 class="pf-res-h">Seu acerto por tópico do edital</h2>'
-    + _pfTabelaHtml(res.porTopico, 'Tópico do edital', false)
+    '<section class="perf-visual" data-a="5">'
+    + '<div class="perf-visual-pie">'
+    + '<div class="perf-pie" style="' + pieStyle + '"><div class="perf-pie-center">'
+    + '<span class="perf-pie-pct">' + pctVoce + '%</span><span class="perf-pie-lbl">acerto</span></div></div>'
+    + '<div class="perf-pie-legend">'
+    + '<div class="ppl-row"><span class="ppl-dot" style="background:#4f8a55"></span>Certos<span class="ppl-val">' + g.certos + '</span></div>'
+    + '<div class="ppl-row"><span class="ppl-dot" style="background:#b3524c"></span>Errados<span class="ppl-val">' + g.errados + '</span></div>'
+    + '<div class="ppl-row"><span class="ppl-dot" style="background:#8a8478"></span>Em branco<span class="ppl-val">' + g.brancos + '</span></div>'
+    + (faltam ? '<div class="ppl-row"><span class="ppl-dot" style="background:rgba(255,255,255,.12)"></span>Por preencher<span class="ppl-val">' + faltam + '</span></div>' : '')
+    + '</div></div>'
+    + '<div class="perf-visual-bars">'
+    + '<div class="perf-bars-title">Comparativo — nota líquida</div>'
+    + '<div class="perf-bar-row"><span class="perf-bar-label">Você</span>'
+    + '<div class="perf-bar-track"><div class="perf-bar-fill is-you" id="pfBarVoce" style="width:0%"></div></div>'
+    + '<span class="perf-bar-val" id="pfBarVoceVal">—</span></div>'
+    + '<div class="perf-bar-row"><span class="perf-bar-label">Média de quem fez</span>'
+    + '<div class="perf-bar-track"><div class="perf-bar-fill is-all" id="pfBarMedia" style="width:0%"></div></div>'
+    + '<span class="perf-bar-val" id="pfBarMediaVal">…</span></div>'
+    + '<div class="perf-summary" style="margin-top:1.2rem">'
+    + '<div class="perf-summary-card"><div class="perf-summary-label">Pontos</div>'
+    + '<div class="perf-summary-value" style="color:var(--accent)">' + (Math.round(g.pontos * 100) / 100).toFixed(2)
+    + '<span>/' + g.total + '</span></div></div>'
+    + '<div class="perf-summary-card"><div class="perf-summary-label">Certos</div>'
+    + '<div class="perf-summary-value" style="color:var(--green)">' + g.certos + '</div></div>'
+    + '<div class="perf-summary-card"><div class="perf-summary-label">Errados</div>'
+    + '<div class="perf-summary-value" style="color:var(--red)">' + g.errados + '</div></div>'
+    + '<div class="perf-summary-card"><div class="perf-summary-label">Em branco</div>'
+    + '<div class="perf-summary-value">' + g.brancos + '</div></div>'
+    + '</div></div></section>'
+    + (faltam ? '<p class="pf-res-aviso" data-a="6">Faltam ' + faltam + ' ite' + (faltam === 1 ? 'm' : 'ns')
+        + ' por preencher — o quadro abaixo só considera o que já foi marcado.</p>' : '')
+    + '<section class="perf-section" data-a="7"><div class="perf-section-label">Desempenho por matéria</div>'
+    + _pfTabelaHtml(res.porSecao, 'Matéria', true) + '</section>'
+    + '<section class="perf-section" data-a="8"><div class="perf-section-label">Seu acerto por tópico do edital</div>'
+    + _pfTabelaTopicos(res.porTopico)
     + (semTopico ? '<p class="pf-res-aviso">Os itens em “Sem tópico do edital” ainda não foram classificados pelo professor.</p>' : '')
-    + '<div class="pf-res-acoes">'
-    + '<a class="btn-ghost" href="#/provas/' + Util.attr(id) + '">Voltar à folha</a>'
-    + '<a class="sim-card-cta" href="#/simulados/' + Util.attr(id) + '/ranking">Ver o ranking</a>'
-    + '</div>';
+    + '</section>';
+
+  /* Comparativo com quem já fez: sai do próprio ranking (a RPC devolve score,
+     total e pct de cada participante), sem consulta nova no banco. */
+  const barV = stageEl.querySelector('#pfBarVoce'), barVv = stageEl.querySelector('#pfBarVoceVal');
+  const notaPct = g.total ? Math.max(0, g.pontos) / g.total * 100 : 0;
+  if(barV) barV.style.width = notaPct.toFixed(1) + '%';
+  if(barVv) barVv.textContent = (Math.round(g.pontos * 100) / 100).toFixed(2);
+  try{
+    if(window._sb && typeof window._sb.rpc === 'function'){
+      const { data, error } = await window._sb.rpc('simulado_leaderboard', { p_simulado_id: id });
+      const rows = (!error && data) ? data : [];
+      const notas = rows.map(function(r){ return parseFloat(r.score) || 0; }).filter(function(n){ return !isNaN(n); });
+      const el = stageEl.querySelector('#pfBarMedia'), ev = stageEl.querySelector('#pfBarMediaVal');
+      if(notas.length){
+        const media = notas.reduce(function(a, b){ return a + b; }, 0) / notas.length;
+        const tot = parseFloat(rows[0].total) || g.total || 1;
+        if(el) el.style.width = Math.max(0, Math.min(100, media / tot * 100)).toFixed(1) + '%';
+        if(ev) ev.textContent = (Math.round(media * 100) / 100).toFixed(2)
+          + (notas.length > 1 ? ' · ' + notas.length + ' pessoas' : ' · 1 pessoa');
+      } else {
+        if(ev) ev.textContent = 'ninguém finalizou ainda';
+      }
+    }
+  }catch(e){ console.warn('[prova média]', e); }
 };
 // S2.2 — modal de confirmação ao "Refazer" um simulado de Estudo
 function _openRefazerModal(simId){
@@ -34577,11 +34665,29 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
 };
 
 /* Simulado ranking page */
+/* Prova passada e simulado dividem a MESMA tela de ranking; o que muda é a
+   palavra e o link de volta. Sem isto, quem fez a prova de 2026 lia "este
+   simulado" e caía num endereço de simulado que não existia. */
+function _rankTermos(sim){
+  const prova = !!(sim && sim.kind === 'prova');
+  const id = sim ? encodeURIComponent(sim.id) : '';
+  return {
+    prova: prova,
+    isto: prova ? 'esta prova' : 'este simulado',
+    voltar: prova ? 'Voltar à folha' : 'Voltar ao simulado',
+    voltarHref: prova ? ('#/provas/' + id) : ('#/simulados/' + id),
+    todos: prova ? 'Todas as provas' : 'Todos os simulados',
+    todosHref: prova ? '#/provas' : '#/simulados',
+    ir: prova ? 'Ir para a folha' : 'Ir para o simulado',
+    finalize: prova ? 'Finalize a prova' : 'Finalize o simulado'
+  };
+}
 Renderers.simuladoRanking = function(route){
   // P3 — a prova passada é um exame como outro qualquer, mas vive em PROVAS:
   // procurar só em SIMULADOS dava "simulado não encontrado" no ranking dela.
   const sim = _simOuProva(route.params.simuladoId);
-  if(!sim) return `<div class="empty"><div class="empty-title">Simulado não encontrado</div></div>`;
+  if(!sim) return `<div class="empty"><div class="empty-title">Não encontrado</div></div>`;
+  const T = _rankTermos(sim);
   // S3b — leaderboard real: o conteúdo vem da RPC simulado_leaderboard no
   // mount (async). Aqui só o esqueleto + placeholders.
   return `<div class="hero">
@@ -34590,8 +34696,8 @@ Renderers.simuladoRanking = function(route){
     <p class="s-subtitle" data-a="3" id="rankCount">Carregando…</p>
     <div class="s-divider" data-a="4"></div>
     <div class="cta-row" data-a="5">
-      <a class="btn-ghost" href="#/simulados/${sim.id}">${Icons.chevron} Voltar ao simulado</a>
-      <a class="btn-ghost" href="#/simulados">${Icons.chevron} Todos os simulados</a>
+      <a class="btn-ghost" href="${Util.attr(T.voltarHref)}">${Icons.chevron} ${Util.esc(T.voltar)}</a>
+      <a class="btn-ghost" href="${Util.attr(T.todosHref)}">${Icons.chevron} ${Util.esc(T.todos)}</a>
     </div>
   </div>
   <div id="rankOptinBar" data-a="6"></div>
@@ -34603,6 +34709,7 @@ Renderers.simuladoRanking = function(route){
 // S3b — barra "você está fora do ranking". hasAttempt = já submeteu (pode entrar).
 function _renderRankOptinBar(barEl, sim, attempt, hasAttempt){
   if(!barEl) return;
+  const T = _rankTermos(sim);
   if(hasAttempt){
     barEl.innerHTML = '<div class="rank-optin-bar">' +
       '<span class="rank-optin-bar-txt">O ranking fica <strong>oculto</strong> até você participar. Entre com seu apelido e foto pra ver as posições.</span>' +
@@ -34612,8 +34719,8 @@ function _renderRankOptinBar(barEl, sim, attempt, hasAttempt){
     if(btn) btn.addEventListener('click', () => _showRankOptinModal(sim, attempt, true));
   } else {
     barEl.innerHTML = '<div class="rank-optin-bar">' +
-      '<span class="rank-optin-bar-txt"><strong>Finalize o simulado</strong> para participar do ranking e ver as posições.</span>' +
-      '<a class="rank-optin-btn" href="#/simulados/' + sim.id + '">Ir para o simulado</a>' +
+      '<span class="rank-optin-bar-txt"><strong>' + T.finalize + '</strong> para participar do ranking e ver as posições.</span>' +
+      '<a class="rank-optin-btn" href="' + T.voltarHref + '">' + T.ir + '</a>' +
     '</div>';
   }
 }
@@ -34626,16 +34733,17 @@ function _showRankOptinModal(sim, attempt, hasAttempt){
   bk = document.createElement('div');
   bk.id = 'rankOptinBackdrop';
   bk.className = 'rank-optin-backdrop';
+  const T = _rankTermos(sim);
   const actions = hasAttempt
-    ? '<a class="btn-ghost" href="#/simulados/' + sim.id + '">Voltar ao simulado</a>' +
+    ? '<a class="btn-ghost" href="' + T.voltarHref + '">' + T.voltar + '</a>' +
       '<button class="rank-optin-btn" id="rankOptinConfirm">Entrar com meu apelido</button>'
-    : '<a class="rank-optin-btn" href="#/simulados/' + sim.id + '">Ir para o simulado</a>';
+    : '<a class="rank-optin-btn" href="' + T.voltarHref + '">' + T.ir + '</a>';
   bk.innerHTML = '<div class="rank-optin-modal">' +
     '<h3>Entre para ver o ranking</h3>' +
-    '<p>O ranking lista quem fez este simulado, em ordem de nota, com <strong>apelido e foto</strong>. Pra ver as posições, você precisa <strong>participar</strong> — assim o ranking fica justo e todo mundo aparece de cara limpa.</p>' +
+    '<p>O ranking lista quem fez ' + T.isto + ', em ordem de nota, com <strong>apelido e foto</strong>. Pra ver as posições, você precisa <strong>participar</strong> — assim o ranking fica justo e todo mundo aparece de cara limpa.</p>' +
     (hasAttempt
-      ? '<p>Sua participação vale <strong>por tentativa</strong> (a nota muda quando você refaz). Ao entrar, a nota <strong>desta tentativa</strong> aparece pra todos. Quem prefere não entrar fica como <strong>Anônimo</strong> na lista — sem nome, só ocupando a posição.</p>'
-      : '<p>Você ainda não finalizou este simulado. Faça o simulado e, ao entrar no ranking, verá sua posição e a dos demais.</p>') +
+      ? '<p>Sua participação vale <strong>por tentativa</strong> (a nota muda quando você ' + (T.prova ? 'refaz a folha' : 'refaz') + '). Ao entrar, a nota <strong>desta tentativa</strong> aparece pra todos. Quem prefere não entrar fica como <strong>Anônimo</strong> na lista — sem nome, só ocupando a posição.</p>'
+      : '<p>Você ainda não finalizou ' + T.isto + '. ' + (T.prova ? 'Preencha a folha de respostas' : 'Faça o simulado') + ' e, ao entrar no ranking, verá sua posição e a dos demais.</p>') +
     '<div class="rank-optin-modal-actions">' + actions + '</div>' +
   '</div>';
   document.body.appendChild(bk);
@@ -34698,7 +34806,8 @@ function _loadAndRenderLeaderboard(stageEl, sim){
     if(error){ console.warn('[leaderboard]', error); bodyEl.innerHTML = '<div class="rank-loading">Erro ao carregar o ranking.</div>'; return; }
     const rows = data || [];
     if(!rows.length){
-      bodyEl.innerHTML = '<div class="rank-empty">Ainda sem participantes no ranking. Entre ao finalizar o simulado!</div>';
+      bodyEl.innerHTML = '<div class="rank-empty">Ainda sem participantes no ranking. Entre ao finalizar '
+        + _rankTermos(sim).isto + '!</div>';
     } else {
       const resolveAv = (r) => {
         if(r.optin && r.photo_url) return { url: r.photo_url, t: r.photo_transform || null };
