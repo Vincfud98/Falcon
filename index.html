@@ -3316,6 +3316,18 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .rank-item.is-you{ border-color:var(--accent); background:var(--accent-lo); }
 .rank-item-pos{ font-family:var(--mono); font-size:1.05rem; color:var(--text-dim); text-align:center; }
 .rank-item.is-you .rank-item-pos{ color:var(--accent); font-weight:600; }
+/* Pódio: ouro, prata e bronze na própria posição — o app não usa emoji. */
+.rank-item.is-p1 .rank-item-pos{ color:#d9b45c; font-weight:600; font-size:1.25rem; }
+.rank-item.is-p2 .rank-item-pos{ color:#c3c8ce; font-weight:600; font-size:1.15rem; }
+.rank-item.is-p3 .rank-item-pos{ color:#c08457; font-weight:600; font-size:1.1rem; }
+/* Bloco "sua posição" com os três modos de tentativa. */
+.rank-modos{ margin:1.2rem 0 1rem; }
+.rank-modos-lbl{ display:block; font-family:var(--sans); font-weight:300; font-size:.58rem;
+  letter-spacing:.2em; text-transform:uppercase; color:var(--text-mute); margin-bottom:.5rem; }
+.rank-modos .perf-view-toggle{ margin:0 0 .6rem; }
+.rank-modos-txt{ font-family:var(--sans); font-weight:300; font-size:.82rem; line-height:1.55;
+  color:var(--text-dim); margin:0; }
+.rank-modos-txt strong{ color:var(--accent); font-weight:400; }
 .rank-item-av{
   width:40px; height:40px; border-radius:50%; overflow:hidden; position:relative;
   background:var(--accent-lo); border:1px solid var(--accent-border-soft);
@@ -35743,6 +35755,7 @@ Renderers.simuladoRanking = function(route){
     </div>
   </div>
   <div id="rankOptinBar" data-a="6"></div>
+  <div id="rankModos" data-a="6"></div>
   <div class="rank-list" id="rankBody" data-a="7">
     <div class="rank-loading">Carregando ranking…</div>
   </div>`;
@@ -35833,6 +35846,61 @@ async function _enterLeaderboard(simId){
   }catch(e){ console.warn('[enter lb ex]', e); return false; }
 }
 
+/* Que tentativa vale no ranking. Na PROVA passada é a PRIMEIRA: quem refaz já
+   viu o gabarito e passaria na frente de quem fez uma vez só. No simulado
+   segue a última, como sempre foi (a RPC tem esse padrão). */
+function _rankModo(sim){ return (sim && sim.kind === 'prova') ? 'primeira' : 'ultima'; }
+/* Em que posição você ficaria com uma nota diferente. Conta quantos OUTROS
+   participantes estão acima dela, na mesma ordem da RPC (pct, depois score).
+   Não precisa de consulta nova: a lista oficial já veio. */
+function _rankPosSe(rows, pct, score){
+  let acima = 0;
+  (rows || []).forEach(function(r){
+    if(r.is_you) return;
+    const p = parseFloat(r.pct) || 0, sc = parseFloat(r.score) || 0;
+    if(p > pct || (p === pct && sc > score)) acima++;
+  });
+  return acima + 1;
+}
+/* Só faz sentido com 2+ tentativas: com uma só, os três modos dariam o mesmo
+   número e o bloco seria ruído. */
+function _rankModosHtml(rows, tents, sel){
+  const env = _pfEnviadas(tents);
+  if(env.length < 2) return '';
+  const num = function(t){ return { pct: parseFloat(t.pct) || 0, score: parseFloat(t.score) || 0,
+                                    n: t.attempt_number || 1 }; };
+  const primeira = num(env[0]);
+  const ultima = num(env[env.length - 1]);
+  const melhor = num(env.slice().sort(function(a, b){
+    return (parseFloat(b.pct) || 0) - (parseFloat(a.pct) || 0)
+        || (parseFloat(b.score) || 0) - (parseFloat(a.score) || 0);
+  })[0]);
+  const opts = [['primeira', 'Oficial · 1ª tentativa', primeira],
+                ['melhor', 'Com a melhor', melhor],
+                ['ultima', 'Com a última', ultima]];
+  const escolhido = opts.find(function(o){ return o[0] === (sel || 'primeira'); }) || opts[0];
+  const pos = _rankPosSe(rows, escolhido[2].pct, escolhido[2].score);
+  const total = (rows || []).length;
+  const oficial = _rankPosSe(rows, primeira.pct, primeira.score);
+  let txt;
+  if(escolhido[0] === 'primeira'){
+    txt = 'Sua posição no ranking, pela tentativa que vale: <strong>' + pos + 'º</strong> de ' + total + '.';
+  } else {
+    const dif = oficial - pos;
+    txt = 'Com a sua ' + (escolhido[0] === 'melhor' ? 'melhor' : 'última') + ' tentativa ('
+      + _pfOrd(escolhido[2].n) + ', ' + _pfNum(escolhido[2].score) + ' pontos) você estaria em <strong>'
+      + pos + 'º</strong> de ' + total + ' — '
+      + (dif > 0 ? '<strong>' + dif + '</strong> posiç' + (dif === 1 ? 'ão' : 'ões') + ' acima'
+         : (dif < 0 ? '<strong>' + (-dif) + '</strong> posiç' + (dif === -1 ? 'ão' : 'ões') + ' abaixo'
+            : 'na mesma posição')) + ' da oficial. A lista continua sendo a oficial.';
+  }
+  return '<div class="rank-modos"><span class="rank-modos-lbl">Sua posição</span>'
+    + '<div class="perf-view-toggle">' + opts.map(function(o){
+        return '<button type="button" class="perf-view-btn' + (o[0] === escolhido[0] ? ' active' : '')
+          + '" data-rankmodo="' + o[0] + '">' + o[1] + '</button>';
+      }).join('') + '</div>'
+    + '<p class="rank-modos-txt">' + txt + '</p></div>';
+}
 // S3b — busca o leaderboard e renderiza (reutilizável: mount + após entrar).
 function _loadAndRenderLeaderboard(stageEl, sim){
   const bodyEl = stageEl.querySelector('#rankBody');
@@ -35844,7 +35912,7 @@ function _loadAndRenderLeaderboard(stageEl, sim){
     const u = (window.Auth && typeof Auth.getUser === 'function') ? Auth.getUser() : null;
     if(u && window.Profile && Profile.get) myProf = Profile.get(u.id);
   }catch(_){}
-  window._sb.rpc('simulado_leaderboard', { p_simulado_id: sim.id }).then(({ data, error }) => {
+  window._sb.rpc('simulado_leaderboard', { p_simulado_id: sim.id, p_modo: _rankModo(sim) }).then(({ data, error }) => {
     if(error){ console.warn('[leaderboard]', error); bodyEl.innerHTML = '<div class="rank-loading">Erro ao carregar o ranking.</div>'; return; }
     const rows = data || [];
     if(!rows.length){
@@ -35858,13 +35926,13 @@ function _loadAndRenderLeaderboard(stageEl, sim){
       };
       bodyEl.innerHTML = rows.map((r, i) => {
         const pos = r.rank_pos || (i+1);
-        const medal = pos === 1 ? '🥇' : pos === 2 ? '🥈' : pos === 3 ? '🥉' : '';
+        const podio = pos <= 3 ? (' is-p' + pos) : '';   // pódio pela cor, não por emoji
         const pct = Math.round((parseFloat(r.pct)||0)*100);
         const isYou = !!r.is_you;
         const name = isYou ? ((r.optin && r.nickname) ? r.nickname : 'Você')
                   : (r.optin && r.nickname ? r.nickname : 'Anônimo');
-        return '<div class="rank-item' + (isYou ? ' is-you' : '') + '">' +
-          '<span class="rank-item-pos">' + (medal || pos) + '</span>' +
+        return '<div class="rank-item' + (isYou ? ' is-you' : '') + podio + '">' +
+          '<span class="rank-item-pos">' + pos + '</span>' +
           '<div class="rank-item-av" id="rankav-' + i + '"></div>' +
           '<span class="rank-item-name">' + Util.esc(name) + (isYou ? ' <span class="rank-you-badge">você</span>' : '') + '</span>' +
           '<span class="rank-item-score">' + (r.score||0) + '<span class="rank-item-total">/' + (r.total||0) + '</span></span>' +
@@ -35877,6 +35945,22 @@ function _loadAndRenderLeaderboard(stageEl, sim){
         const av = resolveAv(r);
         if(av.url && typeof renderAvatarInto === 'function'){ renderAvatarInto(el, av.url, av.t); }
         else { el.classList.add('rank-av-anon'); el.textContent = r.is_you ? '·' : (r.optin && r.nickname ? r.nickname[0].toUpperCase() : '?'); }
+      });
+    }
+    /* Bloco "sua posição": só na prova, e só para quem tem mais de uma
+       tentativa. A lista NÃO muda — o que muda é qual nota sua é medida. */
+    const modosEl = stageEl.querySelector('#rankModos');
+    if(modosEl && sim.kind === 'prova'){
+      _pfTentativasLer(sim.id).then(function(tents){
+        let sel = 'primeira';
+        const pinta = function(){ modosEl.innerHTML = _rankModosHtml(rows, tents, sel); };
+        pinta();
+        modosEl.addEventListener('click', function(ev){
+          const b = ev.target.closest ? ev.target.closest('[data-rankmodo]') : null;
+          if(!b) return;
+          sel = b.getAttribute('data-rankmodo');
+          pinta();
+        });
       });
     }
     const me = rows.find(r => r.is_you);
