@@ -10258,6 +10258,16 @@ a.pr-crumb:hover{color:var(--accent)}
 /* ── Nota de corte ──────────────────────────────────────────────────────────
    Uma régua de 0 até a nota máxima da prova, com a barra da nota do aluno e um
    risco no corte. A cor da borda diz o veredito sem precisar ler. */
+/* Barra de tentativas da prova (folha e desempenho). */
+.pf-tent{ display:flex; align-items:center; gap:.8rem; flex-wrap:wrap; margin-top:1.1rem; }
+.pf-tent-lbl{ font-family:var(--sans); font-weight:300; font-size:.58rem; letter-spacing:.2em;
+  text-transform:uppercase; color:var(--text-mute); }
+.pf-tent .perf-view-toggle{ margin:0; }
+.pf-tent-novo{ font-size:.62rem !important; }
+.pf-tent-aviso{ font-family:var(--sans); font-weight:300; font-size:.76rem; color:var(--text-mute);
+  margin:.5rem 0 0; }
+.pf-tent-aviso strong{ color:var(--accent); font-weight:400; }
+.pf-tent-pisca{ animation:cadRefFlash 1.2s var(--ease); }
 /* Nome da prova, logo abaixo do apelido, no card do radar. */
 .perf-radar-sub{ font-family:var(--sans); font-weight:300; font-size:.62rem; letter-spacing:.18em;
   text-transform:uppercase; color:var(--text-mute); margin-top:.3rem; text-align:center; }
@@ -33331,21 +33341,138 @@ function _pfMapaHtml(id, itens, secAtiva){
         }).join('') + '</div></div>';
   }).join('');
 }
-function _pfBarraFimHtml(id, itens){
+function _pfBarraFimHtml(id, itens, travada){
   const pl = _pfPlacar(id, itens);
   const validos = pl.total;
   const faltam = Math.max(0, validos - pl.respondidos);
-  const st = (window.Store && Store.getSimuladoState) ? Store.getSimuladoState(id) : null;
-  const jaFez = !!(st && st.submittedAt);
+  if(travada){
+    return '<div class="pf-fim" id="pfBarraFim">'
+      + '<div class="pf-fim-txt">Tentativa finalizada e guardada no seu histórico.</div>'
+      + '<button type="button" class="sim-submit-btn" data-pf-fim="1">Ver o desempenho</button>'
+      + '</div>';
+  }
   return '<div class="pf-fim" id="pfBarraFim">'
     + '<div class="pf-fim-txt">' + (faltam > 0
         ? '<strong>' + faltam + '</strong> ite' + (faltam === 1 ? 'm' : 'ns') + ' por preencher.'
         : 'Você preencheu a folha inteira.')
-      + (jaFez ? ' Você já finalizou esta prova — pode ajustar e finalizar de novo.' : '')
       + '</div>'
-    + '<button type="button" class="sim-submit-btn" data-pf-fim="1">'
-      + (jaFez ? 'Ver o desempenho de novo' : 'Finalizar e ver o desempenho') + '</button>'
+    + '<button type="button" class="sim-submit-btn" data-pf-fim="1">Finalizar e ver o desempenho</button>'
     + '</div>';
+}
+/* ── TENTATIVAS DA PROVA ─────────────────────────────────────────────────────
+   A prova passada nasceu com uma tentativa só: a folha fixava attempt = 1 e
+   toda resposta caía lá. Agora ela usa a MESMA máquina do simulado —
+   aluno.simulado_attempts e simulado_responses, as duas já com attempt_number
+   —, então dá histórico: cada "responder de novo" abre a tentativa seguinte, a
+   anterior fica em leitura (senão o gráfico de evolução mentiria: daria para
+   editar a tentativa 1 depois de ver o gabarito) e a evolução compara todas.
+   A fonte de verdade é o BANCO, por tentativa; o estado local é só cache. */
+window._pfTentativas = window._pfTentativas || {};
+async function _pfTentativasLer(id, forcar){
+  if(!forcar && window._pfTentativas[id]) return window._pfTentativas[id];
+  const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(!u || !u.id || !window._sb) return (window._pfTentativas[id] = []);
+  try{
+    const { data, error } = await window._sb.schema('aluno').from('simulado_attempts')
+      .select('attempt_number, score, total, pct, submitted_at, started_at')
+      .eq('user_id', u.id).eq('simulado_id', String(id))
+      .order('attempt_number', { ascending: true });
+    if(error){ console.warn('[prova tentativas]', error.message || error); return (window._pfTentativas[id] = []); }
+    return (window._pfTentativas[id] = (data || []));
+  }catch(e){ console.warn('[prova tentativas ex]', e); return (window._pfTentativas[id] = []); }
+}
+function _pfEnviadas(tents){ return (tents || []).filter(function(t){ return !!t.submitted_at; }); }
+function _pfAtiva(id){ return (window._simCurrentAttempt && window._simCurrentAttempt[id]) || 1; }
+function _pfSetAtiva(id, n){
+  window._simCurrentAttempt = window._simCurrentAttempt || {};
+  window._simCurrentAttempt[id] = n;
+}
+/* Qual tentativa mostrar: a pedida na URL (?t=), senão a que está em aberto,
+   senão a última enviada. */
+function _pfEscolheTentativa(tents, pedida){
+  const n = parseInt(pedida, 10);
+  if(n && (tents || []).some(function(t){ return (t.attempt_number || 1) === n; })) return n;
+  const aberta = (tents || []).find(function(t){ return t.started_at && !t.submitted_at; });
+  if(aberta) return aberta.attempt_number || 1;
+  const env = _pfEnviadas(tents);
+  return env.length ? (env[env.length - 1].attempt_number || 1) : 1;
+}
+function _pfProxTentativa(tents){
+  const nums = (tents || []).map(function(t){ return t.attempt_number || 1; });
+  return (nums.length ? Math.max.apply(null, nums) : 0) + 1;
+}
+function _pfOrd(n){ return n + 'ª'; }
+/* Barra de tentativas: uma pílula por tentativa e o botão de recomeçar.
+   Não aparece antes da primeira entrega — quem nunca finalizou não tem
+   histórico para escolher, e a barra só ocuparia espaço. */
+function _pfBarraTentativasHtml(id, tents, ativa, ondeVoltar){
+  if(!tents || !tents.length) return '';
+  const env = _pfEnviadas(tents);
+  if(!env.length) return '';
+  const pil = tents.map(function(t){
+    const n = t.attempt_number || 1;
+    const nota = t.submitted_at ? _pfNum(parseFloat(t.score) || 0) : 'em andamento';
+    return '<button type="button" class="perf-view-btn' + (n === ativa ? ' active' : '')
+      + '" data-pf-tent="' + n + '">' + _pfOrd(n) + ' · ' + nota + '</button>';
+  }).join('');
+  return '<div class="pf-tent" data-pf-volta="' + Util.attr(ondeVoltar || 'folha') + '">'
+    + '<span class="pf-tent-lbl">Tentativas</span>'
+    + '<div class="perf-view-toggle pf-tent-pills">' + pil + '</div>'
+    + '<button type="button" class="btn-ghost pf-tent-novo" data-pf-tent-novo="1">Responder de novo</button>'
+    + '</div>';
+}
+/* Abre a tentativa seguinte: registra o início no banco (é o que dá a linha
+   nova em simulado_attempts) e recarrega a folha nela. A limpeza das marcas
+   antigas vem da hidratação — a tentativa nova não tem resposta nenhuma. */
+async function _pfNovaTentativa(id){
+  const tents = await _pfTentativasLer(id, true);
+  const prox = _pfProxTentativa(tents);
+  try{ if(window.Store && Store.startSimulado) Store.startSimulado(id, prox, null); }catch(e){ console.warn('[prova nova tentativa]', e); }
+  window._pfTentativas[id] = null;
+  _pfSetAtiva(id, prox);
+  location.hash = '#/provas/' + encodeURIComponent(id) + '?t=' + prox;
+}
+/* Liga a barra de tentativas onde ela estiver (folha ou desempenho). */
+function _pfBarraTentativasBind(el, id){
+  if(!el) return;
+  el.addEventListener('click', function(ev){
+    const novo = ev.target.closest ? ev.target.closest('[data-pf-tent-novo]') : null;
+    if(novo){ _pfNovaTentativa(id); return; }
+    const b = ev.target.closest ? ev.target.closest('[data-pf-tent]') : null;
+    if(!b) return;
+    const barra = b.closest('.pf-tent');
+    const volta = (barra && barra.getAttribute('data-pf-volta')) === 'resultado' ? '/resultado' : '';
+    location.hash = '#/provas/' + encodeURIComponent(id) + volta + '?t=' + b.getAttribute('data-pf-tent');
+  });
+}
+/* Traz do banco as respostas da tentativa pedida (e limpa as da anterior que
+   estejam em memória). Sem isto, trocar de tentativa mostraria as marcas
+   erradas — e pior: gravaria por cima da tentativa antiga. */
+async function _pfHidratar(id, attempt){
+  if(typeof _hydrateSimuladoResponses !== 'function') return;
+  try{ await _hydrateSimuladoResponses(id, attempt); }catch(e){ console.warn('[prova hidratar]', e); }
+}
+/* Gráfico de evolução — o mesmo do simulado (mesmas classes, mesma leitura),
+   agora alimentado pelas tentativas da prova. */
+function _pfEvolucaoHtml(tents){
+  const env = _pfEnviadas(tents);
+  if(env.length < 2) return '';
+  const pct = function(r){ return Math.round((parseFloat(r.pct) || 0) * 100); };
+  const primeiro = pct(env[0]), ultimo = pct(env[env.length - 1]);
+  const delta = ultimo - primeiro;
+  const cols = env.map(function(r){
+    const p = pct(r);
+    const cor = p >= 70 ? '#88c391' : (p >= 40 ? '#e8a857' : '#c77272');
+    return '<div class="evo-col"><span class="evo-pct">' + p + '%</span>'
+      + '<div class="evo-bar-wrap"><div class="evo-bar" style="height:' + Math.max(2, p) + '%;background:' + cor + '"></div></div>'
+      + '<span class="evo-label">' + _pfOrd(r.attempt_number || 1) + '</span></div>';
+  }).join('');
+  return '<section class="perf-section perf-evolution" data-a="6">'
+    + '<div class="perf-section-label">Evolução das tentativas</div>'
+    + '<div class="perf-evo-chart">' + cols
+    + '<div class="evo-trend"><span class="evo-trend-label">Da 1ª à última</span>'
+    + '<span class="evo-trend-val" style="color:' + (delta > 0 ? '#88c391' : (delta < 0 ? '#c77272' : 'var(--text-mute)')) + '">'
+    + (delta > 0 ? '+' : '') + delta + ' pts</span></div></div></section>';
 }
 Renderers.provaFolha = function(route){
   const p = (window.PROVAS || []).find(x => String(x.id) === String(route.params.provaId));
@@ -33367,6 +33494,7 @@ Renderers.provaFolha = function(route){
       ${(p.files && p.files.length) ? `<button type="button" class="btn-ghost" data-sim-pdf="${Util.attr(p.id)}">Baixar a prova</button>` : ''}
       <a class="btn-ghost" href="#/provas/${Util.attr(p.id)}/resultado">${Icons.check || ''} Desempenho</a>
     </div>
+    <div id="pfTentBarra" data-a="5"></div>
   </div>
   <div class="sim-exam-layout is-revealed">
     <aside class="sim-exam-map" id="pfMapa" aria-label="Mapa dos itens"><div class="sem-map-loading">Carregando…</div></aside>
@@ -33411,8 +33539,23 @@ Renderers.provaFolha.mount = async function(stageEl, route){
     if(mapaEl) mapaEl.innerHTML = '';
     return;
   }
-  window._simCurrentAttempt = window._simCurrentAttempt || {};
-  if(!window._simCurrentAttempt[id]) window._simCurrentAttempt[id] = 1;
+  /* Tentativa: a pedida na URL, a que está em aberto ou a última enviada.
+     Hidrata do banco ANTES de desenhar — o estado local é cache de uma
+     tentativa só, então trocar sem hidratar mostraria as marcas erradas. */
+  const tents = await _pfTentativasLer(id);
+  const attempt = _pfEscolheTentativa(tents, route && route.query ? route.query.t : null);
+  _pfSetAtiva(id, attempt);
+  await _pfHidratar(id, attempt);
+  const tentAtual = (tents || []).find(function(t){ return (t.attempt_number || 1) === attempt; });
+  const travada = !!(tentAtual && tentAtual.submitted_at);
+
+  const tentBarra = stageEl.querySelector('#pfTentBarra');
+  if(tentBarra){
+    tentBarra.innerHTML = _pfBarraTentativasHtml(id, tents, attempt, 'folha')
+      + (travada ? '<p class="pf-tent-aviso">Esta tentativa já foi finalizada — as marcações estão travadas.'
+          + ' Use <strong>Responder de novo</strong> para começar outra.</p>' : '');
+    _pfBarraTentativasBind(tentBarra, id);
+  }
 
   let secAtiva = itens[0].secao, itemAtivo = null;
   const pintaMapa = function(){ if(mapaEl) mapaEl.innerHTML = _pfMapaHtml(id, itens, secAtiva); };
@@ -33430,10 +33573,10 @@ Renderers.provaFolha.mount = async function(stageEl, route){
   };
   const refazBarra = function(){
     const barra = folhaEl.querySelector('#pfBarraFim');
-    if(barra) barra.outerHTML = _pfBarraFimHtml(id, itens);
+    if(barra) barra.outerHTML = _pfBarraFimHtml(id, itens, travada);
   };
 
-  folhaEl.innerHTML = _pfFolhaHtml(id, itens) + _pfBarraFimHtml(id, itens);
+  folhaEl.innerHTML = _pfFolhaHtml(id, itens) + _pfBarraFimHtml(id, itens, travada);
   pintaMapa(); pintaSat();
 
   /* Veio de "#/provas/<id>?item=57" (link do tema, na tela de desempenho):
@@ -33460,6 +33603,13 @@ Renderers.provaFolha.mount = async function(stageEl, route){
       const num = b.getAttribute('data-pf-marca'), v = b.getAttribute('data-v');
       const it = itens.find(function(x){ return String(x.numero) === String(num); });
       if(!it) return;
+      /* Tentativa já enviada é HISTÓRICO: deixar mudar aqui faria o gráfico de
+         evolução mentir (dava para "melhorar" a 1ª depois de ver o gabarito). */
+      if(travada){
+        const bar = stageEl.querySelector('#pfTentBarra');
+        if(bar){ bar.classList.add('pf-tent-pisca'); setTimeout(function(){ bar.classList.remove('pf-tent-pisca'); }, 1200); }
+        return;
+      }
       const atual = _pfResposta(id, num);
       const novo = (atual && atual.selected === v) ? null : v;   // clicar de novo desmarca
       const correto = (novo == null || novo === PF_BRANCO || it.gab === 'anulada') ? null : (novo === it.gab);
@@ -33489,9 +33639,10 @@ Renderers.provaFolha.mount = async function(stageEl, route){
       try{
         /* A nota do ranking é a PONTUAÇÃO LÍQUIDA com os 0,25: score/total/pct
            são numeric e a RPC ordena por pct e depois score. */
-        Store.submitSimulado(id, Math.round(pl.pontos * 100) / 100, validos, window._simCurrentAttempt[id] || 1);
+        Store.submitSimulado(id, Math.round(pl.pontos * 100) / 100, validos, _pfAtiva(id));
       }catch(e){ console.warn('[folha finalizar]', e); }
-      location.hash = '#/provas/' + encodeURIComponent(id) + '/resultado';
+      window._pfTentativas[id] = null;   // a lista mudou: recarrega na próxima leitura
+      location.hash = '#/provas/' + encodeURIComponent(id) + '/resultado?t=' + _pfAtiva(id);
     }
   });
 
@@ -34224,6 +34375,7 @@ Renderers.provaResultado = function(route){
       <a class="btn-ghost" href="#/simulados/${Util.attr(p.id)}/ranking">Ranking</a>
       <a class="btn-ghost" href="#/provas">${Icons.chevron || '‹'} Todas as provas</a>
     </div>
+    <div id="pfTentBarra" data-a="5"></div>
   </div>
   <aside class="perf-radar-card" id="pfRadar" data-a="4">
     <div class="perf-radar-empty">Calculando…</div>
@@ -34241,8 +34393,19 @@ Renderers.provaResultado.mount = async function(stageEl, route){
     host.innerHTML = '<div class="empty"><div class="empty-title">Esta prova ainda não tem itens</div></div>';
     return;
   }
+  /* O desempenho é sempre de UMA tentativa: hidrata a escolhida antes de
+     contar, senão mostraria a nota de uma com as respostas de outra. */
+  const tents = await _pfTentativasLer(id);
+  const attempt = _pfEscolheTentativa(tents, route && route.query ? route.query.t : null);
+  _pfSetAtiva(id, attempt);
+  await _pfHidratar(id, attempt);
   const res = _pfResumo(id, itens);
   const g = res.geral;
+  const tentBarra = stageEl.querySelector('#pfTentBarra');
+  if(tentBarra){
+    tentBarra.innerHTML = _pfBarraTentativasHtml(id, tents, attempt, 'resultado');
+    _pfBarraTentativasBind(tentBarra, id);
+  }
   const radarEl = stageEl.querySelector('#pfRadar');
   if(radarEl) try{
     radarEl.innerHTML = _pfRadarHtml(p, g, res.porSecao);
@@ -34301,6 +34464,7 @@ Renderers.provaResultado.mount = async function(stageEl, route){
     + '</div></div></section>'
     + (faltam ? '<p class="pf-res-aviso" data-a="6">Faltam ' + faltam + ' ite' + (faltam === 1 ? 'm' : 'ns')
         + ' por preencher — o quadro abaixo só considera o que já foi marcado.</p>' : '')
+    + _pfEvolucaoHtml(tents)
     + '<div id="pfCorte">' + _pfCorteHtml(p, g, 0) + '</div>'
     + '<section class="perf-section" data-a="7"><div class="perf-section-label">Desempenho geral</div>'
     + _pfTabelaGeral(res.porSecao, res.geral) + '</section>'
