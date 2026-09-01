@@ -9136,8 +9136,14 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 #cadpPaneA .cadpage-ed{min-height:56vh}
 #cadpPaneB .cadpage-ed{min-height:40vh}
 .cadp-paneb-ed{display:block;flex:none}
-.cad-flut{position:fixed;z-index:1350;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:9px;padding:.28rem .32rem;box-shadow:0 10px 26px -8px rgba(0,0,0,.65);margin:0}
+/* Toolbar flutuante do Caderno: a MESMA pílula da .ctx-toolbar (marcação do
+   texto da unidade) — botões redondos, ícones de traço, separadores. */
+.cad-flut{position:fixed;z-index:1350;display:inline-flex;align-items:center;gap:.25rem;padding:.35rem .55rem;border-radius:22px;background:var(--bg-card);border:1px solid var(--border-strong);box-shadow:0 8px 28px rgba(0,0,0,.45);backdrop-filter:blur(12px);margin:0}
 .cad-flut[hidden]{display:none}
+.cad-flut>button,.cad-flut .cad-cwrap>button{width:26px;height:26px;padding:0;border-radius:50%;border:1px solid var(--border);background:transparent;color:var(--text-dim);font-family:var(--sans);font-size:.72rem;line-height:1;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s ease;flex-shrink:0}
+.cad-flut>button:hover,.cad-flut .cad-cwrap>button:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-glow)}
+.cad-flut button svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.cad-flut .ctx-sep{width:1px;height:16px;background:var(--border);margin:0 .15rem;flex-shrink:0}
 /* ── D4a: comentários por célula ── */
 #cadpPaneA{position:relative}
 #cadpPaneA.tem-comentarios{padding-right:334px}
@@ -14917,26 +14923,62 @@ const Store = (function(){
       updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : Date.now()
     };
   }
-  async function _syncDeckInsertToSupabase(card){
+  /* Gravação no servidor = UPSERT (criar e atualizar pelo MESMO caminho) +
+     CAIXA DE SAÍDA (deckOutbox). Antes, o insert que falhava (rede, ou o
+     servidor recusando a linha — foi o caso: a restrição de `origin` não
+     aceitava 'caderno') era só um aviso: o card seguia vivo no aparelho,
+     cada update seguinte virava no-op silencioso (a linha não existia lá)
+     e, na próxima hidratação, o deck do servidor APAGAVA o card local — e o
+     ciclo do caderno removia a linha dele como "morta". Agora: falhou → o
+     id fica na caixa de saída e é reenviado (pós-hidratação, ao voltar a
+     rede); a hidratação PRESERVA o que só existe aqui e reenvia. */
+  function _deckOutbox(){
+    if(!_state) return {};
+    if(!_state.deckOutbox || typeof _state.deckOutbox !== 'object') _state.deckOutbox = {};
+    return _state.deckOutbox;
+  }
+  async function _syncDeckUpsertToSupabase(card, novo){
     const userId = _currentSupaUserId();
-    if(!userId || !window._sb || !_UUID_RE.test(String(card.id||''))) return;
+    if(!userId || !window._sb || !card || !_UUID_RE.test(String(card.id||''))) return false;
+    const id = String(card.id);
     try{
-      const { error } = await window._sb.schema('aluno').from('flashcards').insert(_deckRowFromCard(card, userId));
+      const { error } = await window._sb.schema('aluno').from('flashcards').upsert(_deckRowFromCard(card, userId), { onConflict: 'id' });
       if(error){
-        console.warn('[deck sync insert]', error);
-        if(window.ueToast) ueToast('Seu flashcard não foi salvo no servidor. Confira a conexão e tente de novo.', 'warn');
+        const ob = _deckOutbox(); const jaPendente = !!ob[id];
+        ob[id] = Date.now(); _persist();
+        console.warn('[deck sync] o servidor recusou o card ' + id + ':', error.code || '', error.message || error, error.details || '', error.hint || '');
+        if(novo && !jaPendente && window.ueToast) ueToast('Seu flashcard não chegou ao servidor. Ele fica guardado neste aparelho e será reenviado.', 'warn');
+        return false;
       }
-    }catch(e){ console.warn('[deck sync insert exception]', e); }
+      const ob = _deckOutbox();
+      if(ob[id]){ delete ob[id]; _persist(); }
+      return true;
+    }catch(e){
+      const ob = _deckOutbox(); ob[id] = Date.now(); _persist();
+      console.warn('[deck sync exception]', e);
+      return false;
+    }
   }
-  async function _syncDeckUpdateToSupabase(card){
-    const userId = _currentSupaUserId();
-    if(!userId || !window._sb || !_UUID_RE.test(String(card.id||''))) return;
+  function _syncDeckInsertToSupabase(card){ return _syncDeckUpsertToSupabase(card, true); }
+  function _syncDeckUpdateToSupabase(card){ return _syncDeckUpsertToSupabase(card, false); }
+  // Reenvia a caixa de saída, um card por vez. Card purgado ou com id local
+  // (não-UUID, sem como sincronizar) sai da caixa.
+  let _outboxRodando = false;
+  async function _deckOutboxFlush(){
+    if(_outboxRodando || !_state) return;
+    const ob = _deckOutbox(); const ids = Object.keys(ob);
+    if(!ids.length) return;
+    _outboxRodando = true;
     try{
-      const row = _deckRowFromCard(card, userId); delete row.id; delete row.user_id;
-      const { error } = await window._sb.schema('aluno').from('flashcards').update(row).eq('id', card.id).eq('user_id', userId);
-      if(error) console.warn('[deck sync update]', error);
-    }catch(e){ console.warn('[deck sync update exception]', e); }
+      for(const id of ids){
+        const card = (_state.deck || []).find(c => String(c.id) === id);
+        if(!card || !_UUID_RE.test(id)){ delete ob[id]; continue; }
+        await _syncDeckUpsertToSupabase(card, false);
+      }
+      _persist();
+    } finally { _outboxRodando = false; }
   }
+  window.addEventListener('online', function(){ _deckOutboxFlush().catch(()=>{}); });
   // Lixeira: apagar/restaurar é UPDATE de deleted_at (o DELETE real é o purge)
   async function _syncDeckLixeira(cardId, quando){
     const userId = _currentSupaUserId();
@@ -15007,10 +15049,22 @@ const Store = (function(){
         () => window._sb.schema('aluno').from('flashcards').select('*').eq('user_id', userId),
         'id', 'flashcards');
       if(error){ console.warn('[hydrate deck] FALHOU:', error.message || error); return; }
-      _state.deck = (data || []).map(_cardFromDeckRow);
+      const locais = Array.isArray(_state.deck) ? _state.deck : [];
+      const doServidor = (data || []).map(_cardFromDeckRow);
+      const noServidor = new Set(doServidor.map(c => String(c.id)));
+      // O que só existe NESTE aparelho não morre na hidratação: fica no deck
+      // e entra na caixa de saída (é o card cujo envio falhou).
+      const soAqui = locais.filter(c => c && !noServidor.has(String(c.id)) && _UUID_RE.test(String(c.id || '')));
+      _state.deck = doServidor.concat(soAqui);
+      if(soAqui.length){
+        const ob = _deckOutbox();
+        soAqui.forEach(c => { ob[String(c.id)] = ob[String(c.id)] || Date.now(); });
+        console.warn('[Store] ' + soAqui.length + ' card(s) só neste aparelho — reenviando ao servidor');
+      }
       console.log('[Store] deck hidratado:', _state.deck.length, 'cards');
       _persist(); _emit();
       _deckProntoMarca();
+      _deckOutboxFlush().catch(()=>{});
       // faxina da lixeira: 30 dias depois, o apagamento vira real
       const teto = Date.now() - 30 * 24 * 60 * 60 * 1000;
       const vencidos = _state.deck.filter(c => c.deletedAt && c.deletedAt < teto).map(c => c.id);
@@ -16573,6 +16627,7 @@ const Store = (function(){
     deckPurge(id){
       if(!_state || !Array.isArray(_state.deck)) return;
       _state.deck = _state.deck.filter(c => c.id !== id);
+      try{ delete _deckOutbox()[String(id)]; }catch(_){}
       if(Array.isArray(_state.srs)) _state.srs = _state.srs.filter(x => x.cardId !== id);   // cascade no servidor
       try{ document.dispatchEvent(new CustomEvent('ubq:fc-changed', { detail: { id: id, acao: 'delete' } })); }catch(_){}
       _persist(); _emit();
@@ -39381,15 +39436,30 @@ window.TutorIA = (function(){
     .tutor-caderno-tb{ display:flex; gap:.25rem; flex-wrap:wrap; margin-bottom:.55rem; }
     .tutor-caderno-tb button{ display:inline-flex; align-items:center; justify-content:center; min-width:28px; height:26px; padding:0 .45rem; border:1px solid var(--accent-border-soft); border-radius:6px; background:transparent; color:var(--text-dim); font-family:var(--sans); font-size:.74rem; line-height:1; cursor:pointer; transition:all .2s var(--ease); }
     .tutor-caderno-tb button:hover{ border-color:var(--accent-border); color:var(--accent); background:var(--accent-lo); }
+    .tutor-caderno-tb button svg{ width:13px; height:13px; stroke:currentColor; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
     /* Grifo e cor da letra: a barrinha de cores ANCORA no botão (não é a
        floating toolbar do texto da unidade — aqui não há seleção flutuante). */
     .cad-cwrap{ position:relative; display:inline-flex; }
-    .cad-cbar{ position:absolute; top:calc(100% + .3rem); left:0; z-index:40; display:inline-flex; align-items:center; gap:.3rem; padding:.35rem .45rem; background:var(--bg-card); border:1px solid var(--border-strong); border-radius:22px; box-shadow:0 8px 28px rgba(0,0,0,.45); }
+    /* Painel de cores: 3 linhas (marca-texto, letra, bloco) ancoradas no
+       botão. Mesma pílula/sombra da .ctx-toolbar da unidade. */
+    .cad-cbar{ position:absolute; top:calc(100% + .35rem); left:0; z-index:40; display:flex; flex-direction:column; gap:.32rem; padding:.45rem .6rem; background:var(--bg-card); border:1px solid var(--border-strong); border-radius:12px; box-shadow:0 8px 28px rgba(0,0,0,.45); backdrop-filter:blur(12px); }
     .cad-cbar[hidden]{ display:none; }
-    /* A bolinha do grifo mostra a cor CHAPADA; a de fonte, a letra na cor. */
+    .cad-cbar-row{ display:flex; align-items:center; gap:.3rem; }
+    .cad-cbar-lbl{ width:5.4rem; font-family:var(--sans); font-size:.58rem; letter-spacing:.1em; text-transform:uppercase; color:var(--text-mute); white-space:nowrap; }
     .cad-cbar .ctx-color{ width:16px; height:16px; }
+    /* Linha da LETRA: um "A" na cor (é a cor da fonte, não do fundo). */
+    .cad-cbar .cad-cor-letra{ background:transparent !important; border:1px solid var(--border); font-family:var(--sans); font-weight:700; font-size:.7rem; line-height:1; display:inline-flex; align-items:center; justify-content:center; }
+    .cad-cbar .cad-cor-letra:hover{ border-color:var(--accent-border); }
+    .cad-cor-letra[data-color="yellow"]{ color:#e8d44d; }
+    .cad-cor-letra[data-color="green"]{ color:#5dd49f; }
+    .cad-cor-letra[data-color="blue"]{ color:#6ba3d6; }
+    .cad-cor-letra[data-color="orange"]{ color:#e8a857; }
+    .cad-cor-letra[data-color="pink"]{ color:#e491b8; }
+    .cad-cor-letra[data-color="red"]{ color:#e87878; }
     .cad-cbar-clr{ display:inline-flex; align-items:center; justify-content:center; width:auto; height:18px; padding:0 .4rem; border:1px solid var(--border); border-radius:9px; background:transparent; color:var(--text-mute); font-family:var(--sans); font-size:.62rem; cursor:pointer; white-space:nowrap; }
     .cad-cbar-clr:hover{ color:var(--accent); border-color:var(--accent-border); }
+    /* Chip [[ ]] dentro de uma cor de letra herda a cor (o chip tem cor própria). */
+    .cad-fc[data-fc] .tutor-ref{ color:inherit; }
     /* Cor da letra. NÃO escopar no editor: o corpo do caderno também aparece
        nos cards da aba Cadernos e no card "Suas anotações" — escopado, a cor
        sumiria fora da caixa de edição (é global igual ao .hl-mark).
@@ -40454,9 +40524,14 @@ window.TutorIA = (function(){
   // card ganha um <div> pra poder receber o carimbo (caret preservado).
   function _fcCadBlocos(el){
     const sel = window.getSelection();
-    // caret só é preservado se o EDITOR ainda tem o foco — no save do blur
-    // (aluno clicou fora), restaurar aqui roubaria a seleção da página
-    const marca = (sel && sel.rangeCount && el.contains(sel.anchorNode) && document.activeElement === el) ? { node: sel.anchorNode, off: sel.anchorOffset } : null;
+    // A seleção só é restaurada se o EDITOR ainda tem o foco — no save do
+    // blur (aluno clicou fora), restaurar aqui roubaria a seleção da página.
+    // E só se ESTA função mexeu na árvore: antes ela restaurava SEMPRE, e
+    // colapsada — cada input (inclusive o do negrito/cor) matava a seleção
+    // do aluno e a toolbar flutuante sumia a cada uso.
+    const focado = !!(sel && sel.rangeCount && el.contains(sel.anchorNode) && document.activeElement === el);
+    const marca = focado ? { a: sel.anchorNode, ao: sel.anchorOffset, f: sel.focusNode, fo: sel.focusOffset } : null;
+    let mudou = false;
     // embrulha corridas soltas COM sintaxe
     let corrida = [];
     const fecharCorrida = function(antesDe){
@@ -40466,6 +40541,7 @@ window.TutorIA = (function(){
         const d = document.createElement('div');
         el.insertBefore(d, corrida[0]);
         corrida.forEach(function(n){ d.appendChild(n); });
+        mudou = true;
       }
       corrida = [];
     };
@@ -40474,8 +40550,11 @@ window.TutorIA = (function(){
       if(ehBloco){ fecharCorrida(n); } else { corrida.push(n); }
     });
     fecharCorrida(null);
-    if(marca && marca.node && marca.node.isConnected){
-      try{ const r = document.createRange(); r.setStart(marca.node, Math.min(marca.off, marca.node.length || marca.off)); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }catch(_){}
+    if(mudou && marca && marca.a && marca.a.isConnected && marca.f && marca.f.isConnected){
+      try{
+        const lim = function(n){ return n.nodeType === 3 ? n.nodeValue.length : n.childNodes.length; };
+        sel.setBaseAndExtent(marca.a, Math.min(marca.ao, lim(marca.a)), marca.f, Math.min(marca.fo, lim(marca.f)));
+      }catch(_){}
     }
     return Array.prototype.filter.call(el.children, function(n){ return n.matches(_FC_BLOCO_SEL); })
       .map(function(n){ return { node: n, texto: _fcCadTexto(n), fcId: n.getAttribute('data-fc-id') || null }; });
@@ -40572,6 +40651,39 @@ window.TutorIA = (function(){
       Array.prototype.forEach.call(n.childNodes, walk);
     })(linha);
     return achou ? off : null;
+  }
+  /* Seleção como OFFSETS de texto (linha + deslocamento) para sobreviver a
+     cirurgias no DOM que NÃO mudam o texto: des-renderizar/re-renderizar a
+     vista, desembrulhar um grifo, normalize(). Nó e offset crus morrem
+     quando o nó é substituído ou fundido; o texto não. */
+  function _cadLinhaDoNo(node, ed){
+    if(typeof _cadLinhaDe === 'function'){ const l = _cadLinhaDe(node, ed); if(l) return l; }
+    let n = node && node.nodeType === 1 ? node : (node ? node.parentElement : null);
+    while(n && n.parentElement && n.parentElement !== ed) n = n.parentElement;
+    return (n && n.parentElement === ed) ? n : null;
+  }
+  function _cadSelSnap(ed){
+    const sel = window.getSelection();
+    if(!ed || !sel || !sel.rangeCount || sel.isCollapsed) return null;
+    const r = sel.getRangeAt(0);
+    if(!ed.contains(r.startContainer) || !ed.contains(r.endContainer)) return null;
+    const la = _cadLinhaDoNo(r.startContainer, ed), lb = _cadLinhaDoNo(r.endContainer, ed);
+    if(!la || !lb) return null;
+    const oa = _fcVistaCaretOff(la, r.startContainer, r.startOffset), ob = _fcVistaCaretOff(lb, r.endContainer, r.endOffset);
+    if(oa == null || ob == null) return null;
+    return { la: la, oa: oa, lb: lb, ob: ob };
+  }
+  // Devolve o Range restaurado (e o põe na seleção) ou null.
+  function _cadSelRestaura(ed, snap){
+    if(!snap || !snap.la.isConnected || !snap.lb.isConnected) return null;
+    const pa = _fcVistaPos(snap.la, snap.oa), pb = snap.ob > 0 ? _fcVistaPos(snap.lb, snap.ob, true) : _fcVistaPos(snap.lb, 0);
+    if(!pa || !pb) return null;
+    try{
+      const r = document.createRange();
+      r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      return r;
+    }catch(_){ return null; }
   }
   function _fcVistaWrap(linha, a, b, cls, atrs){
     const pa = _fcVistaPos(linha, a), pb = _fcVistaPos(linha, b, true);
@@ -40701,7 +40813,7 @@ window.TutorIA = (function(){
   }
   // Sincroniza UMA linha: só mexe no DOM se a decoração devida mudou
   function _fcVistaSync(linha){
-    if(!window.FcSintaxe) return;
+    if(!window.FcSintaxe) return false;
     const texto = _fcCadTexto(linha);
     let kind = null;
     if(linha.hasAttribute && linha.hasAttribute('data-fc-item')) kind = 'item';
@@ -40715,7 +40827,7 @@ window.TutorIA = (function(){
     }
     const plano = kind ? _fcVistaPlano(texto, kind) : [];
     const atual = _fcVistaAtual(linha);
-    if(plano.length === atual.length && plano.every(function(pl, i){ return pl.a === atual[i].a && pl.b === atual[i].b && pl.cls === atual[i].cls; })) return;
+    if(plano.length === atual.length && plano.every(function(pl, i){ return pl.a === atual[i].a && pl.b === atual[i].b && pl.cls === atual[i].cls; })) return false;
     const sel = window.getSelection();
     let off = null;
     const _ae = document.activeElement;
@@ -40745,13 +40857,19 @@ window.TutorIA = (function(){
         }
       }
     } finally { _fcVistaMudando = false; }
+    return true;
   }
   function _fcVistaAplicar(el){
     if(!el || !window.FcSintaxe) return;
+    // seleção ABERTA (aluno vai formatar): reembrulhar uma linha trocaria os
+    // nós dela — guarda como offsets e devolve igual se alguma linha mudou
+    const snap = (document.activeElement === el) ? _cadSelSnap(el) : null;
+    let mudou = false;
     Array.prototype.forEach.call(el.children, function(l){
       if(l.nodeType !== 1 || !l.matches || !l.matches(_FC_BLOCO_SEL)) return;
-      try{ _fcVistaSync(l); }catch(e){ console.warn('[fc vista]', e); }
+      try{ if(_fcVistaSync(l)) mudou = true; }catch(e){ console.warn('[fc vista]', e); }
     });
+    if(snap && mudou) _cadSelRestaura(el, snap);
   }
   document.addEventListener('compositionstart', function(e){ const el = _cadEl(); if(el && el.contains(e.target)) _fcComposing = true; });
   document.addEventListener('compositionend', function(e){ const el = _cadEl(); if(el && el.contains(e.target)){ _fcComposing = false; try{ _fcVistaAplicar(el); }catch(_){} } });
@@ -40815,11 +40933,20 @@ window.TutorIA = (function(){
         if(novo) r.insertNode(document.createTextNode(novo));
       }catch(_){}
     };
-    // de trás pra frente: mexer no fim não desloca o começo
-    if(acao === 'desfazer'){ troca(L.ib - 1, L.ib, ''); troca(L.ia, L.ia + L.abre, ''); }
-    else {
-      const g = acao === 'separar' ? (max + 1) : alvoG;
-      troca(L.ia, L.ia + L.abre, '{' + g + ':');
+    // De trás pra frente: mexer no fim não desloca o começo. E TODAS as
+    // ocorrências ganham número EXPLÍCITO: o parser numera as implícitas
+    // DEPOIS do maior explícito, então dar número a UMA lacuna movia as
+    // outras — em "{A} e {B}", unir B ao c1 escrevia "{A} e {1:B}" e A
+    // virava c2 (invertia em vez de unir). Fixar as outras torna a edição
+    // local: só a lacuna escolhida muda.
+    for(let k = Ls.length - 1; k >= 0; k--){
+      const X = Ls[k];
+      if(k !== oc){ troca(X.ia, X.ia + X.abre, '{' + X.g + ':'); continue; }
+      if(acao === 'desfazer'){ troca(X.ib - 1, X.ib, ''); troca(X.ia, X.ia + X.abre, ''); }
+      else {
+        const g = acao === 'separar' ? (max + 1) : alvoG;
+        troca(X.ia, X.ia + X.abre, '{' + g + ':');
+      }
     }
     linha.normalize();
     try{ _fcVistaSync(linha); }catch(_){}
@@ -41231,32 +41358,33 @@ window.TutorIA = (function(){
     { k:'yellow', n:'Amarelo' }, { k:'green', n:'Verde' }, { k:'blue', n:'Azul' },
     { k:'orange', n:'Laranja' }, { k:'pink', n:'Rosa' }, { k:'red', n:'Vermelho' }
   ];
-  // HTML dos 2 botões + suas barrinhas. Função ÚNICA porque a toolbar existe em
-  // DOIS lugares (drawer da unidade e modal do Caderno no Banco) — duplicar o
-  // markup faria os dois divergirem na primeira mudança.
+  // HTML do botão de CORES + o painel com as 3 linhas (marca-texto, letra,
+  // bloco). Função ÚNICA porque a toolbar existe em TRÊS lugares (drawer da
+  // unidade, modal do Caderno no Banco e a flutuante da página Cadernos) —
+  // duplicar o markup faria os três divergirem na primeira mudança.
+  const _SVG_CORES = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></svg>';
   function _cadColorBtnsHtml(){
-    function bar(kind){
-      return '<div class="cad-cbar" data-cad-bar="' + kind + '" hidden>'
-        + _CAD_CORES.map(function(c){
-            // data-color É OBRIGATÓRIO: é ele que a paleta do app usa
-            // (.ctx-color[data-color="..."] no CSS). Sem ele a bolinha fica
-            // PRETA — reusar a classe não basta, o seletor é pelo atributo.
-            // O data-cad-cor é o que o nosso handler lê (o data-color pertence
-            // à floating toolbar e não deve mudar de dono).
-            return '<span class="ctx-color" data-color="' + c.k + '" data-cad-cor="' + c.k + '" data-cad-kind="' + kind + '" title="' + c.n + '" role="button" tabindex="0"></span>';
-          }).join('')
-        + '<button type="button" class="cad-cbar-clr" data-cad-cor="" data-cad-kind="' + kind + '">Remover</button>'
-        + '</div>';
+    function bolinhas(kind){
+      return _CAD_CORES.map(function(c){
+        // data-color É OBRIGATÓRIO: é ele que a paleta do app usa
+        // (.ctx-color[data-color="..."] no CSS). O data-cad-cor é o que o
+        // nosso handler lê (o data-color pertence à floating toolbar da
+        // unidade e não deve mudar de dono). Na linha da LETRA a bolinha
+        // vira um "A" na cor — é a cor da fonte, não do fundo.
+        return '<span class="ctx-color' + (kind === 'fc' ? ' cad-cor-letra' : '') + '" data-color="' + c.k + '" data-cad-cor="' + c.k + '" data-cad-kind="' + kind + '" title="' + c.n + '" role="button" tabindex="0">' + (kind === 'fc' ? 'A' : '') + '</span>';
+      }).join('')
+      + '<button type="button" class="cad-cbar-clr" data-cad-cor="" data-cad-kind="' + kind + '">Remover</button>';
+    }
+    function linha(kind, rotulo, dica){
+      return '<div class="cad-cbar-row" data-cad-row="' + kind + '"><span class="cad-cbar-lbl" title="' + dica + '">' + rotulo + '</span>' + bolinhas(kind) + '</div>';
     }
     return '<span class="cad-cwrap">'
-        + '<button type="button" data-cad-pick="hl" data-tip="Grifar">Grifo</button>' + bar('hl')
-      + '</span>'
-      + '<span class="cad-cwrap">'
-        + '<button type="button" data-cad-pick="fc" data-tip="Cor da letra"><span style="text-decoration:underline;text-underline-offset:2px">A</span></button>' + bar('fc')
-      + '</span>'
-      + '<span class="cad-cwrap">'
-        + '<button type="button" data-cad-pick="bl" data-tip="Pintar o bloco inteiro">Bloco</button>' + bar('bl')
-      + '</span>';
+      + '<button type="button" data-cad-pick="cor" data-tip="Cores: marca-texto, letra e bloco">' + _SVG_CORES + '</button>'
+      + '<div class="cad-cbar" data-cad-bar="cor" hidden>'
+      + linha('hl', 'Marca-texto', 'Pinta o fundo do trecho selecionado')
+      + linha('fc', 'Letra', 'Cor da letra do trecho selecionado')
+      + linha('bl', 'Bloco', 'Pinta a linha inteira')
+      + '</div></span>';
   }
   function _cadSpecOf(kind){
     return kind === 'hl'
@@ -41275,7 +41403,8 @@ window.TutorIA = (function(){
       try { inter = range.intersectsNode(n); } catch(_){ inter = false; }
       if(!inter) continue;
       // Chip [[ ]] é contentEditable=false e representa OUTRA unidade — pintar
-      // por dentro quebraria o chip (e o grafo lê o HTML dele).
+      // por dentro quebraria o chip (e o grafo lê o HTML dele). O chip é
+      // pintado INTEIRO, por fora (_cadChipsNaSelecao).
       if(n.parentElement && n.parentElement.closest('.tutor-ref')) continue;
       let ini = 0, fim = n.nodeValue.length;
       if(n === range.startContainer && range.startOffset != null) ini = range.startOffset;
@@ -41284,6 +41413,18 @@ window.TutorIA = (function(){
       if(!n.nodeValue.slice(ini, fim).trim()) continue; // só espaço: não pinta
       out.push({ node: n, ini: ini, fim: fim });
     }
+    return out;
+  }
+  // Chips [[ ]] que a seleção toca. O chip é ATÔMICO: a cor não entra nele —
+  // o chip inteiro é embrulhado no <span> da cor, e o "Remover" desembrulha
+  // sem tocar no chip.
+  function _cadChipsNaSelecao(range, root){
+    const out = [];
+    root.querySelectorAll('.tutor-ref').forEach(function(chip){
+      let toca = false;
+      try{ toca = range.intersectsNode(chip); }catch(_){ toca = false; }
+      if(toca) out.push(chip);
+    });
     return out;
   }
   // Tira a marca do tipo pedido que encoste na seleção (o "Remover" da barra).
@@ -41344,15 +41485,20 @@ window.TutorIA = (function(){
     const spec = _cadSpecOf(kind);
     if(!cor){ _cadDesmarca(range, ed, spec); }
     else {
-      const pedacos = _cadPedacos(range, ed);
-      if(!pedacos.length) return;
       // Repinta: tira a marca antiga do MESMO tipo antes, senão empilha span
-      // dentro de span e a cor de fora continua valendo.
+      // dentro de span e a cor de fora continua valendo. A seleção vira
+      // OFFSETS antes: desembrulhar + normalize() fundem nós de texto, e os
+      // pedaços colhidos no DOM velho apontavam pra nós mortos — trocar a
+      // cor de um trecho já pintado PERDIA o trecho em vez de repintar.
+      const snap = _cadSelSnap(ed);
       _cadDesmarca(range, ed, spec);
+      const range2 = (snap && _cadSelRestaura(ed, snap)) || (sel.rangeCount ? sel.getRangeAt(0) : null);
+      if(!range2 || range2.collapsed) return;
+      const pedacos = _cadPedacos(range2, ed);
+      const chips = _cadChipsNaSelecao(range2, ed);
+      if(!pedacos.length && !chips.length) return;
       const novos = [];
       pedacos.forEach(function(p){
-        // Após o desmarcar, o text node pode ter sido fundido pelo normalize();
-        // se saiu do documento, o trecho já foi absorvido por um vizinho.
         if(!p.node.parentNode || !ed.contains(p.node)) return;
         const lim = p.node.nodeValue.length;
         const ini = Math.min(p.ini, lim), fim = Math.min(p.fim, lim);
@@ -41366,9 +41512,19 @@ window.TutorIA = (function(){
         // de elemento, então não precisa do fallback que rasga o conteúdo.
         try { r.surroundContents(sp); novos.push(sp); } catch(_){}
       });
-      // Devolve a seleção pro trecho pintado — o aluno consegue trocar a cor
-      // em seguida sem reselecionar.
+      chips.forEach(function(chip){
+        if(!chip.parentNode || !ed.contains(chip)) return;
+        const sp = document.createElement('span');
+        sp.className = spec.cls;
+        sp.setAttribute(spec.attr, cor);
+        chip.parentNode.insertBefore(sp, chip);
+        sp.appendChild(chip);
+        novos.push(sp);
+      });
+      // Devolve a seleção pro trecho pintado (do primeiro ao último, em ordem
+      // de documento) — o aluno troca a cor em seguida sem reselecionar.
       if(novos.length){
+        novos.sort(function(a, b){ return a === b ? 0 : ((a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1); });
         try {
           const r2 = document.createRange();
           r2.setStartBefore(novos[0]); r2.setEndAfter(novos[novos.length - 1]);
@@ -41772,6 +41928,9 @@ window.TutorIA = (function(){
     if(!docAlvo && (!unitAlvo || String(unitAlvo) === 'null')) return;
     // O ciclo de flashcards (::) é DA UNIDADE — card precisa de unitId.
     // No avulso, :: fica como texto (decisão em aberto registrada).
+    // O ciclo des-renderiza a vista (tira os embrulhos) e ela volta logo
+    // abaixo: uma seleção aberta do aluno morreria no meio. Offsets salvam.
+    const snapSel = (document.activeElement === el) ? _cadSelSnap(el) : null;
     if(unitAlvo){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
     try{ _cadNormalizarBlocos(el); }catch(_){ }
     try{ _cadCelCarimbar(el); }catch(e){ console.warn('[cad cel]', e); }
@@ -41781,6 +41940,7 @@ window.TutorIA = (function(){
     try{ await _portaisAntesDeSalvar(el, chavePo); }catch(e){ console.warn('[portal salvar]', e); }
     const body = _cadSanitize(_poCorpoParaSalvar(el));   // corpo CRU: o ciclo des-renderizou
     if(unitAlvo){ try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); } }
+    if(snapSel && document.activeElement === el) _cadSelRestaura(el, snapSel);
     if(docAlvo){
       // caderno AVULSO: salva pelo Store (sync embutido) + versões em 'doc:'+id
       _cadStatus('salvando…', stAlvo);
@@ -45173,6 +45333,9 @@ window.TutorIA = (function(){
   /* ── Toolbar FLUTUANTE da página Cadernos (RemNote/Notion): aparece sobre
      o texto selecionado nos editores .cadpage-ed; os mesmos botões da barra
      de sempre (o Histórico mora no menu ···). ── */
+  const _SVG_LISTA = '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4.5" cy="6" r="1" fill="currentColor"/><circle cx="4.5" cy="12" r="1" fill="currentColor"/><circle cx="4.5" cy="18" r="1" fill="currentColor"/></svg>';
+  const _SVG_LISTA_N = '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="10" y1="6" x2="21" y2="6"/><line x1="10" y1="12" x2="21" y2="12"/><line x1="10" y1="18" x2="21" y2="18"/><path d="M4 6h1v4"/><path d="M4 10h2"/><path d="M6 18H4c0-1 2-2 2-3s-1-1.5-2-1"/></svg>';
+  const _SVG_LIMPAR = '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   let _flutEl = null, _flutTimer = null;
   function _flutSync(){
     const sel = window.getSelection();
@@ -45183,17 +45346,26 @@ window.TutorIA = (function(){
     if(!ok){ if(_flutEl) _flutEl.hidden = true; return; }
     if(!_flutEl){
       _flutEl = document.createElement('div');
-      _flutEl.className = 'tutor-caderno-tb cad-flut';
+      // Mesma pílula da toolbar de marcação do texto da unidade (.ctx-toolbar):
+      // fundo, borda, sombra, botões redondos — adaptada à edição de texto.
+      _flutEl.className = 'cad-flut';
       _flutEl.innerHTML =
         '<button type="button" data-cmd="bold" data-tip="Negrito"><b>B</b></button>'
         + '<button type="button" data-cmd="italic" data-tip="Itálico"><i>I</i></button>'
-        + '<button type="button" data-cmd="underline" data-tip="Sublinhado"><span style="text-decoration:underline">U</span></button>'
-        + '<button type="button" data-cmd="formatBlock" data-arg="h3" data-tip="Título">Título</button>'
-        + '<button type="button" data-cmd="insertUnorderedList" data-tip="Lista">&bull;</button>'
-        + '<button type="button" data-cmd="insertOrderedList" data-tip="Lista numerada">1.</button>'
+        + '<button type="button" data-cmd="underline" data-tip="Sublinhado"><span style="text-decoration:underline;text-underline-offset:2px">U</span></button>'
+        + '<button type="button" data-cmd="formatBlock" data-arg="h3" data-tip="Título"><b>H</b></button>'
+        + '<span class="ctx-sep"></span>'
+        + '<button type="button" data-cmd="insertUnorderedList" data-tip="Lista">' + _SVG_LISTA + '</button>'
+        + '<button type="button" data-cmd="insertOrderedList" data-tip="Lista numerada">' + _SVG_LISTA_N + '</button>'
+        + '<span class="ctx-sep"></span>'
         + _cadColorBtnsHtml()
-        + '<button type="button" data-cmd="removeFormat" data-tip="Limpar formatação">&#9003;</button>'
+        + '<button type="button" data-cmd="removeFormat" data-tip="Limpar formatação">' + _SVG_LIMPAR + '</button>'
+        + '<span class="ctx-sep"></span>'
         + '<button type="button" data-act="comentar" data-tip="Comentar esta linha">' + _SVG_BALAO + '</button>';
+      // A barra só some quando o aluno clica FORA ou escreve (a seleção
+      // colapsa). Clicar na barra — inclusive no espaço entre botões — não
+      // pode roubar a seleção do editor.
+      _flutEl.addEventListener('mousedown', function(e){ e.preventDefault(); });
       document.body.appendChild(_flutEl);
       _flutEl.querySelectorAll('button[data-cmd]').forEach(function(b){
         b.addEventListener('mousedown', function(e){ e.preventDefault(); });
@@ -62646,8 +62818,11 @@ const FcSintaxe = (function(){
           lines.push(limpa(bt.replace(RE_ITEM, '')));
           idxs.push(j); j++;
         }
-        if(front && lines.length){
-          cards.push({ fcId: b.fcId || null, blocos: idxs, card: { kind: 'multi', front: front, lines: lines.filter(Boolean), listStyle: numerada ? 'number' : 'bullets' } });
+        // só é card com pelo menos um item PREENCHIDO: o " :::" recém-digitado
+        // com o marcador vazio embaixo ainda não é um card (não vai ao deck)
+        const cheias = lines.filter(Boolean);
+        if(front && cheias.length){
+          cards.push({ fcId: b.fcId || null, blocos: idxs, card: { kind: 'multi', front: front, lines: cheias, listStyle: numerada ? 'number' : 'bullets' } });
           i = j - 1;
         }
         continue;
