@@ -40276,23 +40276,32 @@ window.TutorIA = (function(){
     units = units.slice(0, 10);
     // Fase 6F-1c: dentro de uma LINHA-CARD do caderno, o [[ também busca
     // flashcards (frente + verso) pra criar CONEXÃO (6A) com chip na linha.
+    // O editor é o ATIVO (_cadEl: drawer OU página Cadernos) — antes era o
+    // id fixo do drawer, e na página a seção nunca aparecia. E a linha vale
+    // pelo carimbo OU pela sintaxe: o carimbo só chega no ciclo de 1 s, e o
+    // aluno digita [[ logo depois de fechar o card (o card nasce ao inserir).
     let fcHtml = ''; _fcRefLinha = null;
     try{
-      const elCad = document.getElementById('cadernoInput');
+      const elCad = _cadEl();
       const base = ci.node && (ci.node.nodeType === 1 ? ci.node : ci.node.parentElement);
-      const head = (base && base.closest) ? base.closest('[data-fc-id],[data-fc-item]') : null;
-      if(head && elCad && elCad.contains(head) && window.Store && Store.deckList){
-        const meuId = head.getAttribute('data-fc-id') || head.getAttribute('data-fc-item');
-        if(meuId){
-          _fcRefLinha = String(meuId);
-          const ligados = new Set((Store.linksFor ? Store.linksFor(meuId) : []).map(function(l){ return l.from === String(meuId) ? l.to : l.from; }));
+      const linha = (base && elCad && elCad.contains(base)) ? _cadLinhaDoNo(base, elCad) : null;
+      if(linha && _cadUnit && window.Store && Store.deckList){
+        const meuId = linha.getAttribute('data-fc-id') || linha.getAttribute('data-fc-item') || null;
+        let ehCard = !!meuId;
+        if(!ehCard && window.FcSintaxe){
+          const txt = _fcCadTexto(linha);
+          ehCard = !!FcSintaxe.detectar(txt) || (_FC_RE_ITEM.test(txt) && !!_fcCadMultiHead(linha));
+        }
+        if(ehCard){
+          _fcRefLinha = { id: meuId ? String(meuId) : null, linha: linha };
+          const ligados = new Set((meuId && Store.linksFor ? Store.linksFor(meuId) : []).map(function(l){ return l.from === String(meuId) ? l.to : l.from; }));
           const resumo = function(c){
             if(c.kind === 'cloze') return { f: String(c.clozeText || '').replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '[$1]'), v: '' };
             if(c.kind === 'multi') return { f: c.front || '', v: (c.lines || []).join(' · ') };
             return { f: c.front || '', v: c.back || '' };
           };
           const corta = function(x, n2){ x = String(x || '').trim(); return x.length > n2 ? x.slice(0, n2) + '…' : x; };
-          const cands = Store.deckList().filter(function(c){ return String(c.id) !== String(meuId) && !ligados.has(String(c.id)); })
+          const cands = Store.deckList().filter(function(c){ return String(c.id) !== String(meuId || '') && !ligados.has(String(c.id)); })
             .filter(function(c){ const r = resumo(c); return !q || (r.f + ' ' + r.v).toLowerCase().indexOf(q) >= 0; }).slice(0, 5);
           if(cands.length){
             fcHtml = '<div class="tutor-refsec">Flashcards — conectar</div>' + cands.map(function(c){
@@ -40341,10 +40350,10 @@ window.TutorIA = (function(){
     p.innerHTML = ((fcHtml || docsHtml) && units.length ? '<div class="tutor-refsec">Unidades</div>' : '') + units.map(function(u){ return '<button type="button" class="tutor-refopt" data-uid="' + Util.attr(u.id) + '" data-ut="' + Util.attr(u.label) + '">' + _esc(u.label) + '</button>'; }).join('') + docsHtml + novoHtml;
     if(fcHtml) p.innerHTML += fcHtml;
     // Fase 6E — com a busca ainda vazia, acrescenta os sugeridos semânticos
-    if(_fcRefLinha && !q && window.FlashcardsSugestoes){
-      const linhaAlvo = _fcRefLinha;
+    if(_fcRefLinha && _fcRefLinha.id && !q && window.FlashcardsSugestoes){
+      const linhaAlvo = _fcRefLinha.id;
       FlashcardsSugestoes.prontas(linhaAlvo).then(function(sug){
-        if(!_refPickerEl || _refPickerEl.hidden || _fcRefLinha !== linhaAlvo) return;
+        if(!_refPickerEl || _refPickerEl.hidden || !_fcRefLinha || _fcRefLinha.id !== linhaAlvo) return;
         if(!sug.length || _refPickerEl.querySelector('.fc-sug-sec')) return;
         const corta2 = function(x, n2){ x = String(x || '').trim(); return x.length > n2 ? x.slice(0, n2) + '…' : x; };
         const resumo2 = function(c){
@@ -40380,14 +40389,44 @@ window.TutorIA = (function(){
     p.querySelectorAll('[data-fcrel]').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); _fcRefInserir(outroId, front, b.getAttribute('data-fcrel')); }); });
   }
   function _fcRefInserir(outroId, front, rel){
-    const ci = _refPickerCI; const meuId = _fcRefLinha;
-    if(!ci || !meuId){ _hideRefPicker(); return; }
+    const ci = _refPickerCI; const ref = _fcRefLinha;
+    if(!ci || !ref || !ref.linha || !ref.linha.isConnected){ _hideRefPicker(); return; }
+    const elCad = _cadEl();
+    // O trecho "[[busca" vira OFFSETS na linha ANTES de qualquer cirurgia: o
+    // ciclo abaixo des-renderiza a linha e funde nós de texto — o nó do
+    // caret pode morrer, o texto não.
+    const offA = _fcVistaCaretOff(ref.linha, ci.node, ci.start), offB = _fcVistaCaretOff(ref.linha, ci.node, ci.offset);
+    let meuId = ref.id, rodouCiclo = false;
+    if(!meuId){
+      // linha com sintaxe mas ainda sem carimbo: o card nasce AGORA
+      try{ _fcCadCiclo(); }catch(e){ console.warn('[fc ref ciclo]', e); }
+      rodouCiclo = true;
+      meuId = ref.linha.getAttribute('data-fc-id') || ref.linha.getAttribute('data-fc-item') || null;
+      if(!meuId){
+        if(elCad){ try{ _fcVistaAplicar(elCad); }catch(_){ } }
+        if(window.ueToast) ueToast('Feche o card desta linha (frente :: verso, ou ::: com um item) antes de conectar.', 'warn');
+        _hideRefPicker(); return;
+      }
+      meuId = String(meuId);
+    }
     const r = rel === 'requer' ? Store.linkAdd(meuId, outroId, 'requisito')
       : rel === 'consequencia' ? Store.linkAdd(outroId, meuId, 'requisito')
       : Store.linkAdd(meuId, outroId, 'associacao');
-    if(!r.ok){ if(window.ueToast) ueToast(r.erro, 'warn'); _hideRefPicker(); return; }
-    const range = document.createRange();
-    try { range.setStart(ci.node, ci.start); range.setEnd(ci.node, ci.offset); range.deleteContents(); } catch(_){ _hideRefPicker(); return; }
+    if(!r.ok){
+      if(window.ueToast) ueToast(r.erro, 'warn');
+      if(rodouCiclo && elCad){ try{ _fcVistaAplicar(elCad); }catch(_){ } }
+      _hideRefPicker(); return;
+    }
+    let range = null;
+    try{
+      if(!rodouCiclo && ci.node.isConnected){ range = document.createRange(); range.setStart(ci.node, ci.start); range.setEnd(ci.node, ci.offset); }
+    }catch(_){ range = null; }
+    if(!range && offA != null && offB != null){
+      const pa = _fcVistaPos(ref.linha, offA), pb = _fcVistaPos(ref.linha, offB, true);
+      if(pa && pb){ try{ range = document.createRange(); range.setStart(pa.node, pa.off); range.setEnd(pb.node, pb.off); }catch(_){ range = null; } }
+    }
+    if(!range){ _hideRefPicker(); return; }
+    try{ range.deleteContents(); }catch(_){ _hideRefPicker(); return; }
     const chip = document.createElement('span');
     chip.className = 'tutor-ref fc-ref'; chip.contentEditable = 'false';
     chip.setAttribute('data-fc-ref', String(outroId));
@@ -40396,12 +40435,12 @@ window.TutorIA = (function(){
     const space = document.createTextNode(' '); chip.after(space);
     const nr = document.createRange(); nr.setStartAfter(space); nr.collapse(true);
     const sel2 = window.getSelection(); sel2.removeAllRanges(); sel2.addRange(nr);
-    const elCad = document.getElementById('cadernoInput');
     const head = elCad ? elCad.querySelector('[data-fc-id="' + meuId + '"]') : null;
     if(head) _fcCadSelos(head, meuId);
     _inpEl().focus(); _inpEmptyToggle(); _hideRefPicker();
+    if(elCad){ try{ _fcVistaAplicar(elCad); }catch(_){ } }
     if(window.ueToast) ueToast('Cards conectados.', 'success');
-    if(_activeEd && _activeEd.id === 'cadernoInput') _cadSchedule();
+    if(elCad && elCad.contains(chip)) _cadSchedule();
   }
   // Enter/clique na 1ª opção: despacha pro insersor certo (unidade, doc, card).
   function _pickRefEl(btn){
