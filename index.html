@@ -40526,15 +40526,22 @@ window.TutorIA = (function(){
      linha preservando o caret. Chips são EDITÁVEIS por dentro; o menu de
      unir/separar aparece num botão quando o caret está dentro da lacuna. */
   let _fcVistaMudando = false, _fcComposing = false;
-  function _fcVistaPos(linha, off){
-    // fronteira exata prefere o COMEÇO do nó seguinte (off < fim, não <=):
-    // senão, embrulhar faixas adjacentes parte o span vizinho em cópias vazias
+  /* Posição (nó, offset) de um deslocamento de texto da linha.
+     COMEÇO de faixa: o nó que contém o caractere `off` (off < fim do nó).
+     FIM de faixa (fim=true): o nó que contém o caractere `off-1`, no fim dele.
+     A diferença importa: o fim de " :: " cai exatamente onde começa o span
+     vizinho (um grifo, por exemplo). Se a fronteira de fim escolhesse o
+     COMEÇO do nó seguinte — dentro do grifo —, o Range atravessaria o grifo e
+     extractContents() clonaria o ancestral parcial, deixando um <span> VAZIO
+     do grifo dentro do separador. Um por ciclo de salvamento; e é dentro
+     desses spans vazios que os espaços digitados iam parar. */
+  function _fcVistaPos(linha, off, fim){
     let acc = 0, achou = null, ult = null;
     (function walk(n){
       if(achou) return;
       if(n.nodeType === 3){
         const len = n.nodeValue.length;
-        if(off < acc + len){ achou = { node: n, off: off - acc }; return; }
+        if(fim ? (off > acc && off <= acc + len) : (off < acc + len)){ achou = { node: n, off: off - acc }; return; }
         acc += len; ult = { node: n, off: len };
         return;
       }
@@ -40567,15 +40574,35 @@ window.TutorIA = (function(){
     return achou ? off : null;
   }
   function _fcVistaWrap(linha, a, b, cls, atrs){
-    const pa = _fcVistaPos(linha, a), pb = _fcVistaPos(linha, b);
+    const pa = _fcVistaPos(linha, a), pb = _fcVistaPos(linha, b, true);
     if(!pa || !pb) return null;
-    const r = document.createRange();
-    try{ r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off); }catch(_){ return null; }
-    const sp = document.createElement('span');
-    sp.className = cls; sp.setAttribute('data-deco', '1');
-    Object.keys(atrs || {}).forEach(function(k){ sp.setAttribute(k, atrs[k]); });
-    try{ sp.appendChild(r.extractContents()); r.insertNode(sp); }catch(_){ return null; }
-    return sp;
+    const embrulha = function(n0, o0, n1, o1){
+      const r = document.createRange();
+      try{ r.setStart(n0, o0); r.setEnd(n1, o1); }catch(_){ return null; }
+      const sp = document.createElement('span');
+      sp.className = cls; sp.setAttribute('data-deco', '1');
+      Object.keys(atrs || {}).forEach(function(k){ sp.setAttribute(k, atrs[k]); });
+      try{ sp.appendChild(r.extractContents()); r.insertNode(sp); }catch(_){ return null; }
+      return sp;
+    };
+    /* Um span POR NÓ DE TEXTO. Se a faixa começa num nó e termina noutro, um
+       Range só cruzaria os elementos entre eles e extractContents() partiria o
+       vizinho (clone vazio). Nó a nó, nada é atravessado. Fronteira num <br>
+       (nó que não é texto) segue no caminho antigo, de faixa única. */
+    if(pa.node.nodeType !== 3 || pb.node.nodeType !== 3) return embrulha(pa.node, pa.off, pb.node, pb.off);
+    if(pa.node === pb.node) return embrulha(pa.node, pa.off, pa.node, pb.off);
+    const segs = [];
+    const w = document.createTreeWalker(linha, NodeFilter.SHOW_TEXT);
+    let n, dentro = false;
+    while((n = w.nextNode())){
+      if(n === pa.node){ dentro = true; segs.push([n, pa.off, n.nodeValue.length]); continue; }
+      if(!dentro) continue;
+      if(n === pb.node){ segs.push([n, 0, pb.off]); break; }
+      segs.push([n, 0, n.nodeValue.length]);
+    }
+    let ultimo = null;
+    segs.forEach(function(sg){ if(sg[2] > sg[1]){ const sp = embrulha(sg[0], sg[1], sg[0], sg[2]); if(sp) ultimo = sp; } });
+    return ultimo;   // o ÚLTIMO span da faixa: é depois dele que o caret pula
   }
   // grupos POR OCORRÊNCIA, com a mesma regra do parser (implícitas após o maior)
   function _fcVistaGrupos(texto){
@@ -40623,20 +40650,45 @@ window.TutorIA = (function(){
       if(n.getAttribute && n.getAttribute('data-deco') != null){
         const a = acc;
         Array.prototype.forEach.call(n.childNodes, walk);
-        out.push({ a: a, b: acc, cls: n.className });
+        out.push({ a: a, b: acc, cls: n.className, i: n.getAttribute('data-deco-i') });
         return;
       }
       if(n.tagName === 'SCRIPT' || n.tagName === 'STYLE') return;
       Array.prototype.forEach.call(n.childNodes, walk);
     })(linha);
     out.sort(function(x, y){ return x.a - y.a || x.b - y.b; });
-    return out;
+    // uma faixa embrulhada nó a nó vira vários spans com o MESMO índice:
+    // aqui eles voltam a ser uma faixa só, para bater com o plano
+    const junto = [];
+    out.forEach(function(f){
+      const u = junto[junto.length - 1];
+      if(u && u.i != null && u.i === f.i && u.b === f.a) u.b = f.b; else junto.push(f);
+    });
+    return junto;
+  }
+  /* Reparo do entulho que a versão anterior deixou: spans de formatação
+     (grifo, cor, negrito…) SEM conteúdo — ou só com espaços, que era onde a
+     digitação caía. Somem inteiros: um grifo de nada não é formatação de
+     nada. O span onde o caret está fica em paz (pode ser um grifo que o
+     aluno acabou de abrir). */
+  const _FC_FMT_SEL = '.hl-mark,.cad-fc,mark,b,i,u,strong,em';
+  function _fcVistaReparar(raiz){
+    const sel = window.getSelection();
+    const anc = (sel && sel.rangeCount) ? sel.anchorNode : null;
+    Array.prototype.slice.call(raiz.querySelectorAll(_FC_FMT_SEL)).forEach(function(sp){
+      if(!sp.isConnected) return;
+      if(sp.querySelector('img,br,.tutor-ref,[data-fc-id],[data-fc-item]')) return;
+      if(/[^\s\u00A0]/.test(sp.textContent || '')) return;
+      if(anc && sp.contains(anc)) return;
+      sp.remove();
+    });
   }
   function _fcVistaSource(linha){
     Array.prototype.slice.call(linha.querySelectorAll('[data-deco]')).forEach(function(sp){
       while(sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
       sp.remove();
     });
+    _fcVistaReparar(linha);
     linha.normalize();
   }
   function _fcVistaLimpar(el){
@@ -40644,6 +40696,7 @@ window.TutorIA = (function(){
       while(sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
       sp.remove();
     });
+    _fcVistaReparar(el);
     el.normalize();
   }
   // Sincroniza UMA linha: só mexe no DOM se a decoração devida mudou
@@ -40656,6 +40709,9 @@ window.TutorIA = (function(){
       const id = linha.getAttribute ? linha.getAttribute('data-fc-id') : null;
       const card = (id && window.Store && Store.deckList) ? Store.deckList().find(function(c){ return String(c.id) === String(id); }) : null;
       kind = card ? card.kind : FcSintaxe.detectar(texto);
+      // item de lista ainda sem carimbo: reconhecido pela estrutura (bullet
+      // abaixo de um título " :::"), para o marcador já sair desenhado
+      if(!kind && _FC_RE_ITEM.test(texto) && _fcCadMultiHead(linha)) kind = 'item';
     }
     const plano = kind ? _fcVistaPlano(texto, kind) : [];
     const atual = _fcVistaAtual(linha);
@@ -40667,10 +40723,11 @@ window.TutorIA = (function(){
     _fcVistaMudando = true;
     try{
       _fcVistaSource(linha);
-      plano.forEach(function(pl){
-        const atrs = {};
+      const criados = [];
+      plano.forEach(function(pl, i){
+        const atrs = { 'data-deco-i': String(i) };
         if(pl.g != null){ atrs['data-g'] = String(pl.g); atrs['data-oc'] = String(pl.oc); }
-        _fcVistaWrap(linha, pl.a, pl.b, pl.cls, atrs);
+        criados[i] = _fcVistaWrap(linha, pl.a, pl.b, pl.cls, atrs);
       });
       if(off != null){
         const pp = _fcVistaPos(linha, off);
@@ -40680,8 +40737,7 @@ window.TutorIA = (function(){
           // sintaxe recém-fechada: caret cai no marcador oculto ou na borda → pula pra fora
           const hit = plano.find(function(pl){ return off > pl.a && off <= pl.b; });
           if(hit && (hit.cls === 'fc-oc' || off === hit.b)){
-            const spans = linha.querySelectorAll('[data-deco]');
-            const alvoSp = spans[plano.indexOf(hit)];
+            const alvoSp = criados[plano.indexOf(hit)];
             if(alvoSp){ try{ r.setStartAfter(alvoSp); r.collapse(true); posto = true; }catch(_){} }
           }
           if(!posto){ try{ r.setStart(pp.node, pp.off); r.collapse(true); posto = true; }catch(_){} }
@@ -41834,7 +41890,12 @@ window.TutorIA = (function(){
     const el = _cadEl(); _emptyToggle(el);
     try{ _cadNormalizarBlocos(el); }catch(_){ }
     if(el && !_fcComposing && !_fcCicloAtivo){
-      try{ _fcCadDedup(el); _fcCadBlocos(el); _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista input]', e); }
+      try{
+        _fcCadDedup(el); _fcCadBlocos(el);
+        if(_fcCadMultiAuto(el)){ _onCadInput(); return; }     // " :::" → desceu para o 1º item
+        _fcCadRenumerar(el);
+        _fcVistaAplicar(el);
+      }catch(e){ console.warn('[fc vista input]', e); }
     }
     try{ if(_atalhoSync()) return; }catch(e){ console.warn('[atalho]', e); }
     const ci = _caretInfo(); if(ci) _showRefPicker(ci); else _hideRefPicker();
@@ -42563,53 +42624,133 @@ window.TutorIA = (function(){
     // sai da lista (anotação depois do card).
     if(e.key === 'Enter' && !e.shiftKey) _fcCadEnter(e);
   }
+  /* ── Card de LISTA (" :::" + itens) — estrutura reconhecida pela SINTAXE ──
+     O carimbo data-fc-id/data-fc-item só chega no salvamento, 1 s depois de
+     parar de digitar. Tudo que decide "isto é um card de lista" pela presença
+     do carimbo falha exatamente na hora em que o card está sendo escrito — e
+     era por isso que o Enter depois de " :::" caía na quebra padrão e a lista
+     nunca nascia. Aqui a estrutura vem do TEXTO: título termina em " :::",
+     item começa com "- " / "1. ", e o item pertence ao título que o antecede. */
+  const _FC_RE_ITEM = /^\s*(?:-|•|\d+[.)])\s+/;
+  function _fcCadBlocoDe(no, el){
+    const b = (typeof _cadLinhaDe === 'function') ? _cadLinhaDe(no, el) : (no && no.closest ? no.closest(_FC_BLOCO_SEL) : null);
+    return (b && b !== el && el.contains(b)) ? b : null;
+  }
+  function _fcCadEhHead(n){
+    return !!n && (n.hasAttribute('data-fc-id') || (window.FcSintaxe && FcSintaxe.detectar(_fcCadTexto(n)) === 'multi'));
+  }
+  // título do card de lista a que um item pertence (subindo pelos irmãos), ou null
+  function _fcCadMultiHead(item){
+    let p = item.previousElementSibling;
+    while(p && _FC_RE_ITEM.test(_fcCadTexto(p))) p = p.previousElementSibling;
+    return (p && _fcCadEhHead(p)) ? p : null;
+  }
+  // itens de um título, na ordem
+  function _fcCadItensDe(head){
+    const out = []; let p = head.nextElementSibling;
+    while(p && _FC_RE_ITEM.test(_fcCadTexto(p))){ out.push(p); p = p.nextElementSibling; }
+    return out;
+  }
+  /* "1." no PRIMEIRO item vira lista numerada — os outros seguem (2., 3.…);
+     "- " de volta no primeiro devolve os bullets. É o primeiro item que decide,
+     como no parser (o listStyle sai dele). Mexe só no marcador dos OUTROS
+     itens; a linha onde o caret está é do aluno. */
+  function _fcCadRenumerar(el){
+    const sel = window.getSelection();
+    if(!sel || !sel.anchorNode || !el.contains(sel.anchorNode)) return;
+    const no = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+    const bloco = _fcCadBlocoDe(no, el); if(!bloco) return;
+    const head = _FC_RE_ITEM.test(_fcCadTexto(bloco)) ? _fcCadMultiHead(bloco) : (_fcCadEhHead(bloco) ? bloco : null);
+    if(!head) return;
+    const itens = _fcCadItensDe(head);
+    if(itens.length < 2) return;
+    const numerada = /^\s*\d+[.)]\s+/.test(_fcCadTexto(itens[0]));
+    itens.forEach(function(it, i){
+      if(it === bloco) return;
+      const marcador = numerada ? ((i + 1) + '. ') : '- ';
+      const w = document.createTreeWalker(it, NodeFilter.SHOW_TEXT);
+      const tn = w.nextNode(); if(!tn) return;
+      const m = tn.nodeValue.match(_FC_RE_ITEM);
+      if(!m || m[0] === marcador) return;
+      tn.nodeValue = marcador + tn.nodeValue.slice(m[0].length);
+    });
+  }
+  /* Digitou " :::" no fim da linha → o card já DESCE para o primeiro item, com
+     o marcador. Sem isto o aluno ficava preso na linha do título: continuar
+     digitando ali quebrava a sintaxe (o ::: tem de ser o FIM da linha). */
+  function _fcCadMultiAuto(el){
+    const sel = window.getSelection();
+    if(!sel || !sel.isCollapsed || !sel.anchorNode || !el.contains(sel.anchorNode)) return false;
+    const no = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
+    const bloco = _fcCadBlocoDe(no, el); if(!bloco) return false;
+    if(bloco.hasAttribute('data-fc-item')) return false;
+    const texto = _fcCadTexto(bloco);
+    if(!/ :::\s*$/.test(texto)) return false;
+    const off = _fcVistaCaretOff(bloco, sel.anchorNode, sel.anchorOffset);
+    if(off == null || off < texto.replace(/\s+$/, '').length) return false;    // só com o caret no fim
+    if(_fcCadItensDe(bloco).length) return false;                                // já tem itens
+    const id = bloco.getAttribute('data-fc-id');
+    const d = document.createElement('div');
+    if(id) d.setAttribute('data-fc-item', id);
+    d.textContent = '- ';
+    bloco.parentNode.insertBefore(d, bloco.nextSibling);
+    try{ const r = document.createRange(); r.setStart(d.firstChild, d.firstChild.length); r.collapse(true); sel.removeAllRanges(); sel.addRange(r); }catch(_){}
+    return true;
+  }
   function _fcCadEnter(e){
     const el = _cadEl(); const sel = window.getSelection();
     if(!el || !sel || !sel.isCollapsed || !sel.anchorNode || !el.contains(sel.anchorNode)) return;
     const no = sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement;
-    const linha = no && no.closest ? no.closest('[data-fc-id],[data-fc-item]') : null;
-    if(!linha) return;
-    const texto = _fcCadTexto(linha);
-    const off = _fcVistaCaretOff(linha, sel.anchorNode, sel.anchorOffset);
-    if(off == null || off < texto.length) return;              // só no FIM da linha
+    const bloco = _fcCadBlocoDe(no, el); if(!bloco) return;
+    const texto = _fcCadTexto(bloco);
+    let papel = null;                                            // 'head' | 'item'
+    if(bloco.hasAttribute('data-fc-id')) papel = 'head';
+    else if(bloco.hasAttribute('data-fc-item')) papel = 'item';
+    else if(window.FcSintaxe && FcSintaxe.detectar(texto) === 'multi') papel = 'head';
+    else if(_FC_RE_ITEM.test(texto) && _fcCadMultiHead(bloco)) papel = 'item';
+    if(!papel) return;
+    // card básico/lacuna carimbado: Enter cru (quebra normal)
+    if(papel === 'head' && !(window.FcSintaxe && FcSintaxe.detectar(texto) === 'multi')) return;
+    const off = _fcVistaCaretOff(bloco, sel.anchorNode, sel.anchorOffset);
+    if(off == null || off < texto.length) return;               // só no FIM da linha
     const pos = function(d, offNovo){
       const r = document.createRange();
       if(d.firstChild && d.firstChild.nodeType === 3) r.setStart(d.firstChild, offNovo != null ? offNovo : d.firstChild.length);
       else r.setStart(d, 0);
       r.collapse(true); sel.removeAllRanges(); sel.addRange(r);
     };
-    if(linha.hasAttribute('data-fc-id')){
-      const id = linha.getAttribute('data-fc-id');
-      const prox = linha.nextElementSibling;
-      if(prox && prox.getAttribute && prox.getAttribute('data-fc-item') === id){
-        e.preventDefault();
-        const d = document.createElement('div');
-        d.setAttribute('data-fc-item', id);
-        d.textContent = /^\s*\d+[.)]/.test(_fcCadTexto(prox)) ? '1. ' : '- ';
-        linha.parentNode.insertBefore(d, prox);
-        pos(d); _onCadInput();
-      }
-      return;                                                   // sem itens: quebra padrão
+    if(papel === 'head'){
+      // título → novo PRIMEIRO item (numerado se a lista já for numerada)
+      e.preventDefault();
+      const id = bloco.getAttribute('data-fc-id');
+      const itens = _fcCadItensDe(bloco);
+      const d = document.createElement('div');
+      if(id) d.setAttribute('data-fc-item', id);
+      d.textContent = (itens.length && /^\s*\d+[.)]/.test(_fcCadTexto(itens[0]))) ? '1. ' : '- ';
+      bloco.parentNode.insertBefore(d, bloco.nextSibling);
+      pos(d); _onCadInput();
+      return;
     }
     // fim de um ITEM
-    const id = linha.getAttribute('data-fc-item');
+    const head = _fcCadMultiHead(bloco);
+    const id = bloco.getAttribute('data-fc-item') || (head && head.getAttribute('data-fc-id'));
     e.preventDefault();
     const soMarcador = /^\s*(?:-|•|\d+[.)])\s*$/.test(texto);
     if(soMarcador){
       // item vazio → sai da lista: anotação limpa DEPOIS do card
-      let fim = linha;
-      while(fim.nextElementSibling && fim.nextElementSibling.getAttribute && fim.nextElementSibling.getAttribute('data-fc-item') === id) fim = fim.nextElementSibling;
+      let fim = bloco;
+      while(fim.nextElementSibling && _FC_RE_ITEM.test(_fcCadTexto(fim.nextElementSibling))) fim = fim.nextElementSibling;
       const d = document.createElement('div'); d.innerHTML = '<br>';
       fim.parentNode.insertBefore(d, fim.nextSibling);
-      linha.remove();
+      bloco.remove();
       pos(d, 0); _onCadInput();
       return;
     }
     const m = texto.match(/^\s*(\d+)[.)]/);
     const d = document.createElement('div');
-    d.setAttribute('data-fc-item', id);
+    if(id) d.setAttribute('data-fc-item', id);
     d.textContent = m ? ((parseInt(m[1], 10) + 1) + '. ') : '- ';
-    linha.parentNode.insertBefore(d, linha.nextSibling);
+    bloco.parentNode.insertBefore(d, bloco.nextSibling);
     pos(d); _onCadInput();
   }
   function _setTab(tab){
