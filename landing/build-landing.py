@@ -184,6 +184,41 @@ while True:
     if i < 0: break
     el = elemento(tools_html, i); mocks.append(el[len('<div class="tool-mock">'):-len('</div>')]); pos = i + len(el)
 assert len(mocks) == 9, len(mocks)
+MOCK_NOMES = ['Destaques semânticos', 'Anotações com tags', 'Flashcard frente e verso', 'Meu desempenho (matéria)', 'Portal de referências', 'Modo estudo (blocos)', 'Tutor de IA (chat)', 'Desempenho por tema', 'Simulados']
+# ── ilustrações novas (landing/ilustracoes.html): CSS + blocos nomeados ──
+IL = io.open(os.path.join(AQUI, 'ilustracoes.html'), encoding='utf8').read()
+css_ilustracoes = IL[IL.index('<style>') + 7:IL.index('</style>')]
+def _heat():
+    out = []
+    for r in range(7):
+        for c in range(14):
+            lv = ((c * 3 + r * 5 + (c // 4)) % 7)
+            lv = 0 if (r in (0, 6) and lv < 4) else min(4, lv // 1 if lv < 5 else 4)
+            if c < 2 and lv > 1: lv = 1
+            out.append('<i class="l%d"></i>' % lv if lv else '<i></i>')
+    return ''.join(out)
+def _wave():
+    import math
+    return ''.join('<i style="height:%d%%"></i>' % int(22 + 70 * abs(math.sin(i * 0.62) * math.cos(i * 0.21))) for i in range(34))
+def _cal():
+    out = ''.join('<b>%s</b>' % d for d in 'DSTQQSS')
+    for d in range(1, 29):
+        cls = ' class="on"' if d == 11 else (' class="dot"' if d in (4, 18, 25) else '')
+        out += '<i%s>%d</i>' % (cls, d)
+    return out
+IL_corpo = IL[IL.index('</style>') + 8:].replace('{{HEAT}}', _heat()).replace('{{WAVE}}', _wave()).replace('{{CAL}}', _cal())
+for nome, html in re.findall(r'^<!-- ilustracao: (.+?) -->\n([\s\S]*?)(?=^<!-- ilustracao: |\Z)', IL_corpo, re.M):
+    mocks.append(html.strip()); MOCK_NOMES.append(nome.strip())
+assert len(mocks) == len(MOCK_NOMES) == 19, (len(mocks), len(MOCK_NOMES))
+css_extra += css_ilustracoes + r"""
+/* editor: seletor de ilustração no card + "voltar ao padrão" por seção */
+body.ed-on .ed-mock{ position:absolute; top:.5rem; right:.5rem; z-index:20; }
+body.ed-on .ed-mock select{ font-family:var(--mono); font-size:.62rem; letter-spacing:.04em; background:#13151a; color:#f0ece4; border:1px solid rgba(200,169,126,.5); border-radius:4px; padding:.2rem .35rem; max-width:210px; cursor:pointer; }
+body.ed-on [data-sec]{ position:relative; }
+body.ed-on .ed-reset{ position:absolute; top:-2.4rem; right:0; z-index:30; font-family:var(--mono); font-size:.6rem; letter-spacing:.08em; background:rgba(11,12,15,.7); color:rgba(240,236,228,.6); border:1px dashed rgba(200,169,126,.45); border-radius:4px; padding:.2rem .5rem; cursor:pointer; }
+body.ed-on .ed-reset:hover{ color:#0b0c0f; background:#c8a97e; border-style:solid; }
+body.ed-on .stage-inner > .ed-reset{ top:.6rem; right:var(--gutter); }
+"""
 logo_svg = re.search(r'<span class="footer-brand-logo">\s*(<svg.*?</svg>)', P, re.S).group(1)
 topbar_logo_svg = re.search(r'<a href="#top" class="topbar-logo" aria-label="Ubique">\s*(<svg.*?</svg>)', P, re.S).group(1)
 
@@ -221,13 +256,19 @@ DEFAULT = {
   'ferramentas': { 'rotulo': 'Diferenciais da plataforma', 'titulo': 'O que nenhuma preparação<br>para o CACD tinha <em>reunido</em>.', 'texto': 'Teoria e prática só viram aprovação com revisão ativa e autoconhecimento. A Falcon entrega <strong>os instrumentos que faltam</strong> na rotina do candidato sério, costurados em volta de cada unidade de cada matéria.', 'itens': [
       { 'mock': 0, 'numero': 'I · Destaques semânticos', 'titulo': 'Sete cores. <em>Sete significados</em>.', 'texto': 'Amarelo é teoria. Verde é exemplo. Vermelho é armadilha. Cada cor tem uma função que você define, e <strong>todos os trechos destacados ficam salvos</strong>, compilados por unidade e por matéria.' },
       { 'mock': 1, 'numero': 'II · Anotações com temas e tags', 'titulo': 'Anote <em>dentro do texto</em>.', 'texto': 'Notas ancoradas no parágrafo exato que as inspirou. Organize por <strong>temas e etiquetas</strong>, pesquise com busca por texto e recupere tudo quando voltar semanas depois.' },
-      { 'mock': 2, 'numero': 'III · Flashcards com repetição espaçada', 'titulo': 'Crie o card <em>no meio da leitura</em>.', 'texto': 'Selecione o trecho, crie o flashcard ali mesmo ou peça à IA. A revisão segue o agendamento inteligente: você revisa o que está prestes a esquecer, não o que já sabe.' },
-      { 'mock': 3, 'numero': 'IV · Boletim em tempo real', 'titulo': 'Você sabe <em>onde está</em>.', 'texto': 'Acerto por tópico do edital, por unidade e por matéria, atualizado a cada questão respondida. O desempenho vira mapa de estudo, não surpresa no dia da prova.' },
-      { 'mock': 4, 'numero': 'V · Compilar para estudar', 'titulo': 'Tudo <em>num arquivo só</em>.', 'texto': 'Destaques, notas, flashcards e cadernos de uma unidade ou de uma matéria inteira compilados num texto para imprimir ou levar para onde quiser.' },
+      { 'mock': 2, 'numero': 'III · Flashcards com repetição espaçada', 'titulo': 'Crie o card <em>no meio da leitura</em>.', 'texto': 'Selecione o trecho, crie o flashcard ali mesmo ou peça à IA. A revisão segue o agendamento inteligente: você revisa o que está prestes a esquecer. Leve os cards para o Anki ou presenteie um colega.' },
+      { 'mock': 7, 'numero': 'IV · Desempenho por tema e Raio-X', 'titulo': 'Você sabe <em>onde está</em>.', 'texto': 'Acerto por tópico do edital, por unidade e por matéria, atualizado a cada questão. O <strong>Raio-X</strong> lê tudo isso e diz o que estudar primeiro, antes da prova, não depois.' },
+      { 'mock': 15, 'numero': 'V · Compilar para estudar', 'titulo': 'Tudo <em>num arquivo só</em>.', 'texto': 'O texto da unidade com os seus grifos, notas e caderno, ou as provas que você fez, compilados num documento para imprimir ou levar. Cada compilado sai com um <strong>código verificável</strong>.' },
       { 'mock': 5, 'numero': 'VI · Estudo por blocos', 'titulo': 'Unidade como <em>trilha</em>.', 'texto': 'Cada unidade é uma sequência de blocos: texto, vídeo, pontos-chave, linha do tempo, glossário, questões, discursiva. Você vê o progresso e retoma de onde parou.' },
-      { 'mock': 6, 'numero': 'VII · Tutor de IA', 'titulo': 'Um tutor que <em>faz você pensar</em>.', 'texto': 'Por texto e por voz, alimentado pela unidade e pela bibliografia da banca. Tira dúvida, cobra explicação e devolve em forma de desafio.' },
-      { 'mock': 7, 'numero': 'VIII · Desempenho por tema', 'titulo': 'A tela do <em>Raio-X</em>.', 'texto': 'Em cada tópico do edital, quantas questões caíram nas provas anteriores, quanto você acertou e o que estudar primeiro.' },
-      { 'mock': 8, 'numero': 'IX · Simulados e provas anteriores', 'titulo': 'Treine no <em>padrão da banca</em>.', 'texto': 'Provas anteriores completas para responder com cronômetro, folha de respostas e nota de corte de cada concorrência, e simulados novos ao longo do ano.' } ] },
+      { 'mock': 6, 'numero': 'VII · Tutor de IA, por texto e por voz', 'titulo': 'Um tutor que <em>faz você pensar</em>.', 'texto': 'Por texto e por voz, alimentado pela unidade e pela bibliografia da banca. Tira dúvida, cobra explicação e <strong>encena cenários</strong>: defender a posição do Brasil, ensinar a turma, enfrentar a banca oral.' },
+      { 'mock': 14, 'numero': 'VIII · Banco de questões pelo edital', 'titulo': 'Cada questão <em>sabe de onde veio</em>.', 'texto': 'Provas anteriores item por item, cada um ligado ao tópico do edital que cobra. Filtre por <strong>banca, ano, tópico e dificuldade</strong> e treine exatamente o que a prova pede.' },
+      { 'mock': 8, 'numero': 'IX · Simulados e provas anteriores', 'titulo': 'Treine no <em>padrão da banca</em>.', 'texto': 'Provas anteriores completas para responder com cronômetro, folha de respostas e nota de corte de cada concorrência, e simulados novos ao longo do ano.' },
+      { 'mock': 9, 'numero': 'X · Salas de estudo', 'titulo': 'Estude <em>em grupo</em>.', 'texto': 'Uma sala com o feed do que cada colega faz, questões enviadas <strong>para o grupo corrigir</strong> e a correção devolvida com nota. Estudo cooperativo de verdade, sem sair da plataforma.' },
+      { 'mock': 10, 'numero': 'XI · Caderno com conexões', 'titulo': 'Suas ideias, <em>ligadas</em>.', 'texto': 'Um caderno por unidade que cita outras com [[dois colchetes]]. As citações viram um <strong>grafo</strong>: a interdisciplinaridade que o CACD cobra, desenhada pelo seu próprio estudo.' },
+      { 'mock': 12, 'numero': 'XII · Brainstorm de discursivas', 'titulo': 'Argumente <em>antes de escrever</em>.', 'texto': 'Liste os argumentos por quesito. A IA avalia <strong>cobertura e ordem</strong>, aponta o que faltou e monta o esqueleto do texto. Só depois vem a redação, também corrigida por IA.' },
+      { 'mock': 11, 'numero': 'XIII · Rotina de estudo', 'titulo': 'Constância <em>que se vê</em>.', 'texto': 'Cronômetro automático por atividade, mapa do ano, diário e sequência de dias. Você vê <strong>quanto estudou, o quê</strong> e onde a rotina falha.' },
+      { 'mock': 16, 'numero': 'XIV · Ouvir a unidade', 'titulo': 'O texto <em>em áudio</em>.', 'texto': 'A unidade lida em voz, com velocidade de 1 a 2x sem distorcer. Revise no ônibus, na fila, na esteira.' },
+      { 'mock': 18, 'numero': 'XV · Fórum e colegas', 'titulo': 'Ninguém estuda <em>sozinho</em>.', 'texto': 'Cada unidade tem o seu fórum. Colegas com perfil, <strong>estatísticas compartilhadas</strong> por quem quiser e flashcards de presente.' } ] },
   'promessa': { 'rotulo': 'Princípio da Especificidade', 'titulo': 'Não é cursinho genérico.<br>É <em>preparação de banca</em>.', 'texto': 'Todo esforço de estudo rende mais quando é <strong>específico</strong>: à banca que vai cobrar, ao formato da prova, à bibliografia que a comissão respeita e ao histórico do que já caiu. A Falcon foi construída sobre esse princípio.', 'itens': [
       { 'titulo': 'Todo o edital, matéria por matéria', 'texto': 'Cada matéria do CACD organizada em módulos, capítulos e unidades que seguem o edital, com a recorrência de cada tópico nas provas anteriores à vista.' },
       { 'titulo': 'Questões de provas reais, classificadas pelo tópico', 'texto': 'O banco reúne as provas anteriores, item por item, ligadas ao tópico do edital que cobram. Você treina no padrão Cebraspe e sabe de onde vem cada questão.' },
@@ -267,7 +308,7 @@ NOVO = {
   'depoimentos.itens': { 'texto': 'Texto do depoimento.', 'iniciais': 'AA', 'foto': '', 'nome': 'Nome', 'cargo': 'Cargo · ano' },
   'materias.itens': { 'sigla': 'XX', 'nome': 'Nova matéria', 'desc': 'Descrição.', 'cobertura': 'n%' },
   'promessa.itens': { 'titulo': 'Nova promessa', 'texto': 'Texto.' },
-  'ferramentas.itens': { 'mock': 8, 'numero': 'X · Nova ferramenta', 'titulo': 'Título', 'texto': 'Texto.' },
+  'ferramentas.itens': { 'mock': 17, 'numero': 'XVI · Nova ferramenta', 'titulo': 'Título', 'texto': 'Texto.' },
   'planos.itens': { 'gratis': False, 'destaque': False, 'ribbon': '', 'kind': 'Tipo', 'nome': 'Nome do plano', 'tag': 'Para quem…', 'preco': '0', 'periodo': '/ mês', 'sub': '', 'inclui': ['Item'], 'cta': 'Assinar', 'ctaHref': 'app', 'nota': '' },
   'hero.atos': { 'rotulo': 'Ato', 'titulo': 'Título', 'texto': 'Texto.', 'cta1': { 'label': 'Criar conta grátis', 'href': 'app' }, 'cta2': None, 'meta': [] },
   'materias.stats': { 'num': 'n', 'label': 'rótulo' }, 'final.stack': { 'num': 'n', 'label': 'rótulo' }, 'rodape.links': { 'label': 'Link', 'href': '#' },
@@ -324,6 +365,7 @@ js_hero = io.open(os.path.join(AQUI, 'hero-engine.js'), encoding='utf8').read().
 js_dados = ('window.LANDING_DEFAULT = ' + json.dumps(DEFAULT, ensure_ascii=False) + ';\n'
   + 'window.LANDING_NOVO = ' + json.dumps(NOVO, ensure_ascii=False) + ';\n'
   + 'window.LANDING_MOCKS = ' + json.dumps(mocks, ensure_ascii=False) + ';\n'
+  + 'window.LANDING_MOCK_NOMES = ' + json.dumps(MOCK_NOMES, ensure_ascii=False) + ';\n'
   + 'window.LANDING_LOGO = ' + json.dumps(logo_svg) + ';\n'
   + 'window.LANDING_FRAMES = ' + json.dumps({'dir': FRAMES_DIR, 'count': FRAMES_COUNT}) + ';\n')
 

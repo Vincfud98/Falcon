@@ -136,9 +136,12 @@
         + '</figcaption></figure>';
     }).join('') + '</div></div><div class="galeria-piso"></div><div class="galeria-hint"' + e('cursos.dica') + '>' + esc(c.dica) + '</div>';
   R.demo = d => '<div class="vnp-intro">' + cabeca('demo', d, true, SVG.janela) + '</div>';
+  // ilustração do card: índice em LANDING_MOCKS (as 9 do protótipo + as de landing/ilustracoes.html)
+  const mockIdx = (t, i) => { const M = window.LANDING_MOCKS || []; let k = t.mock != null ? parseInt(t.mock, 10) : i; if(!(k >= 0 && k < M.length)) k = Math.max(0, M.length - 1); return k; };
+  const mockDe = (t, i) => (window.LANDING_MOCKS || [])[mockIdx(t, i)] || '';
   R.ferramentas = f => '<div class="tools-head">' + cabeca('ferramentas', f, true, SVG.star) + '</div>'
     + '<div class="tools-grid"' + lista('ferramentas.itens') + '>' + (f.itens || []).map((t, i) => '<div class="tool-card" data-a="' + ((i % 3) + 1) + '"' + item() + '>'
-      + '<div class="tool-mock">' + (window.LANDING_MOCKS[t.mock != null ? t.mock : i] || window.LANDING_MOCKS[window.LANDING_MOCKS.length - 1] || '') + '</div>'
+      + '<div class="tool-mock">' + mockDe(t, i) + (EDITAR ? '<span class="ed-mock" contenteditable="false"><select data-mock-pick="ferramentas.itens.' + i + '.mock" title="Ilustração deste card">' + (window.LANDING_MOCK_NOMES || []).map((n, k) => '<option value="' + k + '"' + (k === mockIdx(t, i) ? ' selected' : '') + '>' + esc(n) + '</option>').join('') + '</select></span>' : '') + '</div>'
       + '<div class="tool-body"><div class="tool-number"' + e('ferramentas.itens.' + i + '.numero') + '>' + esc(t.numero) + '</div><h3 class="tool-title"' + er('ferramentas.itens.' + i + '.titulo') + '>' + rico(t.titulo) + '</h3><p' + er('ferramentas.itens.' + i + '.texto') + '>' + rico(t.texto) + '</p></div></div>').join('') + '</div>';
   R.promessa = pr => '<div class="promise-grid"><div class="promise-head">' + cabeca('promessa', pr, false, SVG.prom) + '</div><div class="promise-body"><div class="promise-list"' + lista('promessa.itens') + '>'
     + (pr.itens || []).map((x, i) => '<div class="promise-item" data-a="' + Math.min(7, i + 2) + '"' + item() + '><div class="promise-num">' + String(i + 1).padStart(2, '0') + '</div><div><h3' + er('promessa.itens.' + i + '.titulo') + '>' + rico(x.titulo) + '</h3><p' + er('promessa.itens.' + i + '.texto') + '>' + rico(x.texto) + '</p></div></div>').join('') + '</div></div></div>';
@@ -394,6 +397,25 @@
         arr.push(modelo); marcarSujo(); render();
       });
       box.appendChild(add);
+    });
+    // ilustração do card de Diferenciais (seletor pelo nome)
+    document.querySelectorAll('[data-mock-pick]').forEach(sel => {
+      if(sel.__edOk) return; sel.__edOk = true;
+      sel.addEventListener('mousedown', ev => ev.stopPropagation());
+      sel.addEventListener('change', () => { por(sel.getAttribute('data-mock-pick'), parseInt(sel.value, 10)); marcarSujo(); render(); });
+    });
+    // "Voltar ao padrão desta seção": recupera o conteúdo padrão do sistema (novos cards, textos revistos)
+    document.querySelectorAll('[data-sec]').forEach(sec => {
+      if(sec.querySelector(':scope > .ed-reset')) return;
+      const k = sec.getAttribute('data-sec'); if(!window.LANDING_DEFAULT[k]) return;
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'ed-reset'; b.setAttribute('contenteditable', 'false'); b.textContent = 'Voltar ao padrão desta seção';
+      b.addEventListener('mousedown', ev => ev.preventDefault());
+      b.addEventListener('click', ev => {
+        ev.preventDefault(); ev.stopPropagation();
+        if(!confirm('Trocar o conteúdo desta seção pelo padrão do sistema? O que você editou nela será substituído (até salvar, "Descartar alterações" desfaz).')) return;
+        window.LANDING[k] = JSON.parse(JSON.stringify(window.LANDING_DEFAULT[k])); marcarSujo(); render();
+      });
+      sec.appendChild(b);
     });
     // imagens: trocar foto (upload no bucket "landing")
     document.querySelectorAll('[data-img]').forEach(el => {
