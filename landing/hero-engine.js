@@ -4,6 +4,7 @@
    ═════════════════════════════ */
 (function(){
   const FRAMES = { dir: '__FRAMES__', dirM: '__FRAMES_M__', count: __COUNT__, ext: 'webp' };
+  if(new URLSearchParams(location.search).get('editar') === '1') return;   // no editor o herói é um roteiro parado (landing-runtime)
   const ATOS = [0.24, 0.56];   // pontos do vídeo (10,96 s): lago → Meteoro → jardim
   const hero = document.getElementById('top'), canvas = document.getElementById('heroCanvas'), tag = document.getElementById('heroPreviewTag'), scrollHint = document.getElementById('scrollHint');
   if(!hero || !canvas) return;
@@ -76,16 +77,40 @@
 /* GALERIA DE CURSOS — a parede anda para o lado enquanto você rola */
 (function(){
   const sec = document.getElementById('cursos'); if(!sec) return;
+  if(new URLSearchParams(location.search).get('editar') === '1') return;   // no editor a galeria é uma grade parada
   let ticking = false;
   function update(){
     ticking = false; const wall = document.getElementById('galeriaWall'); if(!wall) return;
     if(window.innerWidth <= 860){ wall.style.transform = ''; return; }
+    const band = wall.parentElement; if(band && band.clientHeight + 'x' + band.clientWidth !== chaveMedida) ajustar();
     const rect = sec.getBoundingClientRect(), scrollable = sec.offsetHeight - window.innerHeight;
     let p = scrollable > 0 ? (-rect.top) / scrollable : 0; p = Math.max(0, Math.min(1, p));
     const max = Math.max(0, wall.scrollWidth - window.innerWidth);
     wall.style.transform = 'translate3d(' + (-p * max).toFixed(1) + 'px,0,0)';
   }
+  // A largura da obra vem do CSS (limite por 100cqh); como a placa cresce quando
+  // estreita, a altura real é medida e a obra encolhe até caber na faixa.
+  let chaveMedida = '';
+  function ajustar(){
+    const wall = document.getElementById('galeriaWall'), band = wall && wall.parentElement; if(!wall || !band) return;
+    // a faixa muda de tamanho (janela, fontes, re-render): observar é mais seguro que o evento resize
+    if(!band.__ro && window.ResizeObserver){ band.__ro = new ResizeObserver(() => { if(band.clientHeight + 'x' + band.clientWidth !== chaveMedida) ajustar(); }); band.__ro.observe(band); }
+    chaveMedida = band.clientHeight + 'x' + band.clientWidth;
+    wall.style.removeProperty('--obra-w');
+    if(window.innerWidth <= 860 || document.body.classList.contains('ed-on')) return;
+    const obras = Array.prototype.slice.call(wall.querySelectorAll('.obra')); if(!obras.length) return;
+    const alvo = band.clientHeight - (band.clientHeight < 640 ? 44 : 72);   // folga acima e abaixo (menor em telas baixas)
+    let w = obras[0].getBoundingClientRect().width;
+    for(let k = 0; k < 4; k++){
+      const alt = Math.max.apply(null, obras.map(o => o.offsetHeight));
+      if(alt <= alvo || w <= 200) break;
+      w = Math.max(200, Math.floor(w * alvo / alt)); wall.style.setProperty('--obra-w', w + 'px');
+    }
+  }
   function onScroll(){ if(!ticking){ requestAnimationFrame(update); ticking = true; } }
-  window.addEventListener('scroll', onScroll, { passive: true }); window.addEventListener('resize', onScroll, { passive: true }); update();
-  window.__falconGaleria = { update: update };
+  window.addEventListener('scroll', onScroll, { passive: true });
+  window.addEventListener('resize', () => { ajustar(); onScroll(); }, { passive: true });
+  if(document.fonts && document.fonts.ready) document.fonts.ready.then(() => { ajustar(); update(); });
+  ajustar(); update();
+  window.__falconGaleria = { update: update, ajustar: ajustar };
 })();

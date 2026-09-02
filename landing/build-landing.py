@@ -31,16 +31,27 @@ SB_KEY = re.search(r"const KEY = '(ey[^']+)'", io.open(RAIZ + 'index.html', enco
 css_proto = P[P.index('<style>') + 7:P.index('</style>')]
 css_extra = r"""
 /* ═══ FALCON · acréscimos da landing ═══ */
-.topbar-logo{ display:inline-flex; align-items:center; white-space:nowrap; }
-.topbar-logo .logo-word{ white-space:nowrap; font-family:var(--serif); font-weight:500; font-size:1.25rem; letter-spacing:.02em; color:var(--text); margin-left:.55rem; }
-.topbar-logo .logo-word em{ font-style:normal; color:var(--accent); }
+/* Marca no topo: a mesma do rodapé (losango dourado + "Falcon · Grupo Ubique") */
+.topbar-logo{ width:auto; height:auto; display:inline-flex; align-items:center; gap:.75rem; text-decoration:none; white-space:nowrap; }
+.topbar-logo-mark{ width:28px; height:28px; display:block; flex:0 0 auto; }
+.topbar-logo-mark svg{ width:100%; height:100%; display:block; }
+.topbar-logo-mark svg path{ fill:var(--accent); }
+.topbar-logo .logo-word{ font-family:var(--serif); font-weight:400; font-size:1.2rem; letter-spacing:.01em; color:var(--text); }
+.topbar-logo .logo-word em{ color:var(--accent); font-style:italic; }
 .topbar-right{ display:flex; align-items:center; gap:.6rem; }
 .topbar .btn{ padding:.55rem 1rem; font-size:var(--fs-micro); }
 .topbar .btn-ghost{ border-color:var(--border-strong); }
 @media (max-width:640px){ .topbar .btn-ghost{ display:none; } }
+/* Texto rico: fonte e cor escolhidas no editor. Classes da paleta, nunca style inline.
+   Cores = as seis do app (com a versão do tema claro) + dourado / cor do texto / suave. */
+:root{ --c-amarelo:#e8d44d; --c-verde:#5dd49f; --c-azul:#6ba3d6; --c-laranja:#e8a857; --c-rosa:#e491b8; --c-vermelho:#e87878; }
+html[data-theme="light"]{ --c-amarelo:#9a8408; --c-verde:#1d8a5c; --c-azul:#2c6ea3; --c-laranja:#a86617; --c-rosa:#a83f6f; --c-vermelho:#b03434; }
+.f-serif{ font-family:var(--serif) !important; } .f-sans{ font-family:var(--sans) !important; } .f-mono{ font-family:var(--mono) !important; }
+.c-dourado{ color:var(--accent) !important; } .c-texto{ color:var(--text) !important; } .c-suave{ color:var(--text-dim) !important; }
+.c-amarelo{ color:var(--c-amarelo) !important; } .c-verde{ color:var(--c-verde) !important; } .c-azul{ color:var(--c-azul) !important; } .c-laranja{ color:var(--c-laranja) !important; } .c-rosa{ color:var(--c-rosa) !important; } .c-vermelho{ color:var(--c-vermelho) !important; }
 /* O herói vive em cima de um vídeo: paleta ESCURA própria, em qualquer tema
    (no modo claro o texto escuro sumia sobre a imagem). */
-.scroll-hero{ height:420vh; --bg:#0b0c0f; --bg-card:#13151a; --text:#f0ece4; --text-dim:rgba(240,236,228,.7); --text-mute:rgba(240,236,228,.42); --accent:#c8a97e; --accent-lo:rgba(200,169,126,.14); --border:rgba(200,169,126,.14); --border-strong:rgba(200,169,126,.28); --accent-strong:rgba(200,169,126,.32); color:var(--text); }
+.scroll-hero{ height:420vh; --bg:#0b0c0f; --bg-card:#13151a; --text:#f0ece4; --text-dim:rgba(240,236,228,.7); --text-mute:rgba(240,236,228,.42); --accent:#c8a97e; --accent-lo:rgba(200,169,126,.14); --border:rgba(200,169,126,.14); --border-strong:rgba(200,169,126,.28); --accent-strong:rgba(200,169,126,.32); --c-amarelo:#e8d44d; --c-verde:#5dd49f; --c-azul:#6ba3d6; --c-laranja:#e8a857; --c-rosa:#e491b8; --c-vermelho:#e87878; color:var(--text); }
 @media (max-width:980px){ .scroll-hero{ height:320vh; } }
 .scroll-hero .btn-primary{ color:#0b0c0f; }
 .scroll-hero .stage-plaque{ background:rgba(11,12,15,.62); }
@@ -52,16 +63,19 @@ html[data-theme="light"] .scroll-hero .btn-primary:hover{ color:var(--accent); }
              linear-gradient(180deg, rgba(11,12,15,.5) 0%, transparent 28%, transparent 72%, rgba(11,12,15,.9) 100%); }
 .hero-preview-tag{ position:absolute; top:calc(68px + 1rem); right:1.2rem; z-index:3; font-family:var(--mono); font-size:var(--fs-micro); letter-spacing:.2em; text-transform:uppercase; color:var(--text-mute); border:1px solid var(--border); padding:.3rem .6rem; border-radius:2px; background:rgba(11,12,15,.5); backdrop-filter:blur(8px); }
 .plaque-year.is-text{ font-size:clamp(2rem,3.4vw,3.2rem); line-height:1.05; }
-/* Galeria de cursos */
+/* Galeria de cursos: coluna cabeçalho → faixa das obras → dica. A faixa é um container
+   de tamanho e cada obra se dimensiona pela ALTURA que sobrou (100cqh), então nunca
+   invade o título nem sai por baixo, em qualquer altura de tela. */
 .galeria{ position:relative; height:calc(100vh + 420vw); }
-.galeria-stage{ position:sticky; top:0; height:100vh; overflow:hidden; background:radial-gradient(ellipse 60% 50% at 50% 0%, rgba(200,169,126,.10), transparent 60%), linear-gradient(180deg,#0c0d10 0%, #0b0c0f 60%, #08090b 100%); --text:#f0ece4; --text-dim:rgba(240,236,228,.58); --text-mute:rgba(240,236,228,.32); --accent:#c8a97e; }
+.galeria-stage{ position:sticky; top:0; height:100vh; overflow:hidden; display:flex; flex-direction:column; background:radial-gradient(ellipse 60% 50% at 50% 0%, rgba(200,169,126,.10), transparent 60%), linear-gradient(180deg,#0c0d10 0%, #0b0c0f 60%, #08090b 100%); --text:#f0ece4; --text-dim:rgba(240,236,228,.58); --text-mute:rgba(240,236,228,.32); --accent:#c8a97e; --c-amarelo:#e8d44d; --c-verde:#5dd49f; --c-azul:#6ba3d6; --c-laranja:#e8a857; --c-rosa:#e491b8; --c-vermelho:#e87878; }
 .galeria-stage::after{ content:""; position:absolute; left:0; right:0; bottom:0; height:22vh; background:linear-gradient(180deg, transparent, rgba(0,0,0,.55)); pointer-events:none; }
 .galeria-piso{ position:absolute; left:0; right:0; bottom:0; height:18vh; background:linear-gradient(180deg, #121317, #0a0b0d); border-top:1px solid rgba(200,169,126,.10); }
-.galeria-head{ position:absolute; top:calc(68px + 2rem); left:0; right:0; text-align:center; z-index:3; padding:0 var(--gutter); pointer-events:none; }
+.galeria-head{ position:relative; z-index:3; flex:0 0 auto; padding:calc(68px + 2rem) var(--gutter) 0; text-align:center; pointer-events:none; }
 .galeria-head .s-title{ font-size:clamp(1.6rem,2.6vw,2.6rem); }
-.galeria-hint{ position:absolute; bottom:1.4rem; left:0; right:0; text-align:center; font-family:var(--mono); font-size:var(--fs-micro); letter-spacing:.25em; text-transform:uppercase; color:var(--text-mute); z-index:3; }
+.galeria-band{ position:relative; z-index:2; flex:1 1 auto; min-height:0; container-type:size; }
+.galeria-hint{ position:relative; z-index:3; flex:0 0 auto; padding:1.2rem 0 1.5rem; text-align:center; font-family:var(--mono); font-size:var(--fs-micro); letter-spacing:.25em; text-transform:uppercase; color:var(--text-mute); }
 .galeria-wall{ position:absolute; top:0; bottom:0; left:0; display:flex; align-items:center; gap:clamp(4rem,8vw,9rem); padding:0 12vw; will-change:transform; }
-.obra{ flex:0 0 auto; width:clamp(300px,34vw,520px); position:relative; }
+.obra{ flex:0 0 auto; position:relative; width:clamp(300px,34vw,520px); width:var(--obra-w, min(clamp(300px,34vw,520px), max(260px, calc((100cqh - 280px) / 1.25)))); }
 .obra-luz{ position:absolute; left:50%; top:-40vh; width:170%; height:60vh; transform:translateX(-50%); background:radial-gradient(ellipse 50% 100% at 50% 100%, rgba(200,169,126,.16), transparent 70%); pointer-events:none; }
 .obra-moldura{ position:relative; padding:14px; background:linear-gradient(135deg,#8a6f45,#c8a97e 40%,#7b6238 60%,#b8985f); border-radius:2px; box-shadow:0 40px 80px -30px rgba(0,0,0,.9), inset 0 0 0 1px rgba(0,0,0,.4); }
 .obra-moldura::before{ content:""; position:absolute; inset:6px; border:1px solid rgba(0,0,0,.35); pointer-events:none; }
@@ -71,7 +85,7 @@ html[data-theme="light"] .scroll-hero .btn-primary:hover{ color:var(--accent); }
 .obra-tela .obra-sigla{ position:absolute; left:.9rem; top:.8rem; font-family:var(--mono); font-size:.7rem; letter-spacing:.3em; color:var(--accent); opacity:.9; }
 .obra-tela .obra-nome{ position:absolute; left:.9rem; right:.9rem; bottom:.9rem; font-family:var(--serif); font-size:clamp(1.3rem,2vw,1.9rem); line-height:1.1; color:#f0ece4; text-shadow:0 2px 16px rgba(0,0,0,.6); }
 .obra-tela .obra-nome em{ color:var(--accent); font-style:italic; }
-.placa{ margin:1.4rem auto 0; width:min(88%,360px); padding:.9rem 1.1rem; background:linear-gradient(135deg,#3a3125,#5a4a33 45%,#33291d); border:1px solid rgba(200,169,126,.45); border-radius:2px; box-shadow:0 12px 30px -16px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.08); color:#e6dcc8; }
+.placa{ margin:1.4rem auto 0; width:min(96%,360px); padding:.9rem 1.1rem; background:linear-gradient(135deg,#3a3125,#5a4a33 45%,#33291d); border:1px solid rgba(200,169,126,.45); border-radius:2px; box-shadow:0 12px 30px -16px rgba(0,0,0,.9), inset 0 1px 0 rgba(255,255,255,.08); color:#e6dcc8; }
 .placa-titulo{ font-family:var(--serif); font-size:1.1rem; font-weight:500; letter-spacing:.02em; }
 .placa-prof{ font-family:var(--sans); font-size:.72rem; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin-top:.15rem; }
 .placa-dados{ display:flex; flex-wrap:wrap; gap:.35rem .9rem; margin-top:.55rem; font-family:var(--mono); font-size:.62rem; letter-spacing:.06em; color:rgba(230,220,200,.7); }
@@ -81,9 +95,12 @@ html[data-theme="light"] .scroll-hero .btn-primary:hover{ color:var(--accent); }
 .placa-preco a{ font-family:var(--sans); font-size:.68rem; letter-spacing:.12em; text-transform:uppercase; color:var(--accent); text-decoration:none; border-bottom:1px solid var(--accent-strong); }
 .placa-preco a:hover{ color:var(--text); border-color:var(--text); }
 .obra.is-placeholder .obra-tela::after{ content:"foto do professor · marcador"; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); font-family:var(--mono); font-size:.6rem; letter-spacing:.2em; text-transform:uppercase; color:rgba(240,236,228,.35); white-space:nowrap; }
+@media (max-height:820px) and (min-width:861px){ .galeria-head{ padding-top:calc(68px + 1rem); } .galeria-head .s-label{ margin-bottom:.7rem; } .galeria-hint{ padding:.7rem 0 .9rem; } }
+@media (max-height:720px) and (min-width:861px){ .galeria-hint{ display:none; } }
 @media (max-width:860px){
-  .galeria{ height:auto; } .galeria-stage{ position:relative; height:auto; overflow:visible; padding:calc(68px + 5rem) 0 4rem; }
-  .galeria-head{ position:static; margin-bottom:2rem; pointer-events:auto; } .galeria-wall{ position:static; flex-direction:column; gap:3.5rem; padding:0 var(--gutter); transform:none !important; }
+  .galeria{ height:auto; } .galeria-stage{ position:relative; height:auto; overflow:visible; display:block; padding:calc(68px + 5rem) 0 4rem; }
+  .galeria-head{ position:static; padding:0 var(--gutter); margin-bottom:2rem; pointer-events:auto; } .galeria-band{ position:static; container-type:normal; }
+  .galeria-wall{ position:static; flex-direction:column; gap:3.5rem; padding:0 var(--gutter); transform:none !important; }
   .galeria-hint, .galeria-piso, .obra-luz{ display:none; } .obra{ width:min(100%,420px); margin:0 auto; }
 }
 /* Matérias */
@@ -110,20 +127,52 @@ body.ed-on [data-item]:hover > .ed-ctl{ opacity:1; }
 body.ed-on .ed-ctl button, body.ed-on .ed-add, body.ed-on .ed-img{ font-family:var(--mono); font-size:.62rem; letter-spacing:.06em; background:#13151a; color:#f0ece4; border:1px solid rgba(200,169,126,.5); border-radius:4px; padding:.15rem .45rem; cursor:pointer; line-height:1.3; }
 body.ed-on .ed-ctl button:hover, body.ed-on .ed-add:hover, body.ed-on .ed-img:hover{ background:#c8a97e; color:#0b0c0f; }
 body.ed-on .ed-add{ display:inline-flex; margin:.6rem .3rem; padding:.3rem .7rem; border-style:dashed; }
-body.ed-on .ed-img{ position:absolute; left:.5rem; bottom:.5rem; z-index:20; }
-body.ed-on .ed-img-x{ left:auto; right:.5rem; }
-body.ed-on .testimonial-avatar .ed-img{ left:50%; bottom:-1.6rem; transform:translateX(-50%); white-space:nowrap; }
-body.ed-on .ed-placa{ margin-top:.8rem; padding-top:.6rem; border-top:1px dashed rgba(200,169,126,.35); display:flex; flex-direction:column; gap:.4rem; font-family:var(--sans); font-size:.7rem; text-align:left; }
-body.ed-on .ed-placa-ato{ display:flex; flex-direction:column; gap:.15rem; padding:.3rem .4rem; background:rgba(0,0,0,.25); border-radius:3px; }
-body.ed-on .ed-placa-ato b{ font-family:var(--mono); font-size:.55rem; letter-spacing:.2em; text-transform:uppercase; color:var(--accent); }
+/* botões de foto no canto de cima, longe do nome que fica embaixo do quadro */
+body.ed-on .ed-img{ position:absolute; top:.5rem; right:.5rem; z-index:20; white-space:nowrap; }
+body.ed-on .ed-img-x{ top:2.3rem; }
+body.ed-on .testimonial-avatar .ed-img{ top:auto; right:auto; left:50%; bottom:-1.6rem; transform:translateX(-50%); }
+body.ed-on .testimonial-avatar .ed-img-x{ bottom:-3.2rem; }
 body.ed-on .ed-nota{ text-align:center; margin-top:.8rem; font-family:var(--sans); font-size:.72rem; color:var(--text-mute); }
 body.ed-on .ed-url{ display:inline-block; min-width:16ch; padding:.1rem .4rem; }
+/* edição do herói: os três atos viram um roteiro parado, um embaixo do outro, cada um sobre o quadro do vídeo daquele momento */
+body.ed-on .scroll-hero{ height:auto; }
+body.ed-on .scroll-stage{ position:static; height:auto; overflow:visible; background:#0b0c0f; }
+body.ed-on .hero-canvas, body.ed-on .hero-veil, body.ed-on .scroll-hint, body.ed-on .hero-preview-tag{ display:none; }
+body.ed-on .stage-overlay{ position:static; display:block; padding:0; }
+body.ed-on .stage-inner{ display:block; max-width:none; margin:0; }
+body.ed-on .panel{ position:relative; opacity:1; transform:none; pointer-events:auto; }
+.ed-ato{ position:relative; padding:3.5rem var(--gutter); background:#0b0c0f center/cover no-repeat; border-bottom:1px solid rgba(200,169,126,.28); }
+.ed-ato:first-child{ padding-top:calc(68px + 3rem); }
+.ed-ato::before{ content:""; position:absolute; inset:0; pointer-events:none; background:linear-gradient(90deg, rgba(11,12,15,.86) 0%, rgba(11,12,15,.6) 40%, rgba(11,12,15,.18) 75%, rgba(11,12,15,.05) 100%), linear-gradient(180deg, rgba(11,12,15,.55) 0%, transparent 30%, transparent 70%, rgba(11,12,15,.85) 100%); }
+.ed-ato > *{ position:relative; }
+.ed-ato-num{ max-width:var(--maxw); margin:0 auto 1.6rem; display:flex; align-items:center; gap:.8rem; font-family:var(--mono); font-size:.62rem; letter-spacing:.25em; text-transform:uppercase; color:#c8a97e; }
+.ed-ato-num::after{ content:""; flex:1; height:1px; background:rgba(200,169,126,.35); }
+.ed-ato-grid{ max-width:var(--maxw); margin:0 auto; display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:clamp(2rem,5vw,5rem); align-items:center; }
+@media (max-width:980px){ .ed-ato-grid{ grid-template-columns:1fr; } body.ed-on .stage-plaque{ display:flex; } }
+/* edição da galeria: todas as obras numa grade parada (nada de rolagem lateral nem 100vh) */
+body.ed-on .galeria{ height:auto; }
+body.ed-on .galeria-stage{ position:relative; height:auto; overflow:visible; display:block; padding:calc(68px + 4rem) var(--gutter) 4rem; }
+body.ed-on .galeria-stage::after{ display:none; }
+body.ed-on .galeria-head{ position:static; padding:0; margin-bottom:2.5rem; pointer-events:auto; }
+body.ed-on .galeria-band{ position:static; container-type:normal; }
+body.ed-on .galeria-wall{ position:static; display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:3.5rem 2.5rem; padding:0; transform:none !important; align-items:start; max-width:var(--maxw); margin:0 auto; }
+body.ed-on .obra{ width:auto; }
+body.ed-on .galeria-hint, body.ed-on .galeria-piso, body.ed-on .obra-luz{ display:none; }
+body.ed-on .galeria-wall > .ed-add{ align-self:center; justify-self:center; padding:1rem 1.4rem; }
+/* barra de formatação do texto rico */
+.ed-fmt{ position:fixed; z-index:6000; display:flex; align-items:center; gap:.2rem; padding:.3rem .4rem; background:#13151a; border:1px solid rgba(200,169,126,.5); border-radius:6px; box-shadow:0 14px 34px -14px rgba(0,0,0,.9); font-family:var(--mono); color:#f0ece4; white-space:nowrap; }
+.ed-fmt button{ background:transparent; border:1px solid transparent; color:#f0ece4; padding:.2rem .45rem; border-radius:4px; cursor:pointer; font-family:var(--mono); font-size:.66rem; letter-spacing:.04em; line-height:1.4; }
+.ed-fmt button:hover{ border-color:rgba(200,169,126,.5); }
+.ed-fmt button.on{ background:#c8a97e; color:#0b0c0f; }
+.ed-fmt button b{ font-weight:700; } .ed-fmt button i{ font-style:italic; font-family:var(--serif); font-size:.9rem; }
+.ed-fmt-sep{ width:1px; height:16px; background:rgba(200,169,126,.3); margin:0 .25rem; }
+.ed-fmt button.ed-fmt-cor, .ed-fmt button.ed-fmt-cor.on{ width:16px; height:16px; padding:0; border-radius:50%; border:1px solid rgba(255,255,255,.25); background:currentColor; }
+.ed-fmt button.ed-fmt-cor.on{ box-shadow:0 0 0 2px #13151a, 0 0 0 3px #c8a97e; }
 .ed-bar{ position:fixed; left:0; right:0; bottom:0; z-index:5000; display:flex; align-items:center; gap:.8rem; padding:.7rem var(--gutter); background:rgba(11,12,15,.96); border-top:1px solid rgba(200,169,126,.35); backdrop-filter:blur(10px); font-family:var(--sans); color:#f0ece4; flex-wrap:wrap; }
 .ed-bar-t{ font-family:var(--mono); font-size:.62rem; letter-spacing:.25em; text-transform:uppercase; color:#c8a97e; }
 .ed-status{ font-size:.75rem; color:rgba(240,236,228,.6); flex:1; }
 .ed-bar-acoes{ display:flex; gap:.5rem; flex-wrap:wrap; }
 .ed-bar .btn{ padding:.5rem .9rem; font-size:var(--fs-micro); }
-body.ed-on .scroll-hero{ height:140vh; }
 """
 
 # ── mocks dos 9 cartões de ferramentas + logo ────────────────────────────
@@ -139,8 +188,8 @@ logo_svg = re.search(r'<span class="footer-brand-logo">\s*(<svg.*?</svg>)', P, r
 topbar_logo_svg = re.search(r'<a href="#top" class="topbar-logo" aria-label="Ubique">\s*(<svg.*?</svg>)', P, re.S).group(1)
 
 # ── CONTEÚDO PADRÃO (o que o admin edita) ─────────────────────────────────
-def curso(sigla, nome, materia, prof, cred, dados, real=False):
-    return { 'sigla': sigla, 'nome': nome, 'materia': materia, 'professor': prof, 'foto': '', 'dados': [cred, dados, 'questões de provas: a definir'], 'preco': 'R$ 100', 'precoNota': '/ mês por matéria · a confirmar', 'cta': 'Ver matéria', 'link': 'app' }
+def curso(sigla, nome, materia, prof, cred, dados, foto=''):
+    return { 'sigla': sigla, 'nome': nome, 'materia': materia, 'professor': prof, 'foto': foto, 'dados': [cred, dados, 'questões de provas: a definir'], 'preco': 'R$ 100', 'precoNota': '/ mês por matéria · a confirmar', 'cta': 'Ver matéria', 'link': 'app' }
 DEFAULT = {
   'cta': { 'app': APP, 'sticky': 'Criar conta grátis' },
   'hero': {
@@ -159,12 +208,13 @@ DEFAULT = {
   'strip': { 'rotulo': 'Preparação específica para', 'itens': ['CACD', 'Instituto Rio Branco', 'Edital vivo', 'Provas anteriores', 'Bibliografia da banca'] },
   'video': { 'rotulo': 'Vídeo de apresentação', 'titulo': 'Veja a plataforma<br><em>por dentro</em>.', 'texto': 'Em poucos minutos: como uma unidade é estudada de ponta a ponta, como as questões de provas anteriores conversam com o edital e como o tutor de IA entra no meio do estudo.', 'chip': 'Assista gratuitamente', 'legenda': '"O caminho inteiro do candidato, numa plataforma só."', 'tituloVideo': 'Falcon, por dentro:<br><em>aulas, provas, flashcards, cadernos e tutor</em>', 'duracao': 'em breve', 'url': '' },
   'cursos': { 'rotulo': 'Os cursos e seus professores', 'titulo': 'Uma matéria, <em>um especialista</em>.', 'dica': 'Role para caminhar pela galeria', 'itens': [
-      curso('HB', 'História <em>do Brasil</em>', 'História do Brasil', 'Cláudia Viscardi', 'Doutora em História Social · UFJF', '3 módulos · 43 unidades', True),
-      curso('HM', 'História <em>Mundial</em>', 'História Mundial', 'Professor a definir', 'credenciais', 'módulos · unidades'),
-      curso('PI', 'Política <em>Internacional</em>', 'Política Internacional', 'Professor a definir', 'credenciais', 'módulos · unidades'),
-      curso('ECO', 'Economia', 'Economia', 'Professor a definir', 'credenciais', 'módulos · unidades'),
-      curso('DIP', 'Direito', 'Direito', 'Professor a definir', 'credenciais', 'módulos · unidades'),
-      curso('GEO', 'Geografia', 'Geografia', 'Professor a definir', 'credenciais', 'módulos · unidades'),
+      curso('HB', 'História <em>do Brasil</em>', 'História do Brasil', 'Cláudia Viscardi', 'Professora doutora titular · UFJF', '3 módulos · 43 unidades', 'landing/fotos/claudia-viscardi.webp'),
+      curso('HM', 'História <em>Mundial</em>', 'História Mundial', 'Gabriel Falcão', 'Diplomata · aprovado no CACD 2024', 'módulos · unidades', 'landing/fotos/gabriel-falcao.webp'),
+      curso('PI', 'Política <em>Internacional</em>', 'Política Internacional', 'Marcílio Falcão', 'Diplomata · fundador do Grupo Ubique', 'módulos · unidades', 'landing/fotos/marcilio-falcao.webp'),
+      curso('ECO', 'Economia', 'Economia', 'Rogério Graça', 'Diplomata · aprovado no CACD 2023', 'módulos · unidades', 'landing/fotos/rogerio-graca.webp'),
+      curso('DI', 'Direito <em>Interno</em>', 'Direito Interno', 'Giovanna Souza', 'Diplomata · 1º lugar no CACD 2023', 'módulos · unidades', 'landing/fotos/giovanna-souza.webp'),
+      curso('DIP', 'Direito <em>Internacional</em>', 'Direito Internacional', 'Juliana Barreto', 'Diplomata', 'módulos · unidades'),
+      curso('GEO', 'Geografia', 'Geografia', 'Luis Marcelo', 'Diplomata · aprovado no CACD 2024', 'módulos · unidades', 'landing/fotos/luis-marcelo.webp'),
       curso('LP', 'Língua <em>Portuguesa</em>', 'Língua Portuguesa', 'Professor a definir', 'credenciais', 'módulos · unidades'),
       curso('ING', 'Inglês', 'Inglês', 'Professor a definir', 'credenciais', 'módulos · unidades') ] },
   'demo': { 'rotulo': 'Veja na prática', 'titulo': 'A plataforma inteira,<br><em>à mão</em> do candidato.', 'texto': 'Toque no botão abaixo para abrir uma unidade de exemplo (<strong>História do Brasil — A Chegada, 1500</strong>) dentro da própria plataforma. Você navega pelos <strong>13 tipos de bloco</strong>: texto editorial, vídeo, quiz, discursiva, flashcards, fórum e mais.' },
@@ -225,7 +275,8 @@ NOVO = {
 }
 
 # ── shell HTML ───────────────────────────────────────────────────────────
-topbar = ('<header class="topbar">\n  <a href="#top" class="topbar-logo" aria-label="Falcon">' + topbar_logo_svg + '<span class="logo-word">Falcon <em>·</em> Ubique</span></a>\n'
+# marca do topo = a mesma do rodapé; o texto vem de rodape.marca (render() preenche o [data-marca])
+topbar = ('<header class="topbar">\n  <a href="#top" class="topbar-logo" aria-label="Falcon · Grupo Ubique"><span class="topbar-logo-mark">' + logo_svg + '</span><span class="logo-word" data-marca>Falcon · <em>Grupo Ubique</em></span></a>\n'
   '  <div class="topbar-right"><a class="btn btn-ghost" data-app-link href="' + APP + '">Entrar</a><a class="btn btn-primary" data-app-link href="' + APP + '">Criar conta grátis</a>\n'
   + linhas(3427, 3430) + '\n  </div>\n</header>')
 menu = '<aside class="anchor-menu" id="anchorMenu" aria-label="Navegação da página">' + ''.join('<a class="anchor-item" href="#' + i + '" data-target="' + i + '"><span class="anchor-item-dot"></span><span class="anchor-item-label">' + l + '</span></a>' for i, l in [('top', 'Início'), ('video', 'Vídeo'), ('cursos', 'Cursos'), ('integrado', 'Veja na prática'), ('ferramentas', 'Plataforma'), ('materias', 'Matérias'), ('alunos', 'Alunos'), ('planos', 'Planos'), ('faq', 'Dúvidas'), ('experimentar', 'Experimentar')]) + '</aside>'
@@ -273,7 +324,8 @@ js_hero = io.open(os.path.join(AQUI, 'hero-engine.js'), encoding='utf8').read().
 js_dados = ('window.LANDING_DEFAULT = ' + json.dumps(DEFAULT, ensure_ascii=False) + ';\n'
   + 'window.LANDING_NOVO = ' + json.dumps(NOVO, ensure_ascii=False) + ';\n'
   + 'window.LANDING_MOCKS = ' + json.dumps(mocks, ensure_ascii=False) + ';\n'
-  + 'window.LANDING_LOGO = ' + json.dumps(logo_svg) + ';\n')
+  + 'window.LANDING_LOGO = ' + json.dumps(logo_svg) + ';\n'
+  + 'window.LANDING_FRAMES = ' + json.dumps({'dir': FRAMES_DIR, 'count': FRAMES_COUNT}) + ';\n')
 
 head = '''<!DOCTYPE html>
 <html lang="pt-BR" data-theme="dark">
