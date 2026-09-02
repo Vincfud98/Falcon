@@ -244,7 +244,7 @@ def _cal():
 IL_corpo = IL[IL.index('</style>') + 8:].replace('{{HEAT}}', _heat()).replace('{{WAVE}}', _wave()).replace('{{CAL}}', _cal())
 for nome, html in re.findall(r'^<!-- ilustracao: (.+?) -->\n([\s\S]*?)(?=^<!-- ilustracao: |\Z)', IL_corpo, re.M):
     mocks.append(html.strip()); MOCK_NOMES.append(nome.strip())
-assert len(mocks) == len(MOCK_NOMES) == 19, (len(mocks), len(MOCK_NOMES))
+assert len(mocks) == len(MOCK_NOMES) == 20, (len(mocks), len(MOCK_NOMES))
 css_extra += css_ilustracoes + r"""
 /* editor: seletor de ilustração no card + "voltar ao padrão" por seção */
 body.ed-on .ed-mock{ position:absolute; top:.5rem; right:.5rem; z-index:20; }
@@ -303,7 +303,8 @@ DEFAULT = {
       { 'mock': 12, 'numero': 'XII · Brainstorm de discursivas', 'titulo': 'Argumente <em>antes de escrever</em>.', 'texto': 'Liste os argumentos por quesito. A IA avalia <strong>cobertura e ordem</strong>, aponta o que faltou e monta o esqueleto do texto. Só depois vem a redação, também corrigida por IA.' },
       { 'mock': 11, 'numero': 'XIII · Rotina de estudo', 'titulo': 'Constância <em>que se vê</em>.', 'texto': 'Cronômetro automático por atividade, mapa do ano, diário e sequência de dias. Você vê <strong>quanto estudou, o quê</strong> e onde a rotina falha.' },
       { 'mock': 16, 'numero': 'XIV · Ouvir a unidade', 'titulo': 'O texto <em>em áudio</em>.', 'texto': 'A unidade lida em voz, com velocidade de 1 a 2x sem distorcer. Revise no ônibus, na fila, na esteira.' },
-      { 'mock': 18, 'numero': 'XV · Fórum e colegas', 'titulo': 'Ninguém estuda <em>sozinho</em>.', 'texto': 'Cada unidade tem o seu fórum. Colegas com perfil, <strong>estatísticas compartilhadas</strong> por quem quiser e flashcards de presente.' } ] },
+      { 'mock': 18, 'numero': 'XV · Fórum e colegas', 'titulo': 'Ninguém estuda <em>sozinho</em>.', 'texto': 'Cada unidade tem o seu fórum. Colegas com perfil, <strong>estatísticas compartilhadas</strong> por quem quiser e flashcards de presente.' },
+      { 'mock': 19, 'numero': 'XVI · Correção de discursivas por IA', 'titulo': 'Escreva, envie, <em>receba o feedback</em>.', 'texto': 'Sua redação é corrigida na hora, critério por critério: nota, pontos fortes, o que faltou e <strong>sugestões trecho a trecho</strong>. Depois, compare com uma resposta-modelo e reescreva.' } ] },
   'promessa': { 'rotulo': 'Princípio da Especificidade', 'titulo': 'Não é cursinho genérico.<br>É <em>preparação de banca</em>.', 'texto': 'Todo esforço de estudo rende mais quando é <strong>específico</strong>: à banca que vai cobrar, ao formato da prova, à bibliografia que a comissão respeita e ao histórico do que já caiu. A Falcon foi construída sobre esse princípio.', 'itens': [
       { 'titulo': 'Todo o edital, matéria por matéria', 'texto': 'Cada matéria do CACD organizada em módulos, capítulos e unidades que seguem o edital, com a recorrência de cada tópico nas provas anteriores à vista.' },
       { 'titulo': 'Questões de provas reais, classificadas pelo tópico', 'texto': 'O banco reúne as provas anteriores, item por item, ligadas ao tópico do edital que cobram. Você treina no padrão Cebraspe e sabe de onde vem cada questão.' },
