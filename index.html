@@ -58454,11 +58454,23 @@ window.FlashcardsIA = FlashcardsIA;
    - intervalos FRACIONÁRIOS por dentro (como o RemNote: 4,6 → 10,6 → 24,3),
      arredondados só na exibição. Facilidade mínima 130%. Leech = lapsos ≥ N.
    Estado: { state:new|learning|review|relearning, step, ease, intervalDays,
-   dueAt, reps, lapses, lastReviewedAt, leech }. */
+   dueAt, reps, lapses, lastReviewedAt, leech }.
+   dueAt: intervalos em DIAS vencem à meia-noite local do dia-alvo (valem o dia
+   todo); passos em minutos/horas vencem na hora exata. */
 const Scheduler = (function(){
   const MIN = 60000, DIA = 86400000;
   const EASE_MIN = 1.3, HARD_MULT = 1.2;
   const D_ERREI = -0.20, D_DIFICIL = -0.15, D_FACIL = 0.15;
+  // Vencimento por DIA (semântica Anki/RemNote): um intervalo em dias vence à
+  // meia-noite LOCAL do dia-alvo e vale o dia inteiro — é exatamente o que
+  // "Vencem hoje", o Revisar da unidade e a home contam (dueAt <= fim do dia).
+  // Antes o vencimento era a hora exata (ontem 19:32 + 1 dia = hoje 19:32):
+  // o card "vencia hoje" no contador mas a prática, que compara com AGORA, só
+  // o liberava à noite — "14 pendentes" e "nada para praticar" ao mesmo tempo.
+  // Passos de minutos/horas (esqueci 1 min, Difícil 12 h) seguem na hora exata.
+  function inicioDoDia(ts){ const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); }
+  function venceEmDias(now, dias){ const d = new Date(inicioDoDia(now)); d.setDate(d.getDate() + Math.max(1, Math.round(dias))); return d.getTime(); }
+  function venceEmMin(now, min){ return min >= 1440 ? venceEmDias(now, min / 1440) : now + min * MIN; }
   // "1d", "2d12h", "6h", "30m", "1h30m" → minutos
   function parseStep(txt){
     const s = String(txt || '').trim().toLowerCase().replace(/\s+/g, '');
@@ -58497,19 +58509,19 @@ const Scheduler = (function(){
     const toReview = function(d){
       d = Math.max(1, d * cfg.intervalMultiplier);
       d = Math.min(d, cfg.maxIntervalDays);
-      r.state = 'review'; r.step = 0; r.intervalDays = d; days = d;
-      r.dueAt = now + d * DIA;
+      r.state = 'review'; r.step = 0; r.intervalDays = d; days = d;   // fracionário por dentro…
+      r.dueAt = venceEmDias(now, d);                                     // …mas vence num DIA inteiro
     };
     if(r.state === 'new' || r.state === 'learning' || r.state === 'relearning'){
       if(r.state === 'new') r.state = 'learning';
       const emRelearn = antes === 'relearning';
       if(rating === 1){
-        r.step = 0; delayMin = cfg.forgotIntervalMin; r.dueAt = now + delayMin * MIN;
+        r.step = 0; delayMin = cfg.forgotIntervalMin; r.dueAt = venceEmMin(now, delayMin);
       } else if(rating === 2){
         const st = steps[Math.min(r.step, n - 1)];
-        delayMin = Math.max(1, (cfg.forgotIntervalMin + st) / 2); r.dueAt = now + delayMin * MIN;
+        delayMin = Math.max(1, (cfg.forgotIntervalMin + st) / 2); r.dueAt = venceEmMin(now, delayMin);
       } else if(rating === 3){
-        if(r.step < n){ delayMin = steps[r.step]; r.step += 1; r.dueAt = now + delayMin * MIN; }
+        if(r.step < n){ delayMin = steps[r.step]; r.step += 1; r.dueAt = venceEmMin(now, delayMin); }
         else if(emRelearn){ toReview(Math.max(1, r.intervalDays || 1)); }
         else { toReview((steps[n - 1] / 1440) * r.ease); }
       } else {
@@ -58525,7 +58537,7 @@ const Scheduler = (function(){
         r.lapses += 1; r.ease = Math.max(EASE_MIN, r.ease + D_ERREI);
         r.state = 'relearning'; r.step = 0;
         r.intervalDays = Math.max(1, prev * cfg.lapseMultiplier);   // usado ao SAIR do reaprendizado
-        delayMin = cfg.forgotIntervalMin; r.dueAt = now + delayMin * MIN;
+        delayMin = cfg.forgotIntervalMin; r.dueAt = venceEmMin(now, delayMin);
         if(r.lapses >= cfg.leechThreshold && !r.leech){ r.leech = true; leechNow = true; }
       } else if(rating === 2){
         toReview(Math.max(prev + 1, (prev + atrasoDias * cfg.overdueBonus.hard) * HARD_MULT));
@@ -58545,8 +58557,8 @@ const Scheduler = (function(){
     if(res.kind === 'min'){
       const m = res.delayMin;
       if(m < 60) return Math.round(m) + ' min';
-      if(m < 72 * 60) return Math.round(m / 60) + ' h';
-      return Math.round(m / 1440) + ' dias';
+      if(m < 1440) return Math.round(m / 60) + ' h';
+      const dd = Math.round(m / 1440); return dd + (dd === 1 ? ' dia' : ' dias');   // passo de dia(s) vence por dia inteiro
     }
     const d = res.days;
     if(d < 30){ const r = Math.round(d); return r + (r === 1 ? ' dia' : ' dias'); }
@@ -59145,7 +59157,16 @@ const Practice = (function(){
     // Fase 6B: conexões — pré-requisitos antes (em cadeia), relacionados
     // depois do âncora; fora do vencimento entra como contexto (Entendi).
     fila = PracticeQueue.conectar(fila, Store.linksList ? Store.linksList() : [], _infoConexao, { puxar: Store.srsSettings().pullLinked !== false });
-    if(!fila.length){ toast(scope.tipo === 'pendentes' ? 'Nada para praticar agora: nenhum card vencido.' : 'Nenhum card para praticar nesta seleção.', 'info'); return false; }
+    if(!fila.length){
+      let msg = 'Nenhum card para praticar nesta seleção.';
+      if(scope.tipo === 'pendentes'){
+        // passos intradiários (esqueci → 1 min, Difícil → 12 h) ainda não vencidos: diz quando voltam
+        const agora = Date.now(), fim = new Date(); fim.setHours(23, 59, 59, 999);
+        const prox = _itensDeEscopo(scope).filter(x => !x.suspended && x.state !== 'new' && x.dueAt != null && x.dueAt > agora && x.dueAt <= fim.getTime()).map(x => x.dueAt).sort((a, b) => a - b);
+        msg = prox.length ? 'Nada vencido agora: ' + prox.length + (prox.length === 1 ? ' card volta' : ' cards voltam') + ' ainda hoje, a partir das ' + new Date(prox[0]).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) + '.' : 'Nada para praticar agora: nenhum card vencido.';
+      }
+      toast(msg, 'info'); return false;
+    }
     _s = { id: _uuid(), scope: scope, status: 'andamento', queue: fila, done: [], cardsTotal: fila.length,
       counts: { errei: 0, dificil: 0, bom: 0, facil: 0 }, durationMs: 0, startedAt: Date.now(), endedAt: null, atual: null };
     _hist = {};
