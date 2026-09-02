@@ -116,7 +116,42 @@ html[data-theme="light"] .scroll-hero .btn-primary:hover{ color:var(--accent); }
 .marcador{ display:inline-block; font-family:var(--mono); font-size:.58rem; letter-spacing:.18em; text-transform:uppercase; color:var(--text-mute); border:1px dashed var(--border-strong); padding:.15rem .45rem; border-radius:2px; vertical-align:middle; }
 .plan-free .plan-price{ font-size:clamp(2.6rem,4vw,3.6rem); }
 .testimonial-avatar img{ width:100%; height:100%; object-fit:cover; border-radius:50%; }
+/* ═══ Demonstração por dados ═══ */
+.pp-main .block-title em, .pp-main .vb-title em, .pp-hero-title em, .vnp-launch-title em, .pp-main .gloss-panel-term em, .pp-main .bio-name em, .pp-main .tl-fid-group-title em, .pp-main .kp-title em{ color:var(--accent); font-style:italic; }
+.vb-frame{ position:relative; }
+.vb-frame iframe{ position:absolute; inset:0; width:100%; height:100%; border:0; }
+.pp-main .bio-portrait-frame.sem-retrato{ display:grid; place-items:center; background:linear-gradient(160deg,#2a2d36,#0f1115); }
+.pp-main .bio-iniciais{ font-family:var(--serif); font-size:3rem; color:var(--accent); }
+.pp-main .block-chips-grupo{ display:contents; }
+.pp-main .q-ref-media-box{ flex:0 0 auto; }
+.pp-main .q-ref-media-box .q-ref-media{ position:static; }
 /* ═══ MODO DE EDIÇÃO (admin) ═══ */
+body.ed-on [data-img]{ position:relative; }
+body.ed-on .ed-img-box{ min-height:70px; background:var(--bg-deeper) center/cover no-repeat; border:1px dashed rgba(200,169,126,.4); border-radius:3px; margin-top:.5rem; }
+body.ed-on .ed-thumb{ width:140px; aspect-ratio:4/3; }
+body.ed-on .ed-cap{ font-size:.7rem; padding:.3rem .4rem; background:rgba(0,0,0,.5); color:#f0ece4; }
+body.ed-on .ed-gab{ color:var(--green); border-color:rgba(93,212,159,.4); }
+body.ed-on .q-ref-media-box[data-img], body.ed-on .gloss-panel-img[data-img]{ min-width:140px; min-height:110px; }
+body.ed-on .mosaic-item[data-img]{ min-height:120px; }
+body.ed-on .ed-demo{ margin-top:2.5rem; }
+body.ed-on .ed-demo-stage{ position:static; height:auto; min-height:0; }
+body.ed-on .ed-demo-main{ height:auto; max-height:none; overflow:visible; }
+body.ed-on .ed-demo-painel{ margin-top:2.2rem; padding-top:1.2rem; border-top:1px dashed rgba(200,169,126,.35); }
+body.ed-on .ed-demo-tag{ font-family:var(--mono); font-size:.62rem; letter-spacing:.2em; text-transform:uppercase; color:#c8a97e; margin-bottom:.8rem; }
+body.ed-on .ed-demo .carousel-slide, body.ed-on .ed-demo .ecrit-slide{ display:block !important; animation:none !important; }
+body.ed-on .ed-demo .carousel-slide + .carousel-slide{ margin-top:1.2rem; border-top:1px dashed rgba(200,169,126,.25); padding-top:1.2rem; }
+body.ed-on .ed-demo .carousel-nav, body.ed-on .ed-demo .carousel-footer, body.ed-on .ed-demo .ecrit-nav, body.ed-on .ed-demo .tg-satellite-nav, body.ed-on .ed-demo .tg-satellite-dots, body.ed-on .ed-demo .tg-satellite-cap[data-caption], body.ed-on .ed-demo .tl-fid-side, body.ed-on .ed-demo .block-nav-row{ display:none !important; }
+body.ed-on .ed-demo .tg-satellite-stage{ aspect-ratio:auto; display:grid; gap:.5rem; }
+body.ed-on .ed-demo .tg-satellite-slide{ position:relative; opacity:1; pointer-events:auto; aspect-ratio:4/3; }
+body.ed-on .ed-demo .fc-card{ aspect-ratio:auto; }
+body.ed-on .ed-demo .fc-inner{ transform:none !important; display:grid; grid-template-columns:1fr 1fr; gap:.5rem; height:auto; }
+body.ed-on .ed-demo .fc-face{ position:static; transform:none; backface-visibility:visible; -webkit-backface-visibility:visible; min-height:130px; }
+body.ed-on .ed-demo .q-feedback{ display:block; }
+body.ed-on .ed-demo .essay-aside, body.ed-on .ed-demo .ecrit-slider{ display:block !important; }
+body.ed-on .ed-demo .essay-textarea, body.ed-on .ed-demo .cmt-compose{ opacity:.45; pointer-events:none; }
+body.ed-on .ed-termos{ margin-top:1.2rem; display:flex; flex-direction:column; gap:.4rem; font-family:var(--sans); font-weight:300; font-size:.78rem; color:var(--text-dim); }
+body.ed-on .ed-termos > div{ display:grid; grid-template-columns:200px 1fr; gap:.6rem; align-items:start; padding:.4rem .5rem; background:rgba(0,0,0,.2); border-radius:3px; }
+body.ed-on .ed-termos b{ color:var(--accent); font-weight:500; }
 body.ed-on{ padding-bottom:84px; }
 body.ed-on .sticky-cta, body.ed-on .anchor-menu{ display:none !important; }
 body.ed-on [data-e]{ outline:1px dashed rgba(200,169,126,.35); outline-offset:3px; border-radius:2px; cursor:text; min-width:1ch; }
@@ -302,6 +337,10 @@ DEFAULT = {
   'final': { 'rotulo': 'Sem risco · conta gratuita', 'titulo': 'Comece hoje,<br><em>sem pagar nada</em>.', 'lead': 'A conta é gratuita e não expira. Você entra, estuda a primeira unidade de cada matéria com tudo ligado e só assina o que quiser, quando quiser.', 'stack': [ { 'num': 'R$ 0', 'label': 'Conta gratuita, sem cartão' }, { 'num': '1ª unidade', 'label': 'De cada matéria, aberta' }, { 'num': '2ⓤ', 'label': 'Para conversar com o tutor de IA' }, { 'num': '1 clique', 'label': 'Para cancelar qualquer matéria' } ], 'reassure': 'Olhe honestamente para o que você viu até aqui: aulas de especialistas, o banco de provas anteriores classificado pelo edital, flashcards, cadernos, tutor de IA e desempenho por tema, num lugar só. O próximo passo custa um minuto.', 'cta': 'Criar conta grátis', 'ctaHref': 'app' },
   'rodape': { 'marca': 'Falcon · <em>Grupo Ubique</em>', 'links': [ { 'label': 'Grupo Ubique', 'href': '#' }, { 'label': 'Ubique Idiomas', 'href': 'https://www.ubiqueidiomas.com.br/' }, { 'label': 'Termos', 'href': '#' }, { 'label': 'Privacidade', 'href': '#' }, { 'label': 'Contato', 'href': '#' } ], 'copyright': '© 2026 Grupo Ubique · Todos os direitos reservados · Preparação para o CACD' }
 }
+# demonstração "Veja na prática": resumo editável da unidade 01 de HB (landing/demo-conteudo.py)
+import importlib.util
+_spec = importlib.util.spec_from_file_location('demo_conteudo', os.path.join(AQUI, 'demo-conteudo.py')); _dc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_dc)
+DEFAULT['demo'].update(_dc.DEMO)
 NOVO = {
   'cursos.itens': curso('XX', 'Nova <em>matéria</em>', 'Nova matéria', 'Professor a definir', 'credenciais', 'módulos · unidades'),
   'faq.itens': { 'q': 'Nova pergunta?', 'a': 'Resposta.' },
@@ -327,13 +366,12 @@ hero = '''<section class="scroll-hero" id="top"><div class="scroll-stage">
     <div class="stage-overlay"><div class="stage-inner" data-sec="hero"></div></div>
     <div class="scroll-hint" id="scrollHint"><span>Role para sobrevoar</span><div class="scroll-hint-line"></div></div>
   </div></section>'''
-demo_launch = linhas(3776, 3922)   # bloco de lançamento + modal da demo (estático)
 secoes = [
   topbar, menu, hero,
   '<section class="strip"><div class="container" data-sec="strip"></div></section>',
   '<section class="video-section sec-pad" id="video"><div class="container" data-sec="video"></div></section>',
   '<section class="galeria" id="cursos"><div class="galeria-stage" data-sec="cursos"></div></section>',
-  '<section class="integrated" id="integrado"><div class="container"><div data-sec="demo"></div>\n' + demo_launch,
+  '<section class="integrated" id="integrado"><div class="container" data-sec="demo"></div></section>',   # cabeçalho + cartão + player vêm do JSON (demo-render.js)
   linhas(3923, 3950),   # barra de contexto + toast da demo (vivem fora da seção)
   '<section class="study-tools sec-pad" id="ferramentas"><div class="container" data-sec="ferramentas"></div></section>',
   '<section class="promise sec-pad"><div class="container" data-sec="promessa"></div></section>',
@@ -346,7 +384,6 @@ secoes = [
   '<footer class="footer"><div class="container" data-sec="rodape"></div></footer>',
   '<div class="sticky-cta"></div>'
 ]
-assert demo_launch.rstrip().endswith('</section>'), demo_launch[-200:]
 
 # ── scripts ──────────────────────────────────────────────────────────────
 runtime = io.open(os.path.join(AQUI, 'landing-runtime.js'), encoding='utf8').read().replace('__SB_URL__', SB_URL).replace('__SB_KEY__', SB_KEY)
@@ -360,7 +397,11 @@ bloco = bloco.replace("const firstFaq = document.querySelector('.faq-item');\nif
 js_rebind = "/* reveal + FAQ + vídeo — re-executável após um re-render do editor */\nfunction __landingRebind(){\n" + bloco + "\n}\n__landingRebind(); window.__landingRebind = __landingRebind;\n"
 js_menu = linhas(5270, 5339)          # menu-âncora (scrollspy)
 js_tema = linhas(5368, 5387)          # tema claro/escuro
-js_demo = linhas(5388, 6388)          # demo pp-main + depoimentos (css) + colapso currículo
+_bloco = linhas(5388, 6388)           # protótipo: demo (substituída) + depoimentos + colapso currículo
+_i = _bloco.index('PREVIEW: Testimonial carousel'); _i = _bloco.rfind('/*', 0, _i)
+js_resto = _bloco[_i:]                # só depoimentos + colapso currículo (a demo agora é por dados)
+js_demo_render = io.open(os.path.join(AQUI, 'demo-render.js'), encoding='utf8').read()
+js_demo_player = io.open(os.path.join(AQUI, 'demo-player.js'), encoding='utf8').read()
 js_hero = io.open(os.path.join(AQUI, 'hero-engine.js'), encoding='utf8').read().replace('__FRAMES_M__', FRAMES_DIR_M).replace('__FRAMES__', FRAMES_DIR).replace('__COUNT__', str(FRAMES_COUNT))
 js_dados = ('window.LANDING_DEFAULT = ' + json.dumps(DEFAULT, ensure_ascii=False) + ';\n'
   + 'window.LANDING_NOVO = ' + json.dumps(NOVO, ensure_ascii=False) + ';\n'
@@ -384,7 +425,7 @@ head = '''<!DOCTYPE html>
 </head>
 <body>
 '''
-html = (head + '\n\n'.join(secoes) + '\n\n<script>\n' + js_dados + '</script>\n<script>\n' + runtime + '\n</script>\n<script>\n'
-  + js_menu + '\n' + js_rebind + '\n' + js_tema + '\n' + js_demo + '\n' + js_hero + '\n</script>\n</body>\n</html>\n')
+html = (head + '\n\n'.join(secoes) + '\n\n<script>\n' + js_dados + '</script>\n<script>\n' + js_demo_render + '\n</script>\n<script>\n' + runtime + '\n</script>\n<script>\n'
+  + js_menu + '\n' + js_rebind + '\n' + js_tema + '\n' + js_resto + '\n' + js_demo_player + '\n' + js_hero + '\n</script>\n</body>\n</html>\n')
 io.open(RAIZ + 'landing.html', 'w', encoding='utf8').write(html)
 print('landing.html gerado:', len(html), 'bytes;', html.count('<section'), 'seções;', FRAMES_COUNT, 'quadros;', len(mocks), 'mocks')

@@ -52,6 +52,7 @@
   const lista = p => EDITAR ? ' data-list="' + p + '"' : '';
   const item = () => EDITAR ? ' data-item' : '';
   const img = p => EDITAR ? ' data-img="' + p + '"' : '';
+  const H = { e: e, er: er, lista: lista, item: item, img: img, esc: esc, rico: rico }; window.__landingH = H;   // helpers para renderizadores externos (demo)
 
   const SVG = {
     cap: '<svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>',
@@ -135,7 +136,8 @@
         + '<div class="placa-preco"><span><b' + e(p + '.preco') + '>' + esc(o.preco) + '</b><small' + e(p + '.precoNota') + '>' + esc(o.precoNota) + '</small></span><a href="' + esc(href(o.link)) + '"' + (!o.link || o.link === 'app' ? ' data-app-link' : '') + '><span' + e(p + '.cta') + '>' + esc(o.cta || 'Ver matéria') + '</span></a></div>'
         + '</figcaption></figure>';
     }).join('') + '</div></div><div class="galeria-piso"></div><div class="galeria-hint"' + e('cursos.dica') + '>' + esc(c.dica) + '</div>';
-  R.demo = d => '<div class="vnp-intro">' + cabeca('demo', d, true, SVG.janela) + '</div>';
+  // "Veja na prática": cabeçalho + cartão de abertura + player (público) ou a unidade empilhada (editor) — landing/demo-render.js
+  R.demo = d => '<div class="vnp-intro">' + cabeca('demo', d, true, SVG.janela) + '</div>' + (window.DemoRender ? window.DemoRender.secao(d, H, EDITAR) : '');
   // ilustração do card: índice em LANDING_MOCKS (as 9 do protótipo + as de landing/ilustracoes.html)
   const mockIdx = (t, i) => { const M = window.LANDING_MOCKS || []; let k = t.mock != null ? parseInt(t.mock, 10) : i; if(!(k >= 0 && k < M.length)) k = Math.max(0, M.length - 1); return k; };
   const mockDe = (t, i) => (window.LANDING_MOCKS || [])[mockIdx(t, i)] || '';
@@ -179,6 +181,7 @@
       const ghost = document.querySelector('.topbar .btn-ghost[data-app-link]'); if(ghost) ghost.remove();
     }
     if(window.__landingRebind) window.__landingRebind();
+    if(window.__demoPlayerBind) window.__demoPlayerBind();
     if(window.__falconHero) window.__falconHero.reler();
     if(window.__falconGaleria){ window.__falconGaleria.ajustar(); window.__falconGaleria.update(); }
     if(EDITAR) editorArmar();
