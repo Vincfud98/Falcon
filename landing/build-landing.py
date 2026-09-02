@@ -1,53 +1,60 @@
 # -*- coding: utf-8 -*-
 """Monta landing.html da Falcon a partir do protótipo historia-do-brasil-v7.html.
-Reaproveita: CSS inteiro, topbar, menu-âncora, demo interativa (pp-main), cartões de
-ferramentas, e os scripts do protótipo (menos o herói). Troca: herói (vídeo aéreo
-do Itamaraty por quadros, com cena provisória desenhada), galeria de cursos
-(no lugar da professora), matérias (no lugar do explorador de currículo),
-planos (conta grátis), FAQ, experimentar, final, rodapé e textos."""
-import io, re, os
+Reaproveita: CSS, topbar, menu-âncora, demo interativa (pp-main), os 9 mocks dos
+cartões de ferramentas e os scripts do protótipo (menos o herói).
+Conteúdo das seções = JSON (LANDING_DEFAULT) renderizado por landing-runtime.js;
+o admin edita esse JSON no lugar (?editar=1) e publica em platform_config."""
+import io, re, os, json, glob
 RAIZ = '/Users/guilhermecavalcanti/Documents/Falcon/'
+AQUI = os.path.dirname(os.path.abspath(__file__))
 P = io.open(RAIZ + 'historia-do-brasil-v7.html', encoding='utf8').read()
 L = P.split('\n')
-def linhas(a, b):  # 1-based, inclusivo
-    return '\n'.join(L[a-1:b])
-def fatia(ini, fim, a_partir=0):
-    i = P.index(ini, a_partir); j = P.index(fim, i); return P[i:j], j
+def linhas(a, b): return '\n'.join(L[a-1:b])
+def elemento(html, ini):
+    """recorta o elemento que começa em `ini` ('<div ...'), contando aninhamento de div"""
+    i = ini; prof = 0; j = i
+    while True:
+        a = html.find('<div', j); b = html.find('</div>', j)
+        if b < 0: return html[ini:]
+        if a >= 0 and a < b: prof += 1; j = a + 4
+        else:
+            prof -= 1; j = b + 6
+            if prof == 0: return html[ini:j]
 
-APP = 'index.html'          # o app hoje mora na raiz; vira /app/ quando a landing for para a raiz
-FRAMES_DIR = 'landing/frames/hero'
-FRAMES_DIR_M = 'landing/frames/hero-m'
-import glob
-FRAMES_COUNT = len(glob.glob(RAIZ + FRAMES_DIR + '/*.webp'))   # contado no build: 0 = cena provisória
+APP = 'index.html'
+FRAMES_DIR, FRAMES_DIR_M = 'landing/frames/hero', 'landing/frames/hero-m'
+FRAMES_COUNT = len(glob.glob(RAIZ + FRAMES_DIR + '/*.webp'))
+SB_URL = 'https://kluqjqojxzpuiauuidwx.supabase.co'
+SB_KEY = re.search(r"const KEY = '(ey[^']+)'", io.open(RAIZ + 'index.html', encoding='utf8').read()).group(1)
 
-# ── 1. CSS do protótipo + acréscimos ─────────────────────────────────────
-css_proto = P[P.index('<style>') + len('<style>'):P.index('</style>')]
+# ── CSS ──────────────────────────────────────────────────────────────────
+css_proto = P[P.index('<style>') + 7:P.index('</style>')]
 css_extra = r"""
-/* ═════════════════════════════════════════════════
-   FALCON · acréscimos da landing (herói por quadros, galeria, matérias)
-   ═════════════════════════════════════════════════ */
+/* ═══ FALCON · acréscimos da landing ═══ */
+.topbar-logo{ display:inline-flex; align-items:center; white-space:nowrap; }
+.topbar-logo .logo-word{ white-space:nowrap; font-family:var(--serif); font-weight:500; font-size:1.25rem; letter-spacing:.02em; color:var(--text); margin-left:.55rem; }
+.topbar-logo .logo-word em{ font-style:normal; color:var(--accent); }
 .topbar-right{ display:flex; align-items:center; gap:.6rem; }
 .topbar .btn{ padding:.55rem 1rem; font-size:var(--fs-micro); }
 .topbar .btn-ghost{ border-color:var(--border-strong); }
 @media (max-width:640px){ .topbar .btn-ghost{ display:none; } }
-.topbar-logo{ display:inline-flex; align-items:center; white-space:nowrap; }
-.topbar-logo .logo-word{ white-space:nowrap; font-family:var(--serif); font-weight:500; font-size:1.25rem; letter-spacing:.02em; color:var(--text); margin-left:.55rem; }
-.topbar-logo .logo-word em{ font-style:normal; color:var(--accent); }
-
-/* Herói: o vídeo (ou a cena provisória) é um canvas preso atrás do texto */
-.hero-canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
-.scroll-hero{ height:420vh; }
+/* O herói vive em cima de um vídeo: paleta ESCURA própria, em qualquer tema
+   (no modo claro o texto escuro sumia sobre a imagem). */
+.scroll-hero{ height:420vh; --bg:#0b0c0f; --bg-card:#13151a; --text:#f0ece4; --text-dim:rgba(240,236,228,.7); --text-mute:rgba(240,236,228,.42); --accent:#c8a97e; --accent-lo:rgba(200,169,126,.14); --border:rgba(200,169,126,.14); --border-strong:rgba(200,169,126,.28); --accent-strong:rgba(200,169,126,.32); color:var(--text); }
 @media (max-width:980px){ .scroll-hero{ height:320vh; } }
+.scroll-hero .btn-primary{ color:#0b0c0f; }
+.scroll-hero .stage-plaque{ background:rgba(11,12,15,.62); }
+html[data-theme="light"] .scroll-hero .btn-primary{ color:#0b0c0f; }
+html[data-theme="light"] .scroll-hero .btn-primary:hover{ color:var(--accent); }
+.hero-canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
 .hero-veil{ position:absolute; inset:0; pointer-events:none;
-  background:linear-gradient(90deg, rgba(11,12,15,.82) 0%, rgba(11,12,15,.5) 40%, rgba(11,12,15,.08) 75%, rgba(11,12,15,0) 100%),
+  background:linear-gradient(90deg, rgba(11,12,15,.84) 0%, rgba(11,12,15,.55) 40%, rgba(11,12,15,.1) 75%, rgba(11,12,15,0) 100%),
              linear-gradient(180deg, rgba(11,12,15,.5) 0%, transparent 28%, transparent 72%, rgba(11,12,15,.9) 100%); }
 .hero-preview-tag{ position:absolute; top:calc(68px + 1rem); right:1.2rem; z-index:3; font-family:var(--mono); font-size:var(--fs-micro); letter-spacing:.2em; text-transform:uppercase; color:var(--text-mute); border:1px solid var(--border); padding:.3rem .6rem; border-radius:2px; background:rgba(11,12,15,.5); backdrop-filter:blur(8px); }
 .plaque-year.is-text{ font-size:clamp(2rem,3.4vw,3.2rem); line-height:1.05; }
-
-/* Galeria de cursos: uma parede de museu que anda para o lado com o scroll */
+/* Galeria de cursos */
 .galeria{ position:relative; height:calc(100vh + 420vw); }
-.galeria-stage{ position:sticky; top:0; height:100vh; overflow:hidden;
-  background:radial-gradient(ellipse 60% 50% at 50% 0%, rgba(200,169,126,.10), transparent 60%), linear-gradient(180deg,#0c0d10 0%, #0b0c0f 60%, #08090b 100%); }
+.galeria-stage{ position:sticky; top:0; height:100vh; overflow:hidden; background:radial-gradient(ellipse 60% 50% at 50% 0%, rgba(200,169,126,.10), transparent 60%), linear-gradient(180deg,#0c0d10 0%, #0b0c0f 60%, #08090b 100%); --text:#f0ece4; --text-dim:rgba(240,236,228,.58); --text-mute:rgba(240,236,228,.32); --accent:#c8a97e; }
 .galeria-stage::after{ content:""; position:absolute; left:0; right:0; bottom:0; height:22vh; background:linear-gradient(180deg, transparent, rgba(0,0,0,.55)); pointer-events:none; }
 .galeria-piso{ position:absolute; left:0; right:0; bottom:0; height:18vh; background:linear-gradient(180deg, #121317, #0a0b0d); border-top:1px solid rgba(200,169,126,.10); }
 .galeria-head{ position:absolute; top:calc(68px + 2rem); left:0; right:0; text-align:center; z-index:3; padding:0 var(--gutter); pointer-events:none; }
@@ -55,8 +62,7 @@ css_extra = r"""
 .galeria-hint{ position:absolute; bottom:1.4rem; left:0; right:0; text-align:center; font-family:var(--mono); font-size:var(--fs-micro); letter-spacing:.25em; text-transform:uppercase; color:var(--text-mute); z-index:3; }
 .galeria-wall{ position:absolute; top:0; bottom:0; left:0; display:flex; align-items:center; gap:clamp(4rem,8vw,9rem); padding:0 12vw; will-change:transform; }
 .obra{ flex:0 0 auto; width:clamp(300px,34vw,520px); position:relative; }
-.obra-luz{ position:absolute; left:50%; top:-40vh; width:170%; height:60vh; transform:translateX(-50%);
-  background:radial-gradient(ellipse 50% 100% at 50% 100%, rgba(200,169,126,.16), transparent 70%); pointer-events:none; }
+.obra-luz{ position:absolute; left:50%; top:-40vh; width:170%; height:60vh; transform:translateX(-50%); background:radial-gradient(ellipse 50% 100% at 50% 100%, rgba(200,169,126,.16), transparent 70%); pointer-events:none; }
 .obra-moldura{ position:relative; padding:14px; background:linear-gradient(135deg,#8a6f45,#c8a97e 40%,#7b6238 60%,#b8985f); border-radius:2px; box-shadow:0 40px 80px -30px rgba(0,0,0,.9), inset 0 0 0 1px rgba(0,0,0,.4); }
 .obra-moldura::before{ content:""; position:absolute; inset:6px; border:1px solid rgba(0,0,0,.35); pointer-events:none; }
 .obra-passe{ background:#efe9dc; padding:22px; }
@@ -76,15 +82,11 @@ css_extra = r"""
 .placa-preco a:hover{ color:var(--text); border-color:var(--text); }
 .obra.is-placeholder .obra-tela::after{ content:"foto do professor · marcador"; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); font-family:var(--mono); font-size:.6rem; letter-spacing:.2em; text-transform:uppercase; color:rgba(240,236,228,.35); white-space:nowrap; }
 @media (max-width:860px){
-  .galeria{ height:auto; }
-  .galeria-stage{ position:relative; height:auto; overflow:visible; padding:calc(68px + 5rem) 0 4rem; }
-  .galeria-head{ position:static; margin-bottom:2rem; pointer-events:auto; }
-  .galeria-wall{ position:static; flex-direction:column; gap:3.5rem; padding:0 var(--gutter); transform:none !important; }
-  .galeria-hint, .galeria-piso, .obra-luz{ display:none; }
-  .obra{ width:min(100%,420px); margin:0 auto; }
+  .galeria{ height:auto; } .galeria-stage{ position:relative; height:auto; overflow:visible; padding:calc(68px + 5rem) 0 4rem; }
+  .galeria-head{ position:static; margin-bottom:2rem; pointer-events:auto; } .galeria-wall{ position:static; flex-direction:column; gap:3.5rem; padding:0 var(--gutter); transform:none !important; }
+  .galeria-hint, .galeria-piso, .obra-luz{ display:none; } .obra{ width:min(100%,420px); margin:0 auto; }
 }
-
-/* Matérias do CACD (no lugar do explorador de currículo) */
+/* Matérias */
 .materias-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:1rem; margin-top:3rem; }
 .materia{ position:relative; padding:1.3rem 1.3rem 1.1rem; background:var(--bg-card); border:1px solid var(--border); border-radius:4px; transition:border-color .3s var(--ease), transform .3s var(--ease); }
 .materia:hover{ border-color:var(--border-strong); transform:translateY(-3px); }
@@ -95,598 +97,183 @@ css_extra = r"""
 .materia-bar i{ display:block; height:100%; width:var(--w,60%); background:linear-gradient(90deg,var(--accent),#e2c99a); }
 .materia-meta{ display:flex; justify-content:space-between; font-family:var(--mono); font-size:.62rem; letter-spacing:.08em; color:var(--text-mute); margin-top:.45rem; }
 .marcador{ display:inline-block; font-family:var(--mono); font-size:.58rem; letter-spacing:.18em; text-transform:uppercase; color:var(--text-mute); border:1px dashed var(--border-strong); padding:.15rem .45rem; border-radius:2px; vertical-align:middle; }
-
-/* Planos: conta grátis + matéria como produto */
 .plan-free .plan-price{ font-size:clamp(2.6rem,4vw,3.6rem); }
-.plan-includes .no{ opacity:.55; }
+.testimonial-avatar img{ width:100%; height:100%; object-fit:cover; border-radius:50%; }
+/* ═══ MODO DE EDIÇÃO (admin) ═══ */
+body.ed-on{ padding-bottom:84px; }
+body.ed-on .sticky-cta, body.ed-on .anchor-menu{ display:none !important; }
+body.ed-on [data-e]{ outline:1px dashed rgba(200,169,126,.35); outline-offset:3px; border-radius:2px; cursor:text; min-width:1ch; }
+body.ed-on [data-e]:hover, body.ed-on [data-e]:focus{ outline:1px solid var(--accent); background:rgba(200,169,126,.08); }
+body.ed-on [data-item]{ position:relative; }
+body.ed-on .ed-ctl{ position:absolute; top:-.6rem; right:-.4rem; z-index:20; display:inline-flex; gap:2px; opacity:0; transition:opacity .15s; }
+body.ed-on [data-item]:hover > .ed-ctl{ opacity:1; }
+body.ed-on .ed-ctl button, body.ed-on .ed-add, body.ed-on .ed-img{ font-family:var(--mono); font-size:.62rem; letter-spacing:.06em; background:#13151a; color:#f0ece4; border:1px solid rgba(200,169,126,.5); border-radius:4px; padding:.15rem .45rem; cursor:pointer; line-height:1.3; }
+body.ed-on .ed-ctl button:hover, body.ed-on .ed-add:hover, body.ed-on .ed-img:hover{ background:#c8a97e; color:#0b0c0f; }
+body.ed-on .ed-add{ display:inline-flex; margin:.6rem .3rem; padding:.3rem .7rem; border-style:dashed; }
+body.ed-on .ed-img{ position:absolute; left:.5rem; bottom:.5rem; z-index:20; }
+body.ed-on .ed-img-x{ left:auto; right:.5rem; }
+body.ed-on .testimonial-avatar .ed-img{ left:50%; bottom:-1.6rem; transform:translateX(-50%); white-space:nowrap; }
+body.ed-on .ed-placa{ margin-top:.8rem; padding-top:.6rem; border-top:1px dashed rgba(200,169,126,.35); display:flex; flex-direction:column; gap:.4rem; font-family:var(--sans); font-size:.7rem; text-align:left; }
+body.ed-on .ed-placa-ato{ display:flex; flex-direction:column; gap:.15rem; padding:.3rem .4rem; background:rgba(0,0,0,.25); border-radius:3px; }
+body.ed-on .ed-placa-ato b{ font-family:var(--mono); font-size:.55rem; letter-spacing:.2em; text-transform:uppercase; color:var(--accent); }
+body.ed-on .ed-nota{ text-align:center; margin-top:.8rem; font-family:var(--sans); font-size:.72rem; color:var(--text-mute); }
+body.ed-on .ed-url{ display:inline-block; min-width:16ch; padding:.1rem .4rem; }
+.ed-bar{ position:fixed; left:0; right:0; bottom:0; z-index:5000; display:flex; align-items:center; gap:.8rem; padding:.7rem var(--gutter); background:rgba(11,12,15,.96); border-top:1px solid rgba(200,169,126,.35); backdrop-filter:blur(10px); font-family:var(--sans); color:#f0ece4; flex-wrap:wrap; }
+.ed-bar-t{ font-family:var(--mono); font-size:.62rem; letter-spacing:.25em; text-transform:uppercase; color:#c8a97e; }
+.ed-status{ font-size:.75rem; color:rgba(240,236,228,.6); flex:1; }
+.ed-bar-acoes{ display:flex; gap:.5rem; flex-wrap:wrap; }
+.ed-bar .btn{ padding:.5rem .9rem; font-size:var(--fs-micro); }
+body.ed-on .scroll-hero{ height:140vh; }
 """
 
-# ── 2. Topbar (com Entrar / Criar conta) ─────────────────────────────────
-topbar = linhas(3423, 3431)
-topbar = topbar.replace('<a href="#top" class="topbar-logo" aria-label="Ubique">', '<a href="#top" class="topbar-logo" aria-label="Falcon">')
-topbar = topbar.replace('  </a>\n  <button class="theme-toggle"', '    <span class="logo-word">Falcon <em>·</em> Ubique</span>\n  </a>\n  <div class="topbar-right">\n  <a class="btn btn-ghost" data-app-link href="' + APP + '">Entrar</a>\n  <a class="btn btn-primary" data-app-link href="' + APP + '">Criar conta grátis</a>\n  <button class="theme-toggle"')
-topbar = topbar.replace('  </button>\n</header>', '  </button>\n  </div>\n</header>')
+# ── mocks dos 9 cartões de ferramentas + logo ────────────────────────────
+tools_html = linhas(3955, 4330)
+mocks = []
+pos = 0
+while True:
+    i = tools_html.find('<div class="tool-mock">', pos)
+    if i < 0: break
+    el = elemento(tools_html, i); mocks.append(el[len('<div class="tool-mock">'):-len('</div>')]); pos = i + len(el)
+assert len(mocks) == 9, len(mocks)
+logo_svg = re.search(r'<span class="footer-brand-logo">\s*(<svg.*?</svg>)', P, re.S).group(1)
+topbar_logo_svg = re.search(r'<a href="#top" class="topbar-logo" aria-label="Ubique">\s*(<svg.*?</svg>)', P, re.S).group(1)
 
-menu = '''<aside class="anchor-menu" id="anchorMenu" aria-label="Navegação da página">
-  <a class="anchor-item" href="#top" data-target="top"><span class="anchor-item-dot"></span><span class="anchor-item-label">Início</span></a>
-  <a class="anchor-item" href="#video" data-target="video"><span class="anchor-item-dot"></span><span class="anchor-item-label">Vídeo</span></a>
-  <a class="anchor-item" href="#cursos" data-target="cursos"><span class="anchor-item-dot"></span><span class="anchor-item-label">Cursos</span></a>
-  <a class="anchor-item" href="#integrado" data-target="integrado"><span class="anchor-item-dot"></span><span class="anchor-item-label">Veja na prática</span></a>
-  <a class="anchor-item" href="#ferramentas" data-target="ferramentas"><span class="anchor-item-dot"></span><span class="anchor-item-label">Plataforma</span></a>
-  <a class="anchor-item" href="#materias" data-target="materias"><span class="anchor-item-dot"></span><span class="anchor-item-label">Matérias</span></a>
-  <a class="anchor-item" href="#alunos" data-target="alunos"><span class="anchor-item-dot"></span><span class="anchor-item-label">Alunos</span></a>
-  <a class="anchor-item" href="#planos" data-target="planos"><span class="anchor-item-dot"></span><span class="anchor-item-label">Planos</span></a>
-  <a class="anchor-item" href="#faq" data-target="faq"><span class="anchor-item-dot"></span><span class="anchor-item-label">Dúvidas</span></a>
-  <a class="anchor-item" href="#experimentar" data-target="experimentar"><span class="anchor-item-dot"></span><span class="anchor-item-label">Experimentar</span></a>
-</aside>'''
+# ── CONTEÚDO PADRÃO (o que o admin edita) ─────────────────────────────────
+def curso(sigla, nome, materia, prof, cred, dados, real=False):
+    return { 'sigla': sigla, 'nome': nome, 'materia': materia, 'professor': prof, 'foto': '', 'dados': [cred, dados, 'questões de provas: a definir'], 'preco': 'R$ 100', 'precoNota': '/ mês por matéria · a confirmar', 'cta': 'Ver matéria', 'link': 'app' }
+DEFAULT = {
+  'cta': { 'app': APP, 'sticky': 'Criar conta grátis' },
+  'hero': {
+    'placaRotulo': 'Brasília · Palácio Itamaraty',
+    'atos': [
+      { 'rotulo': 'Preparação completa · CACD', 'titulo': 'Do primeiro tópico<br>do edital ao <em>Itamaraty</em>.', 'texto': 'A Falcon reúne, numa só plataforma, as aulas dos melhores professores de cada matéria, o banco de provas anteriores classificado pelo edital, flashcards, cadernos e um tutor de IA. Feita para quem vai prestar o concurso de diplomata.', 'cta1': { 'label': 'Criar conta grátis', 'href': 'app' }, 'cta2': { 'label': 'Ver os cursos', 'href': '#cursos' }, 'meta': ['Continue rolando para sobrevoar o Itamaraty'] },
+      { 'rotulo': 'Ato II · A plataforma', 'titulo': 'Todo o <em>CACD</em>,<br>num só lugar.', 'texto': 'Matéria por matéria, unidade por unidade: texto editorial, videoaula, questões de provas reais, flashcards e desempenho por tópico do edital, costurados na mesma tela. Nada de abrir cinco aplicativos para estudar um tema.', 'cta1': { 'label': 'Veja na prática', 'href': '#integrado' }, 'cta2': None, 'meta': ['n matérias', 'n unidades', 'n questões de provas'] },
+      { 'rotulo': 'Ato III · Feita para a banca', 'titulo': 'Estude o que a banca<br><em>cobra</em>.', 'texto': 'Cada questão de prova anterior está ligada ao tópico do edital. Você vê a recorrência de cada tema, o que precisa estar seguro e onde ainda perde ponto, antes da prova, não depois.', 'cta1': { 'label': 'Criar conta grátis', 'href': 'app' }, 'cta2': { 'label': 'Conhecer os professores', 'href': '#cursos' }, 'meta': ['Conta gratuita', 'Primeira unidade de cada matéria aberta'] }
+    ],
+    'placa': [
+      { 'year': "O espelho d'água", 'name': 'Sobre o lago', 'desc': "O voo cruza o espelho d'água do Palácio Itamaraty, sede do Ministério das Relações Exteriores, com o Meteoro à frente." },
+      { 'year': 'O Meteoro', 'name': 'Bruno Giorgi · 1967', 'desc': 'A escultura de mármore no meio do lago: cinco continentes num só bloco, símbolo da casa da diplomacia brasileira.' },
+      { 'year': 'O jardim', 'name': 'Burle Marx', 'desc': 'A câmera sobe pela fachada e chega ao terraço: o jardim de Burle Marx, a chegada depois de todo o caminho de estudo.' }
+    ]
+  },
+  'strip': { 'rotulo': 'Preparação específica para', 'itens': ['CACD', 'Instituto Rio Branco', 'Edital vivo', 'Provas anteriores', 'Bibliografia da banca'] },
+  'video': { 'rotulo': 'Vídeo de apresentação', 'titulo': 'Veja a plataforma<br><em>por dentro</em>.', 'texto': 'Em poucos minutos: como uma unidade é estudada de ponta a ponta, como as questões de provas anteriores conversam com o edital e como o tutor de IA entra no meio do estudo.', 'chip': 'Assista gratuitamente', 'legenda': '"O caminho inteiro do candidato, numa plataforma só."', 'tituloVideo': 'Falcon, por dentro:<br><em>aulas, provas, flashcards, cadernos e tutor</em>', 'duracao': 'em breve', 'url': '' },
+  'cursos': { 'rotulo': 'Os cursos e seus professores', 'titulo': 'Uma matéria, <em>um especialista</em>.', 'dica': 'Role para caminhar pela galeria', 'itens': [
+      curso('HB', 'História <em>do Brasil</em>', 'História do Brasil', 'Cláudia Viscardi', 'Doutora em História Social · UFJF', '3 módulos · 43 unidades', True),
+      curso('HM', 'História <em>Mundial</em>', 'História Mundial', 'Professor a definir', 'credenciais', 'módulos · unidades'),
+      curso('PI', 'Política <em>Internacional</em>', 'Política Internacional', 'Professor a definir', 'credenciais', 'módulos · unidades'),
+      curso('ECO', 'Economia', 'Economia', 'Professor a definir', 'credenciais', 'módulos · unidades'),
+      curso('DIP', 'Direito', 'Direito', 'Professor a definir', 'credenciais', 'módulos · unidades'),
+      curso('GEO', 'Geografia', 'Geografia', 'Professor a definir', 'credenciais', 'módulos · unidades'),
+      curso('LP', 'Língua <em>Portuguesa</em>', 'Língua Portuguesa', 'Professor a definir', 'credenciais', 'módulos · unidades'),
+      curso('ING', 'Inglês', 'Inglês', 'Professor a definir', 'credenciais', 'módulos · unidades') ] },
+  'demo': { 'rotulo': 'Veja na prática', 'titulo': 'A plataforma inteira,<br><em>à mão</em> do candidato.', 'texto': 'Toque no botão abaixo para abrir uma unidade de exemplo (<strong>História do Brasil — A Chegada, 1500</strong>) dentro da própria plataforma. Você navega pelos <strong>13 tipos de bloco</strong>: texto editorial, vídeo, quiz, discursiva, flashcards, fórum e mais.' },
+  'ferramentas': { 'rotulo': 'Diferenciais da plataforma', 'titulo': 'O que nenhuma preparação<br>para o CACD tinha <em>reunido</em>.', 'texto': 'Teoria e prática só viram aprovação com revisão ativa e autoconhecimento. A Falcon entrega <strong>os instrumentos que faltam</strong> na rotina do candidato sério, costurados em volta de cada unidade de cada matéria.', 'itens': [
+      { 'mock': 0, 'numero': 'I · Destaques semânticos', 'titulo': 'Sete cores. <em>Sete significados</em>.', 'texto': 'Amarelo é teoria. Verde é exemplo. Vermelho é armadilha. Cada cor tem uma função que você define, e <strong>todos os trechos destacados ficam salvos</strong>, compilados por unidade e por matéria.' },
+      { 'mock': 1, 'numero': 'II · Anotações com temas e tags', 'titulo': 'Anote <em>dentro do texto</em>.', 'texto': 'Notas ancoradas no parágrafo exato que as inspirou. Organize por <strong>temas e etiquetas</strong>, pesquise com busca por texto e recupere tudo quando voltar semanas depois.' },
+      { 'mock': 2, 'numero': 'III · Flashcards com repetição espaçada', 'titulo': 'Crie o card <em>no meio da leitura</em>.', 'texto': 'Selecione o trecho, crie o flashcard ali mesmo ou peça à IA. A revisão segue o agendamento inteligente: você revisa o que está prestes a esquecer, não o que já sabe.' },
+      { 'mock': 3, 'numero': 'IV · Boletim em tempo real', 'titulo': 'Você sabe <em>onde está</em>.', 'texto': 'Acerto por tópico do edital, por unidade e por matéria, atualizado a cada questão respondida. O desempenho vira mapa de estudo, não surpresa no dia da prova.' },
+      { 'mock': 4, 'numero': 'V · Compilar para estudar', 'titulo': 'Tudo <em>num arquivo só</em>.', 'texto': 'Destaques, notas, flashcards e cadernos de uma unidade ou de uma matéria inteira compilados num texto para imprimir ou levar para onde quiser.' },
+      { 'mock': 5, 'numero': 'VI · Estudo por blocos', 'titulo': 'Unidade como <em>trilha</em>.', 'texto': 'Cada unidade é uma sequência de blocos: texto, vídeo, pontos-chave, linha do tempo, glossário, questões, discursiva. Você vê o progresso e retoma de onde parou.' },
+      { 'mock': 6, 'numero': 'VII · Tutor de IA', 'titulo': 'Um tutor que <em>faz você pensar</em>.', 'texto': 'Por texto e por voz, alimentado pela unidade e pela bibliografia da banca. Tira dúvida, cobra explicação e devolve em forma de desafio.' },
+      { 'mock': 7, 'numero': 'VIII · Desempenho por tema', 'titulo': 'A tela do <em>Raio-X</em>.', 'texto': 'Em cada tópico do edital, quantas questões caíram nas provas anteriores, quanto você acertou e o que estudar primeiro.' },
+      { 'mock': 8, 'numero': 'IX · Simulados e provas anteriores', 'titulo': 'Treine no <em>padrão da banca</em>.', 'texto': 'Provas anteriores completas para responder com cronômetro, folha de respostas e nota de corte de cada concorrência, e simulados novos ao longo do ano.' } ] },
+  'promessa': { 'rotulo': 'Princípio da Especificidade', 'titulo': 'Não é cursinho genérico.<br>É <em>preparação de banca</em>.', 'texto': 'Todo esforço de estudo rende mais quando é <strong>específico</strong>: à banca que vai cobrar, ao formato da prova, à bibliografia que a comissão respeita e ao histórico do que já caiu. A Falcon foi construída sobre esse princípio.', 'itens': [
+      { 'titulo': 'Todo o edital, matéria por matéria', 'texto': 'Cada matéria do CACD organizada em módulos, capítulos e unidades que seguem o edital, com a recorrência de cada tópico nas provas anteriores à vista.' },
+      { 'titulo': 'Questões de provas reais, classificadas pelo tópico', 'texto': 'O banco reúne as provas anteriores, item por item, ligadas ao tópico do edital que cobram. Você treina no padrão Cebraspe e sabe de onde vem cada questão.' },
+      { 'titulo': 'Discursivas com <em>correção por IA</em>', 'texto': 'Questões no formato da banca, com modelos de resposta e correção instantânea a cada envio, critério por critério.' },
+      { 'titulo': 'Tutor de IA que faz <em>você pensar</em>', 'texto': 'Por texto e por voz, alimentado pelo conteúdo da unidade e pela bibliografia da banca. Tira dúvida, mas também devolve em forma de desafio.' },
+      { 'titulo': 'Um especialista em cada matéria', 'texto': 'Professores com trajetória na disciplina que ensinam, não um generalista dando conta de tudo. Conheça cada um na galeria de cursos.' },
+      { 'titulo': 'Teoria, prática e revisão no mesmo lugar', 'texto': 'Leitura, vídeo, questões, flashcards com repetição espaçada, cadernos, simulados e desempenho por tema: tudo em torno da mesma unidade.' } ] },
+  'materias': { 'rotulo': 'Matérias · cobertura do edital', 'titulo': 'As matérias do CACD,<br><em>cada uma com o seu edital</em>.', 'texto': 'Cada matéria é um curso completo e independente: você assina as que precisa, na ordem que quiser. O edital de cada uma é o esqueleto do curso, e a barra abaixo mostra quanto dele já está coberto na plataforma.',
+    'stats': [ { 'num': 'n', 'label': 'matérias' }, { 'num': 'n', 'label': 'unidades' }, { 'num': 'n', 'label': 'questões de provas anteriores' }, { 'num': 'n', 'label': 'horas de videoaula' }, { 'num': 'n', 'label': 'professores' }, { 'num': '2ⓤ', 'label': 'de boas-vindas para o tutor de IA' } ],
+    'itens': [ { 'sigla': s, 'nome': n, 'desc': d, 'cobertura': c } for s, n, d, c in [
+      ('HB', 'História do Brasil', 'Da chegada de Cabral à Nova República, com a bibliografia que a banca cobra.', '82%'), ('HM', 'História Mundial', 'Das revoluções às ordens internacionais do século XX.', 'n%'), ('PI', 'Política Internacional', 'Sistema internacional, política externa brasileira e temas globais.', 'n%'), ('ECO', 'Economia', 'Micro, macro, economia brasileira e internacional.', 'n%'), ('DIP', 'Direito', 'Direito internacional público, direito interno e temas de fronteira.', 'n%'), ('GEO', 'Geografia', 'Geografia política, econômica e do Brasil.', 'n%'), ('LP', 'Língua Portuguesa', 'Redação, gramática e interpretação no padrão da banca.', 'n%'), ('ING', 'Inglês', 'Compreensão, versão e redação para a segunda fase.', 'n%') ] ] },
+  'depoimentos': { 'rotulo': 'Alunos', 'titulo': 'Quem estudou por aqui, <em>está lá</em>.', 'nota': 'depoimentos de exemplo · substituir pelos reais', 'itens': [
+      { 'texto': 'Depoimento de exemplo. Substituir pelo texto real de um aluno aprovado: o que mudou no estudo, o que a plataforma resolveu, o resultado.', 'iniciais': 'AA', 'foto': '', 'nome': 'Nome do aluno', 'cargo': 'Diplomata · CACD 20xx' },
+      { 'texto': 'Depoimento de exemplo. Um comentário curto sobre o banco de questões ou o tutor de IA funciona melhor do que elogios genéricos.', 'iniciais': 'BB', 'foto': '', 'nome': 'Nome do aluno', 'cargo': 'Aprovado na 1ª fase · CACD 20xx' },
+      { 'texto': 'Depoimento de exemplo. Preferir alunos com nome, turma e ano, e pedir autorização de uso.', 'iniciais': 'CC', 'foto': '', 'nome': 'Nome do aluno', 'cargo': 'Candidato · turma 20xx' } ] },
+  'planos': { 'rotulo': 'Como funciona', 'titulo': 'Conta gratuita. <em>Matérias avulsas</em>.', 'texto': 'Crie a conta sem pagar nada e estude a primeira unidade de cada matéria com tudo ligado. Depois, assine só as matérias que você precisa, pelo tempo que precisar.', 'itens': [
+      { 'gratis': True, 'destaque': True, 'ribbon': 'Comece por aqui', 'kind': 'Gratuito · sem cartão', 'nome': 'Conta Falcon', 'tag': 'Para conhecer a plataforma de verdade, com o seu próprio estudo.', 'preco': '0', 'periodo': 'para sempre', 'sub': 'Crie a conta em um minuto · <strong>sem cartão</strong>, sem prazo de teste.', 'inclui': ['<strong>Primeira unidade de cada matéria</strong> aberta, com aulas, questões e flashcards', '<strong>2 UbiTokens de boas-vindas</strong> para usar o tutor de IA', 'Cadernos, destaques, anotações e flashcards próprios salvos na sua conta', 'Edital vivo com a recorrência de cada tópico nas provas', 'Fórum e salas de estudo com outros candidatos'], 'cta': 'Criar conta grátis', 'ctaHref': 'app', 'nota': 'Leva um minuto · você só decide depois se quer assinar alguma matéria' },
+      { 'gratis': False, 'destaque': False, 'ribbon': '', 'kind': 'Assinatura · por matéria', 'nome': 'Matéria completa', 'tag': 'Cada matéria é um produto: assine uma, várias ou um combo.', 'preco': '100', 'periodo': '/ mês por matéria', 'sub': 'Preço a confirmar · combos com desconto no carrinho', 'inclui': ['<strong>Todas as unidades</strong> da matéria, com o professor especialista', '<strong>Banco de provas anteriores</strong> da matéria, classificado pelo edital', 'Discursivas com correção por IA e simulados no padrão da banca', 'Desempenho por tópico, Raio-X do estudo e certificado', '<strong>15 UbiTokens por mês</strong> para o tutor de IA'], 'cta': 'Ver as matérias e os preços', 'ctaHref': '#cursos', 'nota': 'Os preços de cada matéria estão nas placas da galeria de cursos' } ] },
+  'faq': { 'rotulo': 'Dúvidas frequentes', 'titulo': 'Perguntas que a gente <em>já ouviu</em>.', 'itens': [ { 'q': q, 'a': a } for q, a in [
+      ('A conta gratuita tem limite de tempo?', 'Não. Ela é gratuita para sempre: você estuda a primeira unidade de cada matéria, usa seus 2 UbiTokens no tutor e guarda cadernos, flashcards e destaques na sua conta. Só paga se quiser assinar uma matéria inteira.'),
+      ('Preciso assinar todas as matérias?', 'Não. Cada matéria é um curso independente. Você assina só as que precisa, pelo tempo que precisar, e pode montar combos com desconto no carrinho.'),
+      ('As questões são de provas reais?', 'Sim. O banco reúne itens das provas anteriores do CACD, cada um ligado ao tópico do edital que cobra, com gabarito comentado. Há também questões inéditas no padrão da banca, sempre marcadas como tal.'),
+      ('O que é o tutor de IA e o que são os UbiTokens?', 'O tutor responde por texto e por voz a partir do conteúdo da unidade e da bibliografia da banca. Cada uso consome UbiTokens, a moeda interna da plataforma: a conta gratuita ganha 2 de boas-vindas e cada matéria assinada inclui 15 por mês.'),
+      ('Os flashcards, cadernos e destaques ficam salvos?', 'Sim, tudo na sua conta. Os flashcards seguem repetição espaçada, os cadernos aceitam citações entre si e portais, e os destaques ficam no texto quando você volta.'),
+      ('Posso estudar no celular?', 'Sim. A plataforma é responsiva: leitura, questões, flashcards e tutor funcionam no celular e no tablet, e o seu progresso é o mesmo em qualquer aparelho.'),
+      ('Posso cancelar a assinatura de uma matéria?', 'Sim, a qualquer momento, no painel da sua conta. Você mantém o acesso até o fim do período já pago.'),
+      ('Serve para quem ainda não decidiu prestar o CACD?', 'Serve. A conta gratuita é a melhor forma de descobrir se o concurso é para você: o edital vivo mostra o tamanho de cada matéria e a primeira unidade dá a medida do estudo.') ] ] },
+  'experimentar': { 'rotulo': 'Comece sem pagar nada', 'titulo': 'Antes de assinar,<br><em>experimente</em> de verdade.', 'texto': 'Duas formas de provar a Falcon sem custo: a demonstração aberta nesta página e a conta gratuita, com a primeira unidade de cada matéria e o tutor de IA ligados.', 'itens': [
+      { 'eyebrow': 'Agora · sem conta', 'titulo': 'Uma unidade <em>completa</em>, nesta página', 'texto': 'Abra a demonstração e navegue por uma unidade inteira como o aluno vê: texto editorial, vídeo, linha do tempo, quiz, discursiva, flashcards.', 'lista': ['<strong>13 tipos de bloco</strong> · texto, vídeo, quiz, discursiva, flashcards, fórum', '<strong>Destaques e notas</strong> · selecione um trecho e veja como funciona', '<strong>Mesmo design</strong> da plataforma real'], 'cta': 'Abrir a demonstração', 'ctaHref': '#integrado', 'nota': 'Sem cadastro · sem instalar nada' },
+      { 'eyebrow': 'Conta gratuita · para sempre', 'titulo': 'A primeira unidade de <em>cada matéria</em>, com tudo ligado', 'texto': 'Crie a conta e estude a primeira unidade de todas as matérias com questões de provas, flashcards, cadernos e o tutor de IA, com 2 UbiTokens de boas-vindas.', 'lista': ['<strong>Sem cartão</strong> · você só decide depois', '<strong>Seu progresso fica salvo</strong> · destaques, notas, flashcards e cadernos', '<strong>Edital vivo</strong> · veja o tamanho de cada matéria antes de assinar'], 'cta': 'Criar conta grátis', 'ctaHref': 'app', 'nota': 'Leva um minuto · você confirma o e-mail e já entra' } ] },
+  'final': { 'rotulo': 'Sem risco · conta gratuita', 'titulo': 'Comece hoje,<br><em>sem pagar nada</em>.', 'lead': 'A conta é gratuita e não expira. Você entra, estuda a primeira unidade de cada matéria com tudo ligado e só assina o que quiser, quando quiser.', 'stack': [ { 'num': 'R$ 0', 'label': 'Conta gratuita, sem cartão' }, { 'num': '1ª unidade', 'label': 'De cada matéria, aberta' }, { 'num': '2ⓤ', 'label': 'Para conversar com o tutor de IA' }, { 'num': '1 clique', 'label': 'Para cancelar qualquer matéria' } ], 'reassure': 'Olhe honestamente para o que você viu até aqui: aulas de especialistas, o banco de provas anteriores classificado pelo edital, flashcards, cadernos, tutor de IA e desempenho por tema, num lugar só. O próximo passo custa um minuto.', 'cta': 'Criar conta grátis', 'ctaHref': 'app' },
+  'rodape': { 'marca': 'Falcon · <em>Grupo Ubique</em>', 'links': [ { 'label': 'Grupo Ubique', 'href': '#' }, { 'label': 'Ubique Idiomas', 'href': 'https://www.ubiqueidiomas.com.br/' }, { 'label': 'Termos', 'href': '#' }, { 'label': 'Privacidade', 'href': '#' }, { 'label': 'Contato', 'href': '#' } ], 'copyright': '© 2026 Grupo Ubique · Todos os direitos reservados · Preparação para o CACD' }
+}
+NOVO = {
+  'cursos.itens': curso('XX', 'Nova <em>matéria</em>', 'Nova matéria', 'Professor a definir', 'credenciais', 'módulos · unidades'),
+  'faq.itens': { 'q': 'Nova pergunta?', 'a': 'Resposta.' },
+  'depoimentos.itens': { 'texto': 'Texto do depoimento.', 'iniciais': 'AA', 'foto': '', 'nome': 'Nome', 'cargo': 'Cargo · ano' },
+  'materias.itens': { 'sigla': 'XX', 'nome': 'Nova matéria', 'desc': 'Descrição.', 'cobertura': 'n%' },
+  'promessa.itens': { 'titulo': 'Nova promessa', 'texto': 'Texto.' },
+  'ferramentas.itens': { 'mock': 8, 'numero': 'X · Nova ferramenta', 'titulo': 'Título', 'texto': 'Texto.' },
+  'planos.itens': { 'gratis': False, 'destaque': False, 'ribbon': '', 'kind': 'Tipo', 'nome': 'Nome do plano', 'tag': 'Para quem…', 'preco': '0', 'periodo': '/ mês', 'sub': '', 'inclui': ['Item'], 'cta': 'Assinar', 'ctaHref': 'app', 'nota': '' },
+  'hero.atos': { 'rotulo': 'Ato', 'titulo': 'Título', 'texto': 'Texto.', 'cta1': { 'label': 'Criar conta grátis', 'href': 'app' }, 'cta2': None, 'meta': [] },
+  'materias.stats': { 'num': 'n', 'label': 'rótulo' }, 'final.stack': { 'num': 'n', 'label': 'rótulo' }, 'rodape.links': { 'label': 'Link', 'href': '#' },
+  'experimentar.itens': { 'eyebrow': 'Rótulo', 'titulo': 'Título', 'texto': 'Texto.', 'lista': ['Item'], 'cta': 'Botão', 'ctaHref': 'app', 'nota': '' }
+}
 
-# ── 3. Herói ─────────────────────────────────────────────────────────────
-SETA = '<svg viewBox="0 0 24 24"><path d="M5 12h14M13 5l7 7-7 7"/></svg>'
-hero = '''<section class="scroll-hero" id="top">
-  <div class="scroll-stage">
-    <canvas class="hero-canvas" id="heroCanvas" aria-hidden="true"></canvas>
-    <div class="hero-veil"></div>
+# ── shell HTML ───────────────────────────────────────────────────────────
+topbar = ('<header class="topbar">\n  <a href="#top" class="topbar-logo" aria-label="Falcon">' + topbar_logo_svg + '<span class="logo-word">Falcon <em>·</em> Ubique</span></a>\n'
+  '  <div class="topbar-right"><a class="btn btn-ghost" data-app-link href="' + APP + '">Entrar</a><a class="btn btn-primary" data-app-link href="' + APP + '">Criar conta grátis</a>\n'
+  + linhas(3427, 3430) + '\n  </div>\n</header>')
+menu = '<aside class="anchor-menu" id="anchorMenu" aria-label="Navegação da página">' + ''.join('<a class="anchor-item" href="#' + i + '" data-target="' + i + '"><span class="anchor-item-dot"></span><span class="anchor-item-label">' + l + '</span></a>' for i, l in [('top', 'Início'), ('video', 'Vídeo'), ('cursos', 'Cursos'), ('integrado', 'Veja na prática'), ('ferramentas', 'Plataforma'), ('materias', 'Matérias'), ('alunos', 'Alunos'), ('planos', 'Planos'), ('faq', 'Dúvidas'), ('experimentar', 'Experimentar')]) + '</aside>'
+hero = '''<section class="scroll-hero" id="top"><div class="scroll-stage">
+    <canvas class="hero-canvas" id="heroCanvas" aria-hidden="true"></canvas><div class="hero-veil"></div>
     <div class="hero-preview-tag" id="heroPreviewTag">Cena provisória · o vídeo aéreo entra aqui</div>
-
-    <div class="stage-overlay">
-      <div class="stage-inner">
-        <div class="stage-text">
-          <div class="panel on" data-panel="0">
-            <div class="s-label">
-              <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-              Preparação completa · CACD
-            </div>
-            <h1>Do primeiro tópico<br>do edital ao <em>Itamaraty</em>.</h1>
-            <p>A Falcon reúne, numa só plataforma, as aulas dos melhores professores de cada matéria, o banco de provas anteriores classificado pelo edital, flashcards, cadernos e um tutor de IA. Feita para quem vai prestar o concurso de diplomata.</p>
-            <div class="cta-row">
-              <a class="btn btn-primary" data-app-link href="''' + APP + '''">Criar conta grátis ''' + SETA + '''</a>
-              <a href="#cursos" class="btn btn-ghost">Ver os cursos</a>
-            </div>
-            <div class="meta-row"><span>Continue rolando para sobrevoar o Itamaraty</span></div>
-          </div>
-
-          <div class="panel" data-panel="1">
-            <div class="s-label">
-              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 4v16"/></svg>
-              Ato II · A plataforma
-            </div>
-            <h1>Todo o <em>CACD</em>,<br>num só lugar.</h1>
-            <p>Matéria por matéria, unidade por unidade: texto editorial, videoaula, questões de provas reais, flashcards e desempenho por tópico do edital, costurados na mesma tela. Nada de abrir cinco aplicativos para estudar um tema.</p>
-            <div class="cta-row">
-              <a href="#integrado" class="btn btn-primary">Veja na prática ''' + SETA + '''</a>
-            </div>
-            <div class="meta-row"><span><span class="marcador">n</span> matérias</span><span><span class="marcador">n</span> unidades</span><span><span class="marcador">n</span> questões de provas</span></div>
-          </div>
-
-          <div class="panel" data-panel="2">
-            <div class="s-label">
-              <svg viewBox="0 0 24 24"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 9h.01M9 13h.01M9 17h.01M15 9h.01M15 13h.01M15 17h.01"/></svg>
-              Ato III · Feita para a banca
-            </div>
-            <h1>Estude o que a banca<br><em>cobra</em>.</h1>
-            <p>Cada questão de prova anterior está ligada ao tópico do edital. Você vê a recorrência de cada tema, o que precisa estar seguro e onde ainda perde ponto, antes da prova, não depois.</p>
-            <div class="cta-row">
-              <a class="btn btn-primary" data-app-link href="''' + APP + '''">Criar conta grátis ''' + SETA + '''</a>
-              <a href="#cursos" class="btn btn-ghost">Conhecer os professores</a>
-            </div>
-            <div class="meta-row"><span>Conta gratuita</span><span>Primeira unidade de cada matéria aberta</span></div>
-          </div>
-        </div>
-
-        <div>
-          <div class="stage-plaque">
-            <div class="plaque-corner tl"></div><div class="plaque-corner tr"></div>
-            <div class="plaque-corner bl"></div><div class="plaque-corner br"></div>
-            <div class="plaque-top-label">Brasília · Palácio Itamaraty</div>
-            <div class="plaque-year is-text" id="plaqueYear">O espelho d'água</div>
-            <div class="plaque-event">
-              <div class="plaque-event-name" id="plaqueName">Sobre o lago</div>
-              <div class="plaque-event-desc" id="plaqueDesc">A câmera cruza o espelho d'água do palácio, sede do Ministério das Relações Exteriores desde 1970.</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="scroll-hint" id="scrollHint">
-      <span>Role para sobrevoar</span>
-      <div class="scroll-hint-line"></div>
-    </div>
-  </div>
-</section>'''
-
-# ── 4. Strip + vídeo ──────────────────────────────────────────────────────
-strip = '''<section class="strip">
-  <div class="container">
-    <div class="strip-inner">
-      <div class="strip-label">Preparação específica para</div>
-      <div class="strip-logos">
-        <span>CACD</span><span>·</span><span>Instituto Rio Branco</span><span>·</span><span>Edital vivo</span><span>·</span><span>Provas anteriores</span><span>·</span><span>Bibliografia da banca</span>
-      </div>
-    </div>
-  </div>
-</section>'''
-
-video = linhas(3678, 3715)
-video = video.replace('Uma <em>aula aberta</em> com<br>a professora Cláudia Viscardi.', 'Veja a plataforma<br><em>por dentro</em>.')
-video = re.sub(r'Em 4 minutos, a professora mostra .*?</p>', 'Em poucos minutos: como uma unidade é estudada de ponta a ponta, como as questões de provas anteriores conversam com o edital e como o tutor de IA entra no meio do estudo. <span class="marcador">vídeo a produzir</span></p>', video, flags=re.S)
-video = video.replace('"O que a banca cobra — e como este curso te prepara."', '"O caminho inteiro do candidato, numa plataforma só."')
-video = video.replace('História do Brasil no CACD:<br>\n            <em>o método para cobrir 200% do edital</em>', 'Falcon, por dentro:<br>\n            <em>aulas, provas, flashcards, cadernos e tutor</em>')
-video = video.replace('<div class="video-duration">04:32</div>', '<div class="video-duration">em breve</div>')
-
-# ── 5. Galeria de cursos ─────────────────────────────────────────────────
-CURSOS = [
-  ('HB', 'História', 'do Brasil', 'Cláudia Viscardi', 'Doutora em História Social · UFJF', '3 módulos · 43 unidades', True),
-  ('HM', 'História', 'Mundial', 'Professor a definir', 'marcador', 'módulos · unidades', False),
-  ('PI', 'Política', 'Internacional', 'Professor a definir', 'marcador', 'módulos · unidades', False),
-  ('ECO', 'Economia', '', 'Professor a definir', 'marcador', 'módulos · unidades', False),
-  ('DIP', 'Direito', '', 'Professor a definir', 'marcador', 'módulos · unidades', False),
-  ('GEO', 'Geografia', '', 'Professor a definir', 'marcador', 'módulos · unidades', False),
-  ('LP', 'Língua', 'Portuguesa', 'Professor a definir', 'marcador', 'módulos · unidades', False),
-  ('ING', 'Inglês', '', 'Professor a definir', 'marcador', 'módulos · unidades', False),
+    <div class="stage-overlay"><div class="stage-inner" data-sec="hero"></div></div>
+    <div class="scroll-hint" id="scrollHint"><span>Role para sobrevoar</span><div class="scroll-hint-line"></div></div>
+  </div></section>'''
+demo_launch = linhas(3776, 3922)   # bloco de lançamento + modal da demo (estático)
+secoes = [
+  topbar, menu, hero,
+  '<section class="strip"><div class="container" data-sec="strip"></div></section>',
+  '<section class="video-section sec-pad" id="video"><div class="container" data-sec="video"></div></section>',
+  '<section class="galeria" id="cursos"><div class="galeria-stage" data-sec="cursos"></div></section>',
+  '<section class="integrated" id="integrado"><div class="container"><div data-sec="demo"></div>\n' + demo_launch,
+  linhas(3923, 3950),   # barra de contexto + toast da demo (vivem fora da seção)
+  '<section class="study-tools sec-pad" id="ferramentas"><div class="container" data-sec="ferramentas"></div></section>',
+  '<section class="promise sec-pad"><div class="container" data-sec="promessa"></div></section>',
+  '<section class="curriculum-section sec-pad" id="materias"><div class="container" data-sec="materias"></div></section>',
+  '<section class="testimonials sec-pad" id="alunos"><div class="container" data-sec="depoimentos"></div></section>',
+  '<section class="pricing sec-pad" id="planos"><div class="container" data-sec="planos"></div></section>',
+  '<section class="faq sec-pad" id="faq"><div class="container" data-sec="faq"></div></section>',
+  '<section class="tryit sec-pad" id="experimentar"><div class="container" data-sec="experimentar"></div></section>',
+  '<section class="final"><div class="container" data-sec="final"></div></section>',
+  '<footer class="footer"><div class="container" data-sec="rodape"></div></footer>',
+  '<div class="sticky-cta"></div>'
 ]
-def obra(c):
-    sigla, n1, n2, prof, cred, dados, real = c
-    silhueta = ('<svg viewBox="0 0 400 500" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice">'
-      '<defs><linearGradient id="g' + sigla + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a2d36"/><stop offset="1" stop-color="#0f1115"/></linearGradient></defs>'
-      '<rect width="400" height="500" fill="url(#g' + sigla + ')"/>'
-      '<circle cx="200" cy="205" r="70" fill="#3a3f4b"/>'
-      '<path d="M60 500 C60 380 120 320 200 320 C280 320 340 380 340 500 Z" fill="#3a3f4b"/>'
-      '<path d="M0 0 L400 0 L400 60 L0 130 Z" fill="rgba(200,169,126,.10)"/></svg>')
-    nome = n1 + (' <em>' + n2 + '</em>' if n2 else '')
-    return ('<figure class="obra' + ('' if real else ' is-placeholder') + '">'
-      '<div class="obra-luz"></div>'
-      '<div class="obra-moldura"><div class="obra-passe"><div class="obra-tela">' + silhueta +
-      '<span class="obra-sigla">' + sigla + '</span><span class="obra-nome">' + nome + '</span></div></div></div>'
-      '<figcaption class="placa">'
-      '<div class="placa-titulo">' + n1 + (' ' + n2 if n2 else '') + '</div>'
-      '<div class="placa-prof">' + prof + '</div>'
-      '<div class="placa-dados"><span>' + cred + '</span><span>' + dados + '</span><span>questões de provas · <span class="marcador">n</span></span></div>'
-      '<div class="placa-preco"><span><b>R$ 100</b><small>/ mês por matéria · <span class="marcador">a confirmar</span></small></span><a data-app-link href="' + APP + '">Ver matéria</a></div>'
-      '</figcaption></figure>')
-galeria = '''<section class="galeria" id="cursos">
-  <div class="galeria-stage">
-    <div class="galeria-head">
-      <div class="s-label" style="margin-left:auto;margin-right:auto">
-        <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-        Os cursos e seus professores
-      </div>
-      <h2 class="s-title">Uma matéria, <em>um especialista</em>.</h2>
-    </div>
-    <div class="galeria-wall" id="galeriaWall">''' + ''.join(obra(c) for c in CURSOS) + '''</div>
-    <div class="galeria-piso"></div>
-    <div class="galeria-hint">Role para caminhar pela galeria</div>
-  </div>
-</section>'''
+assert demo_launch.rstrip().endswith('</section>'), demo_launch[-200:]
 
-# ── 6. Demo interativa (como está) + ferramentas + promessa ──────────────
-integrado = linhas(3764, 3954)
-integrado = integrado.replace('O curso inteiro,<br><em>à mão</em> do candidato.', 'A plataforma inteira,<br><em>à mão</em> do candidato.')
-integrado = re.sub(r'Toque no botão abaixo para abrir a <strong>Unidade 1 — A Chegada \(1500\)</strong> dentro da própria plataforma\.', 'Toque no botão abaixo para abrir uma unidade de exemplo (<strong>História do Brasil — A Chegada, 1500</strong>) dentro da própria plataforma.', integrado)
-integrado = integrado.replace('Mesmo design, mesmas funcionalidades. Selecione um trecho para destacar, marque flashcards, responda às questões — tudo que o aluno tem na plataforma real.', 'Mesmo design, mesmas funcionalidades de qualquer matéria da Falcon. Selecione um trecho para destacar, marque flashcards, responda às questões — tudo que o aluno tem na plataforma real.')
-
-ferramentas = linhas(3955, 4330)
-ferramentas = ferramentas.replace('O que nenhum outro curso<br>de História tem <em>reunido</em>.', 'O que nenhuma preparação<br>para o CACD tinha <em>reunido</em>.')
-ferramentas = re.sub(r'Teoria e prática só viram aprovação com revisão ativa e autoconhecimento\. A plataforma entrega <strong>os seis instrumentos que faltam</strong> na rotina do candidato sério — e os cost[^<]*', 'Teoria e prática só viram aprovação com revisão ativa e autoconhecimento. A Falcon entrega <strong>os instrumentos que faltam</strong> na rotina do candidato sério, costurados em volta de cada unidade de cada matéria.', ferramentas)
-ferramentas = ferramentas.replace('Cláudia Viscardi', 'os professores').replace('de História', 'do CACD')
-
-promessa = linhas(4331, 4396)
-promessa = promessa.replace('Não é curso genérico.<br>É <em>curso de banca</em>.', 'Não é cursinho genérico.<br>É <em>preparação de banca</em>.')
-promessa = re.sub(r'<div class="promise-list">.*?</div>\n      </div>\n    </div>\n  </div>\n</section>', '''<div class="promise-list">
-          <div class="promise-item" data-a="2"><div class="promise-num">01</div><div><h3>Todo o edital, matéria por matéria</h3><p>Cada matéria do CACD organizada em módulos, capítulos e unidades que seguem o edital, com a recorrência de cada tópico nas provas anteriores à vista.</p></div></div>
-          <div class="promise-item" data-a="3"><div class="promise-num">02</div><div><h3>Questões de provas reais, classificadas pelo tópico</h3><p>O banco reúne as provas anteriores, item por item, ligadas ao tópico do edital que cobram. Você treina no padrão Cebraspe e sabe exatamente de onde vem cada questão.</p></div></div>
-          <div class="promise-item" data-a="4"><div class="promise-num">03</div><div><h3>Discursivas com <em>correção por IA</em></h3><p>Questões no formato da banca, com modelos de resposta e correção instantânea a cada envio, critério por critério.</p></div></div>
-          <div class="promise-item" data-a="5"><div class="promise-num">04</div><div><h3>Tutor de IA que faz <em>você pensar</em></h3><p>Por texto e por voz, alimentado pelo conteúdo da unidade e pela bibliografia da banca. Tira dúvida, mas também devolve em forma de desafio.</p></div></div>
-          <div class="promise-item" data-a="6"><div class="promise-num">05</div><div><h3>Um especialista em cada matéria</h3><p>Professores com trajetória na disciplina que ensinam, não um generalista dando conta de tudo. Conheça cada um na galeria de cursos.</p></div></div>
-          <div class="promise-item" data-a="7"><div class="promise-num">06</div><div><h3>Teoria, prática e revisão no mesmo lugar</h3><p>Leitura, vídeo, questões, flashcards com repetição espaçada, cadernos, simulados e desempenho por tema: tudo em torno da mesma unidade.</p></div></div>
-        </div>
-      </div>
-    </div>
-  </div>
-</section>''', promessa, flags=re.S)
-
-# ── 7. Matérias (no lugar do currículo) ──────────────────────────────────
-MATERIAS = [('HB','História do Brasil','Da chegada de Cabral à Nova República, com a bibliografia que a banca cobra.',82),('HM','História Mundial','Das revoluções às ordens internacionais do século XX.',0),('PI','Política Internacional','Sistema internacional, política externa brasileira e temas globais.',0),('ECO','Economia','Micro, macro, economia brasileira e internacional.',0),('DIP','Direito','Direito internacional público, direito interno e temas de fronteira.',0),('GEO','Geografia','Geografia política, econômica e do Brasil.',0),('LP','Língua Portuguesa','Redação, gramática e interpretação no padrão da banca.',0),('ING','Inglês','Compreensão, versão e redação para a segunda fase.',0)]
-materias = '''<section class="curriculum-section sec-pad" id="materias">
-  <div class="container">
-    <div style="text-align:center;max-width:760px;margin:0 auto">
-      <div class="s-label" style="margin-left:auto;margin-right:auto">
-        <svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 016.5 17H20 M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
-        Matérias · cobertura do edital
-      </div>
-      <h2 class="s-title">As matérias do CACD,<br><em>cada uma com o seu edital</em>.</h2>
-      <div class="s-divider center"></div>
-      <p class="s-body" style="margin:0 auto">Cada matéria é um curso completo e independente: você assina as que precisa, na ordem que quiser. O edital de cada uma é o esqueleto do curso, e a barra abaixo mostra quanto dele já está coberto na plataforma.</p>
-    </div>
-    <div class="curr-stats" data-a="1">
-      <div class="curr-stat"><div class="curr-stat-num"><span class="marcador">n</span></div><div class="curr-stat-label">matérias</div></div>
-      <div class="curr-stat"><div class="curr-stat-num"><span class="marcador">n</span></div><div class="curr-stat-label">unidades</div></div>
-      <div class="curr-stat"><div class="curr-stat-num"><span class="marcador">n</span></div><div class="curr-stat-label">questões de provas anteriores</div></div>
-      <div class="curr-stat"><div class="curr-stat-num"><span class="marcador">n</span></div><div class="curr-stat-label">horas de videoaula</div></div>
-      <div class="curr-stat"><div class="curr-stat-num"><span class="marcador">n</span></div><div class="curr-stat-label">professores</div></div>
-      <div class="curr-stat"><div class="curr-stat-num">2ⓤ</div><div class="curr-stat-label">de boas-vindas para o tutor de IA</div></div>
-    </div>
-    <div class="materias-grid" data-a="2">''' + ''.join(
-      '<div class="materia"><div class="materia-sigla">' + s + '</div><div class="materia-nome">' + n + '</div><div class="materia-desc">' + d + '</div><div class="materia-bar"><i style="--w:' + str(w or 35) + '%"></i></div><div class="materia-meta"><span>edital coberto</span><span>' + (str(w) + '%' if w else '<span class="marcador">n%</span>') + '</span></div></div>' for s, n, d, w in MATERIAS) + '''</div>
-  </div>
-</section>'''
-
-# ── 8. Depoimentos (marcadores) ──────────────────────────────────────────
-DEP = [('Depoimento de exemplo. Substituir pelo texto real de um aluno aprovado: o que mudou no estudo, o que a plataforma resolveu, o resultado.', 'AA', 'Nome do aluno', 'Diplomata · CACD 20xx'),
-       ('Depoimento de exemplo. Um comentário curto sobre o banco de questões ou o tutor de IA funciona melhor do que elogios genéricos.', 'BB', 'Nome do aluno', 'Aprovado na 1ª fase · CACD 20xx'),
-       ('Depoimento de exemplo. Preferir alunos com nome, turma e ano, e pedir autorização de uso.', 'CC', 'Nome do aluno', 'Candidato · turma 20xx')]
-dep_items = ''.join('<div class="testimonial"><p class="testimonial-text">' + t + '</p><div class="testimonial-author"><div class="testimonial-avatar">' + a + '</div><div class="testimonial-info"><h5>' + n + '</h5><p>' + c + '</p></div></div></div>' for t, a, n, c in DEP)
-depo_ini, j = fatia('<section class="testimonials sec-pad" id="alunos">', '<div class="testimonial-carousel"')
-depoimentos = depo_ini + '<div class="testimonial-carousel" id="testimonialCarousel"><div class="testimonial-track" id="testimonialTrack">' + dep_items + dep_items + '</div></div>\n    <p style="text-align:center;margin-top:1.5rem"><span class="marcador">depoimentos de exemplo · substituir pelos reais</span></p>\n  </div>\n</section>'
-
-# ── 9. Planos: conta grátis + matéria como produto ────────────────────────
-CHECK = '<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>'
-planos = '''<section class="pricing sec-pad" id="planos">
-  <div class="container">
-    <div style="text-align:center;max-width:720px;margin:0 auto">
-      <div class="s-label" style="margin-left:auto;margin-right:auto">
-        <svg viewBox="0 0 24 24"><path d="M12 2l3 7h7l-5.5 4 2 8L12 17l-6.5 4 2-8L2 9h7z"/></svg>
-        Como funciona
-      </div>
-      <h2 class="s-title">Conta gratuita. <em>Matérias avulsas</em>.</h2>
-      <div class="s-divider center"></div>
-      <p class="s-body" style="margin:0 auto">Crie a conta sem pagar nada e estude a primeira unidade de cada matéria com tudo ligado. Depois, assine só as matérias que você precisa, pelo tempo que precisar.</p>
-    </div>
-    <div class="plans">
-      <div class="plan featured plan-free" data-a="1">
-        <div class="plan-ribbon">Comece por aqui</div>
-        <div class="plan-kind">Gratuito · sem cartão</div>
-        <div class="plan-name"><em>Conta Falcon</em></div>
-        <div class="plan-tag">Para conhecer a plataforma de verdade, com o seu próprio estudo.</div>
-        <div class="plan-price-row"><span class="plan-price"><span class="currency">R$</span>0</span><span class="plan-period">para sempre</span></div>
-        <div class="plan-sub">Crie a conta em um minuto · <strong>sem cartão</strong>, sem prazo de teste.</div>
-        <ul class="plan-includes">
-          <li>''' + CHECK + '''<div><strong>Primeira unidade de cada matéria</strong> aberta, com aulas, questões e flashcards</div></li>
-          <li>''' + CHECK + '''<div><strong>2 UbiTokens de boas-vindas</strong> para usar o tutor de IA</div></li>
-          <li>''' + CHECK + '''<div>Cadernos, destaques, anotações e flashcards próprios salvos na sua conta</div></li>
-          <li>''' + CHECK + '''<div>Edital vivo com a recorrência de cada tópico nas provas</div></li>
-          <li>''' + CHECK + '''<div>Fórum e salas de estudo com outros candidatos</div></li>
-        </ul>
-        <a class="btn btn-primary plan-cta" data-app-link href="''' + APP + '''">Criar conta grátis ''' + SETA + '''</a>
-        <p class="plan-note">Leva um minuto · você só decide depois se quer assinar alguma matéria</p>
-      </div>
-      <div class="plan" data-a="2">
-        <div class="plan-kind">Assinatura · por matéria</div>
-        <div class="plan-name"><em>Matéria completa</em></div>
-        <div class="plan-tag">Cada matéria é um produto: assine uma, várias ou um combo.</div>
-        <div class="plan-price-row"><span class="plan-price"><span class="currency">R$</span>100</span><span class="plan-period">/ mês por matéria</span></div>
-        <div class="plan-sub"><span class="marcador">preço a confirmar</span> · combos com desconto no carrinho</div>
-        <ul class="plan-includes">
-          <li>''' + CHECK + '''<div><strong>Todas as unidades</strong> da matéria, com o professor especialista</div></li>
-          <li>''' + CHECK + '''<div><strong>Banco de provas anteriores</strong> da matéria, classificado pelo edital</div></li>
-          <li>''' + CHECK + '''<div>Discursivas com correção por IA e simulados no padrão da banca</div></li>
-          <li>''' + CHECK + '''<div>Desempenho por tópico, Raio-X do estudo e certificado</div></li>
-          <li>''' + CHECK + '''<div><strong>15 UbiTokens por mês</strong> para o tutor de IA</div></li>
-        </ul>
-        <a href="#cursos" class="btn btn-ghost plan-cta">Ver as matérias e os preços ''' + SETA + '''</a>
-        <p class="plan-note">Os preços de cada matéria estão nas placas da galeria de cursos</p>
-      </div>
-    </div>
-  </div>
-</section>'''
-
-# ── 10. FAQ ───────────────────────────────────────────────────────────────
-ICO = '<span class="faq-q-icon"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>'
-FAQ = [('A conta gratuita tem limite de tempo?', 'Não. Ela é gratuita para sempre: você estuda a primeira unidade de cada matéria, usa seus 2 UbiTokens no tutor e guarda cadernos, flashcards e destaques na sua conta. Só paga se quiser assinar uma matéria inteira.'),
-       ('Preciso assinar todas as matérias?', 'Não. Cada matéria é um curso independente. Você assina só as que precisa, pelo tempo que precisar, e pode montar combos com desconto no carrinho.'),
-       ('As questões são de provas reais?', 'Sim. O banco reúne itens das provas anteriores do CACD, cada um ligado ao tópico do edital que cobra, com gabarito comentado. Há também questões inéditas no padrão da banca, sempre marcadas como tal.'),
-       ('O que é o tutor de IA e o que são os UbiTokens?', 'O tutor responde por texto e por voz a partir do conteúdo da unidade e da bibliografia da banca. Cada uso consome UbiTokens, a moeda interna da plataforma: a conta gratuita ganha 2 de boas-vindas e cada matéria assinada inclui 15 por mês.'),
-       ('Os flashcards, cadernos e destaques ficam salvos?', 'Sim, tudo na sua conta. Os flashcards seguem repetição espaçada, os cadernos aceitam citações entre si e portais, e os destaques ficam no texto quando você volta.'),
-       ('Posso estudar no celular?', 'Sim. A plataforma é responsiva: leitura, questões, flashcards e tutor funcionam no celular e no tablet, e o seu progresso é o mesmo em qualquer aparelho.'),
-       ('Posso cancelar a assinatura de uma matéria?', 'Sim, a qualquer momento, no painel da sua conta. Você mantém o acesso até o fim do período já pago.'),
-       ('Serve para quem ainda não decidiu prestar o CACD?', 'Serve. A conta gratuita é a melhor forma de descobrir se o concurso é para você: o edital vivo mostra o tamanho de cada matéria e a primeira unidade dá a medida do estudo.')]
-faq = '''<section class="faq sec-pad" id="faq">
-  <div class="container">
-    <div style="text-align:center;max-width:720px;margin:0 auto">
-      <div class="s-label" style="margin-left:auto;margin-right:auto">
-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        Dúvidas frequentes
-      </div>
-      <h2 class="s-title">Perguntas que a gente <em>já ouviu</em>.</h2>
-      <div class="s-divider center"></div>
-    </div>
-    <div class="faq-list">''' + ''.join('<div class="faq-item"><button class="faq-q"><span>' + q + '</span>' + ICO + '</button><div class="faq-a"><p>' + a + '</p></div></div>' for q, a in FAQ) + '''</div>
-  </div>
-</section>'''
-
-# ── 11. Experimentar ──────────────────────────────────────────────────────
-experimentar = '''<section class="tryit sec-pad" id="experimentar">
-  <div class="container">
-    <div class="tryit-head">
-      <div class="s-label" style="margin-left:auto;margin-right:auto">
-        <svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
-        Comece sem pagar nada
-      </div>
-      <h2 class="s-title" data-a="1">Antes de assinar,<br><em>experimente</em> de verdade.</h2>
-      <div class="s-divider center"></div>
-      <p class="s-body" style="margin:0 auto" data-a="2">Duas formas de provar a Falcon sem custo: a demonstração aberta nesta página e a conta gratuita, com a primeira unidade de cada matéria e o tutor de IA ligados.</p>
-    </div>
-    <div class="tryit-grid">
-      <article class="tryit-card" data-a="3">
-        <div class="tryit-card-icon"><svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
-        <div class="tryit-card-eyebrow">Agora · sem conta</div>
-        <h3 class="tryit-card-title">Uma unidade <em>completa</em>, nesta página</h3>
-        <p class="tryit-card-desc">Abra a demonstração e navegue por uma unidade inteira como o aluno vê: texto editorial, vídeo, linha do tempo, quiz, discursiva, flashcards.</p>
-        <ul class="tryit-card-list">
-          <li><strong>13 tipos de bloco</strong> · texto, vídeo, quiz, discursiva, flashcards, fórum</li>
-          <li><strong>Destaques e notas</strong> · selecione um trecho e veja como funciona</li>
-          <li><strong>Mesmo design</strong> da plataforma real</li>
-        </ul>
-        <a href="#integrado" class="tryit-card-btn" style="text-decoration:none;display:inline-flex"><svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>Abrir a demonstração</a>
-        <p class="tryit-card-note">Sem cadastro · sem instalar nada</p>
-      </article>
-      <article class="tryit-card" data-a="4">
-        <div class="tryit-card-icon"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></div>
-        <div class="tryit-card-eyebrow">Conta gratuita · para sempre</div>
-        <h3 class="tryit-card-title">A primeira unidade de <em>cada matéria</em>, com tudo ligado</h3>
-        <p class="tryit-card-desc">Crie a conta e estude a primeira unidade de todas as matérias com questões de provas, flashcards, cadernos e o tutor de IA, com 2 UbiTokens de boas-vindas.</p>
-        <ul class="tryit-card-list">
-          <li><strong>Sem cartão</strong> · você só decide depois</li>
-          <li><strong>Seu progresso fica salvo</strong> · destaques, notas, flashcards e cadernos</li>
-          <li><strong>Edital vivo</strong> · veja o tamanho de cada matéria antes de assinar</li>
-        </ul>
-        <a class="tryit-card-btn" data-app-link href="''' + APP + '''" style="text-decoration:none;display:inline-flex">''' + SETA + '''Criar conta grátis</a>
-        <p class="tryit-card-note">Leva um minuto · você confirma o e-mail e já entra</p>
-      </article>
-    </div>
-  </div>
-</section>'''
-
-# ── 12. Final + rodapé + CTA fixo ─────────────────────────────────────────
-final = '''<section class="final">
-  <div class="container">
-    <div class="final-emblem" aria-hidden="true">
-      <svg viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg"><circle cx="40" cy="40" r="36" fill="none" stroke="currentColor" stroke-width=".5" opacity=".4"/><circle cx="40" cy="40" r="28" fill="none" stroke="currentColor" stroke-width=".5" opacity=".8"/><path d="M28 40 L36 48 L52 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </div>
-    <div class="s-label" style="margin-left:auto;margin-right:auto"><svg viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>Sem risco · conta gratuita</div>
-    <h2 class="s-title">Comece hoje,<br><em>sem pagar nada</em>.</h2>
-    <p class="final-lead">A conta é gratuita e não expira. Você entra, estuda a primeira unidade de cada matéria com tudo ligado e só assina o que quiser, quando quiser.</p>
-    <div class="final-stack">
-      <div class="final-stack-item"><div class="final-stack-num">R$ 0</div><div class="final-stack-label">Conta gratuita, sem cartão</div></div>
-      <div class="final-stack-item"><div class="final-stack-num">1ª unidade</div><div class="final-stack-label">De cada matéria, aberta</div></div>
-      <div class="final-stack-item"><div class="final-stack-num">2ⓤ</div><div class="final-stack-label">Para conversar com o tutor de IA</div></div>
-      <div class="final-stack-item"><div class="final-stack-num">1 clique</div><div class="final-stack-label">Para cancelar qualquer matéria</div></div>
-    </div>
-    <p class="final-reassure">Olhe honestamente para o que você viu até aqui: aulas de especialistas, o banco de provas anteriores classificado pelo edital, flashcards, cadernos, tutor de IA e desempenho por tema, num lugar só. O próximo passo custa um minuto.</p>
-    <div class="final-ctas"><a class="btn btn-primary btn-xl" data-app-link href="''' + APP + '''">Criar conta grátis ''' + SETA + '''</a></div>
-  </div>
-</section>'''
-rodape_ini, j = fatia('<footer class="footer">', '<span>Ubique · <em>Course Platform</em></span>')
-rodape = rodape_ini + '<span>Falcon · <em>Grupo Ubique</em></span>' + P[j + len('<span>Ubique · <em>Course Platform</em></span>'):P.index('</footer>') + len('</footer>')]
-rodape = rodape.replace('Princípio da Especificidade', 'Preparação para o CACD')
-sticky = '<div class="sticky-cta"><a class="btn btn-primary" data-app-link href="' + APP + '">Criar conta grátis ' + SETA + '</a></div>'
-
-# ── 13. Scripts: os do protótipo (menos o herói) + herói novo + galeria + app-link ──
-js_proto_resto = linhas(5270, 6388)   # menu-âncora, reveal/faq/vídeo, tema, demo, depoimentos, currículo
-js_novo = r"""
-/* ═════════════════════════════
-   FALCON · links para o app (Entrar / Criar conta) + sessão existente
-   ═════════════════════════════ */
-(function(){
-  const APP = '__APP__';
-  const logado = (function(){ try{ return Object.keys(localStorage).some(k => /^sb-.*-auth-token$/.test(k)); }catch(_){ return false; } })();
-  document.querySelectorAll('[data-app-link]').forEach(a => {
-    a.setAttribute('href', APP);
-    if(logado && /Criar conta/.test(a.textContent)) a.textContent = 'Entrar na plataforma';
-  });
-})();
-
-/* ═════════════════════════════
-   FALCON · HERÓI POR QUADROS — vídeo aéreo do Itamaraty dirigido pelo scroll.
-   Enquanto os quadros não existem (FRAMES.count = 0), desenha uma cena
-   provisória: espelho d'água, arcos do palácio, o Meteoro, o jardim.
-   Quando o vídeo chegar: ffmpeg -> landing/frames/hero/0001.webp… e count.
-   ═════════════════════════════ */
-(function(){
-  const FRAMES = { dir: '__FRAMES__', dirM: '__FRAMES_M__', count: __COUNT__, ext: 'webp' };
-  // ATOS sincronizados com o vídeo (10,96 s): 0–2,6 s lago com o Meteoro à frente; 2,6–6,1 s o Meteoro
-  // cresce e passa pela câmera; 6,1 s em diante a câmera sobe a fachada e chega ao jardim.
-  const ATOS = [0.24, 0.56];
-  const hero = document.getElementById('top');
-  const canvas = document.getElementById('heroCanvas');
-  const tag = document.getElementById('heroPreviewTag');
-  const scrollHint = document.getElementById('scrollHint');
-  const panels = Array.from(document.querySelectorAll('.panel'));
-  const plaqueYear = document.getElementById('plaqueYear'), plaqueName = document.getElementById('plaqueName'), plaqueDesc = document.getElementById('plaqueDesc');
-  if(!hero || !canvas) return;
-  const ctx = canvas.getContext('2d');
-  const acts = [
-    { year: "O espelho d'água", name: 'Sobre o lago', desc: "O voo cruza o espelho d'água do Palácio Itamaraty, sede do Ministério das Relações Exteriores, com o Meteoro à frente." },
-    { year: 'O Meteoro', name: 'Bruno Giorgi · 1967', desc: 'A escultura de mármore no meio do lago: cinco continentes num só bloco, símbolo da casa da diplomacia brasileira.' },
-    { year: 'O jardim', name: 'Burle Marx', desc: 'A câmera sobe pela fachada e chega ao terraço: o jardim de Burle Marx, a chegada depois de todo o caminho de estudo.' }
-  ];
-  const reduzir = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  let W = 0, H = 0, dpr = 1;
-  function medir(){
-    dpr = Math.min(2, window.devicePixelRatio || 1);
-    W = canvas.clientWidth; H = canvas.clientHeight;
-    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  }
-  /* quadros reais (quando existirem) */
-  const imgs = []; let carregados = 0, temQuadros = FRAMES.count > 0;
-  // celular/tablet recebe o conjunto de 960 px (um quarto do peso)
-  const dirQuadros = (window.innerWidth <= 860) ? FRAMES.dirM : FRAMES.dir;
-  function nomeQuadro(i){ return dirQuadros + '/' + String(i).padStart(4, '0') + '.' + FRAMES.ext; }
-  if(temQuadros){
-    if(tag) tag.remove();
-    // o 1º quadro entra na hora (pôster); os outros carregam em ordem, em lotes
-    let prox = 1;
-    const carregarLote = function(){
-      const fim = Math.min(FRAMES.count, prox + 5);
-      for(; prox <= fim; prox++){
-        const i = prox; const im = new Image(); im.decoding = 'async';
-        im.onload = () => { carregados++; if(i === 1 || Math.abs(i - 1 - ultimo * (FRAMES.count - 1)) < 1) desenhar(ultimo); if(prox <= FRAMES.count) carregarLote(); };
-        im.onerror = () => { if(prox <= FRAMES.count) carregarLote(); };
-        im.src = nomeQuadro(i); imgs[i - 1] = im;
-      }
-    };
-    carregarLote();
-  }
-  function desenharQuadro(p){
-    let idx = Math.min(FRAMES.count, Math.max(1, Math.round(p * (FRAMES.count - 1)) + 1));
-    // quadro ainda não chegou: usa o mais próximo já carregado (nunca a cena provisória no meio do vídeo)
-    let im = imgs[idx - 1];
-    if(!im || !im.complete || !im.naturalWidth){
-      let j = idx - 1; while(j >= 0 && !(imgs[j] && imgs[j].complete && imgs[j].naturalWidth)) j--;
-      if(j < 0){ cena(p); return; }
-      im = imgs[j];
-    }
-    const r = Math.max(W / im.naturalWidth, H / im.naturalHeight);
-    const w = im.naturalWidth * r, h = im.naturalHeight * r;
-    ctx.clearRect(0, 0, W, H);
-    ctx.drawImage(im, (W - w) / 2, (H - h) / 2, w, h);
-  }
-  /* cena provisória: camadas com paralaxe pelo progresso p (0..1) */
-  const ease = t => t < .5 ? 2*t*t : -1 + (4 - 2*t) * t;
-  function cena(p){
-    ctx.clearRect(0, 0, W, H);
-    const horizonte = H * (0.58 - 0.16 * ease(Math.min(1, p / 0.7)));   // a câmera sobe
-    // céu
-    const sky = ctx.createLinearGradient(0, 0, 0, horizonte);
-    sky.addColorStop(0, '#07080b'); sky.addColorStop(0.7, '#0d1119'); sky.addColorStop(1, '#1a1a1c');
-    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, horizonte);
-    // névoa dourada do horizonte
-    const haze = ctx.createRadialGradient(W * 0.62, horizonte, 0, W * 0.62, horizonte, W * 0.7);
-    haze.addColorStop(0, 'rgba(200,169,126,.22)'); haze.addColorStop(1, 'rgba(200,169,126,0)');
-    ctx.fillStyle = haze; ctx.fillRect(0, 0, W, H);
-    // palácio: pórtico de arcos ao fundo, aproximando com o scroll
-    const esc = 1 + 0.55 * ease(Math.min(1, p / 0.75));
-    const baseY = horizonte + 2;
-    const cx = W * 0.62;
-    const larg = Math.min(W * 0.9, 900) * esc, alt = larg * 0.22;
-    const nArcos = 9, passo = larg / nArcos;
-    ctx.save();
-    ctx.translate(cx - larg / 2, baseY - alt);
-    ctx.fillStyle = 'rgba(238,232,220,.06)'; ctx.fillRect(0, 0, larg, alt);
-    ctx.strokeStyle = 'rgba(200,169,126,.55)'; ctx.lineWidth = 1;
-    for(let i = 0; i < nArcos; i++){
-      const x = i * passo, w = passo * 0.78, h = alt * 0.82;
-      ctx.beginPath();
-      ctx.moveTo(x + (passo - w) / 2, alt);
-      ctx.lineTo(x + (passo - w) / 2, alt - h + w * 0.5);
-      ctx.arc(x + passo / 2, alt - h + w * 0.5, w / 2, Math.PI, 0);
-      ctx.lineTo(x + (passo + w) / 2, alt);
-      ctx.stroke();
-    }
-    ctx.strokeRect(0, 0, larg, alt);
-    ctx.restore();
-    // laje sobre os arcos com o jardim (surge quando a câmera sobe)
-    const jardim = Math.max(0, (p - 0.62) / 0.38);
-    if(jardim > 0){
-      ctx.save(); ctx.globalAlpha = Math.min(1, jardim * 1.4);
-      const gy = baseY - alt - 8;
-      const gg = ctx.createLinearGradient(0, gy - 60 * jardim, 0, gy);
-      gg.addColorStop(0, 'rgba(52,84,55,.0)'); gg.addColorStop(1, 'rgba(52,84,55,.75)');
-      ctx.fillStyle = gg; ctx.fillRect(cx - larg / 2, gy - 60 * jardim, larg, 60 * jardim + 8);
-      ctx.fillStyle = 'rgba(93,140,88,.55)';
-      for(let i = 0; i < 7; i++){
-        const rx = cx - larg / 2 + larg * (0.08 + i * 0.13), ry = gy - 12 - 30 * jardim * ((i % 3) + 1) / 3;
-        ctx.beginPath(); ctx.ellipse(rx, ry, larg * 0.06, 12 + 26 * jardim, 0, 0, Math.PI * 2); ctx.fill();
-      }
-      ctx.restore();
-    }
-    // espelho d'água
-    const agua = ctx.createLinearGradient(0, horizonte, 0, H);
-    agua.addColorStop(0, '#14202b'); agua.addColorStop(0.5, '#0e1821'); agua.addColorStop(1, '#08090b');
-    ctx.fillStyle = agua; ctx.fillRect(0, horizonte, W, H - horizonte);
-    // reflexo dos arcos
-    ctx.save(); ctx.globalAlpha = .28; ctx.translate(0, baseY * 2 + 4); ctx.scale(1, -1);
-    ctx.strokeStyle = 'rgba(200,169,126,.5)';
-    ctx.translate(cx - larg / 2, baseY - alt);
-    for(let i = 0; i < nArcos; i++){ const x = i * passo, w = passo * 0.78, h = alt * 0.82; ctx.beginPath(); ctx.moveTo(x + (passo - w) / 2, alt); ctx.lineTo(x + (passo - w) / 2, alt - h + w * .5); ctx.arc(x + passo / 2, alt - h + w * .5, w / 2, Math.PI, 0); ctx.lineTo(x + (passo + w) / 2, alt); ctx.stroke(); }
-    ctx.restore();
-    // ondulações
-    ctx.strokeStyle = 'rgba(200,169,126,.10)'; ctx.lineWidth = 1;
-    for(let i = 0; i < 14; i++){
-      const y = horizonte + 18 + i * ((H - horizonte) / 14) * (0.6 + 0.4 * (i / 14));
-      const desl = (p * 400 + i * 37) % W;
-      ctx.beginPath();
-      for(let x = -60; x <= W + 60; x += 30){ const yy = y + Math.sin((x + desl) / 48) * 1.6; if(x === -60) ctx.moveTo(x, yy); else ctx.lineTo(x, yy); }
-      ctx.stroke();
-    }
-    // o Meteoro: cinco lâminas de mármore que entram pela direita e passam
-    const met = Math.max(0, Math.min(1, (p - 0.18) / 0.5));
-    if(met > 0 && met < 1){
-      const mx = W * (1.15 - 1.05 * met), my = horizonte + (H - horizonte) * 0.42, ms = Math.min(W, 1200) * (0.12 + 0.16 * met);
-      ctx.save(); ctx.translate(mx, my);
-      for(let i = 0; i < 5; i++){
-        ctx.save(); ctx.rotate(-0.5 + i * 0.28);
-        const gm = ctx.createLinearGradient(-ms, 0, ms, 0); gm.addColorStop(0, 'rgba(240,236,228,.85)'); gm.addColorStop(1, 'rgba(200,190,170,.55)');
-        ctx.fillStyle = gm;
-        ctx.beginPath(); ctx.ellipse(0, -ms * 0.15, ms * 0.55, ms * 0.14, 0, 0, Math.PI * 2); ctx.fill();
-        ctx.restore();
-      }
-      ctx.globalAlpha = .35; ctx.scale(1, -0.6);
-      for(let i = 0; i < 5; i++){ ctx.save(); ctx.rotate(-0.5 + i * 0.28); ctx.fillStyle = 'rgba(240,236,228,.5)'; ctx.beginPath(); ctx.ellipse(0, -ms * 0.15, ms * 0.55, ms * 0.14, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore(); }
-      ctx.restore();
-    }
-    // varredura de luz
-    ctx.save(); ctx.globalCompositeOperation = 'lighter';
-    const lx = W * (-0.3 + 1.6 * p);
-    const luz = ctx.createLinearGradient(lx - W * 0.25, 0, lx + W * 0.25, H);
-    luz.addColorStop(0, 'rgba(200,169,126,0)'); luz.addColorStop(0.5, 'rgba(200,169,126,.07)'); luz.addColorStop(1, 'rgba(200,169,126,0)');
-    ctx.fillStyle = luz; ctx.fillRect(0, 0, W, H);
-    ctx.restore();
-    // grão
-    ctx.fillStyle = 'rgba(0,0,0,.18)';
-    for(let i = 0; i < 40; i++){ ctx.fillRect((i * 733 + p * 1000) % W, (i * 271) % H, 1, 1); }
-  }
-  let ultimo = 0, ticking = false, lastP = -1;
-  function desenhar(p){ if(temQuadros) desenharQuadro(p); else cena(p); }
-  function update(){
-    const rect = hero.getBoundingClientRect();
-    const scrollable = hero.offsetHeight - window.innerHeight;
-    let p = scrollable > 0 ? (-rect.top) / scrollable : 0;
-    p = Math.max(0, Math.min(1, p));
-    ultimo = p;
-    if(Math.abs(p - lastP) >= 0.0015 || lastP < 0){
-      lastP = p;
-      desenhar(reduzir ? 0.5 : p);
-      if(scrollHint) scrollHint.classList.toggle('fade', p > 0.02);
-      let act = 0; if(p >= ATOS[0] && p < ATOS[1]) act = 1; else if(p >= ATOS[1]) act = 2;
-      panels.forEach((pl, i) => pl.classList.toggle('on', i === act));
-      const a = acts[act];
-      if(plaqueYear && plaqueYear.textContent !== a.year){ plaqueYear.textContent = a.year; plaqueName.textContent = a.name; plaqueDesc.textContent = a.desc; }
-    }
-    ticking = false;
-  }
-  function onScroll(){ if(!ticking){ requestAnimationFrame(update); ticking = true; } }
-  window.addEventListener('scroll', onScroll, { passive: true });
-  window.addEventListener('resize', () => { medir(); lastP = -1; onScroll(); }, { passive: true });
-  medir(); update();
-  window.__falconHero = { update: update, cena: cena };
-})();
-
-/* ═════════════════════════════
-   FALCON · GALERIA DE CURSOS — a parede anda para o lado enquanto você rola
-   ═════════════════════════════ */
-(function(){
-  const sec = document.getElementById('cursos'), wall = document.getElementById('galeriaWall');
-  if(!sec || !wall) return;
-  let ticking = false;
-  function update(){
-    ticking = false;
-    if(window.innerWidth <= 860){ wall.style.transform = ''; return; }
-    const rect = sec.getBoundingClientRect();
-    const scrollable = sec.offsetHeight - window.innerHeight;
-    let p = scrollable > 0 ? (-rect.top) / scrollable : 0;
-    p = Math.max(0, Math.min(1, p));
-    const max = Math.max(0, wall.scrollWidth - window.innerWidth);
-    wall.style.transform = 'translate3d(' + (-p * max).toFixed(1) + 'px,0,0)';
-  }
-  function onScroll(){ if(!ticking){ requestAnimationFrame(update); ticking = true; } }
-  window.addEventListener('scroll', onScroll, { passive: true });
-  window.addEventListener('resize', onScroll, { passive: true });
-  update();
-  window.__falconGaleria = { update: update };
-})();
-""".replace('__APP__', APP).replace('__FRAMES_M__', FRAMES_DIR_M).replace('__FRAMES__', FRAMES_DIR).replace('__COUNT__', str(FRAMES_COUNT))
+# ── scripts ──────────────────────────────────────────────────────────────
+runtime = io.open(os.path.join(AQUI, 'landing-runtime.js'), encoding='utf8').read().replace('__SB_URL__', SB_URL).replace('__SB_KEY__', SB_KEY)
+# bloco do protótipo: reveal + FAQ + vídeo vira função re-executável (re-render do editor)
+bloco = linhas(5343, 5366)
+for a in ["document.querySelectorAll('[data-a]').forEach(el => io.observe(el));", "document.querySelectorAll('.faq-q').forEach(q => {", "document.querySelectorAll('.video-player, .play-btn').forEach(el => {"]:
+    assert a in bloco, a
+bloco = bloco.replace("document.querySelectorAll('.faq-q').forEach(q => {", "document.querySelectorAll('.faq-q').forEach(q => {\n  if(q.__b) return; q.__b = 1;")
+bloco = bloco.replace("document.querySelectorAll('.video-player, .play-btn').forEach(el => {", "document.querySelectorAll('.video-player, .play-btn').forEach(el => {\n  if(el.__b) return; el.__b = 1;")
+bloco = bloco.replace("const firstFaq = document.querySelector('.faq-item');\nif(firstFaq) firstFaq.classList.add('open');", "if(!document.querySelector('.faq-item.open')){ const firstFaq = document.querySelector('.faq-item'); if(firstFaq) firstFaq.classList.add('open'); }")
+js_rebind = "/* reveal + FAQ + vídeo — re-executável após um re-render do editor */\nfunction __landingRebind(){\n" + bloco + "\n}\n__landingRebind(); window.__landingRebind = __landingRebind;\n"
+js_menu = linhas(5270, 5339)          # menu-âncora (scrollspy)
+js_tema = linhas(5368, 5387)          # tema claro/escuro
+js_demo = linhas(5388, 6388)          # demo pp-main + depoimentos (css) + colapso currículo
+js_hero = io.open(os.path.join(AQUI, 'hero-engine.js'), encoding='utf8').read().replace('__FRAMES_M__', FRAMES_DIR_M).replace('__FRAMES__', FRAMES_DIR).replace('__COUNT__', str(FRAMES_COUNT))
+js_dados = ('window.LANDING_DEFAULT = ' + json.dumps(DEFAULT, ensure_ascii=False) + ';\n'
+  + 'window.LANDING_NOVO = ' + json.dumps(NOVO, ensure_ascii=False) + ';\n'
+  + 'window.LANDING_MOCKS = ' + json.dumps(mocks, ensure_ascii=False) + ';\n'
+  + 'window.LANDING_LOGO = ' + json.dumps(logo_svg) + ';\n')
 
 head = '''<!DOCTYPE html>
 <html lang="pt-BR" data-theme="dark">
@@ -695,6 +282,7 @@ head = '''<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Falcon · Preparação completa para o CACD · Grupo Ubique</title>
 <meta name="description" content="A Falcon reúne numa só plataforma as aulas dos melhores professores de cada matéria do CACD, o banco de provas anteriores classificado pelo edital, flashcards, cadernos e um tutor de IA. Conta gratuita.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230b0c0f'/%3E%3Cpath d='M32 10 L54 32 L32 54 L10 32 Z' fill='none' stroke='%23c8a97e' stroke-width='4'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
@@ -702,17 +290,7 @@ head = '''<!DOCTYPE html>
 </head>
 <body>
 '''
-paginas = [topbar, menu, hero, strip, video, galeria, integrado, ferramentas, promessa, materias, depoimentos, planos, faq, experimentar, final, rodape, sticky]
-html = head + '\n\n'.join(paginas) + '\n\n<script>\n' + js_proto_resto + '\n' + js_novo + '\n</script>\n</body>\n</html>\n'
+html = (head + '\n\n'.join(secoes) + '\n\n<script>\n' + js_dados + '</script>\n<script>\n' + runtime + '\n</script>\n<script>\n'
+  + js_menu + '\n' + js_rebind + '\n' + js_tema + '\n' + js_demo + '\n' + js_hero + '\n</script>\n</body>\n</html>\n')
 io.open(RAIZ + 'landing.html', 'w', encoding='utf8').write(html)
-os.makedirs(RAIZ + 'landing/frames/hero', exist_ok=True)
-io.open(RAIZ + 'landing/frames/hero/COMO-GERAR.md', 'w', encoding='utf8').write('''# Quadros do vídeo aéreo do herói
-
-Quando o vídeo do Itamaraty estiver pronto (recomendado: 6 a 10 s, 24 qps, 1920 px de largura):
-
-    ffmpeg -i itamaraty.mp4 -vf "fps=24,scale=1920:-2" -c:v libwebp -quality 78 landing/frames/hero/%04d.webp
-
-Depois, em landing.html, ajuste `FRAMES.count` para o número de arquivos gerados.
-A cena provisória desenhada em canvas some sozinha quando `count > 0`.
-''')
-print('landing.html gerado:', len(html), 'bytes;', html.count('<section'), 'seções;', FRAMES_COUNT, 'quadros')
+print('landing.html gerado:', len(html), 'bytes;', html.count('<section'), 'seções;', FRAMES_COUNT, 'quadros;', len(mocks), 'mocks')
