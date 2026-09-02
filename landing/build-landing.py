@@ -16,6 +16,9 @@ def fatia(ini, fim, a_partir=0):
 
 APP = 'index.html'          # o app hoje mora na raiz; vira /app/ quando a landing for para a raiz
 FRAMES_DIR = 'landing/frames/hero'
+FRAMES_DIR_M = 'landing/frames/hero-m'
+import glob
+FRAMES_COUNT = len(glob.glob(RAIZ + FRAMES_DIR + '/*.webp'))   # contado no build: 0 = cena provisória
 
 # ── 1. CSS do protótipo + acréscimos ─────────────────────────────────────
 css_proto = P[P.index('<style>') + len('<style>'):P.index('</style>')]
@@ -33,9 +36,11 @@ css_extra = r"""
 
 /* Herói: o vídeo (ou a cena provisória) é um canvas preso atrás do texto */
 .hero-canvas{ position:absolute; inset:0; width:100%; height:100%; display:block; }
+.scroll-hero{ height:420vh; }
+@media (max-width:980px){ .scroll-hero{ height:320vh; } }
 .hero-veil{ position:absolute; inset:0; pointer-events:none;
-  background:linear-gradient(90deg, rgba(11,12,15,.78) 0%, rgba(11,12,15,.45) 45%, rgba(11,12,15,.15) 100%),
-             linear-gradient(180deg, rgba(11,12,15,.55) 0%, transparent 30%, transparent 70%, rgba(11,12,15,.85) 100%); }
+  background:linear-gradient(90deg, rgba(11,12,15,.82) 0%, rgba(11,12,15,.5) 40%, rgba(11,12,15,.08) 75%, rgba(11,12,15,0) 100%),
+             linear-gradient(180deg, rgba(11,12,15,.5) 0%, transparent 28%, transparent 72%, rgba(11,12,15,.9) 100%); }
 .hero-preview-tag{ position:absolute; top:calc(68px + 1rem); right:1.2rem; z-index:3; font-family:var(--mono); font-size:var(--fs-micro); letter-spacing:.2em; text-transform:uppercase; color:var(--text-mute); border:1px solid var(--border); padding:.3rem .6rem; border-radius:2px; background:rgba(11,12,15,.5); backdrop-filter:blur(8px); }
 .plaque-year.is-text{ font-size:clamp(2rem,3.4vw,3.2rem); line-height:1.05; }
 
@@ -478,7 +483,10 @@ js_novo = r"""
    Quando o vídeo chegar: ffmpeg -> landing/frames/hero/0001.webp… e count.
    ═════════════════════════════ */
 (function(){
-  const FRAMES = { dir: '__FRAMES__', count: 0, ext: 'webp' };
+  const FRAMES = { dir: '__FRAMES__', dirM: '__FRAMES_M__', count: __COUNT__, ext: 'webp' };
+  // ATOS sincronizados com o vídeo (10,96 s): 0–2,6 s lago com o Meteoro à frente; 2,6–6,1 s o Meteoro
+  // cresce e passa pela câmera; 6,1 s em diante a câmera sobe a fachada e chega ao jardim.
+  const ATOS = [0.24, 0.56];
   const hero = document.getElementById('top');
   const canvas = document.getElementById('heroCanvas');
   const tag = document.getElementById('heroPreviewTag');
@@ -488,9 +496,9 @@ js_novo = r"""
   if(!hero || !canvas) return;
   const ctx = canvas.getContext('2d');
   const acts = [
-    { year: "O espelho d'água", name: 'Sobre o lago', desc: "A câmera cruza o espelho d'água do palácio, sede do Ministério das Relações Exteriores desde 1970." },
-    { year: 'O Meteoro', name: 'Bruno Giorgi · 1967', desc: 'A escultura de mármore que flutua sobre a água: cinco continentes unidos, símbolo da casa da diplomacia brasileira.' },
-    { year: 'O jardim', name: 'Burle Marx', desc: 'Subindo ao terraço, o jardim desenhado por Burle Marx: a chegada, depois de todo o caminho de estudo.' }
+    { year: "O espelho d'água", name: 'Sobre o lago', desc: "O voo cruza o espelho d'água do Palácio Itamaraty, sede do Ministério das Relações Exteriores, com o Meteoro à frente." },
+    { year: 'O Meteoro', name: 'Bruno Giorgi · 1967', desc: 'A escultura de mármore no meio do lago: cinco continentes num só bloco, símbolo da casa da diplomacia brasileira.' },
+    { year: 'O jardim', name: 'Burle Marx', desc: 'A câmera sobe pela fachada e chega ao terraço: o jardim de Burle Marx, a chegada depois de todo o caminho de estudo.' }
   ];
   const reduzir = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   let W = 0, H = 0, dpr = 1;
@@ -502,19 +510,33 @@ js_novo = r"""
   }
   /* quadros reais (quando existirem) */
   const imgs = []; let carregados = 0, temQuadros = FRAMES.count > 0;
-  function nomeQuadro(i){ return FRAMES.dir + '/' + String(i).padStart(4, '0') + '.' + FRAMES.ext; }
+  // celular/tablet recebe o conjunto de 960 px (um quarto do peso)
+  const dirQuadros = (window.innerWidth <= 860) ? FRAMES.dirM : FRAMES.dir;
+  function nomeQuadro(i){ return dirQuadros + '/' + String(i).padStart(4, '0') + '.' + FRAMES.ext; }
   if(temQuadros){
     if(tag) tag.remove();
-    for(let i = 1; i <= FRAMES.count; i++){
-      const im = new Image(); im.decoding = 'async';
-      im.onload = () => { carregados++; if(i === 1) desenhar(ultimo); };
-      im.src = nomeQuadro(i); imgs.push(im);
-    }
+    // o 1º quadro entra na hora (pôster); os outros carregam em ordem, em lotes
+    let prox = 1;
+    const carregarLote = function(){
+      const fim = Math.min(FRAMES.count, prox + 5);
+      for(; prox <= fim; prox++){
+        const i = prox; const im = new Image(); im.decoding = 'async';
+        im.onload = () => { carregados++; if(i === 1 || Math.abs(i - 1 - ultimo * (FRAMES.count - 1)) < 1) desenhar(ultimo); if(prox <= FRAMES.count) carregarLote(); };
+        im.onerror = () => { if(prox <= FRAMES.count) carregarLote(); };
+        im.src = nomeQuadro(i); imgs[i - 1] = im;
+      }
+    };
+    carregarLote();
   }
   function desenharQuadro(p){
-    const idx = Math.min(FRAMES.count, Math.max(1, Math.round(p * (FRAMES.count - 1)) + 1));
-    const im = imgs[idx - 1];
-    if(!im || !im.complete || !im.naturalWidth){ cena(p); return; }
+    let idx = Math.min(FRAMES.count, Math.max(1, Math.round(p * (FRAMES.count - 1)) + 1));
+    // quadro ainda não chegou: usa o mais próximo já carregado (nunca a cena provisória no meio do vídeo)
+    let im = imgs[idx - 1];
+    if(!im || !im.complete || !im.naturalWidth){
+      let j = idx - 1; while(j >= 0 && !(imgs[j] && imgs[j].complete && imgs[j].naturalWidth)) j--;
+      if(j < 0){ cena(p); return; }
+      im = imgs[j];
+    }
     const r = Math.max(W / im.naturalWidth, H / im.naturalHeight);
     const w = im.naturalWidth * r, h = im.naturalHeight * r;
     ctx.clearRect(0, 0, W, H);
@@ -627,7 +649,7 @@ js_novo = r"""
       lastP = p;
       desenhar(reduzir ? 0.5 : p);
       if(scrollHint) scrollHint.classList.toggle('fade', p > 0.02);
-      let act = 0; if(p >= 0.33 && p < 0.72) act = 1; else if(p >= 0.72) act = 2;
+      let act = 0; if(p >= ATOS[0] && p < ATOS[1]) act = 1; else if(p >= ATOS[1]) act = 2;
       panels.forEach((pl, i) => pl.classList.toggle('on', i === act));
       const a = acts[act];
       if(plaqueYear && plaqueYear.textContent !== a.year){ plaqueYear.textContent = a.year; plaqueName.textContent = a.name; plaqueDesc.textContent = a.desc; }
@@ -664,7 +686,7 @@ js_novo = r"""
   update();
   window.__falconGaleria = { update: update };
 })();
-""".replace('__APP__', APP).replace('__FRAMES__', FRAMES_DIR)
+""".replace('__APP__', APP).replace('__FRAMES_M__', FRAMES_DIR_M).replace('__FRAMES__', FRAMES_DIR).replace('__COUNT__', str(FRAMES_COUNT))
 
 head = '''<!DOCTYPE html>
 <html lang="pt-BR" data-theme="dark">
@@ -693,4 +715,4 @@ Quando o vídeo do Itamaraty estiver pronto (recomendado: 6 a 10 s, 24 qps, 1920
 Depois, em landing.html, ajuste `FRAMES.count` para o número de arquivos gerados.
 A cena provisória desenhada em canvas some sozinha quando `count > 0`.
 ''')
-print('landing.html gerado:', len(html), 'bytes;', html.count('<section'), 'seções')
+print('landing.html gerado:', len(html), 'bytes;', html.count('<section'), 'seções;', FRAMES_COUNT, 'quadros')
