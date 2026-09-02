@@ -9063,6 +9063,8 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cadp-titulo-in{flex:1;min-width:0;background:transparent;border:none;border-bottom:1px dashed var(--border);color:var(--text);font-family:var(--serif);font-weight:500;font-size:2rem;line-height:1.18;padding:.1rem 0 .15rem}
 .cadp-titulo-in:focus{outline:none;border-bottom-color:var(--accent)}
 .cadp-acoes{display:flex;gap:.4rem;align-items:center}
+.cadp-revisar{display:inline-flex;align-items:center;margin-right:.5rem}
+.cadp-revisar[hidden]{display:none}
 .cadp-menu-wrap{position:relative}
 .cadp-menu{position:absolute;top:calc(100% + .3rem);right:0;z-index:90;min-width:220px;display:flex;flex-direction:column;padding:.3rem;background:var(--bg-card);border:1px solid var(--border-strong);border-radius:10px;box-shadow:0 12px 32px -10px rgba(0,0,0,.6)}
 .cadp-menu[hidden]{display:none}
@@ -42114,15 +42116,20 @@ window.TutorIA = (function(){
       const org = m.getAttribute('data-po-src'), cel = m.getAttribute('data-po-cel');
       const k = org + _PO_SEP + cel;
       const agora = _poEditavelHtml(m);
-      if(!(k in snap) || snap[k] === agora) continue;
+      // mudou? pelo sinal de edição do próprio buraco OU pela diferença com o snapshot
+      if(!m.__poSujo){
+        if(!(k in snap)){ console.warn('[portal] sem snapshot deste buraco (render não terminou?)', org, cel); continue; }
+        if(snap[k] === agora) continue;
+      }
       const corpo = await _cadCorpoLer(org);
       if(corpo == null){ console.warn('[portal] origem não lida', org); if(window.ueToast) ueToast('Não consegui ler o caderno de origem para gravar sua edição do portal.', 'warn'); continue; }
       const novo = _poTrocarCelula(corpo, cel, agora);
       if(novo == null){ console.warn('[portal] célula não encontrada na origem', org, cel); if(window.ueToast) ueToast('A linha original deste portal não foi encontrada no caderno de origem — a edição não foi gravada lá.', 'warn'); continue; }
       const ok = await _cadCorpoGravar(org, novo);
       if(ok){
-        snap[k] = agora;
+        snap[k] = agora; m.__poSujo = false;
         console.info('[portal] edição gravada na origem', org, cel);
+        if(window.ueToast) ueToast('Edição do portal gravada em: ' + _poRotuloDe(org), 'success');
         try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ }
       } else if(window.ueToast) ueToast('Não consegui gravar a edição do portal no caderno de origem. Confira a conexão.', 'warn');
     }
@@ -42410,7 +42417,19 @@ window.TutorIA = (function(){
   // "Sujo" = houve edição desde a carga/último salvamento. Só editor sujo
   // grava: um editor parado (drawer em outra aba, painel sem foco) nunca
   // escreve o corpo velho por cima do que outro lugar gravou (portal).
-  function _cadMarcarSujo(el){ if(!el) return; el.__cadDirty = true; el.__cadEdits = (el.__cadEdits || 0) + 1; }
+  function _cadMarcarSujo(el){
+    if(!el) return;
+    el.__cadDirty = true; el.__cadEdits = (el.__cadEdits || 0) + 1;
+    // edição DENTRO de um buraco: o próprio buraco fica marcado — a gravação
+    // na origem não depende só do snapshot (que uma re-renderização no meio
+    // do caminho pode ter refeito depois da edição)
+    try{
+      const sel = window.getSelection();
+      const no = (sel && sel.anchorNode) ? (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement) : null;
+      const m = (no && no.closest && el.contains(no)) ? no.closest('.cad-portal[data-po-src]') : null;
+      if(m) m.__poSujo = true;
+    }catch(_){ }
+  }
   function _cadSchedule(){ _cadMarcarSujo(_cadEl()); _cadStatus('digitando…'); if(_cadTimer) clearTimeout(_cadTimer); _cadTimer = setTimeout(function(){ _cadTimer = null; _cadSave(); }, 1000); }
   function _onCadInput(){
     const el = _cadEl(); _emptyToggle(el);
@@ -43466,7 +43485,9 @@ window.TutorIA = (function(){
     // quem abriu o popover pode querer GUARDAR a escolha noutro lugar
     // (ex.: a pílula das propriedades, que não vive no editor)
     if(chip.__aliasAoAplicar){ const fn = chip.__aliasAoAplicar; _aliasClosePop(); fn(text); return; }
-    chip.textContent = text; const el = _cadEl(); if(el) _emptyToggle(el); _cadSchedule(); _aliasClosePop();
+    chip.textContent = text; const el = _cadEl(); if(el) _emptyToggle(el);
+    const mP = chip.closest ? chip.closest('.cad-portal[data-po-src]') : null; if(mP) mP.__poSujo = true;   // apelido trocado dentro de um buraco
+    _cadSchedule(); _aliasClosePop();
   }
   function _aliasPopover(chip, opts){
     _aliasClosePop();
@@ -43599,6 +43620,28 @@ window.TutorIA = (function(){
     });
     return byId;
   }
+  /* Botão "Revisar" do cabeçalho da página Cadernos (ao lado do ···): a
+     contagem é o que VENCE HOJE pelo agendamento (SM-2) — o mesmo botão
+     dividido da página Flashcards, com a seta abrindo os outros modos
+     (todos os cards, em ordem). Atualiza ao vivo quando um card nasce/morre. */
+  function _cadpRevisarSync(ids, nome){
+    const box = document.getElementById('cadpRevisar'); if(!box) return;
+    const lista = (ids || []).map(String).filter(Boolean);
+    box.setAttribute('data-ids', lista.join(',')); box.setAttribute('data-nome', nome || '');
+    if(!lista.length || !window.FlashcardsPage || !FlashcardsPage.idsResumo){ box.hidden = true; box.innerHTML = ''; return; }
+    const r = FlashcardsPage.idsResumo(lista);
+    if(!r.cards){ box.hidden = true; box.innerHTML = ''; return; }
+    const pend = r.due + r.novos;
+    box.innerHTML = FlashcardsPage.splitHtml({ ids: r.ids.join(','), subject: r.subjectId || '', unit: '', pend: pend, total: r.itens, label: 'Revisar', nome: nome || 'Flashcards deste caderno' });
+    box.hidden = false;
+    const go = box.querySelector('[data-go]');
+    if(go) go.setAttribute('data-tip', pend ? (pend + (pend === 1 ? ' card vence hoje' : ' cards vencem hoje') + ' pelo agendamento') : 'Nada vence hoje — a seta abre os outros modos');
+    FlashcardsPage.bindPractice(box);
+  }
+  document.addEventListener('ubq:fc-changed', function(){
+    const box = document.getElementById('cadpRevisar'); if(!box || !box.getAttribute('data-ids')) return;
+    try{ _cadpRevisarSync(box.getAttribute('data-ids').split(','), box.getAttribute('data-nome')); }catch(_){ }
+  });
   async function _cadLoadBacklinks(unitId, alvoAttr, blSurf){
     const atributo = alvoAttr || 'data-unit-id';
     const _bl = blSurf || _cadActiveBl;
@@ -43622,6 +43665,12 @@ window.TutorIA = (function(){
     });
     const deck = (window.Store && Store.deckList) ? Store.deckList() : [];
     const refs = _cadRefsColeta(unitId, rows, deck, _cadSanitize, atributo);
+    // Botão "Revisar" do cabeçalho da página: caderno próprio → os cards que o
+    // CITAM (herança); caderno de unidade → os cards da unidade.
+    try{
+      if(atributo === 'data-doc-id') _cadpRevisarSync(refs.cards.map(function(c){ return String(c.id); }), 'Flashcards que citam este caderno');
+      else if(window.FlashcardsPage && FlashcardsPage.unitResumo) _cadpRevisarSync(FlashcardsPage.unitResumo(unitId).ids, 'Flashcards desta unidade');
+    }catch(e){ console.warn('[revisar cabeçalho]', e); }
     if(!refs.cadernos.length && !refs.cards.length) return;
     const idx = _buildUnitIndex(); const byId = _cadRefsRotulos(idx.flat);
     refs.cadernos.forEach(function(it){
@@ -43640,20 +43689,6 @@ window.TutorIA = (function(){
         .concat(refs.cards.map(function(c){ const i2 = cardInfo(c); return i2 && i2.sigla; }))
         .filter(Boolean))].sort();
     listEl.innerHTML = '';
-    // Herança de flashcards: "Revisar · N" pratica os cards que CITAM este
-    // caderno — é um FILTRO sobre os mesmos cards (agendamento compartilhado).
-    if(refs.cards.length){
-      const rev = document.createElement('button');
-      rev.type = 'button'; rev.className = 'btn-primary tutor-caderno-bl-rev';
-      rev.textContent = 'Revisar · ' + refs.cards.length;
-      rev.setAttribute('data-tip', 'Pratica os flashcards que citam este caderno — mesmo agendamento de sempre');
-      rev.addEventListener('click', function(){
-        const ids = refs.cards.map(function(c){ return String(c.id); });
-        _cadSave(); close();
-        if(window.Practice) Practice.iniciar({ tipo: 'ids', ids: ids, subjectId: null, unitId: null, modo: 'srs', registrar: true });
-      });
-      listEl.appendChild(rev);
-    }
     let filterEl = null;
     if(sigs.length > 1){
       filterEl = document.createElement('select'); filterEl.className = 'tutor-caderno-bl-filter';
@@ -60557,7 +60592,7 @@ const CadernosPage = (function(){
         return (c0 && c0.meta && c0.meta.capaPos) || null;
       })();
       main.innerHTML = (capaU ? _capaHtml(capaU, 'unit', cadCapaPos) : '') + '<div class="cadp-head"><div class="cadp-titulo">' + Util.esc(rot) + '</div>'
-        + '<div class="cadp-acoes">' + (href ? '<a class="icon-btn" href="' + Util.attr(href) + '">Abrir unidade</a>' : '') + _menuExpHtml() + '</div></div>'
+        + '<div class="cadp-acoes"><span class="cadp-revisar" id="cadpRevisar" hidden></span>' + (href ? '<a class="icon-btn" href="' + Util.attr(href) + '">Abrir unidade</a>' : '') + _menuExpHtml() + '</div></div>'
         + '<details class="cadp-meta" open><summary>Propriedades</summary><div class="cadp-meta-body" id="cadpMeta"></div></details>'
         + '<div id="cadpEditor"></div>';
       _menuExpBind(main, rot, function(){
@@ -60599,7 +60634,7 @@ const CadernosPage = (function(){
     const capaDoc = (doc.meta && doc.meta.capa) || '';
     main.innerHTML = (capaDoc ? _capaHtml(capaDoc, 'doc', (doc.meta && doc.meta.capaPos) || null) : '<button type="button" class="cadp-capa-add" data-capa-add>+ Capa</button>')
       + '<div class="cadp-head"><input class="cadp-titulo-in" id="cadpTitulo" maxlength="140" value="' + Util.attr(doc.titulo || '') + '" placeholder="Título do caderno">'
-      + '<div class="cadp-acoes">' + _menuExpHtml({ lixeira: true }) + '</div></div>'
+      + '<div class="cadp-acoes"><span class="cadp-revisar" id="cadpRevisar" hidden></span>' + _menuExpHtml({ lixeira: true }) + '</div></div>'
       + '<details class="cadp-meta" open><summary>Propriedades</summary><div class="cadp-meta-body" id="cadpMeta"></div></details>'
       + '<div id="cadpEditor"></div>';
     _menuExpBind(main, doc.titulo || 'Caderno', function(){
@@ -63275,13 +63310,15 @@ const FlashcardsPage = (function(){
     root.querySelectorAll('[data-dd]').forEach(b => b.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); if(_dd && !_dd.hidden){ _ddFechar(); return; } _ddAbrir(b); }));
   }
   // resumo dos flashcards de UMA unidade (bloco Revisar na página da unidade)
-  function unitResumo(unitId){
-    const ls = linhas().filter(l => String(l.card.unitId || '') === String(unitId));
+  function _resumoDe(ls){
     const r = { cards: ls.length, itens: 0, due: 0, novos: 0, dom: 0, rev: 0, learn: 0, ids: [], subjectId: '' };
     ls.forEach(l => { r.ids.push(l.card.id); if(!l.suspenso) r.itens += l.ords; r.due += l.due; r.novos += l.novos; r.dom += l.dom; r.rev += l.rev; r.learn += l.learn; if(!r.subjectId && l.subjectId) r.subjectId = l.subjectId; });
     return r;
   }
-  return { html, mount, linhas, kpis, unitResumo, splitHtml: _split, bindPractice };
+  function unitResumo(unitId){ return _resumoDe(linhas().filter(l => String(l.card.unitId || '') === String(unitId))); }
+  // resumo de um CONJUNTO de cards (ex.: os que citam um caderno próprio)
+  function idsResumo(ids){ const set = new Set((ids || []).map(String)); return _resumoDe(linhas().filter(l => set.has(String(l.card.id)))); }
+  return { html, mount, linhas, kpis, unitResumo, idsResumo, splitHtml: _split, bindPractice };
 })();
 window.FlashcardsPage = FlashcardsPage;
 
