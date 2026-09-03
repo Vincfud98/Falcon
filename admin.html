@@ -24075,6 +24075,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       showMsg('modalMessage', `Existem ${totalErrors} campo(s) obrigatório(s) não preenchido(s). Veja as tabs marcadas em vermelho.`);
       return;
     }
+    if(document.getElementById('q-type').value === 'essay'){
+      const rep = _ueEssayNumerosRepetidos(modalEssayCriteria.map((c, i) => ({ numero: c.numero, ordem: c.ordem || (i + 1) })));
+      if(rep){ showMsg('modalMessage', 'Critérios: ' + rep.replace('e importe de novo', 'e salve de novo')); return; }
+    }
 
     const qType = document.getElementById('q-type').value;
 
@@ -35185,6 +35189,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         numero: (Number(String(c.numero == null ? '' : c.numero).replace(/\D/g, '')) || (idx + 1)),
         ordem: c.ordem != null ? parseInt(c.ordem) : (idx + 1),
       }));
+      { const rep = _ueEssayNumerosRepetidos(criteria); if(rep) errors.push({ kind: 'err', msg: 'criteria: ' + rep }); }
       // Validar que cada critério tem pelo menos o título
       criteria.forEach((c, idx) => {
         if(!c.title && !c.criterio && !c.label && !c.nome){
@@ -58531,6 +58536,17 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // português) era descartado EM SILÊNCIO, e a discursiva nascia sem quesito.
   function _ueEssayCritsDe(q){ const v = q.criteria || q.criterios || q.quesitos || q.criterias; return Array.isArray(v) ? v : []; }
   function _ueEssayModelsDe(q){ const v = q.answer_models || q.models || q.modelos || q.model_answers || q.respostas_modelo; return Array.isArray(v) ? v : []; }
+  // Número do quesito = dígitos de "numero" (Q9 → 9), senão "ordem", senão a posição.
+  // O banco exige número ÚNICO por questão (UNIQUE(question_id, numero)): dois quesitos
+  // com o mesmo número são recusados um a um; por isso a importação confere ANTES de
+  // gravar qualquer coisa e explica quais rótulos colidiram.
+  function _ueEssayNumeroDe(c, i){ return Number(String(c.numero == null ? '' : c.numero).replace(/\D/g, '')) || (parseInt(c.ordem, 10) || (i + 1)); }
+  function _ueEssayNumerosRepetidos(crits){
+    const vistos = {}; const rep = [];
+    (crits || []).forEach(function(c, i){ const n = _ueEssayNumeroDe(c, i); const rot = c.numero == null || c.numero === '' ? ('posição ' + (i + 1)) : ('"' + c.numero + '"'); (vistos[n] = vistos[n] || []).push(rot); });
+    Object.keys(vistos).forEach(function(n){ if(vistos[n].length > 1) rep.push('nº ' + n + ' (' + vistos[n].join(', ') + ')'); });
+    return rep.length ? 'quesitos com o mesmo número, e o banco exige um número único por questão: ' + rep.join('; ') + '. Numere cada quesito (1, 2, 3…) e importe de novo.' : '';
+  }
   // peso é numérico no banco: texto vazio vira nulo e vírgula decimal vira ponto
   function _pesoNum(v){ if(v === '' || v == null) return null; const n = Number(String(v).replace(',', '.')); return isNaN(n) ? null : n; }
   async function _ueEssayInsertCriteria(questionId, crits){
@@ -58538,7 +58554,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     for(let i = 0; i < crits.length; i++){
       const c = crits[i];
       // numero é INTEIRO no banco; o schema aceita "Q1"/"Q10" → extrai os dígitos.
-      const _cnum = Number(String(c.numero == null ? '' : c.numero).replace(/\D/g, '')) || (c.ordem || (i + 1));
+      const _cnum = _ueEssayNumeroDe(c, i);
       const ce = await questoes().from('essay_criteria').insert({
         question_id:       questionId,
         numero:            _cnum,
@@ -58587,6 +58603,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(isUbique && !year){
       throw new Error('Discursiva Ubique (sem "origin") precisa do campo "ano" no JSON — ex.: "ano": 2025.');
     }
+    {
+      const repetidos = _ueEssayNumerosRepetidos(_ueEssayCritsDe(q));
+      if(repetidos){
+        const prev = String(q.command || g.enunciado || '').replace(/<[^>]+>/g, '').slice(0, 60);
+        throw new Error('Discursiva "' + prev + '…": ' + repetidos);
+      }
+    }
 
     // ── Dedup da discursiva (não existia NENHUM — nem por origin). Regra:
     // com origin, o origin é a identidade; sem origin (Ubique), a identidade
@@ -58624,6 +58647,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         if(!temC.error && !(temC.count > 0)){
           Array.prototype.push.apply(childErrors, await _ueEssayInsertCriteria(existente.id, critNovos));
           complementos.push(critNovos.length + ' critério(s)');
+        } else if(!temC.error){
+          complementos.push('critérios do JSON NÃO aplicados (a existente já tem ' + temC.count + ')');
         }
       }
       // modelos de resposta: idem
