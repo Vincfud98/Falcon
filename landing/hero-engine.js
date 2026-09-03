@@ -5,7 +5,7 @@
 (function(){
   const FRAMES = { dir: '__FRAMES__', dirM: '__FRAMES_M__', count: __COUNT__, ext: 'webp' };
   if(new URLSearchParams(location.search).get('editar') === '1') return;   // no editor o herói é um roteiro parado (landing-runtime)
-  const ATOS = [0.24, 0.56];   // pontos do vídeo (10,96 s): lago → Meteoro → jardim
+  const ATOS = __ATOS__;   // pontos de troca dos atos (fração do voo), definidos no build: lago → Meteoro → jardim
   const hero = document.getElementById('top'), canvas = document.getElementById('heroCanvas'), tag = document.getElementById('heroPreviewTag'), scrollHint = document.getElementById('scrollHint');
   if(!hero || !canvas) return;
   const ctx = canvas.getContext('2d');
