@@ -3,7 +3,9 @@
    (FRAMES.count = 0 → cena provisória desenhada). Atos/placa vêm de LANDING.hero.
    ═════════════════════════════ */
 (function(){
-  const FRAMES = { dir: '__FRAMES__', dirM: '__FRAMES_M__', count: __COUNT__, ext: 'webp' };
+  // ver = assinatura do conjunto de quadros (gerada no build): um vídeo novo ganha endereços novos,
+  // então o cache do navegador nunca mistura quadros de dois vídeos com o mesmo nome.
+  const FRAMES = { dir: '__FRAMES__', dirM: '__FRAMES_M__', count: __COUNT__, ext: 'webp', ver: '__VER__' };
   if(new URLSearchParams(location.search).get('editar') === '1') return;   // no editor o herói é um roteiro parado (landing-runtime)
   const ATOS = __ATOS__;   // pontos de troca dos atos (fração do voo), definidos no build: lago → Meteoro → jardim
   const hero = document.getElementById('top'), canvas = document.getElementById('heroCanvas'), tag = document.getElementById('heroPreviewTag'), scrollHint = document.getElementById('scrollHint');
@@ -16,24 +18,34 @@
   function medir(){ dpr = Math.min(2, window.devicePixelRatio || 1); W = canvas.clientWidth; H = canvas.clientHeight; canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
   const imgs = []; let temQuadros = FRAMES.count > 0;
   const dirQuadros = (window.innerWidth <= 860) ? FRAMES.dirM : FRAMES.dir;
-  function nomeQuadro(i){ return dirQuadros + '/' + String(i).padStart(4, '0') + '.' + FRAMES.ext; }
+  function nomeQuadro(i){ return dirQuadros + '/' + String(i).padStart(4, '0') + '.' + FRAMES.ext + (FRAMES.ver ? '?v=' + FRAMES.ver : ''); }
+  // pede um quadro (uma vez só); quando chega, redesenha se for o quadro da posição atual
+  function pedir(i, depois){
+    if(i < 1 || i > FRAMES.count || imgs[i - 1]) return;
+    const im = new Image(); im.decoding = 'async';
+    im.onload = () => { if(Math.abs(i - 1 - ultimo * (FRAMES.count - 1)) < 1) desenhar(ultimo); if(depois) depois(); };
+    im.onerror = () => { if(depois) depois(); };
+    im.src = nomeQuadro(i); imgs[i - 1] = im;
+  }
   if(temQuadros){
     if(tag) tag.remove();
+    // pré-carga progressiva do começo ao fim (5 por vez); o quadro da posição atual fura a fila (desenharQuadro)
     let prox = 1;
     const carregarLote = function(){
-      const fim = Math.min(FRAMES.count, prox + 5);
-      for(; prox <= fim; prox++){
-        const i = prox; const im = new Image(); im.decoding = 'async';
-        im.onload = () => { if(i === 1 || Math.abs(i - 1 - ultimo * (FRAMES.count - 1)) < 1) desenhar(ultimo); if(prox <= FRAMES.count) carregarLote(); };
-        im.onerror = () => { if(prox <= FRAMES.count) carregarLote(); };
-        im.src = nomeQuadro(i); imgs[i - 1] = im;
+      let pedidos = 0;
+      while(prox <= FRAMES.count && pedidos < 5){
+        const i = prox++;
+        if(imgs[i - 1]) continue;                                   // já pedido pelo scroll: pula
+        pedidos++; pedir(i, () => { if(prox <= FRAMES.count) carregarLote(); });
       }
+      if(!pedidos && prox <= FRAMES.count) carregarLote();          // só achou quadros já pedidos: segue sem esperar
     };
     carregarLote();
   }
   function desenharQuadro(p){
     let idx = Math.min(FRAMES.count, Math.max(1, Math.round(p * (FRAMES.count - 1)) + 1));
     let im = imgs[idx - 1];
+    if(!im) pedir(idx);   // o visitante rolou além da pré-carga: este quadro é prioridade
     if(!im || !im.complete || !im.naturalWidth){ let j = idx - 1; while(j >= 0 && !(imgs[j] && imgs[j].complete && imgs[j].naturalWidth)) j--; if(j < 0){ cena(p); return; } im = imgs[j]; }
     const r = Math.max(W / im.naturalWidth, H / im.naturalHeight), w = im.naturalWidth * r, h = im.naturalHeight * r;
     ctx.clearRect(0, 0, W, H); ctx.drawImage(im, (W - w) / 2, (H - h) / 2, w, h);

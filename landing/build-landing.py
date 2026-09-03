@@ -24,6 +24,12 @@ def elemento(html, ini):
 APP = 'index.html'
 FRAMES_DIR, FRAMES_DIR_M = 'landing/frames/hero', 'landing/frames/hero-m'
 FRAMES_COUNT = len(glob.glob(RAIZ + FRAMES_DIR + '/*.webp'))
+import hashlib
+def _assinatura(pasta):
+    h = hashlib.sha1()
+    for f in sorted(glob.glob(RAIZ + pasta + '/*.webp')): h.update((os.path.basename(f) + ':' + str(os.path.getsize(f))).encode())
+    return h.hexdigest()[:8]
+FRAMES_VER = _assinatura(FRAMES_DIR) + _assinatura(FRAMES_DIR_M)[:4]   # muda sempre que os quadros mudam → endereços novos, cache limpo
 HERO_ATOS = [0.40, 0.61]   # fração do voo em que começam os atos II (Meteoro) e III (fachada → jardim); ver landing/frames/COMO-GERAR.md
 SB_URL = 'https://kluqjqojxzpuiauuidwx.supabase.co'
 SB_KEY = re.search(r"const KEY = '(ey[^']+)'", io.open(RAIZ + 'index.html', encoding='utf8').read()).group(1)
@@ -404,13 +410,13 @@ _i = _bloco.index('PREVIEW: Testimonial carousel'); _i = _bloco.rfind('/*', 0, _
 js_resto = _bloco[_i:]                # só depoimentos + colapso currículo (a demo agora é por dados)
 js_demo_render = io.open(os.path.join(AQUI, 'demo-render.js'), encoding='utf8').read()
 js_demo_player = io.open(os.path.join(AQUI, 'demo-player.js'), encoding='utf8').read()
-js_hero = io.open(os.path.join(AQUI, 'hero-engine.js'), encoding='utf8').read().replace('__FRAMES_M__', FRAMES_DIR_M).replace('__FRAMES__', FRAMES_DIR).replace('__COUNT__', str(FRAMES_COUNT)).replace('__ATOS__', json.dumps(HERO_ATOS))
+js_hero = io.open(os.path.join(AQUI, 'hero-engine.js'), encoding='utf8').read().replace('__FRAMES_M__', FRAMES_DIR_M).replace('__FRAMES__', FRAMES_DIR).replace('__COUNT__', str(FRAMES_COUNT)).replace('__ATOS__', json.dumps(HERO_ATOS)).replace('__VER__', FRAMES_VER)
 js_dados = ('window.LANDING_DEFAULT = ' + json.dumps(DEFAULT, ensure_ascii=False) + ';\n'
   + 'window.LANDING_NOVO = ' + json.dumps(NOVO, ensure_ascii=False) + ';\n'
   + 'window.LANDING_MOCKS = ' + json.dumps(mocks, ensure_ascii=False) + ';\n'
   + 'window.LANDING_MOCK_NOMES = ' + json.dumps(MOCK_NOMES, ensure_ascii=False) + ';\n'
   + 'window.LANDING_LOGO = ' + json.dumps(logo_svg) + ';\n'
-  + 'window.LANDING_FRAMES = ' + json.dumps({'dir': FRAMES_DIR, 'count': FRAMES_COUNT, 'atos': HERO_ATOS}) + ';\n')
+  + 'window.LANDING_FRAMES = ' + json.dumps({'dir': FRAMES_DIR, 'count': FRAMES_COUNT, 'atos': HERO_ATOS, 'ver': FRAMES_VER}) + ';\n')
 
 head = '''<!DOCTYPE html>
 <html lang="pt-BR" data-theme="dark">

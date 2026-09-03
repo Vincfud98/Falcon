@@ -103,7 +103,7 @@
     // modo de edição: o herói vira um roteiro, os três atos um embaixo do outro,
     // cada um sobre o quadro do vídeo daquele momento — tudo parado e visível.
     const FR = window.LANDING_FRAMES || { dir: '', count: 0 };
-    const quadro = p => FR.count ? FR.dir + '/' + String(Math.round(p * (FR.count - 1)) + 1).padStart(4, '0') + '.webp' : '';
+    const quadro = p => FR.count ? FR.dir + '/' + String(Math.round(p * (FR.count - 1)) + 1).padStart(4, '0') + '.webp' + (FR.ver ? '?v=' + FR.ver : '') : '';
     const A = FR.atos || [0.4, 0.61];   // quadro representativo de cada ato: início do voo, meio do ato II (Meteoro), chegada ao jardim
     const momentos = [['Ato I', 'o visitante chega à página', 0.06], ['Ato II', 'no meio do sobrevoo, com o Meteoro', (A[0] + A[1]) / 2], ['Ato III', 'na subida da fachada e no jardim', Math.min(0.96, (A[1] + 1) / 2 + 0.06)]];
     return '<div class="ed-hero">' + atos.map((a, i) => {
