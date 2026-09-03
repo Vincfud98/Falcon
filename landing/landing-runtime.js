@@ -172,7 +172,11 @@
   function render(){
     const L = window.LANDING;
     const alvo = (id) => document.querySelector('[data-sec="' + id + '"]');
+    // o modal da demonstração vive direto no <body>: dentro da seção ele cai no contexto de
+    // empilhamento dela (section{z-index:2}) e fica ABAIXO da topbar, que cortava o botão de fechar
+    document.querySelectorAll('body > #vnpModal').forEach(x => x.remove());
     Object.keys(R).forEach(k => { const el = alvo(k); if(el && L[k]) el.innerHTML = R[k](L[k]); });
+    const modalDemo = document.querySelector('[data-sec="demo"] #vnpModal'); if(modalDemo) document.body.appendChild(modalDemo);
     const st = document.querySelector('.sticky-cta'); if(st && L.cta) st.innerHTML = '<a class="btn btn-primary" href="' + esc(app()) + '" data-app-link><span' + e('cta.sticky') + '>' + esc(L.cta.sticky) + '</span> ' + SETA + '</a>';
     const marca = document.querySelector('.topbar [data-marca]'); if(marca && L.rodape) marca.innerHTML = rico(L.rodape.marca);   // a marca do topo é a mesma do rodapé
     document.querySelectorAll('[data-app-link]').forEach(a => a.setAttribute('href', app()));
