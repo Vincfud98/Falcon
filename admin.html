@@ -24326,7 +24326,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     } else if(qType === 'multiple_choice'){
       await persistMcOptions(savedId);
     } else if(qType === 'essay'){
-      await persistEssayContent(savedId);
+      const errosDisc = await persistEssayContent(savedId);
+      if(errosDisc.length){
+        showMsg('modalMessage', 'Atenção: ' + errosDisc.length + ' item(ns) da discursiva NÃO foram gravados. ' + errosDisc.join(' · '));
+      }
     }
 
     // B3 — vetorização automática (busca por IA): depois de salvar a questão E seu
@@ -24532,13 +24535,20 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // ═══════════════════════════════════════════════════════════
   // PERSISTÊNCIA: ESSAY (critérios + modelos)
   // ═══════════════════════════════════════════════════════════
+  // Grava critérios e modelos da discursiva. Cada gravação é CONFERIDA: antes, um
+  // insert recusado pelo banco (peso vazio virava '' numa coluna numérica, número
+  // repetido…) passava em silêncio e o admin só via o quesito "não registrar".
+  // Devolve a lista de erros; quem chama mostra no modal.
+  function _numOuNulo(v){ if(v === '' || v == null) return null; const n = Number(String(v).replace(',', '.')); return isNaN(n) ? null : n; }
   async function persistEssayContent(questionId){
+    const erros = [];
+    const conferir = (rotulo, r) => { if(r && r.error){ erros.push(rotulo + ': ' + r.error.message); console.warn('[discursiva]', rotulo, r.error); } };
     // CRITÉRIOS
     const existingCrits = essayCriteriaCache.filter(c => c.question_id === questionId);
     const desiredCritIds = modalEssayCriteria.filter(c => c.originalId).map(c => c.originalId);
     const removeCrits = existingCrits.filter(e => !desiredCritIds.includes(e.id)).map(e => e.id);
     if(removeCrits.length > 0){
-      await questoes().from('essay_criteria').delete().in('id', removeCrits);
+      conferir('apagar critérios', await questoes().from('essay_criteria').delete().in('id', removeCrits));
     }
     // Renumera ordem 1..n na hora de salvar — garante consistência mesmo se o
     // usuário pulou alguma posição.
@@ -24547,17 +24557,20 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     for(const c of modalEssayCriteria){
       const payload = {
         question_id: questionId,
-        numero: c.numero,
+        numero: _numOuNulo(c.numero) != null ? Math.round(_numOuNulo(c.numero)) : c.ordem,
         ordem: c.ordem,
         criterio: c.nome || c.criterio || null,
         descricao: c.descricao || null,
         resposta_esperada: c.resposta_esperada || null,
-        peso: c.peso,
+        peso: _numOuNulo(c.peso),
       };
+      const rotulo = 'critério ' + (payload.numero || c.ordem);
       if(c.originalId){
-        await questoes().from('essay_criteria').update(payload).eq('id', c.originalId);
+        conferir(rotulo, await questoes().from('essay_criteria').update(payload).eq('id', c.originalId));
       } else {
-        await questoes().from('essay_criteria').insert(payload);
+        const r = await questoes().from('essay_criteria').insert(payload).select('id').single();
+        conferir(rotulo, r);
+        if(!r.error && r.data) c.originalId = r.data.id;   // salvar de novo atualiza, não duplica
       }
     }
 
@@ -24566,7 +24579,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const desiredModelIds = modalEssayModels.filter(m => m.originalId).map(m => m.originalId);
     const removeModels = existingModels.filter(e => !desiredModelIds.includes(e.id)).map(e => e.id);
     if(removeModels.length > 0){
-      await questoes().from('essay_answer_models').delete().in('id', removeModels);
+      conferir('apagar modelos', await questoes().from('essay_answer_models').delete().in('id', removeModels));
     }
     for(const m of modalEssayModels){
       const payload = {
@@ -24578,12 +24591,16 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         modelo: m.content_html || m.modelo || '',
         ordem: m.ordem,
       };
+      const rotulo = 'resposta-modelo ' + (m.ordem || '');
       if(m.originalId){
-        await questoes().from('essay_answer_models').update(payload).eq('id', m.originalId);
+        conferir(rotulo, await questoes().from('essay_answer_models').update(payload).eq('id', m.originalId));
       } else {
-        await questoes().from('essay_answer_models').insert(payload);
+        const r = await questoes().from('essay_answer_models').insert(payload).select('id').single();
+        conferir(rotulo, r);
+        if(!r.error && r.data) m.originalId = r.data.id;
       }
     }
+    return erros;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -58509,6 +58526,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // Pacote D/E. Aceita criteria[] e models[] já normalizados.
   // Insere critérios de discursiva (campos espelham o form do modal; aceita
   // nomes do schema documentado E legados). Retorna a lista de erros.
+  // Quesitos e modelos no JSON: a ajuda documenta "criteria" e "answer_models"; o
+  // importador só lia "criteria" e "models" — o que viesse com o outro nome (ou em
+  // português) era descartado EM SILÊNCIO, e a discursiva nascia sem quesito.
+  function _ueEssayCritsDe(q){ const v = q.criteria || q.criterios || q.quesitos || q.criterias; return Array.isArray(v) ? v : []; }
+  function _ueEssayModelsDe(q){ const v = q.answer_models || q.models || q.modelos || q.model_answers || q.respostas_modelo; return Array.isArray(v) ? v : []; }
+  // peso é numérico no banco: texto vazio vira nulo e vírgula decimal vira ponto
+  function _pesoNum(v){ if(v === '' || v == null) return null; const n = Number(String(v).replace(',', '.')); return isNaN(n) ? null : n; }
   async function _ueEssayInsertCriteria(questionId, crits){
     const erros = [];
     for(let i = 0; i < crits.length; i++){
@@ -58522,7 +58546,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         criterio:          c.criterio || c.label || c.title || c.nome || null,
         descricao:         c.descricao || c.description || null,
         resposta_esperada: c.resposta_esperada || c.expected || null,
-        peso:              (c.peso != null ? c.peso : (c.weight != null ? c.weight : (c.max_score != null ? c.max_score : null))),
+        peso:              _pesoNum(c.peso != null ? c.peso : (c.weight != null ? c.weight : (c.max_score != null ? c.max_score : null))),   // '' e '2,5' viravam recusa do banco
       });
       if(ce.error){
         const msg = 'essay_criteria #' + (i+1) + ': ' + ce.error.message;
@@ -58593,7 +58617,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         else Object.assign(existente, patch);           // cache local acompanha
       }
       // critérios: só se ela não tem NENHUM (nunca mistura conjuntos)
-      const critNovos = Array.isArray(q.criteria) ? q.criteria : [];
+      const critNovos = _ueEssayCritsDe(q);
       if(critNovos.length){
         const temC = await questoes().from('essay_criteria')
           .select('id', { count: 'exact', head: true }).eq('question_id', existente.id);
@@ -58603,7 +58627,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         }
       }
       // modelos de resposta: idem
-      const modNovos = Array.isArray(q.models) ? q.models : [];
+      const modNovos = _ueEssayModelsDe(q);
       if(modNovos.length){
         const temM = await questoes().from('essay_answer_models')
           .select('id', { count: 'exact', head: true }).eq('question_id', existente.id);
@@ -58698,9 +58722,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // Critérios e modelos: mesmos helpers do caminho de COMPLEMENTO (uma
     // fonte só — criar e complementar nunca divergem).
     const childErrors = [];
-    const crits = Array.isArray(q.criteria) ? q.criteria : [];
+    const crits = _ueEssayCritsDe(q);
     Array.prototype.push.apply(childErrors, await _ueEssayInsertCriteria(bankQuestionId, crits));
-    const models = Array.isArray(q.models) ? q.models : [];
+    const models = _ueEssayModelsDe(q);
     Array.prototype.push.apply(childErrors, await _ueEssayInsertModels(bankQuestionId, models));
 
     console.log('[import] essay criada no banco:', bankQuestionId, '| critérios:', crits.length, '| modelos:', models.length, '| erros filhos:', childErrors.length);
