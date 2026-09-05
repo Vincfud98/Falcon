@@ -9091,6 +9091,20 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cadp-item[draggable="true"]:active{cursor:grabbing}
 .cadp-pasta-h.is-drop{background:var(--accent-lo);border-radius:7px;outline:1px dashed var(--accent-border)}
 .cadp-side.is-drop-raiz{outline:1px dashed var(--accent-border-soft);outline-offset:-4px}
+/* ── subpastas (pastas dentro de pastas) ── */
+.cadp-pasta.is-user .cadp-pasta.is-user{margin-left:.9rem;border-top:1px dashed var(--border);padding-top:.05rem}
+.cadp-pasta-h[draggable="true"]{cursor:grab}
+.cadp-pasta-h[draggable="true"]:active{cursor:grabbing}
+/* ── importar Markdown ── */
+.cad-imp .nlm-panel{width:560px}
+.cadimp-l{display:flex;flex-direction:column;gap:.35rem;font-family:var(--sans);font-size:.72rem;color:var(--text-dim)}
+.cadimp-l input[type="file"]{font-family:var(--sans);font-size:.7rem;color:var(--text)}
+.cadimp-ou{font-family:var(--sans);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-mute);text-align:center}
+.cadimp-txt{width:100%;min-height:150px;resize:vertical;box-sizing:border-box;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:.72rem;line-height:1.5;padding:.5rem .6rem}
+.cadimp-txt:focus,.cadimp-sel:focus{outline:none;border-color:var(--accent-border)}
+.cadimp-sel{background:var(--bg-card);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--sans);font-size:.72rem;padding:.35rem .5rem;max-width:100%}
+.cadimp-nota{font-family:var(--sans);font-size:.66rem;color:var(--text-mute);line-height:1.5}
+.cadimp-acoes{display:flex;justify-content:flex-end;gap:.5rem}
 .cadp-meta{flex-shrink:0;margin-bottom:.5rem;border:1px solid var(--border);border-radius:8px;padding:.3rem .6rem;background:var(--bg-elevated)}
 .cadp-meta summary{font-family:var(--sans);font-size:.62rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-mute);cursor:pointer;padding:.15rem 0;list-style:none}
 .cadp-meta summary::-webkit-details-marker{display:none}
@@ -15703,7 +15717,8 @@ const Store = (function(){
       else {
         _state.cadPastas = (pastasR.data || []).map(r => ({
           id: String(r.id), nome: r.nome || 'Pasta',
-          subjectId: r.subject_id ? String(r.subject_id) : null, ordem: r.ordem || 0
+          subjectId: r.subject_id ? String(r.subject_id) : null, ordem: r.ordem || 0,
+          parentId: r.parent_id ? String(r.parent_id) : null      // subpasta (null = raiz)
         }));
       }
       const marcaAv = JSON.stringify([_state.cadAvulsos || [], _state.cadPastas || []]);
@@ -15733,14 +15748,36 @@ const Store = (function(){
       if(error) console.warn('[cad avulso del]', error);
     }catch(e){ console.warn('[cad avulso del ex]', e); }
   }
+  /* Subpastas: helpers de árvore usados pela API e pelo sync. Pai que não
+     existe mais (apagado em outra aba) conta como RAIZ — nunca pasta órfã
+     invisível. Ciclo é impossível por construção (checagem no mover) e o
+     banco tem um trigger com a mesma regra. */
+  function _pastaPega(id){ return (_state && Array.isArray(_state.cadPastas)) ? (_state.cadPastas.find(x => String(x.id) === String(id)) || null) : null; }
+  function _pastaPaiDe(id){ const p = _pastaPega(id); if(!p || !p.parentId) return null; return _pastaPega(p.parentId) ? String(p.parentId) : null; }
+  function _pastaDescende(id, ancestralId){   // `id` É `ancestralId` ou mora dentro dele
+    let cur = id ? String(id) : null, guarda = 0;
+    while(cur && guarda++ < 500){ if(cur === String(ancestralId)) return true; cur = _pastaPaiDe(cur); }
+    return false;
+  }
+  let _avisouParentId = false;
   async function _syncCadPastaUpsert(pasta){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !pasta) return;
+    const linha = { id: pasta.id, user_id: userId, nome: pasta.nome || 'Pasta',
+      subject_id: pasta.subjectId || null, ordem: pasta.ordem || 0, parent_id: pasta.parentId || null };
     try{
-      const { error } = await window._sb.schema('aluno').from('cadernos_pastas').upsert({
-        id: pasta.id, user_id: userId, nome: pasta.nome || 'Pasta',
-        subject_id: pasta.subjectId || null, ordem: pasta.ordem || 0
-      }, { onConflict: 'id' });
+      let { error } = await window._sb.schema('aluno').from('cadernos_pastas').upsert(linha, { onConflict: 'id' });
+      // A coluna parent_id ainda não existe no banco (o SQL das subpastas não
+      // rodou): a pasta em si NÃO pode se perder — grava sem a coluna e avisa
+      // uma vez por sessão. Assim que o SQL rodar, tudo passa a persistir.
+      if(error && /parent_id/.test(String(error.message || '')) && (error.code === '42703' || error.code === 'PGRST204')){
+        delete linha.parent_id;
+        ({ error } = await window._sb.schema('aluno').from('cadernos_pastas').upsert(linha, { onConflict: 'id' }));
+        if(!_avisouParentId){
+          _avisouParentId = true;
+          if(window.ueToast) ueToast('Subpastas ainda não estão ativas no banco (falta rodar o SQL do parent_id). A pasta foi salva na raiz.', 'warn');
+        }
+      }
       if(error) console.warn('[cad pasta sync]', error);
     }catch(e){ console.warn('[cad pasta sync ex]', e); }
   }
@@ -16226,14 +16263,37 @@ const Store = (function(){
         ? _state.cadPastas.slice().sort((a, b) => ((a.ordem || 0) - (b.ordem || 0)) || String(a.nome).localeCompare(String(b.nome), 'pt-BR'))
         : [];
     },
-    cadPastaCriar(nome, subjectId){
+    cadPastaCriar(nome, subjectId, parentId){
       if(!_state) return null;
-      const pasta = { id: _genUuid() || ('pst' + Date.now()), nome: String(nome || 'Pasta'), subjectId: subjectId || null, ordem: (Array.isArray(_state.cadPastas) ? _state.cadPastas.length : 0) };
+      const pasta = { id: _genUuid() || ('pst' + Date.now()), nome: String(nome || 'Pasta'), subjectId: subjectId || null,
+        ordem: (Array.isArray(_state.cadPastas) ? _state.cadPastas.length : 0),
+        parentId: (parentId && _pastaPega(parentId)) ? String(parentId) : null };   // subpasta
       if(!Array.isArray(_state.cadPastas)) _state.cadPastas = [];
       _state.cadPastas.push(pasta);
       _emit();
       _syncCadPastaUpsert(pasta).catch(()=>{});
       return pasta;
+    },
+    /* ── Subpastas (pastas dentro de pastas) ── */
+    cadPastaPega(id){ return _pastaPega(id); },
+    cadPastaPaiDe(id){ return _pastaPaiDe(id); },                          // id do pai resolvido (null = raiz)
+    cadPastaEhDescendente(id, ancestralId){ return _pastaDescende(id, ancestralId); },
+    cadPastaCaminho(id){                                                   // "Avó / Mãe / Pasta"
+      const nomes = []; let cur = id ? String(id) : null, guarda = 0;
+      while(cur && guarda++ < 500){ const p = _pastaPega(cur); if(!p) break; nomes.unshift(p.nome || 'Pasta'); cur = _pastaPaiDe(cur); }
+      return nomes.join(' / ');
+    },
+    // Move a pasta pra dentro de outra (parentId null = raiz). Recusa (false)
+    // pasta inexistente, ela mesma e qualquer descendente — nunca nasce ciclo.
+    cadPastaMover(id, parentId){
+      const pasta = _pastaPega(id); if(!pasta) return false;
+      const alvo = parentId ? String(parentId) : null;
+      if(alvo && (!_pastaPega(alvo) || _pastaDescende(alvo, id))) return false;
+      if((pasta.parentId || null) === alvo) return true;   // já estava lá
+      pasta.parentId = alvo;
+      _emit();
+      _syncCadPastaUpsert(pasta).catch(()=>{});
+      return true;
     },
     cadPastaRenomear(id, nome){
       const pasta = (_state && Array.isArray(_state.cadPastas)) ? _state.cadPastas.find(x => String(x.id) === String(id)) : null;
@@ -16253,10 +16313,14 @@ const Store = (function(){
     },
     cadPastaApagar(id){
       if(!_state || !Array.isArray(_state.cadPastas)) return;
+      const pai = _pastaPaiDe(id);   // ANTES de tirar da lista: subpastas e cadernos sobem pro pai dela
       _state.cadPastas = _state.cadPastas.filter(x => String(x.id) !== String(id));
-      // cadernos que moravam nela voltam pra raiz (nada se perde)
+      _state.cadPastas.forEach(p => {
+        if(String(p.parentId) === String(id)){ p.parentId = pai; _syncCadPastaUpsert(p).catch(()=>{}); }
+      });
+      // cadernos que moravam nela sobem um nível (raiz se ela era de raiz) — nada se perde
       (_state.cadAvulsos || []).forEach(c => {
-        if(String(c.pastaId) === String(id)){ c.pastaId = null; c.updatedAt = Date.now(); _syncCadAvulsoUpsert(c).catch(()=>{}); }
+        if(String(c.pastaId) === String(id)){ c.pastaId = pai; c.updatedAt = Date.now(); _syncCadAvulsoUpsert(c).catch(()=>{}); }
       });
       _emit();
       _syncCadPastaDelete(id).catch(()=>{});
@@ -41578,8 +41642,9 @@ window.TutorIA = (function(){
   }
   function _docCtxRef(d){
     if(d.pastaId){
-      const p2 = ((window.Store && Store.cadPastasLista) ? Store.cadPastasLista() : []).find(function(x){ return String(x.id) === String(d.pastaId); });
-      if(p2) return p2.nome || 'pasta';
+      // caminho completo ("Avó / Mãe / Pasta") — subpastas
+      const cam = (window.Store && Store.cadPastaCaminho) ? Store.cadPastaCaminho(d.pastaId) : '';
+      if(cam) return cam;
     }
     if(d.subjectId){
       const c = (window.COURSES || []).find(function(c2){ return String(c2._subjectId) === String(d.subjectId); });
@@ -60122,6 +60187,7 @@ const CadernosPage = (function(){
     let h = '<div class="cadp-tools">'
       + '<button type="button" class="icon-btn cadp-tool" id="cadpNovo" data-tip="Novo caderno">+ Caderno</button>'
       + '<button type="button" class="icon-btn cadp-tool" id="cadpNovaPasta" data-tip="Nova pasta">+ Pasta</button>'
+      + '<button type="button" class="icon-btn cadp-tool" id="cadpImportar" data-tip="Importar cadernos de arquivos Markdown (.md)">Importar</button>'
       + '<button type="button" class="icon-btn cadp-tool cadp-ico" id="cadpLupa" data-tip="Buscar cadernos" aria-label="Buscar"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg></button>'
       + '<span class="cadp-olho-wrap"><button type="button" class="icon-btn cadp-tool cadp-ico" id="cadpOlho" data-tip="O que mostrar" aria-label="O que mostrar"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button>'
       + '<div class="cadp-olho-menu" id="cadpOlhoMenu" hidden>'
@@ -60171,16 +60237,35 @@ const CadernosPage = (function(){
     }
     // pastas do usuário + avulsos na raiz
     if(olho.proprios){
-      pastas.forEach(function(pst){
+      // Pastas do usuário em ÁRVORE (subpastas): dentro de cada pasta vêm as
+      // filhas e depois os cadernos dela. Pai que não existe mais = raiz.
+      const porPai = {};
+      pastas.forEach(function(p){
+        const k = (window.Store && Store.cadPastaPaiDe) ? (Store.cadPastaPaiDe(p.id) || '') : '';
+        (porPai[k] = porPai[k] || []).push(p);
+      });
+      const contaArvore = function(pid){   // cadernos na pasta + em todas as subpastas
+        let n = docs.filter(function(d){ return String(d.pastaId) === String(pid); }).length;
+        (porPai[String(pid)] || []).forEach(function(f){ n += contaArvore(f.id); });
+        return n;
+      };
+      const pastaHtml = function(pst, nivel){
         const dentro = _filtraDocs(docs.filter(function(d){ return String(d.pastaId) === String(pst.id); }));
-        h += '<details class="cadp-pasta is-user" open><summary class="cadp-pasta-h" data-drop-pasta="' + Util.attr(pst.id) + '">'
-          + '<span class="cadp-dot' + (pst.subjectId ? '" data-mat-dot="' + Util.attr(pst.subjectId) : ' is-user"') + '"></span>'
-          + '<span class="cadp-pasta-n">' + Util.esc(pst.nome) + '</span><span class="cadp-pasta-c">' + dentro.length + '</span>'
+        const filhas = porPai[String(pst.id)] || [];
+        return '<details class="cadp-pasta is-user" open data-nivel="' + nivel + '">'
+          + '<summary class="cadp-pasta-h" draggable="true" data-drop-pasta="' + Util.attr(pst.id) + '" data-drag-pasta="' + Util.attr(pst.id) + '">'
+          + (pst.subjectId ? '<span class="cadp-dot" data-mat-dot="' + Util.attr(pst.subjectId) + '"></span>' : '<span class="cadp-dot is-user"></span>')
+          + '<span class="cadp-pasta-n">' + Util.esc(pst.nome) + '</span><span class="cadp-pasta-c">' + contaArvore(pst.id) + '</span>'
+          + '<button type="button" class="cadp-mini" data-pasta-sub="' + Util.attr(pst.id) + '" data-tip="Nova subpasta dentro desta">+</button>'
           + '<button type="button" class="cadp-mini" data-pasta-mat="' + Util.attr(pst.id) + '" data-tip="' + (pst.subjectId ? 'Vinculada a uma matéria — trocar ou desvincular' : 'Vincular a uma matéria (a bolinha herda a cor)') + '">&#9673;</button>'
           + '<button type="button" class="cadp-mini" data-pasta-ren="' + Util.attr(pst.id) + '" data-tip="Renomear">&#9998;</button>'
-          + '<button type="button" class="cadp-mini" data-pasta-del="' + Util.attr(pst.id) + '" data-tip="Apagar a pasta (os cadernos voltam pra raiz)">&times;</button>'
-          + '</summary>' + dentro.map(function(d){ return _linhaDoc(d, ativoD); }).join('') + '</details>';
-      });
+          + '<button type="button" class="cadp-mini" data-pasta-del="' + Util.attr(pst.id) + '" data-tip="Apagar a pasta (subpastas e cadernos sobem um nível)">&times;</button>'
+          + '</summary>'
+          + filhas.map(function(f){ return pastaHtml(f, nivel + 1); }).join('')
+          + dentro.map(function(d){ return _linhaDoc(d, ativoD); }).join('')
+          + '</details>';
+      };
+      (porPai[''] || []).forEach(function(pst){ h += pastaHtml(pst, 0); });
       const raiz = docs.filter(function(d){ return !d.pastaId && !d.subjectId; });
       const gruposRaiz = _ordAplica(raiz);
       const totalRaiz = gruposRaiz.reduce(function(n, g){ return n + g.docs.length; }, 0);
@@ -60815,6 +60900,14 @@ const CadernosPage = (function(){
         });
         return;
       }
+      const sub = e.target.closest ? e.target.closest('[data-pasta-sub]') : null;
+      if(sub){
+        e.preventDefault(); e.stopPropagation();
+        const idPai = sub.getAttribute('data-pasta-sub');
+        const nome = prompt('Nome da subpasta:');
+        if(nome && nome.trim() && window.Store && Store.cadPastaCriar){ Store.cadPastaCriar(nome.trim(), null, idPai); _bindSidebar(side.__stage, side.__route); }
+        return;
+      }
       const ren = e.target.closest ? e.target.closest('[data-pasta-ren]') : null;
       if(ren){
         e.preventDefault(); e.stopPropagation();
@@ -60827,7 +60920,7 @@ const CadernosPage = (function(){
       const del = e.target.closest ? e.target.closest('[data-pasta-del]') : null;
       if(del){
         e.preventDefault(); e.stopPropagation();
-        if(confirm('Apagar esta pasta? Os cadernos dela voltam para a raiz (nenhum é apagado).')){
+        if(confirm('Apagar esta pasta? As subpastas e os cadernos dela sobem um nível (nenhum é apagado).')){
           if(window.Store && Store.cadPastaApagar) Store.cadPastaApagar(del.getAttribute('data-pasta-del'));
           _bindSidebar(side.__stage, side.__route);
         }
@@ -60845,18 +60938,48 @@ const CadernosPage = (function(){
       }
     });
     // D2f: arrastar caderno próprio entre pastas (pasta sua | matéria | raiz)
+    // e PASTA pra dentro de pasta (subpastas) ou pra raiz.
     side.addEventListener('dragstart', function(e){
+      if(!e.dataTransfer) return;
       const row = e.target.closest ? e.target.closest('.cadp-item[data-doc]') : null;
-      if(!row || !e.dataTransfer) return;
-      e.dataTransfer.setData('text/ubq-doc', row.getAttribute('data-doc'));
-      e.dataTransfer.effectAllowed = 'move';
+      if(row){
+        e.dataTransfer.setData('text/ubq-doc', row.getAttribute('data-doc'));
+        e.dataTransfer.effectAllowed = 'move';
+        return;
+      }
+      const cab = e.target.closest ? e.target.closest('.cadp-pasta-h[data-drag-pasta]') : null;
+      if(cab){
+        const idP = cab.getAttribute('data-drag-pasta');
+        e.dataTransfer.setData('text/ubq-pasta', idP);
+        e.dataTransfer.effectAllowed = 'move';
+        // o dragover não consegue LER o dado (regra do navegador) — guarda
+        // o id aqui pra recusar na hora o alvo proibido (ela mesma/descendente)
+        side.__dragPasta = idP;
+      }
     });
+    side.addEventListener('dragend', function(){ side.__dragPasta = null; side.classList.remove('is-drop-raiz'); });
     side.addEventListener('dragover', function(e){
-      if(!e.dataTransfer || Array.prototype.indexOf.call(e.dataTransfer.types, 'text/ubq-doc') === -1) return;
+      if(!e.dataTransfer) return;
+      const tipos = e.dataTransfer.types || [];
+      const ehPasta = Array.prototype.indexOf.call(tipos, 'text/ubq-pasta') !== -1;
+      const ehDoc = Array.prototype.indexOf.call(tipos, 'text/ubq-doc') !== -1;
+      if(!ehPasta && !ehDoc) return;
+      const alvo = e.target.closest ? e.target.closest(ehPasta ? '[data-drop-pasta]' : '[data-drop-mat],[data-drop-pasta]') : null;
+      if(ehPasta){
+        // pasta não entra nela mesma nem numa subpasta dela (viraria ciclo),
+        // e não "entra" numa matéria (pasta é vinculada à matéria, não movida)
+        const proibido = (alvo && side.__dragPasta && window.Store && Store.cadPastaEhDescendente
+            && Store.cadPastaEhDescendente(alvo.getAttribute('data-drop-pasta'), side.__dragPasta))
+          || (!alvo && e.target.closest && e.target.closest('[data-drop-mat]'));
+        if(proibido){
+          side.querySelectorAll('.is-drop').forEach(function(x){ x.classList.remove('is-drop'); });
+          side.classList.remove('is-drop-raiz');
+          return;   // sem preventDefault = o navegador mostra "não permitido"
+        }
+      }
       // a BARRA INTEIRA aceita: pasta = entra nela; fora de pasta = raiz
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
-      const alvo = e.target.closest ? e.target.closest('[data-drop-mat],[data-drop-pasta]') : null;
       side.querySelectorAll('.is-drop').forEach(function(x){ if(x !== alvo) x.classList.remove('is-drop'); });
       side.classList.toggle('is-drop-raiz', !alvo);
       if(alvo && alvo.classList) alvo.classList.add('is-drop');
@@ -60867,13 +60990,21 @@ const CadernosPage = (function(){
     });
     side.addEventListener('drop', function(e){
       const id = e.dataTransfer ? e.dataTransfer.getData('text/ubq-doc') : '';
-      if(!id) return;
+      const idPasta = e.dataTransfer ? e.dataTransfer.getData('text/ubq-pasta') : '';
+      if(!id && !idPasta) return;
       e.preventDefault();
       side.querySelectorAll('.is-drop').forEach(function(x){ x.classList.remove('is-drop'); });
       side.classList.remove('is-drop-raiz');
+      side.__dragPasta = null;
       const mat = e.target.closest ? e.target.closest('[data-drop-mat]') : null;
       const pst = e.target.closest ? e.target.closest('[data-drop-pasta]') : null;
-      if(window.Store && Store.cadAvulsoSalvar){
+      if(idPasta){
+        if(mat) return;
+        const alvo = pst ? pst.getAttribute('data-drop-pasta') : null;
+        if(window.Store && Store.cadPastaMover && !Store.cadPastaMover(idPasta, alvo) && alvo && window.ueToast){
+          ueToast('Uma pasta não pode entrar nela mesma nem numa subpasta dela.', 'warn');
+        }
+      } else if(window.Store && Store.cadAvulsoSalvar){
         if(mat) Store.cadAvulsoSalvar(id, { subjectId: mat.getAttribute('data-drop-mat') });
         else if(pst) Store.cadAvulsoSalvar(id, { pastaId: pst.getAttribute('data-drop-pasta') });
         else Store.cadAvulsoSalvar(id, { pastaId: null, subjectId: null });
@@ -60893,6 +61024,8 @@ const CadernosPage = (function(){
       const nome = prompt('Nome da nova pasta:');
       if(nome && nome.trim() && window.Store && Store.cadPastaCriar){ Store.cadPastaCriar(nome.trim()); _bindSidebar(stageEl, route); }
     });
+    const importar = side.querySelector('#cadpImportar');
+    if(importar) importar.addEventListener('click', function(){ _importarAbrir(stageEl, route); });
     const ordBtn = side.querySelector('#cadpOrd'), ordMenu = side.querySelector('#cadpOrdMenu');
     if(ordBtn && ordMenu){
       ordBtn.addEventListener('click', function(e){ e.stopPropagation(); ordMenu.hidden = !ordMenu.hidden; });
@@ -60970,6 +61103,262 @@ const CadernosPage = (function(){
   // faz sentido levar pro Obsidian/RemNote. Conversor de Markdown: chips
   // viram [[Título]], grifos viram ==texto==, sublinhado fica como <u> (o
   // Obsidian renderiza HTML inline), listas viram - / 1. .
+  /* ── IMPORTAR MARKDOWN (o inverso do _cadParaMd) ───────────────────────────
+     Markdown → HTML do caderno, no MESMO markup que o editor produz (DIV por
+     linha, ul/ol com data-ind, .cad-todo, .cad-callout, details.cad-toggle,
+     table.cad-tab, pre.cad-code, hr.cad-hr, chips .tutor-ref). É texto→texto,
+     sem DOM, pra ser testável fora do navegador. TUDO que vem do arquivo é
+     escapado — HTML cru do arquivo nunca entra no caderno; só <u> é
+     reconhecido, porque o exportador escreve <u>. Citações [[Nome]] viram
+     chip quando o nome bate com uma unidade ou um caderno seu (inclusive os
+     do mesmo lote); senão ficam como texto [[Nome]] — nada se perde. */
+  /* MD-IMPORT-INICIO */
+  function _mdEsc(s){ return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  function _mdNorm(s){ return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+  function _mdIndent(sp){ const n = String(sp || '').replace(/\t/g, '  ').length; return Math.max(0, Math.min(5, Math.floor(n / 2))); }
+  function _mdCalloutIco(){
+    const st = (typeof window !== 'undefined' && window.Store) ? window.Store : null;
+    const v = (st && st.prefsGet) ? st.prefsGet('cad_callout_ico') : null;
+    const ico = v == null ? '\u{1F4A1}' : String(v);   // o MESMO padrão do menu "/" do editor
+    return ico ? ' data-ico="' + _mdEsc(ico) + '"' : '';
+  }
+  // front matter YAML sai; o primeiro "# Título" vira o título do caderno
+  function _mdSepararTitulo(md){
+    let txt = String(md || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+    let titulo = '';
+    const fm = /^---\n([\s\S]*?)\n---\n?/.exec(txt);
+    if(fm){
+      const m = /^title:\s*["']?(.+?)["']?\s*$/m.exec(fm[1]);
+      if(m) titulo = m[1].trim();
+      txt = txt.slice(fm[0].length);
+    }
+    const linhas = txt.split('\n');
+    for(let i = 0; i < linhas.length; i++){
+      if(!linhas[i].trim()) continue;
+      const h1 = /^#\s+(.+?)\s*#*\s*$/.exec(linhas[i]);
+      if(h1){ titulo = h1[1].trim(); linhas.splice(i, 1); }
+      break;   // só a PRIMEIRA linha não vazia pode ser o título
+    }
+    return { titulo: titulo, corpo: linhas.join('\n') };
+  }
+  function _mdTitulo(md, nomeArquivo){
+    return _mdSepararTitulo(md).titulo
+      || (nomeArquivo ? String(nomeArquivo).replace(/\.(md|markdown|txt)$/i, '').trim() : '')
+      || 'Sem título';
+  }
+  function _mdUrlOk(u){ return /^(https?:\/\/|mailto:|#)/i.test(String(u || '').trim()); }
+  function _mdInline(txt, ctx){
+    const guardados = [];
+    const guarda = function(html){ guardados.push(html); return '\u0001' + (guardados.length - 1) + '\u0001'; };
+    let s = String(txt || '');
+    // 1) código inline: dentro dele nada é marcação
+    s = s.replace(/`([^`\n]+)`/g, function(_, c){ return guarda('<code>' + _mdEsc(c) + '</code>'); });
+    // 2) citações [[Nome|apelido]] / [[Nome#seção]]
+    s = s.replace(/\[\[([^\]\n]+?)\]\]/g, function(m, dentro){
+      const partes = dentro.split('|');
+      const alvo = partes[0].replace(/#.*$/, '').trim();
+      const rotulo = (partes[1] || '').trim() || alvo;
+      const r = (ctx && ctx.resolver) ? ctx.resolver(alvo) : null;
+      if(!r){ if(ctx && ctx.semRef) ctx.semRef(alvo); return m; }   // fica [[Nome]] legível
+      if(r.docId) return guarda('<span class="tutor-ref tutor-ref-doc" contenteditable="false" data-doc-id="' + _mdEsc(r.docId) + '" data-unit-title="' + _mdEsc(r.titulo) + '">' + _mdEsc(rotulo) + '</span>');
+      return guarda('<span class="tutor-ref" contenteditable="false" data-unit-id="' + _mdEsc(r.unitId) + '" data-unit-title="' + _mdEsc(r.titulo) + '">' + _mdEsc(rotulo) + '</span>');
+    });
+    // 3) imagens e links: só http(s)/mailto — o resto vira texto
+    s = s.replace(/!\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, function(m, alt, src){
+      return /^(https?:\/\/|data:image\/)/i.test(src) ? guarda('<img src="' + _mdEsc(src) + '" alt="' + _mdEsc(alt) + '">') : m;
+    });
+    s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, function(m, texto, url){
+      return _mdUrlOk(url) ? guarda('<a href="' + _mdEsc(url) + '">' + _mdEsc(texto) + '</a>') : m;
+    });
+    // 4) o resto é texto: escapa — e só então a ênfase vira tag
+    s = _mdEsc(s);
+    s = s.replace(/\*\*\*(.+?)\*\*\*/g, '<b><i>$1</i></b>')
+      .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+      .replace(/__(.+?)__/g, '<b>$1</b>')
+      .replace(/==(.+?)==/g, '<span class="hl-mark" data-hl-color="yellow">$1</span>')
+      .replace(/~~(.+?)~~/g, '<s>$1</s>')
+      .replace(/(^|[^*\w])\*([^*\s](?:[^*\n]*?[^*\s])?)\*(?![*\w])/g, '$1<i>$2</i>')
+      .replace(/(^|[^_\w])_([^_\s](?:[^_\n]*?[^_\s])?)_(?![_\w])/g, '$1<i>$2</i>')
+      .replace(/&lt;u&gt;([\s\S]+?)&lt;\/u&gt;/g, '<u>$1</u>');
+    // 5) devolve o que estava guardado
+    return s.replace(/\u0001(\d+)\u0001/g, function(_, i){ return guardados[+i]; });
+  }
+  function _mdCelulas(l){
+    const t = l.trim().replace(/^\|/, '').replace(/\|$/, '').replace(/\\\|/g, '\u0002');
+    return t.split('|').map(function(c){ return c.replace(/\u0002/g, '|').trim(); });
+  }
+  function _mdCitacao(grupo, ctx){
+    const m = /^\[!([\w-]+)\]([-+]?)\s*(.*)$/.exec(grupo[0] || '');
+    if(m){
+      const titulo = m[3].trim(), corpo = grupo.slice(1);
+      if(m[2] === '-' || m[2] === '+'){   // toggle: título + corpo (o corpo passa pelo parser de blocos)
+        const sum = titulo ? '<summary>' + _mdInline(titulo, ctx) + '</summary>' : '<summary data-vazio="1"><br></summary>';
+        return '<details class="cad-toggle" open>' + sum + '<div class="cad-toggle-corpo">' + (_mdBlocos(corpo, ctx) || '<div><br></div>') + '</div></details>';
+      }
+      // callout: bloco de UMA linha no caderno — título em negrito + corpo com quebras
+      const partes = [];
+      const corpoVivo = corpo.filter(function(c){ return c.trim(); });
+      if(titulo) partes.push(corpoVivo.length ? '<b>' + _mdInline(titulo, ctx) + '</b>' : _mdInline(titulo, ctx));
+      corpoVivo.forEach(function(c){ partes.push(_mdInline(c.trim(), ctx)); });
+      return '<div class="cad-callout"' + _mdCalloutIco() + '>' + (partes.join('<br>') || '<br>') + '</div>';
+    }
+    const ls = grupo.filter(function(c){ return c.trim(); }).map(function(c){ return _mdInline(c.trim(), ctx); });
+    return '<blockquote>' + (ls.join('<br>') || '<br>') + '</blockquote>';
+  }
+  function _mdBlocos(linhas, ctx){
+    let out = '', lista = null;   // lista aberta: { tag: 'ul' | 'ol' }
+    const fechaLista = function(){ if(lista){ out += '</' + lista.tag + '>'; lista = null; } };
+    const ind = function(k){ return k ? ' data-ind="' + k + '"' : ''; };
+    for(let i = 0; i < linhas.length; i++){
+      const l = linhas[i];
+      let m;
+      // cerca de código ``` ou ~~~
+      if((m = /^\s*(```|~~~)\s*[\w+-]*\s*$/.exec(l))){
+        fechaLista();
+        const cerca = m[1], corpo = [];
+        i++;
+        while(i < linhas.length && linhas[i].trim() !== cerca){ corpo.push(linhas[i]); i++; }
+        out += '<pre class="cad-code">' + _mdEsc(corpo.join('\n')) + '</pre>';
+        continue;   // o for pula a cerca de fechamento
+      }
+      if(!l.trim()){ fechaLista(); continue; }
+      // títulos: # e ## viram h2 (o caderno não tem h1 — o título já foi separado)
+      if((m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(l))){
+        fechaLista();
+        const n = m[1].length, tag = n <= 2 ? 'h2' : (n === 3 ? 'h3' : 'h4');
+        out += '<' + tag + '>' + (_mdInline(m[2], ctx) || '<br>') + '</' + tag + '>';
+        continue;
+      }
+      // linha divisória --- *** ___
+      if(/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)){ fechaLista(); out += '<hr class="cad-hr">'; continue; }
+      // tabela: linha de células seguida da linha separadora |---|---|
+      if(/^\s*\|.*\|\s*$/.test(l) && i + 1 < linhas.length && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(linhas[i + 1])){
+        fechaLista();
+        const rows = [_mdCelulas(l)];
+        i += 2;
+        while(i < linhas.length && /^\s*\|.*\|\s*$/.test(linhas[i])){ rows.push(_mdCelulas(linhas[i])); i++; }
+        i--;   // o for avança
+        const nc = rows.reduce(function(n, r){ return Math.max(n, r.length); }, 0);
+        out += '<table class="cad-tab" data-hr="1">' + rows.map(function(r){
+          let tr = '<tr>';
+          for(let c = 0; c < nc; c++) tr += '<td>' + ((r[c] && _mdInline(r[c], ctx)) || '<br>') + '</td>';
+          return tr + '</tr>';
+        }).join('') + '</table>';
+        continue;
+      }
+      // citação / callout / toggle (Obsidian): bloco de linhas começando com >
+      if(/^\s*>/.test(l)){
+        fechaLista();
+        const grupo = [];
+        while(i < linhas.length && /^\s*>/.test(linhas[i])){ grupo.push(linhas[i].replace(/^\s*>\s?/, '')); i++; }
+        i--;
+        out += _mdCitacao(grupo, ctx);
+        continue;
+      }
+      // tarefa: - [ ] / - [x]
+      if((m = /^(\s*)[-*+]\s+\[( |x|X)\]\s+(.*)$/.exec(l))){
+        fechaLista();
+        out += '<div class="cad-todo" data-todo="' + (m[2] === ' ' ? '0' : '1') + '"' + ind(_mdIndent(m[1])) + '>' + (_mdInline(m[3].trim(), ctx) || '<br>') + '</div>';
+        continue;
+      }
+      // listas: marcador / numerada — aninhamento vira data-ind no li (como o Tab do editor)
+      if((m = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(l))){
+        const k = _mdIndent(m[1]), tipo = /^\d/.test(m[2]) ? 'ol' : 'ul';
+        if(lista && k === 0 && lista.tag !== tipo) fechaLista();
+        if(!lista){ lista = { tag: tipo }; out += '<' + tipo + '>'; }
+        // item numerado aninhado numa lista de marcadores guarda o número no texto
+        const pref = (k > 0 && lista.tag !== tipo && tipo === 'ol') ? m[2] + ' ' : '';
+        out += '<li' + ind(k) + '>' + (_mdInline(pref + m[3].trim(), ctx) || '<br>') + '</li>';
+        continue;
+      }
+      // parágrafo = uma linha do caderno (recuo por espaços vira data-ind)
+      fechaLista();
+      m = /^(\s*)(.*)$/.exec(l);
+      out += '<div' + ind(_mdIndent(m[1])) + '>' + (_mdInline(m[2].trim(), ctx) || '<br>') + '</div>';
+    }
+    fechaLista();
+    return out;
+  }
+  function _mdParaCadHtml(md, ctx){
+    const sep = _mdSepararTitulo(md);
+    return { titulo: sep.titulo, html: _mdBlocos(sep.corpo.split('\n'), ctx || {}) || '<div><br></div>' };
+  }
+  /* MD-IMPORT-FIM */
+  // Quem responde a [[Nome]]: cadernos do lote primeiro, depois os seus, depois
+  // as unidades (por título, "SIGLA título" ou "SIGLA número título").
+  function _mdResolverDe(lote){
+    const mapa = {};
+    const poe = function(chave, val){ const k = _mdNorm(chave); if(k && !mapa[k]) mapa[k] = val; };
+    (lote || []).forEach(function(d){ poe(d.titulo, { docId: String(d.id), titulo: d.titulo }); });
+    ((window.Store && Store.cadAvulsosLista) ? Store.cadAvulsosLista() : []).forEach(function(d){ poe(d.titulo, { docId: String(d.id), titulo: d.titulo }); });
+    let idx = null;
+    try{ idx = (typeof _buildUnitIndex === 'function') ? _buildUnitIndex() : null; }catch(_){ }
+    ((idx && idx.flat) || []).forEach(function(u){
+      const v = { unitId: u.id, titulo: u.title };
+      poe(u.title, v); poe(u.label, v);
+      if(u.sigla){ poe(u.sigla + ' ' + u.title, v); if(u.number) poe(u.sigla + ' ' + u.number + ' ' + u.title, v); }
+    });
+    return function(nome){ return mapa[_mdNorm(nome)] || null; };
+  }
+  function _importarAbrir(stageEl, route){
+    if(document.querySelector('.note-list-modal.cad-imp')) return;
+    const pastas = ((window.Store && Store.cadPastasLista) ? Store.cadPastasLista() : [])
+      .map(function(p){ return { id: p.id, caminho: (Store.cadPastaCaminho ? Store.cadPastaCaminho(p.id) : p.nome) || p.nome }; })
+      .sort(function(a, b){ return a.caminho.localeCompare(b.caminho, 'pt-BR'); });
+    const el = document.createElement('div'); el.className = 'note-list-modal cad-imp open';
+    const fechar = function(){ el.remove(); };
+    el.innerHTML = '<div class="nlm-backdrop"></div><div class="nlm-panel">'
+      + '<div class="nlm-header"><span class="nlm-title">Importar cadernos (Markdown)</span><button class="nlm-close" type="button" aria-label="Fechar">&times;</button></div>'
+      + '<div class="nlm-body">'
+        + '<label class="cadimp-l">Arquivos .md (pode escolher vários — cada arquivo vira um caderno)'
+          + '<input type="file" id="cadImpArq" accept=".md,.markdown,.txt,text/markdown,text/plain" multiple></label>'
+        + '<div class="cadimp-ou">ou cole o texto</div>'
+        + '<textarea id="cadImpTxt" class="cadimp-txt" rows="8" spellcheck="false" placeholder="# Título do caderno&#10;&#10;Texto em Markdown…"></textarea>'
+        + '<label class="cadimp-l">Guardar em'
+          + '<select id="cadImpPasta" class="cadimp-sel"><option value="">Raiz (sem pasta)</option>'
+          + pastas.map(function(p){ return '<option value="' + Util.attr(p.id) + '">' + Util.esc(p.caminho) + '</option>'; }).join('')
+          + '</select></label>'
+        + '<div class="cadimp-nota">Reconhece títulos, negrito, itálico, marca-texto (==), listas, tarefas, citações, callouts e toggles do Obsidian, tabelas, código, linhas divisórias, links e citações [[ ]] — que viram chips quando o nome bate com uma unidade ou um caderno seu (inclusive os deste lote). O primeiro "# Título" vira o nome do caderno; sem ele, vale o nome do arquivo.</div>'
+        + '<div class="cadimp-acoes"><button type="button" class="nlm-save" id="cadImpOk">Importar</button></div>'
+      + '</div></div>';
+    el.querySelector('.nlm-backdrop').addEventListener('click', fechar);
+    el.querySelector('.nlm-close').addEventListener('click', fechar);
+    document.body.appendChild(el);
+    el.querySelector('#cadImpOk').addEventListener('click', async function(){
+      const btn = this;
+      const arqs = Array.prototype.slice.call(el.querySelector('#cadImpArq').files || []);
+      const colado = el.querySelector('#cadImpTxt').value;
+      const fontes = [];
+      for(const f of arqs){
+        try{ fontes.push({ nome: f.name, md: await f.text() }); }
+        catch(e){ if(window.ueToast) ueToast('Não consegui ler ' + f.name + '.', 'warn'); }
+      }
+      if(colado.trim()) fontes.push({ nome: '', md: colado });
+      if(!fontes.length){ if(window.ueToast) ueToast('Escolha arquivos .md ou cole o texto.', 'warn'); return; }
+      if(!window.Store || !Store.cadAvulsoCriar || !Store.cadAvulsoSalvar) return;
+      btn.disabled = true;
+      const pastaId = el.querySelector('#cadImpPasta').value || null;
+      // passo 1: cria os cadernos (só o título) — assim [[ ]] entre arquivos do lote viram chips
+      const lote = fontes.map(function(f){
+        const titulo = _mdTitulo(f.md, f.nome);
+        const doc = Store.cadAvulsoCriar({ titulo: titulo, pastaId: pastaId });
+        return { id: doc.id, titulo: titulo, md: f.md };
+      });
+      // passo 2: converte e grava o corpo
+      const resolver = _mdResolverDe(lote);
+      const semRef = {};
+      lote.forEach(function(d){
+        const r = _mdParaCadHtml(d.md, { resolver: resolver, semRef: function(nome){ semRef[_mdNorm(nome)] = 1; } });
+        Store.cadAvulsoSalvar(d.id, { body: r.html });
+      });
+      const nSem = Object.keys(semRef).length;
+      if(window.ueToast) ueToast(lote.length + (lote.length === 1 ? ' caderno importado' : ' cadernos importados')
+        + (nSem ? ' — ' + nSem + (nSem === 1 ? ' citação [[ ]] não reconhecida ficou' : ' citações [[ ]] não reconhecidas ficaram') + ' como texto.' : '.'), 'ok');
+      fechar();
+      location.hash = _hashDe({ tipo: 'avulso', id: lote[0].id });
+      _bindSidebar(stageEl, route);
+    });
+  }
   function _cadParaMd(html){
     const d = document.createElement('div');
     d.innerHTML = html || '';
@@ -61193,8 +61582,9 @@ const CadernosPage = (function(){
   }
   function _docContexto(d){
     if(d.pastaId){
-      const p2 = ((window.Store && Store.cadPastasLista) ? Store.cadPastasLista() : []).find(function(x){ return String(x.id) === String(d.pastaId); });
-      if(p2) return p2.nome || 'pasta';
+      // caminho completo ("Avó / Mãe / Pasta") — subpastas
+      const cam = (window.Store && Store.cadPastaCaminho) ? Store.cadPastaCaminho(d.pastaId) : '';
+      if(cam) return cam;
     }
     if(d.subjectId){
       const c = (window.COURSES || []).find(function(c2){ return String(c2._subjectId) === String(d.subjectId); });
