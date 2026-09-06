@@ -302,6 +302,44 @@
     });
   }
 
+  // ── Tag aberta que "vaza" ──────────────────────────────────────────────
+  // Cada parágrafo do bloco de texto é um campo separado, mas na hora de
+  // pintar eles são COLADOS numa string só. O parser do navegador, ao achar
+  // um <b> (ou <strong>, <i>…) sem fechamento num parágrafo, REABRE essa tag
+  // em todos os elementos seguintes (regra dos "active formatting elements"
+  // do HTML) — o negrito de um parágrafo vazava pra todos os outros, e a tag
+  // culpada não aparecia em lugar nenhum dos parágrafos afetados.
+  // Solução na raiz: cada trecho é interpretado ISOLADO (template) antes de
+  // ser concatenado — a tag aberta fecha dentro do próprio parágrafo, e um
+  // fechamento sobrando (</b> sem abertura) é descartado. Sem DOM (Node/SSR)
+  // devolve o texto intacto.
+  function _lbBalanceHTML(html){
+    const s = (html == null) ? '' : String(html);
+    if(!s || s.indexOf('<') === -1) return s;
+    if(typeof document === 'undefined' || !document.createElement) return s;
+    try{
+      const tpl = document.createElement('template');
+      tpl.innerHTML = s;
+      return tpl.innerHTML;
+    }catch(_e){ return s; }
+  }
+  // Aviso pro editor: quais tags inline ficaram sem par neste trecho.
+  // Devolve [] quando está tudo fechado. Conta abertura × fechamento por tag
+  // (b, strong, i, em, u, s, mark, span, a, sub, sup, code, small).
+  const _LB_INLINE_PAR = ['b','strong','i','em','u','s','mark','span','a','sub','sup','code','small'];
+  function _lbUnbalancedTags(html){
+    const s = (html == null) ? '' : String(html);
+    if(!s || s.indexOf('<') === -1) return [];
+    const out = [];
+    _LB_INLINE_PAR.forEach(function(tag){
+      const abre = (s.match(new RegExp('<' + tag + '(?=[\\s>/])', 'gi')) || []).length
+        - (s.match(new RegExp('<' + tag + '(?=[\\s/>])[^>]*/>', 'gi')) || []).length;   // auto-fechada (<b/>) não conta; <br/> não é <b>
+      const fecha = (s.match(new RegExp('</' + tag + '\\s*>', 'gi')) || []).length;
+      if(abre !== fecha) out.push({ tag: tag, abre: abre, fecha: fecha });
+    });
+    return out;
+  }
+
   // Sanitizador rich (com fallback regex pra SSR)
   function _lbSanitizeRichHTML(html){
     if(!html) return '';
@@ -525,7 +563,8 @@
             // Render fragments inline: marca termos com border-bottom dotted
             // e tooltip via title=" ...definição..." (versão básica;
             // tooltip rico com galeria fica pro renderer aluno completo no Y2)
-            let html = p.content || '';
+            // isolado ANTES de concatenar (ver _lbBalanceHTML)
+            let html = _lbBalanceHTML(p.content || '');
             (p.fragments || []).forEach(function(f){
               if(!f || !f.text) return;
               // Substitui a primeira ocorrência por <span> com dotted underline
@@ -1663,6 +1702,8 @@
     deriveGroupOrigin:        _lbDeriveGroupOrigin,
     sanitizeRichHTML:         _lbSanitizeRichHTML,
     sanitizeInlineHTML:       _lbSanitizeInlineHTML,
+    balanceHTML:              _lbBalanceHTML,
+    unbalancedTags:           _lbUnbalancedTags,
     questionBankIdFromOrigin: _lbQuestionBankIdFromOrigin,
     generateUbiqueQuestionId: _lbGenerateUbiqueQuestionId
   };
