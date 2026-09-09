@@ -58997,21 +58997,80 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
   // Completa um grupo C/E: adiciona SÓ os itens que faltam (dedup por identidade),
   // reusando os já existentes. Retorna { itemIds (os DESTA importação), gabAdded }.
+  /* TF-NUM-INICIO */
+  // Número do item C/E a partir dos origins (puro, testável fora do navegador):
+  //   grupo [#46/2013]    + item [#46-3/2013] → 3   (formato #G-N: item N do grupo G)
+  //   grupo [#77-83/2026] + item [#78/2026]   → 78  (grupo-FAIXA: cada item é a própria
+  //                                                  questão numerada da prova; 77..83)
+  //   grupo [#5/2025]     + item [#5/2025]    → null (sem pista → o chamador usa o próximo livre)
+  // Formatos estranhos caem nos regex legados (o último "-N/AAAA]" ou o primeiro "-N").
+  function _ueTfNumeroDoItem(itOrigin, groupCode){
+    const o = String(itOrigin || '').trim();
+    if(!o) return null;
+    const m1 = o.match(/#\s*(\d+)\s*-\s*(\d+)\s*\/\s*\d{4}\s*\]?\s*$/);
+    if(m1) return parseInt(m1[2], 10) || null;
+    const m2 = o.match(/#\s*(\d+)\s*\/\s*(\d{4})\s*\]?\s*$/);
+    if(m2){
+      const n = parseInt(m2[1], 10), ano = m2[2];
+      const g = String(groupCode || '').match(/#\s*(\d+)\s*-\s*(\d+)\s*\/\s*(\d{4})/);
+      if(g && g[3] === ano){
+        const a = parseInt(g[1], 10), b = parseInt(g[2], 10);
+        if(n >= Math.min(a, b) && n <= Math.max(a, b)) return n;
+      }
+      return null;
+    }
+    const mL = o.match(/-(\d+)\/\d{3,4}\]/) || o.match(/-(\d+)\b/);
+    return mL ? (parseInt(mL[1], 10) || null) : null;
+  }
+  /* TF-NUM-FIM */
   async function _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId){
-    const existing = (tfItemsCache || []).filter(function(t){ return String(t.question_id) === String(bankQuestionId); });
-    const byIdent = {};
-    existing.forEach(function(t){ byIdent[_ueTfIdent(t.origin, t.assertiva)] = t; });
-    let maxNum = existing.reduce(function(m, t){ return Math.max(m, Number(t.numero) || 0); }, 0);
+    const avisos = [];
+    const rotuloGrupo = code || ('Ubique ' + (year || ''));
+    // Itens que JÁ existem neste grupo: lidos do BANCO agora (não só do cache —
+    // outra aba/sessão pode ter gravado depois do cache carregar; foi isso que
+    // gerava "duplicate key" em tf_items). O cache é atualizado com o que veio.
+    let existing = (tfItemsCache || []).filter(function(t){ return String(t.question_id) === String(bankQuestionId); });
+    try{
+      const fr = await questoes().from('tf_items').select('id, question_id, numero, assertiva, origin').eq('question_id', bankQuestionId);
+      if(!fr.error && Array.isArray(fr.data)){
+        existing = fr.data;
+        if(Array.isArray(tfItemsCache)){
+          fr.data.forEach(function(t){
+            const i = tfItemsCache.findIndex(function(x){ return String(x.id) === String(t.id); });
+            if(i >= 0) Object.assign(tfItemsCache[i], t); else tfItemsCache.push(t);
+          });
+        }
+      }
+    }catch(e){ console.warn('[import] leitura de tf_items do grupo falhou (usando cache):', e); }
+    // Identidade do item existente: pelo origin E pelo texto. Itens gravados pelo
+    // modal de questão ou pelo importador antigo NÃO têm origin — só o texto os
+    // reconhece; sem isso o mesmo item era reinserido e batia no número já usado.
+    const porOrigin = {}, porTexto = {};
+    existing.forEach(function(t){
+      const o = String(t.origin || '').trim().toLowerCase();
+      if(o) porOrigin[o] = t;
+      const s = _ueNormTexto(t.assertiva);
+      if(s && !porTexto[s]) porTexto[s] = t;
+    });
+    const usados = new Set(existing.map(function(t){ return Number(t.numero) || 0; }).filter(function(n){ return n > 0; }));
+    let maxNum = 0; usados.forEach(function(n){ if(n > maxNum) maxNum = n; });
     const itemIds = []; let gabAdded = 0;
     for(let i = 0; i < objQs.length; i++){
       const q = objQs[i];
       const posN = i + 1;
       const itOrigin = q.origin || ((code && numero) ? ('[#' + numero + '-' + posN + '/' + year + ']') : null);
-      const ident = _ueTfIdent(itOrigin, q.statement || q.assertion);
-      const hit = byIdent[ident];
+      const chaveO = String(itOrigin || '').trim().toLowerCase();
+      const chaveS = _ueNormTexto(q.statement || q.assertion);
+      const hit = (chaveO && porOrigin[chaveO]) || (chaveS && porTexto[chaveS]) || null;
       if(hit){
         // Já existe → REUSA (não duplica). Comentário novo vira gabarito extra.
         itemIds.push(String(hit.id));
+        // Item legado (sem origin) reconhecido pelo texto: grava o origin de vez,
+        // pra da próxima vez casar direto pelo código.
+        if(itOrigin && !String(hit.origin || '').trim()){
+          const up = await questoes().from('tf_items').update({ origin: itOrigin }).eq('id', hit.id);
+          if(!up.error){ hit.origin = itOrigin; porOrigin[chaveO] = hit; }
+        }
         const cmt = (q.comment ? String(q.comment) : '').trim();
         if(cmt){
           const pos = (tfItemCommentsCache || []).filter(function(c){ return String(c.tf_item_id) === String(hit.id); }).length + 1;
@@ -59020,10 +59079,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         }
         continue;
       }
-      // Número real do item pelo origin (#G-N); senão sequencial.
-      let itNum = maxNum + 1;
-      const mN = String(itOrigin || '').match(/-(\d+)\/\d{3,4}\]/) || String(itOrigin || '').match(/-(\d+)\b/);
-      if(mN){ const n = parseInt(mN[1], 10); if(n) itNum = n; }
+      // Número do item: pelo origin (#G-N, ou a própria questão num grupo-faixa);
+      // senão, o próximo livre. Número já ocupado por OUTRO item nunca derruba a
+      // importação: entra no próximo livre e o resumo avisa.
+      let itNum = _ueTfNumeroDoItem(itOrigin, code);
+      if(itNum && usados.has(itNum)){
+        avisos.push('Grupo ' + rotuloGrupo + ', item ' + (itOrigin || ('#' + posN)) + ': o número ' + itNum + ' já era de outro item do grupo; entrou como ' + (maxNum + 1) + '.');
+        itNum = null;
+      }
+      if(!itNum) itNum = maxNum + 1;
       const tf = await questoes().from('tf_items').insert({
         question_id: bankQuestionId, numero: itNum, assertiva: q.statement || q.assertion || '',
         key: _ueTfKeyFormat(q.correct === true), comment: q.comment || null, origin: itOrigin,
@@ -59032,14 +59096,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         // o campo existia no banco e no formulário mas era IMPOSSÍVEL importar).
         anulada: !!q.anulada, desatualizada: !!q.desatualizada
       }).select().single();
-      if(tf.error || !tf.data){ throw new Error('tf_items: ' + (tf.error && tf.error.message)); }
+      if(tf.error || !tf.data){
+        throw new Error('tf_items (grupo ' + rotuloGrupo + ', item ' + (itOrigin || ('#' + posN)) + ', número ' + itNum + '): ' + (tf.error && tf.error.message));
+      }
       const rec = { id: tf.data.id, question_id: bankQuestionId, numero: itNum, assertiva: tf.data.assertiva, origin: itOrigin };
-      byIdent[ident] = rec;
+      if(chaveO) porOrigin[chaveO] = rec;
+      if(chaveS && !porTexto[chaveS]) porTexto[chaveS] = rec;
+      usados.add(itNum);
       if(tfItemsCache) tfItemsCache.push(rec);
       if(itNum > maxNum) maxNum = itNum;
       itemIds.push(String(tf.data.id));
     }
-    return { itemIds: itemIds, gabAdded: gabAdded };
+    return { itemIds: itemIds, gabAdded: gabAdded, avisos: avisos };
   }
   // FIXA as unidades antigas (decisão do usuário): antes de adicionar itens novos
   // a um grupo já existente, "congela" cada bloco objetivo de OUTRAS unidades que
@@ -59127,6 +59195,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const objQs   = qs.filter(function(q){ return q.type !== 'essay'; });
     const allRefs = [];
     const allChildErrors = [];
+    const allAvisos = [];                  // numeração de item C/E (não é erro)
 
     // Item 2 (JSON): aplica as matérias na junção das questões criadas neste
     // grupo. Conjunto = matéria da unidade (subjectId) ∪ matérias do JSON
@@ -59163,6 +59232,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         kind:           'essay',
         refs:           allRefs,
         childErrors:    allChildErrors,
+        avisos:         allAvisos,
         // Grupo só de discursivas: se TODAS já existiam, o grupo conta como
         // "já existente" no resumo (não como criado).
         wasExisting:    essayQs.length > 0 && essaysReusadas.length === essayQs.length,
@@ -59194,7 +59264,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           .map(function(t){ return String(t.id); });
         await _ueFreezeGroupInOtherBlocks(bankQuestionId, currentIds, exceptBid);
         const merged = await _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId);
-        importedItemIds = merged.itemIds; gabAdded = merged.gabAdded;
+        importedItemIds = merged.itemIds; gabAdded = merged.gabAdded; if(Array.isArray(merged.avisos)) Array.prototype.push.apply(allAvisos, merged.avisos);
       }
       // MC já existente = 1 questão; reusa como está (sem duplicar opções).
     } else {
@@ -59231,7 +59301,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
       if(qType === 'true_false'){
         const merged = await _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId);
-        importedItemIds = merged.itemIds; gabAdded = merged.gabAdded;
+        importedItemIds = merged.itemIds; gabAdded = merged.gabAdded; if(Array.isArray(merged.avisos)) Array.prototype.push.apply(allAvisos, merged.avisos);
       } else {
         const q = objQs[0] || {};
         const opts = Array.isArray(q.options) ? q.options : [];
@@ -59254,6 +59324,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       bankQuestionId: bankQuestionId,
       refs:           allRefs,
       childErrors:    allChildErrors,
+      avisos:         allAvisos,
       wasExisting:    wasExisting,
       essaysReusadas: essaysReusadas,
       createdObjective: !wasExisting,
@@ -59400,6 +59471,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const dupeCodes = [];
     const allRefs = [];           // [{ id, type: 'essay'|'objective', sourceType }]
     const allChildErrors = [];
+    const allAvisos = [];         // observações de numeração dos itens C/E
     try{
       // Bloco de destino (quando é unidade) — não "congelar" ele no freeze.
       const exceptBid = (target === 'unit' && ret) ? ret.bid : null;
@@ -59410,6 +59482,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         if(!r) continue;
         if(Array.isArray(r.refs)) Array.prototype.push.apply(allRefs, r.refs);
         if(Array.isArray(r.childErrors)) Array.prototype.push.apply(allChildErrors, r.childErrors);
+        if(Array.isArray(r.avisos)) Array.prototype.push.apply(allAvisos, r.avisos);
         if(Array.isArray(r.essaysReusadas)) Array.prototype.push.apply(essaysReuse, r.essaysReusadas);
         if(typeof r.gabAdded === 'number') gabAdded += r.gabAdded;
         if(r.wasExisting){ dupes++; if(g.origin) dupeCodes.push(g.origin); }
@@ -59548,6 +59621,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       msg += '<br><span style="color:var(--red)">⚠ ' + allChildErrors.length + ' erro(s) ao salvar critérios/modelos:</span><ul style="margin:.3rem 0 0;padding-left:1.2rem;font-size:.72rem;color:var(--red)">' +
              allChildErrors.slice(0, 5).map(function(e){ return '<li>' + esc(e) + '</li>'; }).join('') +
              (allChildErrors.length > 5 ? '<li>… e mais ' + (allChildErrors.length - 5) + '</li>' : '') +
+             '</ul>';
+    }
+    if(allAvisos.length){
+      msg += '<br><span style="color:var(--accent)">Numeração dos itens: ' + allAvisos.length + ' observação(ões)</span><ul style="margin:.3rem 0 0;padding-left:1.2rem;font-size:.72rem;color:var(--text-dim)">' +
+             allAvisos.slice(0, 8).map(function(a){ return '<li>' + esc(a) + '</li>'; }).join('') +
+             (allAvisos.length > 8 ? '<li>… e mais ' + (allAvisos.length - 8) + '</li>' : '') +
              '</ul>';
     }
     show(msg, allChildErrors.length === 0);
