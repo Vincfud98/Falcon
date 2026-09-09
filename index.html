@@ -16,7 +16,7 @@
 <!-- Ubique Shared Store — espelha CRUD do admin -->
 <script src="ubique-shared.js?v=134"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
-<script src="learning-blocks-render.js?v=70"></script>
+<script src="learning-blocks-render.js?v=71"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -6354,6 +6354,8 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
   font-family:var(--mono);font-style:normal;font-weight:500;
   color:var(--accent);margin-right:.4rem;font-size:1rem;
 }
+/* etiqueta "de qual unidade veio" numa definição do glossário */
+.gloss-def-unit{display:inline-block;font-family:var(--mono);font-style:normal;font-weight:400;font-size:.6rem;letter-spacing:.04em;color:var(--accent);background:var(--accent-lo);border:1px solid var(--accent-border-soft);border-radius:999px;padding:.05rem .45rem;margin-left:.4rem;vertical-align:middle;white-space:nowrap}
 .gloss-panel-def-html{display:inline}
 .gloss-panel-examples{
   list-style:none;margin:.5rem 0 0;padding:0 0 0 1.2rem;font-style:normal;
@@ -22769,7 +22771,7 @@ function renderGlossarySlide(g){
           ? `<ul class="gloss-panel-examples">${examples.map(ex => `<li>${sanitize(ex)}</li>`).join('')}</ul>`
           : '';
         const num = resolved.definitions.length > 1 ? `<span class="gloss-panel-num">${i+1}.</span> ` : '';
-        return `<div class="gloss-panel-def-block">${num}<span class="gloss-panel-def-html">${sanitize(d.html||'')}</span>${exHtml}</div>`;
+        return `<div class="gloss-panel-def-block">${num}<span class="gloss-panel-def-html">${sanitize(d.html||'')}</span>${_glossUnitChip(d)}${exHtml}</div>`;
       }).join('')
     : (resolved.definition ? `<div class="gloss-panel-def-block">${sanitize(resolved.definition)}</div>` : '');
   return `<div class="gloss-panel${hasImg?' has-image':''}">
@@ -22795,7 +22797,26 @@ function renderGlossarySlide(g){
      do admin (delete_glossary_term_cascade) tenha falhado.
    - Senão → usa os campos legacy {term, definition, body, image}.
    Retorna {term, definitions[], body, image, callout, classLabel} OU null. */
-function _resolveGlossaryItem(g){
+/* Definições etiquetadas por unidade: uma palavra do banco pode ter, além da
+   definição do banco, definições adicionadas por unidades (unit_id). Dentro
+   da unidade, a definição DELA vem primeiro; nas outras telas, a ordem do banco. */
+function _glossDefsOrdenadas(defs, unitId){
+  const lista = Array.isArray(defs) ? defs : [];
+  if(unitId == null) return lista;
+  const desta = lista.filter(d => d && d.unit_id != null && String(d.unit_id) === String(unitId));
+  if(!desta.length) return lista;
+  return desta.concat(lista.filter(d => desta.indexOf(d) < 0));
+}
+function _glossUnitChip(d){
+  if(!d || d.unit_id == null) return '';
+  const meta = (typeof _unitMetaById === 'function') ? _unitMetaById(d.unit_id) : null;
+  const rot = meta
+    ? ((meta.sigla ? meta.sigla + ' ' : '') + (meta.number ? meta.number + ' · ' : '') + (meta.title || '')).trim()
+    : (d.unit_label || ('Unidade #' + d.unit_id));
+  return ' <span class="gloss-def-unit" title="Definição adicionada nesta unidade">' + Util.esc(rot) + '</span>';
+}
+function _resolveGlossaryItem(g, unitId){
+  if(unitId == null && g && g.__unitId != null) unitId = g.__unitId;
   if(g && g.bank_id){
     if(!window.UbiqueStore || !UbiqueStore.glossary_terms) return null;
     const bank = UbiqueStore.glossary_terms.get(g.bank_id);
@@ -22807,7 +22828,7 @@ function _resolveGlossaryItem(g){
     }
     return {
       term: bank.term || '',
-      definitions: Array.isArray(bank.definitions) ? bank.definitions : [],
+      definitions: _glossDefsOrdenadas(bank.definitions, unitId),
       callout: bank.callout || '',
       // Imagem: prioridade pro override per-bloco; cai pra image_url do banco.
       image: (g.image || '').trim() || bank.image_url || '',
@@ -23293,7 +23314,7 @@ function renderGlossaryListBlock(block, ctx){
   // _resolveGlossaryItem retorna null nesses casos.
   const rawItems = block.items || [];
   const validPairs = rawItems
-    .map(g => ({ raw: g, resolved: _resolveGlossaryItem(g) }))
+    .map(g => ({ raw: g, resolved: _resolveGlossaryItem(g, block.unit_id) }))
     .filter(p => p.resolved);
   if(!validPairs.length){
     return `<section class="block-wrap glossary-block glossary-list-block">
@@ -23315,7 +23336,7 @@ function renderGlossaryListBlock(block, ctx){
             ? `<ul class="gloss-list-examples">${examples.map(e => `<li>${sanitize(e)}</li>`).join('')}</ul>`
             : '';
           const num = r.definitions.length > 1 ? `<span class="gloss-list-num">${i+1}.</span> ` : '';
-          return `<div class="gloss-list-def-block">${num}${sanitize(d.html||'')}${ex}</div>`;
+          return `<div class="gloss-list-def-block">${num}${sanitize(d.html||'')}${_glossUnitChip(d)}${ex}</div>`;
         }).join('')
       : (r.definition ? `<div class="gloss-list-def-block">${sanitize(r.definition)}</div>` : '');
     return `<article class="gloss-list-item${r.image?' has-image':''}">
@@ -23367,7 +23388,8 @@ Blocks.glossary = {
     // Slides: filtra items inválidos antes do carousel
     // (refs órfãs ou inline vazio → _resolveGlossaryItem retorna null).
     const filteredBlock = Object.assign({}, block, {
-      items: (block.items || []).filter(g => _resolveGlossaryItem(g) != null)
+      // carrega a unidade no item: o slide é pintado sem acesso ao bloco
+      items: (block.items || []).filter(g => _resolveGlossaryItem(g) != null).map(g => Object.assign({}, g, { __unitId: block.unit_id }))
     });
     return renderCarouselBlock(filteredBlock, ctx, {
       blockClass:'glossary-block', typeLabel:'Glossário', icon:Icons.glossary,
@@ -29692,7 +29714,7 @@ function _glossEntriesHtml(){
             ? `<ul class="gloss-page-examples">${examples.map(e => `<li>${sanitize(e)}</li>`).join('')}</ul>`
             : '';
           const num = (t.definitions.length > 1) ? `<span class="gloss-page-num">${i+1}.</span> ` : '';
-          return `<div class="gloss-page-def">${num}${sanitize(d.html||'')}${ex}</div>`;
+          return `<div class="gloss-page-def">${num}${sanitize(d.html||'')}${_glossUnitChip(d)}${ex}</div>`;
         }).join('');
         return `<article class="gloss-page-entry${imgUrl ? ' has-image' : ''}">
           ${imgUrl ? `<div class="gloss-page-img" data-gloss-img="${Util.attr(imgUrl)}" data-gloss-title="${Util.attr(termClean)}" title="Clique para ampliar">
@@ -65897,7 +65919,7 @@ const GlossaryLookup = (function(){
         ? `<ul class="gloss-lookup-examples">${examples.map(e => `<li>${sanitize(e)}</li>`).join('')}</ul>`
         : '';
       const num = (t.definitions.length > 1) ? `<span class="gloss-lookup-num">${i+1}.</span> ` : '';
-      return `<div class="gloss-lookup-def">${num}${sanitize(d.html||'')}${ex}</div>`;
+      return `<div class="gloss-lookup-def">${num}${sanitize(d.html||'')}${_glossUnitChip(d)}${ex}</div>`;
     }).join('');
     const bkBtn = _glossBookmarkBtn(t.id, { small:true });
     return `<article class="gloss-lookup-entry">

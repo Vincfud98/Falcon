@@ -1259,9 +1259,13 @@
           if(en && en.bank_id && typeof window !== 'undefined' && window.UbiqueStore && window.UbiqueStore.glossary_terms){
             const bank = window.UbiqueStore.glossary_terms.get(en.bank_id);
             if(bank){
+              // definição etiquetada com ESTA unidade vem primeiro (ver index: _glossDefsOrdenadas)
+              const defsB = Array.isArray(bank.definitions) ? bank.definitions : [];
+              const uid = block && block.unit_id != null ? String(block.unit_id) : null;
+              const desta = uid ? defsB.filter(function(d){ return d && d.unit_id != null && String(d.unit_id) === uid; }) : [];
               return {
                 term: bank.term || '',
-                definitions: Array.isArray(bank.definitions) ? bank.definitions : [],
+                definitions: desta.length ? desta.concat(defsB.filter(function(d){ return desta.indexOf(d) < 0; })) : defsB,
                 callout: bank.callout || '',
                 // Imagem: prioridade per-bloco; cai pra bank.image_url
                 image: (en.image || '').toString().trim() || bank.image_url || '',
@@ -1291,7 +1295,10 @@
             const num = r.definitions.length > 1
               ? '<span style="font-family:var(--mono);color:var(--accent);font-weight:500;margin-right:.4rem">' + (i+1) + '.</span> '
               : '';
-            return '<div style="font-style:italic;color:var(--text-dim);margin-top:.4rem;font-size:.95rem;line-height:1.6">' + num + sanitize(d.html||'') + exHtml + '</div>';
+            const chip = (d && d.unit_id != null)
+              ? ' <span style="display:inline-block;font-family:var(--mono);font-style:normal;font-size:.6rem;color:var(--accent);background:var(--accent-lo);border:1px solid var(--accent-border-soft);border-radius:999px;padding:.05rem .45rem;margin-left:.4rem;vertical-align:middle;white-space:nowrap" title="Definição adicionada nesta unidade">' + e(d.unit_label || ('Unidade #' + d.unit_id)) + '</span>'
+              : '';
+            return '<div style="font-style:italic;color:var(--text-dim);margin-top:.4rem;font-size:.95rem;line-height:1.6">' + num + sanitize(d.html||'') + chip + exHtml + '</div>';
           }).join('');
           return '<div style="display:grid;' + cols + ';gap:1.5rem;align-items:start">' +
             '<div>' +
