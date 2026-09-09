@@ -558,33 +558,35 @@
       case 'text': {
         // Schema rico (do mock original): paragraphs[] com fragments,
         // descrições, títulos que viram anchors.
+        // MESMO markup que o aluno vê (Blocks.text / renderParagraphs no
+        // index.html): .text-block > .tb-body > .tb-paragraph, subtítulo
+        // .tb-section-title, título .tb-para-title. A tipografia vem de
+        // ubique-reading.css, compartilhado — o preview do admin é fiel por
+        // construção. Fragments: só o sublinhado + tooltip simples.
         if(Array.isArray(c.paragraphs) && c.paragraphs.length){
           const body = c.paragraphs.map(function(p){
-            // Render fragments inline: marca termos com border-bottom dotted
-            // e tooltip via title=" ...definição..." (versão básica;
-            // tooltip rico com galeria fica pro renderer aluno completo no Y2)
+            if(!p) return '';
+            if(p.kind === 'subtitle'){
+              const st = p.title || '';
+              return st ? '<h3 class="tb-section-title" data-paragraph-id="' + attrHtml(p.id || '') + '">' + e(st) + '</h3>' : '';
+            }
             // isolado ANTES de concatenar (ver _lbBalanceHTML)
             let html = _lbBalanceHTML(p.content || '');
             (p.fragments || []).forEach(function(f){
               if(!f || !f.text) return;
-              // Substitui a primeira ocorrência por <span> com dotted underline
-              const safeText = e(f.text);
               const def = e(f.definition || '');
               const pattern = new RegExp('(' + f.text.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&') + ')(?![^<]*>)','i');
-              html = html.replace(pattern,
-                '<span style="border-bottom:1px dotted var(--accent);cursor:help" title="' + def + '">$1</span>'
-              );
+              html = html.replace(pattern, '<span class="frag-term" title="' + def + '">$1</span>');
             });
-            const titleAnchor = p.title
-              ? '<h3 id="p-' + e(p.id||'') + '" style="font-family:var(--serif);font-weight:400;font-size:1.4rem;color:var(--accent);margin:1.6rem 0 .6rem;letter-spacing:.005em">' + e(p.title) + '</h3>'
-              : '';
-            return titleAnchor + html;
+            const titleHtml = p.title ? '<h4 class="tb-para-title">' + e(p.title) + '</h4>' : '';
+            const descHtml = (p.title && p.description) ? '<div class="tb-para-desc">' + e(p.description) + '</div>' : '';
+            return '<div class="tb-paragraph' + (p.title ? ' has-title' : '') + '" data-paragraph-id="' + attrHtml(p.id || '') + '">' + titleHtml + descHtml + html + '</div>';
           }).join('');
-          return '<div style="font-family:var(--serif);line-height:1.85;font-size:1.05rem;color:var(--text);max-width:680px">' + body + '</div>';
+          return '<div class="text-block"><div class="tb-body">' + body + '</div></div>';
         }
         // Fallback: schema simples {html}
-        return '<div style="font-family:var(--serif);line-height:1.85;font-size:1.05rem;color:var(--text);max-width:680px">' +
-          (c.html || '<p style="color:var(--text-mute);font-style:italic">Sem conteúdo.</p>') + '</div>';
+        return '<div class="text-block"><div class="tb-body">' +
+          (c.html || '<p style="color:var(--text-mute);font-style:italic">Sem conteúdo.</p>') + '</div></div>';
       }
       case 'video': {
         // Schema canônico (Y3): c.url (URL ou <iframe>) + c.presenter + c.description + c.transcription_url
