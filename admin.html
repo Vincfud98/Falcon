@@ -59007,7 +59007,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   function _ueTfNumeroDoItem(itOrigin, groupCode){
     const o = String(itOrigin || '').trim();
     if(!o) return null;
-    const m1 = o.match(/#\s*(\d+)\s*-\s*(\d+)\s*\/\s*\d{4}\s*\]?\s*$/);
+    const m1 = o.match(/#\s*(\d+)\s*[-.]\s*(\d+)\s*\/\s*\d{4}\s*\]?\s*$/);   // #G-N ou a convenção antiga #G.N
     if(m1) return parseInt(m1[2], 10) || null;
     const m2 = o.match(/#\s*(\d+)\s*\/\s*(\d{4})\s*\]?\s*$/);
     if(m2){
@@ -59022,6 +59022,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const mL = o.match(/-(\d+)\/\d{3,4}\]/) || o.match(/-(\d+)\b/);
     return mL ? (parseInt(mL[1], 10) || null) : null;
   }
+  // Chave de identidade pelo origin: caixa baixa, sem espaços, e "#9.4" (convenção
+  // antiga) vira "#9-4" — o mesmo item nunca entra duas vezes por causa do separador.
+  function _ueTfChaveOrigin(origin){
+    return String(origin || '').trim().toLowerCase().replace(/\s+/g, '').replace(/#(\d+)\.(\d+)/, '#$1-$2');
+  }
   /* TF-NUM-FIM */
   async function _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId){
     const avisos = [];
@@ -59033,13 +59038,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     try{
       const fr = await questoes().from('tf_items').select('id, question_id, numero, assertiva, origin').eq('question_id', bankQuestionId);
       if(!fr.error && Array.isArray(fr.data)){
-        existing = fr.data;
-        if(Array.isArray(tfItemsCache)){
-          fr.data.forEach(function(t){
-            const i = tfItemsCache.findIndex(function(x){ return String(x.id) === String(t.id); });
-            if(i >= 0) Object.assign(tfItemsCache[i], t); else tfItemsCache.push(t);
-          });
-        }
+        if(!Array.isArray(tfItemsCache)) tfItemsCache = [];
+        // trabalha com os OBJETOS do cache (renumerar aqui reflete no banco de questões da tela)
+        existing = fr.data.map(function(t){
+          const i = tfItemsCache.findIndex(function(x){ return String(x.id) === String(t.id); });
+          if(i >= 0){ Object.assign(tfItemsCache[i], t); return tfItemsCache[i]; }
+          tfItemsCache.push(t); return t;
+        });
       }
     }catch(e){ console.warn('[import] leitura de tf_items do grupo falhou (usando cache):', e); }
     // Identidade do item existente: pelo origin E pelo texto. Itens gravados pelo
@@ -59047,19 +59052,38 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // reconhece; sem isso o mesmo item era reinserido e batia no número já usado.
     const porOrigin = {}, porTexto = {};
     existing.forEach(function(t){
-      const o = String(t.origin || '').trim().toLowerCase();
+      const o = _ueTfChaveOrigin(t.origin);
       if(o) porOrigin[o] = t;
       const s = _ueNormTexto(t.assertiva);
       if(s && !porTexto[s]) porTexto[s] = t;
     });
     const usados = new Set(existing.map(function(t){ return Number(t.numero) || 0; }).filter(function(n){ return n > 0; }));
+    // RECONCILIAÇÃO: item cujo origin diz um número diferente do gravado (numeração
+    // sequencial de importações antigas, convenção #G.N, grupo-faixa) é renumerado
+    // pelo origin quando o número está livre — o banco converge pra numeração real.
+    // Se o número já é de outro item, fica como está e o resumo aponta o provável
+    // duplicado. Só nasce "duplicate key" quem inventar a mesma numeração à mão.
+    for(const t of existing){
+      const nO = _ueTfNumeroDoItem(t.origin, code);
+      const nAtual = Number(t.numero) || 0;
+      if(!nO || nO === nAtual) continue;
+      if(usados.has(nO)){
+        const outro = existing.find(function(x){ return Number(x.numero) === nO; });
+        avisos.push('Grupo ' + rotuloGrupo + ': o item ' + t.origin + ' está gravado como número ' + nAtual + ', mas o ' + nO + ' já é do item ' + (outro && outro.origin ? outro.origin : ('nº ' + nO)) + ' — provável item duplicado no banco; vale conferir.');
+        continue;
+      }
+      const up = await questoes().from('tf_items').update({ numero: nO }).eq('id', t.id);
+      if(up.error){ avisos.push('Grupo ' + rotuloGrupo + ': não consegui renumerar ' + t.origin + ' de ' + nAtual + ' para ' + nO + ' (' + up.error.message + ').'); continue; }
+      usados.delete(nAtual); usados.add(nO); t.numero = nO;
+      avisos.push('Grupo ' + rotuloGrupo + ': item ' + t.origin + ' renumerado de ' + nAtual + ' para ' + nO + ' (número real pelo origin).');
+    }
     let maxNum = 0; usados.forEach(function(n){ if(n > maxNum) maxNum = n; });
     const itemIds = []; let gabAdded = 0;
     for(let i = 0; i < objQs.length; i++){
       const q = objQs[i];
       const posN = i + 1;
       const itOrigin = q.origin || ((code && numero) ? ('[#' + numero + '-' + posN + '/' + year + ']') : null);
-      const chaveO = String(itOrigin || '').trim().toLowerCase();
+      const chaveO = _ueTfChaveOrigin(itOrigin);
       const chaveS = _ueNormTexto(q.statement || q.assertion);
       const hit = (chaveO && porOrigin[chaveO]) || (chaveS && porTexto[chaveS]) || null;
       if(hit){
