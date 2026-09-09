@@ -73,9 +73,28 @@
   //
   // NÃO LANÇA erro — retorna null pra qualquer entrada inválida.
   // ─────────────────────────────────────────────────────────────────────
+  // ── Normalizador do código de origem ───────────────────────────────────
+  // Forma canônica: "[#G-N/AAAA]" (item N do grupo G), "[#N/AAAA]" (questão
+  // avulsa ou item de grupo-faixa), "[#A-B/AAAA]" (grupo-faixa), com prefixo
+  // opcional de concurso "[oab:#3-1/2019]" (CACD não leva prefixo).
+  // Aceita as variações que apareceram no banco e nos JSONs:
+  //   separador grupo–item: "-" "." "•" "·" "–" "—" "_"     ([#9.4/2005], [#9•4|2005])
+  //   separador do ano:     "/" "|" "\"                       ([#9-4|2005])
+  //   colchetes, "#" e espaços opcionais; zeros à esquerda somem ("#09" → "#9").
+  // O que não tem esse formato volta INTACTO (aparado) — nunca se perde dado;
+  // quem chama decide o que fazer com o não reconhecido.
+  function _lbNormalizeOrigin(raw){
+    if(raw == null) return '';
+    const s = String(raw).trim();
+    if(!s) return '';
+    const m = s.match(/^\[?\s*(?:([A-Za-z]+)\s*:\s*)?#?\s*(\d+)(?:\s*[-.\u2022\u00b7\u2013\u2014_]\s*(\d+))?\s*[\/|\\]\s*(\d{4})\s*\]?$/);
+    if(!m) return s;
+    const exam = m[1] ? m[1].toLowerCase() : '';
+    return '[' + (exam && exam !== 'cacd' ? exam + ':' : '') + '#' + parseInt(m[2], 10) + (m[3] ? '-' + parseInt(m[3], 10) : '') + '/' + m[4] + ']';
+  }
   function _lbParseQuestionOrigin(input){
     if(input == null) return null;
-    const s = String(input).trim();
+    const s = _lbNormalizeOrigin(input);   // variações antigas (#9.4, |2005) entram como canônicas
     if(!s) return null;
     // Regex: [exam:]?#?G?-N/YYYY com colchetes opcionais
     //  Grupos:
@@ -1713,6 +1732,7 @@
     sanitizeInlineHTML:       _lbSanitizeInlineHTML,
     balanceHTML:              _lbBalanceHTML,
     unbalancedTags:           _lbUnbalancedTags,
+    normalizeOrigin:          _lbNormalizeOrigin,
     questionBankIdFromOrigin: _lbQuestionBankIdFromOrigin,
     generateUbiqueQuestionId: _lbGenerateUbiqueQuestionId
   };
