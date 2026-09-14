@@ -55153,6 +55153,100 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     setTimeout(function(){ try { ta.focus(); } catch(_){} }, 30);
   };
 
+  /* DIVIDIR-INICIO */
+  // ── Dividir / juntar bloco de texto ───────────────────────────────────────
+  // A operação de verdade é a função SQL (conteudo.dividir_bloco_texto /
+  // juntar_blocos_texto): uma transação só, que leva junto grifos, notas,
+  // flashcards, concluído e ver depois dos alunos. Aqui: confirmar, garantir
+  // que o banco tem o que está na tela, medir o texto, chamar e recarregar.
+  //
+  // Texto visível (textContent do .tb-body) de uma fatia dos parágrafos, com o
+  // MESMO markup que o aluno vê (renderer compartilhado). É nessa contagem que
+  // os grifos guardam as posições — por isso o deslocamento bate.
+  function _ueTextoDosParagrafos(b, paragrafos){
+    if(!window.LearningBlocks || !LearningBlocks.render) return '';
+    const div = document.createElement('div');
+    div.innerHTML = LearningBlocks.render({
+      id: b.id, type: 'text', title: b.title || '',
+      content: Object.assign({}, b.content || {}, { paragraphs: paragrafos }),
+      tags: [], topics: []
+    });
+    const body = div.querySelector('.tb-body');
+    return body ? body.textContent : '';
+  }
+  // O bloco de texto logo abaixo deste na seção (ordem do editor), ou null.
+  function _ueProximoBlocoTexto(bid){
+    const idx = ueBlocksCache.findIndex(function(x){ return String(x.id) === String(bid); });
+    if(idx < 0) return null;
+    const prox = ueBlocksCache[idx + 1];
+    return (prox && prox.type === 'text' && prox.content && Array.isArray(prox.content.paragraphs)) ? prox : null;
+  }
+  // Depois de dividir/juntar: relê a unidade do banco, realinha o Store local
+  // (bloco novo entra, bloco juntado sai), redesenha e agenda a re-vetorização.
+  async function _ueRecarregarBlocos(unitId, focoId){
+    await ueLoadBlocks();
+    if(window.UbiqueStore && UbiqueStore.unit_blocks){
+      const vivos = {};
+      ueAllBlocksCache.forEach(function(row){
+        vivos[String(row.id)] = 1;
+        if(UbiqueStore.unit_blocks.get(row.id)) UbiqueStore.unit_blocks.update(row.id, row);
+        else UbiqueStore.unit_blocks.add(row);
+      });
+      UbiqueStore.unit_blocks.list()
+        .filter(function(x){ return String(x.unit_id) === String(unitId) && !vivos[String(x.id)]; })
+        .forEach(function(x){ UbiqueStore.unit_blocks.remove(x.id); });
+    }
+    ueRefreshBlocksForCurrentSection();
+    ueRenderBlocks();
+    ueRenderSectionsNav();
+    _scheduleUnitReembed(unitId);
+    if(focoId != null) ueScrollToBlock(focoId);
+  }
+  window.ueDividirBloco = async function(bid, pIdx){
+    const b = _ueGetBlock(bid);
+    if(!b || !b.content || !Array.isArray(b.content.paragraphs)) return;
+    const paras = b.content.paragraphs;
+    if(pIdx < 1 || pIdx >= paras.length) return;
+    const p = paras[pIdx] || {};
+    const onde = p.kind === 'subtitle' ? ('do subtítulo "' + (p.title || '') + '"') : ('do parágrafo ' + (pIdx + 1));
+    const vaoSair = paras.length - pIdx;
+    if(!confirm('Dividir o bloco aqui?\n\nOs ' + vaoSair + ' item(ns) a partir ' + onde + ' vão para um bloco de texto NOVO, logo abaixo deste, sem título (você dá o título depois, se quiser).\n\nGrifos, notas, flashcards, "concluído" e "ver depois" dos alunos acompanham o texto.')) return;
+    try{
+      await ueSaveBlock(bid, { silent: true });          // o banco precisa ter exatamente o que está na tela
+      const fica = _ueTextoDosParagrafos(b, paras.slice(0, pIdx));
+      const vai  = _ueTextoDosParagrafos(b, paras.slice(pIdx));
+      const { data, error } = await conteudo().rpc('dividir_bloco_texto', {
+        p_block_id: b.id, p_indice: pIdx, p_texto_fica: fica, p_texto_vai: vai, p_deslocamento: fica.length
+      });
+      if(error) throw error;
+      await _ueRecarregarBlocos(b.unit_id, data);
+      window.ueToast('Bloco dividido: ' + vaoSair + ' item(ns) foram para o bloco novo, logo abaixo.', 'success');
+    }catch(e){
+      console.error('[dividir bloco]', e);
+      alert('Não foi possível dividir o bloco: ' + (e.message || e));
+    }
+  };
+  window.ueJuntarBlocos = async function(bid){
+    const b = _ueGetBlock(bid);
+    const prox = _ueProximoBlocoTexto(bid);
+    if(!b || !prox) return;
+    const parasA = (b.content && Array.isArray(b.content.paragraphs)) ? b.content.paragraphs : [];
+    const nB = prox.content.paragraphs.length;
+    if(!confirm('Juntar este bloco com o de baixo?\n\nOs ' + nB + ' item(ns) de "' + (prox.title || 'sem título') + '" entram no fim deste (' + parasA.length + ' item(ns)) e o bloco de baixo deixa de existir.\n\nGrifos, notas, flashcards, "concluído", "ver depois", "parei aqui", agenda e comentários dos alunos passam para este bloco.' + (prox.content.audio_url ? '\n\nO áudio do bloco de baixo NÃO vem junto (ele narra só aquela parte).' : ''))) return;
+    try{
+      await ueSaveBlock(bid, { silent: true });
+      await ueSaveBlock(prox.id, { silent: true });
+      const este = _ueTextoDosParagrafos(b, parasA);
+      const { error } = await conteudo().rpc('juntar_blocos_texto', { p_block_id: b.id, p_deslocamento: este.length });
+      if(error) throw error;
+      await _ueRecarregarBlocos(b.unit_id, b.id);
+      window.ueToast('Blocos juntados: ' + nB + ' item(ns) entraram no fim deste bloco.', 'success');
+    }catch(e){
+      console.error('[juntar blocos]', e);
+      alert('Não foi possível juntar os blocos: ' + (e.message || e));
+    }
+  };
+  /* DIVIDIR-FIM */
   window.ueRemoveParagraph = function(bid, pIdx){
     if(!confirm('Apagar este parágrafo?')) return;
     const b = _ueGetBlock(bid); if(!b || !b.content || !Array.isArray(b.content.paragraphs)) return;
@@ -60143,6 +60237,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     switch(type){
       case 'text': {
         // === Editor visual rico do bloco TEXTO (Y3b) ===
+        const _proxTexto = _ueProximoBlocoTexto(bid);   // bloco de texto logo abaixo (p/ "Juntar")
         // Estrutura: áudio → parágrafos editáveis (cada um com título
         // opcional, descrição interna, conteúdo HTML, lista de fragments).
         // Cada fragment seleciona/edita um verbete da biblioteca Y3a.
@@ -60156,6 +60251,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           const moveBtns =
             '<button class="btn btn-ghost btn-sm" onclick="ueMoveParagraph(' + bid + ',' + pIdx + ',-1)" title="Mover para cima" style="padding:.2rem .45rem">↑</button>' +
             '<button class="btn btn-ghost btn-sm" onclick="ueMoveParagraph(' + bid + ',' + pIdx + ',1)" title="Mover para baixo" style="padding:.2rem .45rem">↓</button>';
+          // "Dividir aqui": daqui (este item incluído) para baixo vira um bloco de
+          // texto novo, logo abaixo. No primeiro item não faz sentido (nada ficaria).
+          const dividirBtn = pIdx > 0
+            ? '<button class="btn btn-ghost btn-sm" onclick="ueDividirBloco(' + bid + ',' + pIdx + ')" title="Daqui para baixo vira um bloco de texto novo, logo abaixo deste (grifos, notas e marcações dos alunos acompanham)" style="padding:.2rem .5rem;white-space:nowrap">Dividir aqui</button>'
+            : '';
           // Item SUBTÍTULO = card simples (só o texto do divisor de seção).
           if(p.kind === 'subtitle'){
             return [
@@ -60163,6 +60263,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
                 '<span class="card-label" style="background:var(--bg-card);padding:.1rem .45rem;border-radius:var(--radius);border:1px solid var(--accent-border);font-size:.6rem;white-space:nowrap">§ Subtítulo</span>',
                 '<input class="field-input" value="' + esc(p.title || '') + '" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'title\',this.value)" placeholder="Texto do subtítulo (divisor de seção) — ex: 2.1 Os Tudors" style="flex:1;font-size:.9rem">',
                 moveBtns,
+                dividirBtn,
                 '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.2rem .5rem" onclick="ueRemoveParagraph(' + bid + ',' + pIdx + ')">apagar</button>',
               '</div>'
             ].join('');
@@ -60205,6 +60306,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
                 '<input class="field-input" value="' + esc(p.id || pid) + '" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'id\',this.value)" placeholder="id (p1, p2...)" style="font-family:var(--mono);font-size:.7rem;max-width:80px">',
                 '<input class="field-input" value="' + esc(p.title || '') + '" oninput="ueUpdateParagraph(' + bid + ',' + pIdx + ',\'title\',this.value)" placeholder="Título (vira anchor na sidebar) — opcional" style="flex:1;font-size:.85rem">',
                 moveBtns,
+                dividirBtn,
                 '<button class="btn btn-ghost btn-sm" style="color:var(--red);padding:.2rem .5rem" onclick="ueRemoveParagraph(' + bid + ',' + pIdx + ')">apagar ¶</button>',
               '</div>',
               '<div class="field" style="margin:0 0 .5rem">',
@@ -60266,6 +60368,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           '<div style="margin-top:.8rem;padding-top:.6rem;border-top:1px solid var(--accent-border-soft);display:flex;align-items:center;gap:.6rem;flex-wrap:wrap">',
             '<button class="btn btn-ghost btn-sm" onclick="ueSavePersistText(' + bid + ')" style="background:var(--accent-lo);border-color:var(--accent-border);color:var(--accent);font-weight:500">💾 Salvar parágrafos</button>',
             '<span class="s-body" style="font-size:.68rem;color:var(--text-mute);margin:0">Salva título + áudio + parágrafos + fragments e atualiza o JSON cru</span>',
+            (_proxTexto
+              ? '<button class="btn btn-ghost btn-sm" onclick="ueJuntarBlocos(' + bid + ')" title="Os parágrafos do bloco de baixo (' + esc(_proxTexto.title || 'sem título') + ') entram no fim deste e o bloco de baixo deixa de existir; grifos, notas e marcações dos alunos vêm junto" style="margin-left:auto;white-space:nowrap">Juntar com o bloco de baixo</button>'
+              : ''),
           '</div>'
         ].join('');
       }
