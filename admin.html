@@ -59038,6 +59038,28 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return window._ueOriginNorm(origin).toLowerCase();
   }
   /* TF-NUM-FIM */
+  // O MESMO gabarito comentado nunca entra duas vezes no item. Compara o texto
+  // normalizado (sem tags/espaços/caixa) com os gabaritos gravados — lidos do
+  // banco na hora, o cache pode estar atrasado — e com o comentário legado do
+  // item (tf_items.comment, que o modal mostra como "Gabarito 1" quando não há
+  // gabaritos gravados). Antes, cada reimportação do mesmo JSON — inclusive as
+  // tentativas que falhavam num grupo mais adiante — gravava mais uma cópia.
+  async function _ueTfGabaritoJaExiste(itemId, comentarioLegado, texto){
+    const alvo = _ueNormTexto(texto);
+    if(!alvo) return true;                                   // vazio nunca vira gabarito
+    if(_ueNormTexto(comentarioLegado) === alvo) return true;
+    let lista = (tfItemCommentsCache || []).filter(function(c){ return String(c.tf_item_id) === String(itemId); });
+    try{
+      const fr = await questoes().from('tf_item_comments').select('id, tf_item_id, text, label, position').eq('tf_item_id', itemId);
+      if(!fr.error && Array.isArray(fr.data)){
+        lista = fr.data;
+        if(Array.isArray(tfItemCommentsCache)){
+          fr.data.forEach(function(c){ if(!tfItemCommentsCache.some(function(x){ return String(x.id) === String(c.id); })) tfItemCommentsCache.push(c); });
+        }
+      }
+    }catch(e){ console.warn('[import] leitura de gabaritos do item falhou (usando cache):', e); }
+    return lista.some(function(c){ return _ueNormTexto(c.text) === alvo; });
+  }
   async function _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId){
     const avisos = [];
     const rotuloGrupo = code || ('Ubique ' + (year || ''));
@@ -59046,7 +59068,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // gerava "duplicate key" em tf_items). O cache é atualizado com o que veio.
     let existing = (tfItemsCache || []).filter(function(t){ return String(t.question_id) === String(bankQuestionId); });
     try{
-      const fr = await questoes().from('tf_items').select('id, question_id, numero, assertiva, origin').eq('question_id', bankQuestionId);
+      const fr = await questoes().from('tf_items').select('id, question_id, numero, assertiva, origin, comment').eq('question_id', bankQuestionId);
       if(!fr.error && Array.isArray(fr.data)){
         if(!Array.isArray(tfItemsCache)) tfItemsCache = [];
         // trabalha com os OBJETOS do cache (renumerar aqui reflete no banco de questões da tela)
@@ -59106,10 +59128,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           if(!up.error){ hit.origin = itOrigin; porOrigin[chaveO] = hit; }
         }
         const cmt = (q.comment ? String(q.comment) : '').trim();
-        if(cmt){
+        if(cmt && !(await _ueTfGabaritoJaExiste(hit.id, hit.comment, cmt))){
           const pos = (tfItemCommentsCache || []).filter(function(c){ return String(c.tf_item_id) === String(hit.id); }).length + 1;
-          const insC = await questoes().from('tf_item_comments').insert({ tf_item_id: hit.id, text: cmt, label: (code || null), position: pos });
-          if(!insC.error) gabAdded++;
+          const insC = await questoes().from('tf_item_comments').insert({ tf_item_id: hit.id, text: cmt, label: (code || null), position: pos }).select().single();
+          if(!insC.error){
+            gabAdded++;
+            if(insC.data && Array.isArray(tfItemCommentsCache)) tfItemCommentsCache.push(insC.data);   // 2ª ocorrência no mesmo lote já enxerga
+          }
         }
         continue;
       }
