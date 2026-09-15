@@ -25075,6 +25075,137 @@ function _streakValid(streak, streakDay){
 }
 // Metadata completa de uma unidade pelo id (sigla, número, título, matéria) —
 // fonte única pro "HB · 01 · Configuração do Brasil" e pra atividade.
+/* RELACOES-INICIO */
+/* ── Relações entre cadernos: UM modelo, nascido da LINHA ─────────────────
+   Uma linha escrita num caderno aparece também em cada caderno que ela cita
+   (portal), com o contexto das linhas-mãe e os filhos recuados. Logo, dois
+   cadernos estão relacionados quando existe uma linha que aparece nos dois:
+     (1) origem → citado   citação direta (tem direção: quem escreveu);
+     (2) citado ~ citado   os dois citados na MESMA linha;
+     (3) citado ~ citado   um na linha, outro numa linha-mãe ou linha-filha
+                           (o mesmo fio da lista; linhas irmãs não).
+   Grafo (aba Conexões) e propriedades automáticas (Pessoas relacionadas,
+   Países, Efemérides…) consomem ESTE modelo; nenhuma tela lê os chips por
+   conta própria para decidir relação. O portal não gera relação: o corpo
+   salvo do destino guarda o buraco VAZIO (o conteúdo mora na origem).
+   GLOBAL de propósito (como _fichaItens/_buildUnitIndex): o tutor, a página
+   de Cadernos e o grafo leem a mesma definição. */
+function _cadSanitize(html){
+  return String(html || '')
+    .replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, '')
+    .replace(/<\s*style[^>]*>[\s\S]*?<\s*\/\s*style\s*>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
+    .replace(/(href|src)\s*=\s*"javascript:[^"]*"/gi, '$1="#"');
+}
+/* Ancestrais (pai, avô…) de uma célula: a linha de nível MENOR logo acima,
+   subindo até o nível 0. Nível = recuo (data-ind) + 1 se for item/propriedade
+   de um card de lista (o título " :::" é o pai do item). Irmãos não entram.
+   (Era do portal; o modelo de relações usa o MESMO fio.) */
+function _poNivel(el2){
+  const ind = parseInt(el2.getAttribute('data-ind') || '0', 10) || 0;
+  return ind + ((el2.hasAttribute('data-fc-item') || el2.hasAttribute('data-fc-prop')) ? 1 : 0);
+}
+function _poPaisDaCelula(alvo){
+  const out = []; let nivel = _poNivel(alvo); let p = alvo.previousElementSibling;
+  while(p && nivel > 0){
+    if(p.classList && p.classList.contains('cad-portal')) break;
+    const n = _poNivel(p);
+    if(n < nivel){ out.unshift(p); nivel = n; }
+    p = p.previousElementSibling;
+  }
+  return out;
+}
+// As LINHAS de um corpo salvo: filhos diretos; em listas, cada <li> — o mesmo
+// recorte do carimbo de célula (_cadCelCarimbar) e do portal.
+function _cadLinhasDoCorpo(raiz){
+  const out = [];
+  Array.prototype.forEach.call(raiz.children, function(li){
+    if(li.nodeType !== 1) return;
+    if(li.tagName === 'UL' || li.tagName === 'OL'){ Array.prototype.forEach.call(li.children, function(it){ if(it.tagName === 'LI') out.push(it); }); return; }
+    out.push(li);
+  });
+  return out;
+}
+// Cadernos citados numa linha (chips [[ ]]): 'doc:<id>' para caderno próprio,
+// '<unitId>' para caderno de unidade. Sem repetição, na ordem do texto.
+function _cadAlvosDaLinha(el){
+  const out = [];
+  Array.prototype.forEach.call(el.querySelectorAll('.tutor-ref'), function(c){
+    const d = c.getAttribute('data-doc-id');
+    const k = d ? ('doc:' + d) : String(c.getAttribute('data-unit-id') || '');
+    if(k && k !== 'doc:' && out.indexOf(k) < 0) out.push(k);
+  });
+  return out;
+}
+/* rows: [{ chave: 'doc:<id>' | '<unitId>', body }]; san: sanitizador do HTML.
+   Devolve { pares: [{ a, b, direta, frases }], porCaderno: { chave: Set } }.
+   Par direto: a = origem, b = citado. Par "juntos": a < b (sem direção). */
+function _cadRelacoes(rows, san){
+  const tmp = document.createElement('div');
+  const pares = Object.create(null), porCaderno = Object.create(null);
+  const liga = function(x, y){
+    (porCaderno[x] = porCaderno[x] || new Set()).add(y);
+    (porCaderno[y] = porCaderno[y] || new Set()).add(x);
+  };
+  const poe = function(a, b, direta, frase){
+    if(!a || !b || a === b) return;
+    if(!direta && b < a){ const t = a; a = b; b = t; }
+    const k = (direta ? 'd' : 'j') + '\x01' + a + '\x01' + b;
+    let p = pares[k];
+    if(!p){ p = pares[k] = { a: a, b: b, direta: !!direta, frases: [] }; liga(a, b); }
+    if(frase && p.frases.indexOf(frase) < 0 && p.frases.length < 12) p.frases.push(frase);
+  };
+  const texto = function(el){ return (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 280); };
+  (rows || []).forEach(function(row){
+    const origem = String((row && (row.chave != null ? row.chave : row.unit_id)) || '');
+    const body = (row && row.body) ? String(row.body) : '';
+    if(!origem || body.indexOf('tutor-ref') < 0) return;         // atalho: nem tem chip
+    tmp.innerHTML = san ? san(body) : body;
+    // buraco de portal: o conteúdo mora na origem e já conta lá (se algum
+    // veio cheio — snapshot antigo —, esvazia antes de ler)
+    Array.prototype.forEach.call(tmp.querySelectorAll('.cad-portal'), function(m){ m.innerHTML = ''; });
+    _cadLinhasDoCorpo(tmp).forEach(function(linha){
+      const alvos = _cadAlvosDaLinha(linha);
+      if(!alvos.length) return;
+      const frase = texto(linha);
+      // (1) origem → cada citado
+      alvos.forEach(function(t){ poe(origem, t, true, frase); });
+      // (2) citados na mesma linha, dois a dois
+      for(let i = 0; i < alvos.length; i++) for(let j = i + 1; j < alvos.length; j++) poe(alvos[i], alvos[j], false, frase);
+      // (3) o mesmo fio: citados nas linhas-mãe. Cada par mãe/filha sai uma
+      //     vez, visto da filha; a mãe mais próxima vence quando o mesmo
+      //     caderno aparece em duas.
+      const vistos = new Set(alvos);
+      _poPaisDaCelula(linha).reverse().forEach(function(mae){          // da mais próxima para a mais distante
+        const fraseFio = (texto(mae) + ' › ' + frase).slice(0, 280);
+        _cadAlvosDaLinha(mae).forEach(function(u){
+          if(vistos.has(u)) return;
+          vistos.add(u);
+          alvos.forEach(function(t){ poe(t, u, false, fraseFio); });
+        });
+      });
+    });
+  });
+  return { pares: Object.keys(pares).map(function(k){ return pares[k]; }), porCaderno: porCaderno };
+}
+/* O modelo a partir do que está no Store (cadernos das unidades + cadernos
+   próprios), em cache por carimbo — abrir o painel de propriedades várias
+   vezes não reprocessa todos os corpos. O grafo monta o seu com as linhas
+   que tiver (Store ou banco) chamando _cadRelacoes direto. */
+let _cadRelCache = { carimbo: null, modelo: null };
+function _cadRelacoesAtual(){
+  const S = window.Store || {};
+  const rows = [];
+  try{ (S.listCadernos ? S.listCadernos() : []).forEach(function(c){ rows.push({ chave: String(c.unitId), body: c.body || '', up: c.updatedAt || 0 }); }); }catch(_){ }
+  try{ (S.cadAvulsosLista ? S.cadAvulsosLista() : []).forEach(function(d){ rows.push({ chave: 'doc:' + d.id, body: d.body || '', up: d.updatedAt || 0 }); }); }catch(_){ }
+  const carimbo = rows.map(function(r){ return r.chave + '|' + r.up + '|' + r.body.length; }).join('\n');
+  if(_cadRelCache.modelo && _cadRelCache.carimbo === carimbo) return _cadRelCache.modelo;
+  const modelo = _cadRelacoes(rows, _cadSanitize);
+  _cadRelCache = { carimbo: carimbo, modelo: modelo };
+  return modelo;
+}
+/* RELACOES-FIM */
 /* Valor de propriedade: LISTA de itens {t:'txt',v} ou {t:'doc'|'unit',id,v}.
    Global de propósito: a página de Cadernos e o GRAFO leem o mesmo dado —
    duplicar a normalização faria os dois divergirem no primeiro ajuste. */
@@ -41816,14 +41947,8 @@ window.TutorIA = (function(){
   // Richtext: o corpo é salvo como HTML (igual ao "Rascunho" do simulado). Os
   // links [[ ]] ficam como chips <span class="tutor-ref" data-unit-id>, então o
   // grafo/backlinks (fases 2/3) extraem os links direto do HTML.
-  function _cadSanitize(html){
-    return String(html || '')
-      .replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, '')
-      .replace(/<\s*style[^>]*>[\s\S]*?<\s*\/\s*style\s*>/gi, '')
-      .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
-      .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
-      .replace(/(href|src)\s*=\s*"javascript:[^"]*"/gi, '$1="#"');
-  }
+  // _cadSanitize: GLOBAL (bloco RELACOES) — o modelo de relações, o grafo e a
+  // página de Cadernos passam pelo MESMO sanitizador.
   /* O chip de caderno guarda uma CÓPIA do nome (no data-unit-title e no texto).
      Renomeou o caderno e a cópia envelhece: o aluno lê um nome ERRADO num link
      que aponta para o lugar certo. Aqui o rótulo é reconciliado com o nome
@@ -42216,23 +42341,8 @@ window.TutorIA = (function(){
     while(n && indDe(n) > base && !n.classList.contains('cad-portal')){ out.push(n); n = n.nextElementSibling; }
     return out;
   }
-  /* Ancestrais (pai, avô…) de uma célula: a linha de nível MENOR logo acima,
-     subindo até o nível 0. Nível = recuo (data-ind) + 1 se for item/propriedade
-     de um card de lista (o título " :::" é o pai do item). Irmãos não entram. */
-  function _poNivel(el2){
-    const ind = parseInt(el2.getAttribute('data-ind') || '0', 10) || 0;
-    return ind + ((el2.hasAttribute('data-fc-item') || el2.hasAttribute('data-fc-prop')) ? 1 : 0);
-  }
-  function _poPaisDaCelula(alvo){
-    const out = []; let nivel = _poNivel(alvo); let p = alvo.previousElementSibling;
-    while(p && nivel > 0){
-      if(p.classList && p.classList.contains('cad-portal')) break;
-      const n = _poNivel(p);
-      if(n < nivel){ out.unshift(p); nivel = n; }
-      p = p.previousElementSibling;
-    }
-    return out;
-  }
+  // _poNivel / _poPaisDaCelula: GLOBAIS (bloco RELACOES) — o modelo de
+  // relações usa o MESMO fio (linha-mãe/filha) que o portal desenha.
   const _PO_ATRS_ID = ['data-cel', 'data-fc-id', 'data-fc-cz', 'data-fc-item', 'data-fc-prop', 'data-fc-due', 'data-fc-links', 'data-ind', 'data-bl'];
   function _poHtmlDaCelula(bodyHtml, cel){
     const d = document.createElement('div');
@@ -44077,17 +44187,30 @@ window.TutorIA = (function(){
       }
       else refMap[k] = { source: src, target: tgt, sentences: frase ? [frase] : [], prop: !!dePropriedade };
     };
+    // "Citados juntos" (mesma linha ou mesmo fio): sem direção, chave própria.
+    const poeJuntos = function(a, b, frases){
+      if(!a || !b || a === b) return;
+      linkedUnits.add(a); linkedUnits.add(b);
+      const k = 'j\x01' + a + '\x01' + b;
+      if(!refMap[k]) refMap[k] = { source: a, target: b, sentences: [], prop: false, juntos: true };
+      (frases || []).forEach(function(f){ if(f && refMap[k].sentences.indexOf(f) < 0) refMap[k].sentences.push(f); });
+    };
+    /* As relações do TEXTO vêm do modelo único (_cadRelacoes): citação direta
+       (origem → citado, com seta) e "citados juntos" (mesma linha ou mesmo
+       fio, sem seta). Antes o grafo lia os chips por conta própria e só
+       enxergava a origem — três cadernos citados na mesma frase ficavam sem
+       ligação entre si (grafo de origem, não de relação). */
+    const relTexto = _cadRelacoes(rows.map(function(r){ return { chave: r.unit_id, body: r.body }; }), _cadSanitize);
+    relTexto.pares.forEach(function(p){
+      if(!p.direta){ poeJuntos(p.a, p.b, p.frases); return; }
+      if(p.frases.length) p.frases.forEach(function(f){ poeRef(p.a, p.b, f); });
+      else poeRef(p.a, p.b, '');
+    });
     rows.forEach(function(row){
       const src = String(row.unit_id);
       if(row.body){
         tmp.innerHTML = _cadSanitize(row.body);
-        charsBy[src] = (tmp.textContent || '').replace(/\s+/g, ' ').trim().length;
-        Array.prototype.forEach.call(tmp.querySelectorAll('.tutor-ref'), function(c){
-          const tDoc = c.getAttribute('data-doc-id');
-          const tgt = tDoc ? ('doc:' + tDoc) : String(c.getAttribute('data-unit-id') || '');
-          const host = (c.closest && c.closest('div,p,li,h1,h2,h3')) || tmp;
-          poeRef(src, tgt, (host.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 280));
-        });
+        charsBy[src] = (tmp.textContent || '').replace(/\s+/g, ' ').trim().length;   // tamanho do nó
       }
       /* PROPRIEDADE também é conexão: marcar Portugal em "País de origem" é
          um vínculo entre os dois cadernos e tem que aparecer no mapa. Roda
@@ -44123,7 +44246,7 @@ window.TutorIA = (function(){
         });
       }
     }catch(e){ console.warn('[grafo fc]', e); }
-    const refs = Object.keys(refMap).map(function(k){ return { source: refMap[k].source, target: refMap[k].target, sentence: refMap[k].sentences.join('  •  '), prop: !!refMap[k].prop }; })
+    const refs = Object.keys(refMap).map(function(k){ return { source: refMap[k].source, target: refMap[k].target, sentence: refMap[k].sentences.join('  •  '), prop: !!refMap[k].prop, juntos: !!refMap[k].juntos }; })
       .concat(Object.keys(fcMap).map(function(k){ return { source: fcMap[k].source, target: fcMap[k].target, fc: true, n: fcMap[k].pares.length, sentence: 'Flashcards conectados: ' + fcMap[k].pares.join('  •  ') }; }));
     const degree = {}; refs.forEach(function(e){ degree[e.source] = (degree[e.source] || 0) + 1; degree[e.target] = (degree[e.target] || 0) + 1; });
     const studentSubj = new Set((window.COURSES || []).map(function(c){ return String(c._subjectId); }));
@@ -44215,6 +44338,7 @@ window.TutorIA = (function(){
     return m.refs.filter(function(e){
       if(e.fc) return d.showFc !== false;
       if(e.prop) return d.showProp === true;      // propriedade: só se pedirem
+      if(e.juntos) return d.showCad !== false && d.showJuntos !== false;   // citados juntos: ligado por padrão
       return d.showCad !== false;
     });
   }
@@ -44239,7 +44363,7 @@ window.TutorIA = (function(){
     m.units.forEach(function(u){ if(!vis.has(u.id)) return; nodeFor(u.id, { kind: 'unit', doc: !!u.doc, name: u.label, unitId: u.id, subjectId: u.subjectId, color: u.doc ? '#dfd9cf' : _grafoColor(u.subjectId), val: modoTam === 'grau' ? (2 + u.degree) : (modoTam === 'fixo' ? 3 : _grafoValConteudo(u)) }); });
     const links = [];
     m.units.forEach(function(u){ if(u.subjectId !== '_doc' && vis.has(u.id) && sunSubj.has(u.subjectId)) links.push({ source: 'subj:' + u.subjectId, target: u.id, kind: 'member' }); });
-    _grafoRefsAtivos().forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: e.fc ? 'fcref' : 'ref', n: e.n || 1, sentence: e.sentence }); });
+    _grafoRefsAtivos().forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: e.fc ? 'fcref' : 'ref', n: e.n || 1, sentence: e.sentence, juntos: !!e.juntos }); });
     // Par RECÍPROCO (A cita B e B cita A): as duas arestas têm os mesmos
     // extremos e, retas (curvatura 0), caem UMA EM CIMA DA OUTRA — some uma
     // seta e o tooltip de uma das frases fica inalcançável. Solução do
@@ -44261,15 +44385,25 @@ window.TutorIA = (function(){
       const k = _parKey(String(l.source), String(l.target));
       _pares[k] = (_pares[k] || 0) + 1;
     });
+    /* Par com MAIS de uma aresta — recíproco (A cita B e B cita A) ou citação
+       direta + "citados juntos" no MESMO sentido — dá a cada aresta um LADO.
+       A lib desvia o arco a partir do ângulo source→target, então a mesma
+       curvatura já troca de lado quando o sentido inverte (por isso o par
+       recíproco usava o MESMO valor nas duas direções — sinais opostos
+       desfaziam a inversão e as duas voltavam a se sobrepor). A orientação
+       entra na conta para o lado ser decidido no PAR (menor→maior), não na
+       aresta: 1ª aresta de um lado, 2ª do outro, 3ª mais aberta. Fórmula da
+       lib (force-graph): ang = atan2(ty-sy, tx-sx); desvio = dist*curv na
+       direção ang-90°. Mão única continua reta (curvatura 0). */
+    const _vaga = Object.create(null);
     links.forEach(function(l){
       if(l.kind !== 'ref') return;
-      // MESMO valor nas duas direções — não sinal oposto. A lib calcula o
-      // desvio a partir do ângulo source→target: na volta esse ângulo já gira
-      // 180°, então o lado JÁ inverte sozinho. Com sinais opostos a inversão é
-      // desfeita e as duas voltam a se sobrepor (foi o que aconteceu na 1ª
-      // tentativa). Fórmula da lib (force-graph):
-      //   ang = atan2(ty-sy, tx-sx);  desvio = dist*curv na direção ang-90°
-      l.curvature = (_pares[_parKey(String(l.source), String(l.target))] > 1) ? 0.22 : 0;
+      const k = _parKey(String(l.source), String(l.target));
+      if(!(_pares[k] > 1)){ l.curvature = 0; return; }
+      const n = _vaga[k] = (_vaga[k] || 0) + 1;
+      const lado = (n % 2 === 1) ? 1 : -1, largura = 0.22 * Math.ceil(n / 2);
+      const orient = (String(l.source) < String(l.target)) ? 1 : -1;
+      l.curvature = lado * largura * orient;
     });
     _fg.graphData({ nodes: nodes, links: links });
     const statusEl = _gEl('grafoStatus'); if(statusEl) statusEl.textContent = sunSubj.size + ' matéria(s) · ' + vis.size + ' unidades · passe o mouse nas linhas';
@@ -44351,7 +44485,7 @@ window.TutorIA = (function(){
     const row = function(parent){ const r = document.createElement('label'); r.className = 'gp-row'; parent.appendChild(r); return r; };
     // Tipos de conexão (Fase 6C): cadernos [[ ]] × flashcards ⇆
     const sC = sec('Conexões');
-    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showFc', 'Flashcards ⇆ — tracejada'], ['showProp', 'Conexões das propriedades'], ['soAtual', 'Só a unidade/caderno atual'], ['semOrfaos', 'Esconder sem conexões']].forEach(function(par){
+    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showJuntos', 'Citados juntos — sem seta'], ['showFc', 'Flashcards ⇆ — tracejada'], ['showProp', 'Conexões das propriedades'], ['soAtual', 'Só a unidade/caderno atual'], ['semOrfaos', 'Esconder sem conexões']].forEach(function(par){
       const r0 = row(sC);
       const cb0 = document.createElement('input'); cb0.type = 'checkbox';
       // soAtual/semOrfaos nascem DESLIGADOS (grafo inteiro é o padrão da casa)
@@ -44531,10 +44665,11 @@ window.TutorIA = (function(){
       // partículas e hit-test do tooltip — por isso tudo segue a curva sozinho.
       .linkCurvature(function(l){ return l.curvature || 0; })
       .linkLabel(function(l){ return l.sentence ? ('“' + _esc(l.sentence) + '”') : ''; })
-      .linkDirectionalArrowLength(function(l){ return (_grafoPrefs.display.arrows && l.kind === 'ref') ? 3 : 0; })
+      // "Citados juntos" não tem sentido (nem seta nem partícula correndo).
+      .linkDirectionalArrowLength(function(l){ return (_grafoPrefs.display.arrows && l.kind === 'ref' && !l.juntos) ? 3 : 0; })
       .linkDirectionalArrowRelPos(1)
       // Partículas sutis correndo nas conexões [[ ]] (dão "vida"). Reversível a pedido.
-      .linkDirectionalParticles(function(l){ return l.kind === 'ref' ? 2 : 0; })
+      .linkDirectionalParticles(function(l){ return (l.kind === 'ref' && !l.juntos) ? 2 : 0; })
       .linkDirectionalParticleWidth(1.7)
       .linkDirectionalParticleSpeed(0.006)
       .linkDirectionalParticleColor(_grafoLinkColor)
@@ -62929,27 +63064,26 @@ const CadernosPage = (function(){
     const campo = _AUTO_CAMPOS.find(function(c){ return _autoTagsDe(c).indexOf(tg) !== -1; });
     return campo ? campo.tipoFicha : null;
   }
-  // Relacionados AUTOMÁTICOS: chips [[ ]] do corpo salvo → cadernos-alvo com
-  // tag mapeada no campo. Não duplica dado: deriva da citação.
+  // Relacionados postos À MÃO ("adicionar…" nos campos automáticos).
   function _autoManuais(meta, campoK){ return _fichaItens(((meta || {}).autoManuais || {})[campoK]); }
+  /* Relacionados AUTOMÁTICOS vêm do modelo único de relações (_cadRelacoes):
+     quem este caderno cita, quem o cita (a linha aparece aqui pelo portal) e
+     quem é citado junto com ele na mesma linha ou no mesmo fio. Antes só o
+     corpo salvo DESTE caderno era lido — e o portal guarda um buraco vazio,
+     então "Carlos I" citado na frase de outra unidade nunca entrava em
+     Pessoas relacionadas da Guerra dos Bispos (nem na mão contrária). Só
+     cadernos com tipo entram (unidade não tem tipo); o × (autoOcultos)
+     continua valendo. */
   function _autoRelacionados(tipo, sel, meta){
-    let corpo = '';
-    if(tipo === 'unit'){
-      const c0 = ((window.Store && Store.listCadernos) ? Store.listCadernos() : []).find(function(x){ return String(x.unitId) === String(sel.unitId); });
-      corpo = (c0 && c0.body) || '';
-    } else {
-      const d0 = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(sel.id) : null;
-      corpo = (d0 && d0.body) || '';
-    }
-    const ocultos = new Set((meta.autoOcultos || []).map(String));
-    const tmp = document.createElement('div'); tmp.innerHTML = corpo;
+    const eu = tipo === 'unit' ? String(sel.unitId) : ('doc:' + String(sel.id));
+    const rel = _cadRelacoesAtual();
+    const vizinhos = (rel && rel.porCaderno && rel.porCaderno[eu]) ? Array.from(rel.porCaderno[eu]) : [];
+    const ocultos = new Set(((meta || {}).autoOcultos || []).map(String));
     const porCampo = {};
-    const vistos = new Set();
-    Array.prototype.forEach.call(tmp.querySelectorAll('.tutor-ref[data-doc-id]'), function(ch){
-      const did = String(ch.getAttribute('data-doc-id') || '');
-      if(!did || vistos.has(did) || ocultos.has(did)) return;
-      vistos.add(did);
-      if(tipo === 'avulso' && String(sel.id) === did) return;
+    vizinhos.forEach(function(k){
+      if(String(k).indexOf('doc:') !== 0) return;
+      const did = String(k).slice(4);
+      if(!did || ocultos.has(did)) return;
       const alvo = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(did) : null;
       if(!alvo || alvo.deletedAt) return;
       const tags = (((alvo.meta || {}).tags) || []).map(_tagNorm);
@@ -62961,6 +63095,7 @@ const CadernosPage = (function(){
         }
       });
     });
+    Object.keys(porCampo).forEach(function(k2){ porCampo[k2].sort(function(x, y){ return String(x.titulo).localeCompare(String(y.titulo), 'pt'); }); });
     return porCampo;
   }
   function _autoConfigAbrir(btn, campo){
