@@ -53776,6 +53776,16 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
 
   function closeUnitEditor(){
+    // JSON cru inválido em algum bloco: nada disso vai ser salvo — o admin
+    // decide se sai mesmo assim (antes fechava e perdia em silêncio).
+    try{
+      const ruins = [];
+      (ueBlocksCache || []).forEach(function(b){
+        const cru = _ueJsonCruLer(b.id);
+        if(cru.estado === 'invalido') ruins.push('"' + (b.title || ('bloco ' + b.type)) + '" (' + cru.erro + ')');
+      });
+      if(ruins.length && !window.confirm('O JSON destes blocos está inválido e NÃO vai ser salvo:\n\n' + ruins.join('\n') + '\n\nSair mesmo assim e perder essas edições?')) return;
+    }catch(_){}
     // Flush de qualquer autosave pendente ANTES de fechar (não perde a última
     // edição feita dentro da janela de debounce). ueSaveBlock lê o DOM de forma
     // síncrona no início, então funciona mesmo fechando logo em seguida.
@@ -54798,6 +54808,53 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     });
     return content;
   }
+  /* JSON-CRU-INICIO */
+  // Inverso da coleta: os campos simples da tela passam a mostrar o que está
+  // em content (usado quando o JSON cru vira o conteúdo do bloco — senão a
+  // coleta devolveria os valores velhos da tela por cima do JSON).
+  function _ueEspelharCamposSimples(bid, content){
+    const card = document.querySelector('[data-block-card][data-block-id="' + bid + '"]');
+    if(!card) return;
+    const prefix = 'ue-bf-', suffix = '-' + bid;
+    card.querySelectorAll('input[id^="' + prefix + '"], textarea[id^="' + prefix + '"], select[id^="' + prefix + '"]').forEach(function(el){
+      if(!el.id || !el.id.endsWith(suffix)) return;
+      const key = el.id.substring(prefix.length, el.id.length - suffix.length);
+      if(key === 'title' || key === 'status' || key === 'raw') return;
+      const v = (content && content[key] != null) ? content[key] : '';
+      if(el.type === 'checkbox') el.checked = !!v; else el.value = (typeof v === 'object') ? JSON.stringify(v) : String(v);
+    });
+  }
+  // Todas as caixas "JSON cru" do card (blocos sem editor próprio têm duas com o
+  // mesmo id: a do formulário e a da "Edição direta").
+  function _ueJsonCruCaixas(bid){
+    const card = document.querySelector('[data-block-card][data-block-id="' + bid + '"]');
+    const lista = card ? Array.from(card.querySelectorAll('textarea[id="ue-bf-raw-' + bid + '"]')) : [];
+    const solto = document.getElementById('ue-bf-raw-' + bid);
+    if(solto && lista.indexOf(solto) < 0) lista.push(solto);
+    return lista;
+  }
+  // O que o admin escreveu/colou no JSON cru (marca `manual`), interpretado.
+  //   { estado: 'nenhum' }                       → ninguém mexeu no JSON cru
+  //   { estado: 'valido', parsed, caixa }        → é este o conteúdo do bloco
+  //   { estado: 'invalido', erro, caixa }        → não dá para salvar assim
+  function _ueJsonCruLer(bid){
+    const caixa = _ueJsonCruCaixas(bid).find(function(ta){ return ta.dataset.manual === '1'; });
+    if(!caixa) return { estado: 'nenhum' };
+    let parsed;
+    try{ parsed = JSON.parse(caixa.value); }
+    catch(e){ return { estado: 'invalido', erro: e.message, caixa: caixa }; }
+    if(typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { estado: 'invalido', erro: 'o JSON deve ser um objeto { … }', caixa: caixa };
+    return { estado: 'valido', parsed: parsed, caixa: caixa };
+  }
+  // Reescreve as caixas de JSON cru com o conteúdo gravado — MENOS a que o admin
+  // ainda está editando (marca manual), que só volta a ser sincronizada depois.
+  function _ueJsonCruSincronizar(bid, content){
+    _ueJsonCruCaixas(bid).forEach(function(ta){
+      if(ta.dataset.manual === '1') return;
+      ta.value = JSON.stringify(content || {}, null, 2);
+    });
+  }
+  /* JSON-CRU-FIM */
   function uePreviewRefresh(bid){
     const b = ueBlocksCache.find(function(x){ return x.id === bid; });
     if(!b) return;
@@ -54957,8 +55014,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(allIdx >= 0) ueAllBlocksCache[allIdx].content = b.content;
     // Reflete na textarea do JSON cru — fica em sincronia com o editor visual
     // (MENOS quando o admin tem uma colada/edição manual ainda não salva lá).
-    const rawTa = document.getElementById('ue-bf-raw-' + bid);
-    if(rawTa && rawTa.dataset.manual !== '1') rawTa.value = JSON.stringify(b.content || {}, null, 2);
+    _ueJsonCruSincronizar(bid, b.content);
     if(typeof uePreviewRefresh === 'function') uePreviewRefresh(bid);
     // Sincroniza com banco de biografias quando o bloco é biography
     if(typeof window._bioBankSyncFromBlock === 'function') window._bioBankSyncFromBlock(b);
@@ -60215,7 +60271,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     } else if(typeof ueRenderBlocks === 'function'){
       ueRenderBlocks();
     }
-    if(typeof window.ueToast === 'function') window.ueToast('JSON do bloco aplicado — formulário atualizado', 'success');
+    // E GRAVA. Antes este botão só aplicava na memória: quem colava o JSON,
+    // clicava aqui, via "aplicado" e saía da unidade perdia tudo — o banco
+    // nunca recebia (o autosave não é acionado por um redesenho).
+    return ueSaveBlock(bid);
   };
 
   function ueBlockFields(type, content, bid){
@@ -61839,7 +61898,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // SILENCIOSO → grava no banco E agenda a re-vetorização (embed-unidades). Selinho
   // "Salvando…/Salvo" no topo do editor. Os botões manuais continuam como reforço.
   const _ueAutosaveTimers = {};
-  function _ueSetAutosaveStatus(state){
+  function _ueSetAutosaveStatus(state, texto){
     const el = document.getElementById('ueAutosaveStatus');
     if(!el) return;
     el.hidden = false;
@@ -61847,9 +61906,24 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(state === 'dirty'){ el.classList.add('is-dirty'); el.textContent = 'Alterações não salvas'; }
     else if(state === 'saving'){ el.classList.add('is-saving'); el.textContent = 'Salvando…'; }
     else if(state === 'saved'){ el.classList.add('is-saved'); el.textContent = 'Salvo'; }
-    else if(state === 'error'){ el.classList.add('is-error'); el.textContent = 'Erro ao salvar — use o botão Salvar'; }
+    else if(state === 'error'){ el.classList.add('is-error'); el.textContent = texto || 'Erro ao salvar — use o botão Salvar'; }
     else { el.hidden = true; el.textContent = ''; }
+    el.dataset.state = state || '';
   }
+  // Há trabalho não gravado no editor? (autosave agendado, ou selinho em
+  // "não salvo"/"erro"). Segura o fechar da aba/recarregar com o aviso do navegador.
+  function _ueTemPendencia(){
+    const modal = document.getElementById('unitEditorModal');
+    if(!modal || !modal.classList.contains('active')) return false;
+    if(Object.keys(_ueAutosaveTimers).length) return true;
+    const el = document.getElementById('ueAutosaveStatus');
+    const st = el ? el.dataset.state : '';
+    return st === 'dirty' || st === 'error' || st === 'saving';
+  }
+  window.addEventListener('beforeunload', function(e){
+    if(!_ueTemPendencia()) return;
+    e.preventDefault(); e.returnValue = '';
+  });
   function _ueScheduleAutosave(bid){
     if(bid == null || !ueCurrentUnitId) return;
     const key = String(bid);
@@ -61865,7 +61939,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     try{
       await ueSaveBlock(bid, { silent: true });
       if(!Object.keys(_ueAutosaveTimers).length) _ueSetAutosaveStatus('saved');
-    }catch(e){ console.warn('[autosave]', e); _ueSetAutosaveStatus('error'); }
+    }catch(e){
+      console.warn('[autosave]', e);
+      // JSON cru inválido vem com a explicação; erro de rede fica com o texto padrão.
+      _ueSetAutosaveStatus('error', (e && /JSON do bloco inválido/.test(e.message || '')) ? (e.message + ' Não salvo.') : null);
+    }
   }
   window._ueScheduleAutosave = _ueScheduleAutosave;
 
@@ -61897,13 +61975,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     };
     const _onEdit = function(e){
       const alvo = e.target;
-      // CAUSA-RAIZ do "JSON cru se apaga em 1s": o id ue-bf-raw-<bid> casava
-      // com a regra geral, o autosave disparava 1,2s após a colada, salvava o
-      // conteúdo ANTIGO (o save ignora o raw de propósito) e a sincronização
-      // reescrevia a textarea por cima do que o admin tinha colado. O raw tem
-      // botão próprio ("Salvar JSON") — aqui só marcamos que há edição manual,
-      // e as sincronizações passam a respeitar essa marca.
-      if(alvo && alvo.id && /^ue-bf-raw-\d+$/.test(alvo.id)){ alvo.dataset.manual = '1'; return; }
+      // JSON cru: a marca `manual` diz "o que está nesta caixa é o conteúdo do
+      // bloco" — o ueSaveBlock aplica (se válido) e nenhuma sincronização
+      // reescreve a caixa enquanto ela está em edição (era o "apaga em 1s").
+      // E entra no autosave como qualquer campo: selinho fica "não salvo",
+      // 1,2s depois grava — ou avisa que o JSON está inválido.
+      if(alvo && alvo.id && /^ue-bf-raw-\d+$/.test(alvo.id)) alvo.dataset.manual = '1';
       const bid = _ueFieldBid(alvo); if(bid != null) _ueScheduleAutosave(bid);
     };
     document.addEventListener('input', _onEdit);
@@ -61914,6 +61991,22 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     opts = opts || {};
     const b = ueBlocksCache.find(function(x){ return String(x.id) === String(bid); });
     if(!b) return;
+    // JSON cru editado à mão: é ELE o conteúdo do bloco (o admin colou/escreveu
+    // ali). Válido → vira b.content e os campos simples da tela passam a
+    // refletir isso (a coleta abaixo lê a tela). Inválido → não salva: no
+    // autosave o selinho explica; no botão, o aviso. Antes, o JSON cru ficava
+    // fora do salvamento (só "Salvar JSON" aplicava, e nem ele gravava no banco).
+    const cru = _ueJsonCruLer(bid);
+    if(cru.estado === 'invalido'){
+      const msg = 'JSON do bloco inválido (' + cru.erro + '). Corrija a caixa "Edição direta do JSON" para salvar.';
+      if(opts.silent) throw new Error(msg);
+      alert(msg);
+      return;
+    }
+    if(cru.estado === 'valido'){
+      b.content = cru.parsed;
+      _ueEspelharCamposSimples(bid, b.content);
+    }
     _ueRefSyncFromBank(b); // referências: grava o autor/campos atuais do banco de obras
     const titleEl  = document.getElementById('ue-bf-title-'  + bid);
     const statusEl = document.getElementById('ue-bf-status-' + bid);
@@ -61958,12 +62051,22 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(allIdx >= 0) Object.assign(ueAllBlocksCache[allIdx], updates);
     const headerTitle = document.querySelector('[data-block-id="' + bid + '"] .card-title');
     if(headerTitle) headerTitle.textContent = title || '(sem título)';
-    // Atualiza a textarea do JSON cru pra refletir o estado salvo — MENOS
-    // quando o admin tem uma colada/edição manual ainda não salva lá.
-    const rawTa = document.getElementById('ue-bf-raw-' + bid);
-    if(rawTa && rawTa.dataset.manual !== '1') rawTa.value = JSON.stringify(content, null, 2);
+    // JSON cru gravado: a caixa deixa de estar "em edição" (a menos que o admin
+    // ainda esteja com o cursor nela — aí a marca fica, para não reescrever o
+    // que ele digita) e, com o foco fora do card, o card é redesenhado para os
+    // campos e as linhas do editor baterem com o JSON.
+    let _redesenhar = false;
+    if(cru.estado === 'valido'){
+      if(document.activeElement !== cru.caixa){ delete cru.caixa.dataset.manual; _redesenhar = true; }
+    }
+    // Reescreve as caixas do JSON cru com o estado salvo (as não editadas).
+    _ueJsonCruSincronizar(bid, content);
     ueRenderSectionsNav();
     _scheduleUnitReembed(b.unit_id);   // texto mudou → re-vetoriza a unidade
+    if(_redesenhar){
+      const _card = document.querySelector('[data-block-card][data-block-id="' + bid + '"]');
+      if(_card && !_card.contains(document.activeElement)) _ueRerenderBlockBody(bid);
+    }
     // Banner de confirmação (autosave é silencioso — usa o selinho no topo)
     if(!opts.silent){
       const blockTitle = title || ('Bloco ' + b.type);
