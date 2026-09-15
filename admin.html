@@ -25041,14 +25041,16 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   function _qSearchHaystack(q){
     const key = String(q.id);
     if(_qHaystackCache[key] != null) return _qHaystackCache[key];
-    const parts = [q.enunciado, q.command, q.description];
+    // Código da questão e id entram no índice: os pickers do editor de unidade
+    // (que usam este mesmo índice) aceitam buscar por [#15/2006] ou pelo id.
+    const parts = [q.enunciado, q.command, q.description, q.origin, (q.id != null ? String(q.id) : '')];
     if(q.type === 'true_false'){
       const itemIds = new Set();
       (tfItemsCache || []).forEach(function(t){
         // A assertiva C/E vive na coluna `assertiva` (o resto do app usa
         // `assertiva || texto`); `texto` é só fallback legado. Sem isto, a busca
         // não achava o enunciado do item — o tipo dominante no CACD.
-        if(String(t.question_id) === key){ parts.push(t.assertiva, t.texto, t.comment); itemIds.add(String(t.id)); }
+        if(String(t.question_id) === key){ parts.push(t.assertiva, t.texto, t.comment, t.origin); itemIds.add(String(t.id)); }
       });
       (tfItemCommentsCache || []).forEach(function(c){
         if(itemIds.has(String(c.tf_item_id))) parts.push(c.text);   // gabaritos comentados (E3)
@@ -25056,6 +25058,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     } else if(q.type === 'multiple_choice'){
       (mcOptionsCache || []).forEach(function(o){
         if(String(o.question_id) === key){ parts.push(o.opcao, o.texto, o.comment); }
+      });
+    } else if(q.type === 'essay'){
+      // Discursiva: critérios (nome, descrição, resposta esperada) e modelos de resposta.
+      (essayCriteriaCache || []).forEach(function(c){
+        if(String(c.question_id) === key){ parts.push(c.criterio, c.descricao, c.resposta_esperada); }
+      });
+      (essayAnswerModelsCache || []).forEach(function(m){
+        if(String(m.question_id) === key){ parts.push(m.title, m.description, m.text); }
       });
     }
     const hay = _qSearchNorm(parts.filter(Boolean).join(' '));
@@ -25695,11 +25705,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const { data, error } = await _fetchAllRowsAdm(() => questoes().from('essay_criteria').select('*'), 'id', 'essay_criteria');
     if(error){ console.error('essay_criteria:', error); return; }
     essayCriteriaCache = data || [];
+    if(window._qSearchInvalidate) window._qSearchInvalidate();   // critérios/modelos entram no índice de busca
   }
   async function loadEssayAnswerModels(){
     const { data, error } = await _fetchAllRowsAdm(() => questoes().from('essay_answer_models').select('*'), 'id', 'essay_answer_models');
     if(error){ console.error('essay_answer_models:', error); return; }
     essayAnswerModelsCache = data || [];
+    if(window._qSearchInvalidate) window._qSearchInvalidate();   // critérios/modelos entram no índice de busca
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -58168,7 +58180,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         '</header>' +
         '<div style="display:grid;grid-template-columns:1fr 1.2fr;flex:1;overflow:hidden;border-top:1px solid var(--accent-border-soft)">' +
           '<div style="display:flex;flex-direction:column;gap:.6rem;padding:1rem;overflow:hidden;border-right:1px solid var(--accent-border-soft)">' +
-            '<input class="field-input" id="ueOqBankPickerSearch" placeholder="Buscar por enunciado ou código [#15/2006]…" oninput="_ueOqBankPickerRenderList()">' +
+            '<input class="field-input" id="ueOqBankPickerSearch" placeholder="Buscar no enunciado, nas assertivas, nos gabaritos ou por código [#15/2006]…" oninput="_ueOqBankPickerRenderList()">' +
             '<div style="display:flex;align-items:center;gap:.5rem">' +
               '<label style="font-size:.6rem;color:var(--text-mute);font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em">Matéria</label>' +
               '<select class="field-input" id="ueOqBankPickerSubject" onchange="_ueOqBankPickerRenderList()" style="flex:1;font-size:.8rem"><option value="">todas</option></select>' +
@@ -58403,6 +58415,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const list = document.getElementById('ueOqBankPickerList');
     if(!list) return;
     const f = String((document.getElementById('ueOqBankPickerSearch') || {}).value || '').toLowerCase().trim();
+    const needle = _qSearchNorm(f);   // sem acento/HTML, igual ao índice
     const yr = String((document.getElementById('ueOqBankPickerYear') || {}).value || '');
     const subj = String((document.getElementById('ueOqBankPickerSubject') || {}).value || '');
     const all = (questionsCache || []);
@@ -58415,10 +58428,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(filtro.unidade && !mapaU[String(q.id)]) return false;                 // só o que a unidade já usa
       if(filtro.origem === 'provas' && !q.origin) return false;                // com código = prova anterior
       if(filtro.origem === 'ubique' && q.origin) return false;                 // sem código = inédita Ubique
-      if(!f) return true;
-      const tfCodes = (tfItemsCache || []).filter(function(t){ return String(t.question_id) === String(q.id); }).map(function(t){ return t.origin || ''; }).join(' ');
-      const hay = ((q.enunciado || '') + ' ' + (q.origin || '') + ' ' + tfCodes + ' ' + (q.id || '')).toLowerCase();
-      return hay.indexOf(f) >= 0;
+      if(!needle) return true;
+      // MESMO índice da aba Questões (_qSearchHaystack): enunciado + assertivas /
+      // alternativas + gabaritos comentados + códigos. Antes o picker só olhava o
+      // enunciado — "Toulon" na assertiva não aparecia.
+      return _qSearchHaystack(q).indexOf(needle) >= 0;
     });
     if(!filtered.length){
       list.innerHTML = '<p class="s-body" style="font-style:italic;color:var(--text-mute);text-align:center;padding:1rem">' +
@@ -58591,7 +58605,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         '</header>' +
         '<div style="display:grid;grid-template-columns:1fr 1.2fr;flex:1;overflow:hidden;border-top:1px solid var(--accent-border-soft)">' +
           '<div style="display:flex;flex-direction:column;gap:.6rem;padding:1rem;overflow:hidden;border-right:1px solid var(--accent-border-soft)">' +
-            '<input class="field-input" id="ueEssayBankPickerSearch" placeholder="Buscar por enunciado, ID ou código [#1/2022]…" oninput="_ueEssayBankPickerRender(this.value)">' +
+            '<input class="field-input" id="ueEssayBankPickerSearch" placeholder="Buscar no enunciado, comando, critérios, ID ou código [#1/2022]…" oninput="_ueEssayBankPickerRender(this.value)">' +
             '<div style="display:flex;align-items:center;gap:.5rem">' +
               '<label style="font-size:.6rem;color:var(--text-mute);font-family:var(--mono);text-transform:uppercase;letter-spacing:.1em">Matéria</label>' +
               '<select class="field-input" id="ueEssayBankPickerSubject" onchange="_ueEssayBankPickerRender((document.getElementById(\'ueEssayBankPickerSearch\')||{}).value||\'\')" style="flex:1;font-size:.8rem"><option value="">todas</option></select>' +
@@ -58651,6 +58665,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const all = (typeof questionsCache !== 'undefined' ? questionsCache : [])
       .filter(function(q){ return q && q.type === 'essay'; });
     const f = String(filter || '').toLowerCase().trim();
+    const needle = _qSearchNorm(f);   // sem acento/HTML, igual ao índice
     const subj = String((document.getElementById('ueEssayBankPickerSubject') || {}).value || '');
     const filtro = window._ueEssayBankFiltro || {};
     const mapaU = _uePickerMapaUnidade(ueAllBlocksCache, ueSectionsCache, 'discursivas');
@@ -58659,11 +58674,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(filtro.unidade && !mapaU[String(q.id)]) return false;
       if(filtro.origem === 'provas' && !q.origin) return false;
       if(filtro.origem === 'ubique' && q.origin) return false;
-      if(!f) return true;
-      // Bug fix — busca passa a olhar command (comando da questão) também,
-      // não só enunciado (que pós-fix Bug 2 é apenas "Leia o texto…").
-      const haystack = ((q.enunciado || '') + ' ' + (q.command || '') + ' ' + (q.origin || '') + ' ' + (q.id || '')).toLowerCase();
-      return haystack.indexOf(f) >= 0;
+      if(!needle) return true;
+      // MESMO índice da aba Questões: enunciado + comando + critérios + modelos + código/id.
+      return _qSearchHaystack(q).indexOf(needle) >= 0;
     });
     if(!filtered.length){
       list.innerHTML = '<p class="s-body" style="font-style:italic;color:var(--text-mute);text-align:center;padding:1rem">' +
