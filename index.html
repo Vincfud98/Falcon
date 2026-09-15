@@ -2440,6 +2440,15 @@ mark.note-mark:hover{background:rgba(200,169,126,.30)}
 [data-leitura="continua"] .block-next-nav .block-next-sec{display:none}
 .sec-sentinela{height:1px}
 .sec-grupo + .sec-grupo{margin-top:.6rem}
+.unit-carregando{
+  font-family:var(--sans);font-weight:400;font-size:.62rem;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--text-mute);margin:0 0 1.2rem;
+}
+.unit-carregando-btn{
+  background:none;border:1px solid var(--accent-border);border-radius:3px;padding:.3rem .7rem;margin-left:.6rem;
+  font:inherit;color:var(--accent);cursor:pointer;
+}
+.unit-carregando-btn:hover{background:var(--accent-lo)}
 /* SEC-CSS-FIM */
 .block-wrap{
   padding:1.6rem 1.8rem 1.8rem;
@@ -11814,13 +11823,38 @@ window.TAG_REGISTRY = {
      mock_exam_files — são tabelas de estrutura, limitadas por natureza (dezenas
      de linhas). Se alguma dessas passar de ~500, paginar também. */
   const _PAG = 1000;
-  window._fetchAllRows = async function(monta, ordem, rotulo){
+  /* FETCH-RESILIENTE-INICIO */
+  // Erro PASSAGEIRO do lado do Supabase: banco lento ("statement timeout",
+  // 57014), PostgREST recarregando o cache de schema (PGRST002, 503), gateway
+  // (502/504) ou rede. Vale repetir; erro de coluna/permissão não.
+  window._ehErroPassageiro = function(error){
+    if(!error) return false;
+    const code = String(error.code || '');
+    if(code === '57014' || code === 'PGRST001' || code === 'PGRST002' || code === 'PGRST003') return true;
+    const st = Number(error.status || 0);
+    if(st === 502 || st === 503 || st === 504 || st === 408 || st === 429) return true;
+    const msg = String(error.message || error || '');
+    return /statement timeout|schema cache|Failed to fetch|NetworkError|Load failed|network|timed? ?out|ECONN|502|503|504/i.test(msg);
+  };
+  const _FETCH_ESPERAS = [1200, 2500];   // 2 novas tentativas por página
+  const _dorme = ms => new Promise(r => setTimeout(r, ms));
+  // opts.pag: tamanho da página (tabela pesada → página menor = statement mais
+  // curto, longe do timeout do banco).
+  window._fetchAllRows = async function(monta, ordem, rotulo, opts){
     const col = ordem || 'id';
+    const pag = (opts && opts.pag > 0) ? opts.pag : _PAG;
     const out = [];
-    for(let de = 0; ; de += _PAG){
-      const { data, error } = await monta().order(col, { ascending: true }).range(de, de + _PAG - 1);
+    for(let de = 0; ; de += pag){
+      let data = null, error = null;
+      for(let tent = 0; ; tent++){
+        const r = await monta().order(col, { ascending: true }).range(de, de + pag - 1);
+        data = r.data; error = r.error;
+        if(!error || !window._ehErroPassageiro(error) || tent >= _FETCH_ESPERAS.length) break;
+        console.warn('[fetchAll] ' + (rotulo || '?') + ' página ' + de + ': erro passageiro (' + error.message + ') — repetindo em ' + _FETCH_ESPERAS[tent] + 'ms');
+        await _dorme(_FETCH_ESPERAS[tent]);
+      }
       if(error){
-        if(de === 0){
+        if(de === 0 && !window._ehErroPassageiro(error)){
           // Provável coluna de ordem inexistente → tenta do jeito antigo.
           console.warn('[fetchAll] ordem "' + col + '" falhou em ' + (rotulo || '?') + ' (' + error.message + ') — caindo pra busca única');
           return await monta();
@@ -11830,11 +11864,38 @@ window.TAG_REGISTRY = {
       }
       const lote = data || [];
       out.push.apply(out, lote);
-      if(lote.length < _PAG) break;
+      if(lote.length < pag) break;
       if(de >= 500000){ console.warn('[fetchAll] teto de segurança em ' + (rotulo || '?')); break; }
     }
     return { data: out, error: null };
   };
+  // Blocos de UMA unidade, direto do banco, para o Store — usado pela página da
+  // unidade quando a carga do boot não trouxe os blocos (falha passageira).
+  const _blocosUnidadeEmCurso = {};
+  window._hydrateBlocksForUnit = async function(storeUnitId){
+    if(storeUnitId == null || !window._sb || !window.UbiqueStore || !UbiqueStore.unit_blocks) return 0;
+    const chave = String(storeUnitId);
+    if(_blocosUnidadeEmCurso[chave]) return _blocosUnidadeEmCurso[chave];
+    const p = (async function(){
+      const r = await window._fetchAllRows(
+        () => window._sb.schema('conteudo').from('unit_blocks').select('*').eq('unit_id', storeUnitId).order('position'),
+        'id', 'unit_blocks da unidade ' + chave, { pag: 200 });
+      if(r.error) throw r.error;
+      const rows = r.data || [];
+      // Entra no Store sem disparar um re-render por linha (mesma marca do boot).
+      const antes = window.__hydrating; window.__hydrating = true;
+      try{
+        rows.forEach(function(row){
+          if(UbiqueStore.unit_blocks.get(row.id)) UbiqueStore.unit_blocks.update(row.id, row);
+          else UbiqueStore.unit_blocks.add(row);
+        });
+      } finally { window.__hydrating = antes; }
+      return rows.length;
+    })();
+    _blocosUnidadeEmCurso[chave] = p;
+    try{ return await p; } finally { delete _blocosUnidadeEmCurso[chave]; }
+  };
+  /* FETCH-RESILIENTE-FIM */
 
   async function hydrateFromSupabase(){
     if(!window.UBIQUE_USE_SUPABASE || !window._sb){
@@ -11871,7 +11932,9 @@ window.TAG_REGISTRY = {
         _fetchAllRows(() => sb.from('course_chapters').select('*').order('position'), 'id', 'course_chapters'),
         _fetchAllRows(() => sb.from('units').select('*').order('position'), 'id', 'units'),
         _fetchAllRows(() => sb.from('unit_sections').select('*').order('position'), 'id', 'unit_sections'),
-        _fetchAllRows(() => sb.from('unit_blocks').select('*').order('position'), 'id', 'unit_blocks'),
+        // Página menor: é a consulta mais pesada do boot (content jsonb de todos
+        // os blocos); 1000 linhas numa só ia perto do timeout do banco.
+        _fetchAllRows(() => sb.from('unit_blocks').select('*').order('position'), 'id', 'unit_blocks', { pag: 200 }),
         _fetchAllRows(() => sb.from('unit_downloads').select('*').order('position'), 'id', 'unit_downloads'),
       ]);
 
@@ -47176,6 +47239,34 @@ function _secAberturaMount(stageEl, blockStage, unit, groups, m, chapter){
   return { bloco, avaliar, observar, irPara };
 }
 window._secProgressoAtualizar = _secProgressoAtualizar;
+// A unidade abriu sem NENHUM bloco no Store (a carga do boot falhou nesta
+// tabela, ou chegou pela metade): busca os blocos desta unidade agora e
+// redesenha. Antes, o aluno via a unidade vazia até dar um hard refresh.
+function _unitRecuperarBlocos(blockStage, unit, groups){
+  const temBloco = (groups || []).some(g => (g.blocks || []).length);
+  if(temBloco || !blockStage || !window.UbiqueStore || !window._hydrateBlocksForUnit) return;
+  const storeId = (unit._storeId != null) ? unit._storeId : String(unit.id || '').replace(/^u/, '');
+  if(storeId === '' || storeId == null) return;
+  const jaTem = (UbiqueStore.unit_blocks.list() || []).some(b => String(b.unit_id) === String(storeId));
+  if(jaTem) return;   // a unidade está no Store e não tem blocos mesmo
+  const aviso = document.createElement('p');
+  aviso.className = 'unit-carregando';
+  blockStage.insertBefore(aviso, blockStage.firstChild);
+  const tentar = () => {
+    aviso.textContent = 'Carregando o conteúdo da unidade…';
+    window._hydrateBlocksForUnit(storeId).then(n => {
+      if(!document.body.contains(blockStage)) return;                 // já saiu da página
+      if(n > 0){ if(window.App && App.render) App.render(); }
+      else aviso.remove();                                             // unidade realmente sem blocos
+    }).catch(e => {
+      console.warn('[unidade] blocos não carregaram:', e && e.message);
+      if(!document.body.contains(aviso)) return;
+      aviso.innerHTML = 'Não foi possível carregar o conteúdo agora. <button type="button" class="unit-carregando-btn">Tentar de novo</button>';
+      aviso.querySelector('button').addEventListener('click', tentar);
+    });
+  };
+  tentar();
+}
 /* SEC-ABERTURA-FIM */
 Renderers.unit = function(route){
   const found = Util.findUnit(route.params.moduleId, route.params.unitId);
@@ -47462,6 +47553,7 @@ Renderers.unit.mount = function(stageEl, route){
 
   const blockStage = stageEl.querySelector('#blockStage');
   const groups = unit.groups||[];
+  _unitRecuperarBlocos(blockStage, unit, groups);   // Store sem os blocos desta unidade → busca e redesenha
   const activeGroupId = (route.query && route.query.g) || (groups[0] && groups[0].id);
   const activeGroup = groups.find(g => g.id === activeGroupId) || groups[0];
   const groupBlocks = activeGroup ? (activeGroup.blocks||[]) : [];
