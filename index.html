@@ -12907,13 +12907,30 @@ window.Util = Util;
    FONTE ÚNICA: todos os pontos (gravar, ler, hidratar, recontar) usam isto,
    pra escrita e leitura nunca divergirem. */
 function _isBankItemId(id){
+  // Id numérico = id da tabela do banco (questoes.tf_items na C/E, questoes.questions
+  // na múltipla escolha). Era o caso que faltava: desde que as questões passaram a
+  // viver no banco, o item chega ao bloco com esse número, o teste dizia "não é do
+  // banco" e a resposta ficava presa ao bloco — a mesma questão no bloco da seção e
+  // no bloco final da unidade eram duas respostas (e contavam duas vezes).
+  if(typeof id === 'number') return Number.isFinite(id);
   if(typeof id !== 'string') return false;
+  if(/^\d+$/.test(id)) return true;
   if(id.indexOf('ubique-') === 0) return true;
   if(/^[a-z]+-\d/.test(id)) return true;
   if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return true;
   return false;
 }
 window._isBankItemId = _isBankItemId;
+/* Chave COMPARTILHADA da resposta: a mesma em todos os lugares onde a questão do
+   banco aparece (bloco da seção, bloco final, outra unidade, página do Banco).
+   null = a resposta é do bloco (questão escrita à mão no bloco) ou o universo é
+   isolado (simulado e prova passada usam o prefixo __sim_ e têm tabelas próprias).
+   TODOS os pontos — gravar, ler, apagar, hidratar, contar — passam por aqui. */
+function _quizChaveBanco(unitId, itemId){
+  if(typeof unitId === 'string' && unitId.indexOf('__sim_') === 0) return null;
+  return _isBankItemId(itemId) ? String(itemId) : null;
+}
+window._quizChaveBanco = _quizChaveBanco;
 
 /* "Matéria ativa": só existe quando o aluno ENTROU numa matéria. No
    catálogo ("Seus cursos") não há matéria ativa — daí o Banco/topbar
@@ -14388,7 +14405,10 @@ const Store = (function(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb) return;
     try{
-      const questionRef = await _uuidFromString(`quiz:${unitId}:${blockId}:${itemId}`);
+      // Questão do banco: UMA linha por aluno e por questão (quiz:banco:<id>), a
+      // mesma em todos os lugares onde ela aparece. Questão do bloco: por bloco.
+      const _chave = _quizChaveBanco(unitId, itemId);
+      const questionRef = await _uuidFromString(_chave ? ('quiz:banco:' + _chave) : `quiz:${unitId}:${blockId}:${itemId}`);
       // Renderer chama com { selected, correct, doubt }
       const ansValue = payload.selected != null ? String(payload.selected)
                      : (payload.choice != null ? String(payload.choice) : null);
@@ -14400,7 +14420,7 @@ const Store = (function(){
         answer_value: ansValue,
         is_correct: is_correct,
         flagged: payload.doubt === true,
-        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, payload: payload },
+        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, bank: !!_chave, payload: payload },
         updated_at: new Date().toISOString()
       };
       // Diagnóstico — registra o que o FRONT ESTÁ ENVIANDO pra Supabase.
@@ -14428,9 +14448,14 @@ const Store = (function(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb) return;
     try{
-      const questionRef = await _uuidFromString(`quiz:${unitId}:${blockId}:${itemId}`);
-      const { error } = await window._sb.schema('aluno').from('student_responses')
-        .delete().eq('user_id', userId).eq('question_ref', questionRef);
+      const _chave = _quizChaveBanco(unitId, itemId);
+      const questionRef = await _uuidFromString(_chave ? ('quiz:banco:' + _chave) : `quiz:${unitId}:${blockId}:${itemId}`);
+      // Questão do banco: apaga a resposta desta questão onde quer que tenha sido
+      // dada (inclusive linhas antigas gravadas por bloco, antes da unificação).
+      const _del = window._sb.schema('aluno').from('student_responses').delete().eq('user_id', userId);
+      const { error } = await (_chave
+        ? _del.eq('question_type', 'quiz').eq('metadata->>item_id', _chave)
+        : _del.eq('question_ref', questionRef));
       if(error) console.warn('[quiz delete]', error);
     }catch(e){ console.warn('[quiz delete exception]', e); }
   }
@@ -14449,7 +14474,8 @@ const Store = (function(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb) return;
     try{
-      const questionRef = await _uuidFromString(`essay:${unitId}:${blockId}:${itemId}`);
+      const _chave = _quizChaveBanco(unitId, itemId);   // discursiva do banco: uma linha por aluno e por questão
+      const questionRef = await _uuidFromString(_chave ? ('essay:banco:' + _chave) : `essay:${unitId}:${blockId}:${itemId}`);
       const txt = (typeof payload.text === 'string') ? payload.text
                 : (typeof payload.userText === 'string') ? payload.userText
                 : (typeof payload.answer === 'string') ? payload.answer
@@ -14467,7 +14493,7 @@ const Store = (function(){
         score_percent: scorePercent,
         // Pra essay, "is_correct" pode ser interpretado como "passou" (>= 60% por convenção)
         is_correct: scorePercent != null ? scorePercent >= 60 : null,
-        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, payload: payload },
+        metadata: { unit_id: unitId, block_id: blockId, item_id: itemId, bank: !!_chave, payload: payload },
         updated_at: new Date().toISOString()
       };
       const { error } = await window._sb.schema('aluno').from('student_responses')
@@ -14628,19 +14654,29 @@ const Store = (function(){
           _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
           _state.quizAnswers[unitId][blockId] = _state.quizAnswers[unitId][blockId] || {};
           _state.quizAnswers[unitId][blockId][itemId] = ans;
-          // Questões do banco (Banco) são indexadas por bank_id — precisam
-          // voltar pro índice global, senão o status some após reload.
-          const isBankId = _isBankItemId(itemId);
-          if(isBankId){
+          // Questão do banco: entra no índice compartilhado (uma resposta para
+          // todos os lugares onde ela aparece). Se ainda houver mais de uma
+          // linha da mesma questão (respondida em dois blocos antes da
+          // unificação), vale a mais recente.
+          const chave = _quizChaveBanco(unitId, itemId);
+          if(chave){
             _state.quizAnswersByBankId = _state.quizAnswersByBankId || {};
-            _state.quizAnswersByBankId[itemId] = ans;
+            const atual = _state.quizAnswersByBankId[chave];
+            if(!atual || (atual.answeredAt || 0) <= ans.answeredAt) _state.quizAnswersByBankId[chave] = ans;
           }
           qCount++;
         } else if(row.question_type === 'essay'){
+          const ens = Object.assign({}, payload,
+            { submittedAt: ts ? new Date(ts).getTime() : Date.now() });
           _state.essays[unitId] = _state.essays[unitId] || {};
           _state.essays[unitId][blockId] = _state.essays[unitId][blockId] || {};
-          _state.essays[unitId][blockId][itemId] = Object.assign({}, payload,
-            { submittedAt: ts ? new Date(ts).getTime() : Date.now() });
+          _state.essays[unitId][blockId][itemId] = ens;
+          const chaveE = _quizChaveBanco(unitId, itemId);
+          if(chaveE){
+            _state.essaysByBankId = _state.essaysByBankId || {};
+            const atualE = _state.essaysByBankId[chaveE];
+            if(!atualE || (atualE.submittedAt || 0) <= ens.submittedAt) _state.essaysByBankId[chaveE] = ens;
+          }
           eCount++;
         }
       });
@@ -16334,20 +16370,17 @@ const Store = (function(){
       _syncBlockBookmarksClearToSupabase(unitId).catch(()=>{});
     },
     updateQuizAnswer(unitId, blockId, itemId, payload, opts){
-      // Y3 Fase I — Stats compartilhadas por bank_id.
-      // Se itemId for um bank_id (questão no banco), grava em
-      // _state.quizAnswersByBankId[itemId] — compartilhado entre TODAS as
-      // unidades onde a questão aparece. Mantém _state.quizAnswers[unitId]
-      // como cache local pra retrocompat com renderers que esperam o
-      // formato antigo.
-      const isBankId = _isBankItemId(itemId);
-      if(isBankId){
+      // Questão do banco: a resposta mora no índice compartilhado
+      // (_state.quizAnswersByBankId[chave]) — UMA para todos os lugares onde a
+      // questão aparece. A gaveta por bloco (_state.quizAnswers[unidade][bloco])
+      // guarda a mesma referência, só como cache de leitura local.
+      const chave = _quizChaveBanco(unitId, itemId);
+      if(chave){
         _state.quizAnswersByBankId = _state.quizAnswersByBankId || {};
-        _state.quizAnswersByBankId[itemId] = Object.assign({ answeredAt: Date.now() }, payload);
-        // Cache local também (pra olhar sem precisar de bank_id)
+        _state.quizAnswersByBankId[chave] = Object.assign({ answeredAt: Date.now() }, payload);
         _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
         _state.quizAnswers[unitId][blockId] = _state.quizAnswers[unitId][blockId] || {};
-        _state.quizAnswers[unitId][blockId][itemId] = _state.quizAnswersByBankId[itemId];
+        _state.quizAnswers[unitId][blockId][itemId] = _state.quizAnswersByBankId[chave];
       } else {
         _state.quizAnswers[unitId] = _state.quizAnswers[unitId] || {};
         _state.quizAnswers[unitId][blockId] = _state.quizAnswers[unitId][blockId] || {};
@@ -16382,11 +16415,22 @@ const Store = (function(){
     // então ela some das estatísticas globais e não ressurge após reload.
     clearQuizAnswer(unitId, blockId, itemId){
       if(!_state) return Promise.resolve();
-      const isBankId = _isBankItemId(itemId);
+      const chave = _quizChaveBanco(unitId, itemId);
       if(_state.quizAnswers[unitId] && _state.quizAnswers[unitId][blockId]){
         delete _state.quizAnswers[unitId][blockId][itemId];
       }
-      if(isBankId && _state.quizAnswersByBankId){ delete _state.quizAnswersByBankId[itemId]; }
+      if(chave){
+        // Questão do banco: some do índice compartilhado E de toda gaveta de bloco
+        // que ainda tenha uma cópia (outro bloco da unidade, outra unidade, Banco)
+        // — senão a contagem do dia continuaria vendo a resposta apagada.
+        if(_state.quizAnswersByBankId) delete _state.quizAnswersByBankId[chave];
+        const qa = _state.quizAnswers || {};
+        for(const u in qa){
+          if(String(u).indexOf('__sim_') === 0) continue;
+          const bb = qa[u] || {};
+          for(const b in bb){ const ii = bb[b]; if(!ii) continue; for(const it in ii){ if(String(it) === chave) delete ii[it]; } }
+        }
+      }
       _persist(); _emit();
       const _p = _deleteQuizAnswerFromSupabase(unitId, blockId, itemId).catch(()=>{});
       _p.then(() => { if(typeof window.refreshQuestionStats === 'function') window.refreshQuestionStats(itemId); });
@@ -16396,11 +16440,11 @@ const Store = (function(){
       // Y3 Fase I (espelho do quiz): se itemId é bank_id, grava também no
       // índice global essaysByBankId — assim respostas valem tanto no LB
       // quanto no /banco/essays (banco), independente do unitId.
-      const isBankId = _isBankItemId(itemId);
+      const chaveE = _quizChaveBanco(unitId, itemId);
       const merged = Object.assign({ submittedAt:Date.now() }, payload);
-      if(isBankId){
+      if(chaveE){
         _state.essaysByBankId = _state.essaysByBankId || {};
-        _state.essaysByBankId[itemId] = merged;
+        _state.essaysByBankId[chaveE] = merged;
       }
       _state.essays[unitId] = _state.essays[unitId] || {};
       _state.essays[unitId][blockId] = _state.essays[unitId][blockId] || {};
@@ -16842,7 +16886,6 @@ const Store = (function(){
       if(!_state){ return 0; }
       const n = new Date();
       const isToday = (ts) => { if(!ts) return false; const d = new Date(ts); return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate(); };
-      const isBank = _isBankItemId;
       const map = new Map();           // chave distinta → objeto da resposta
       const add = (k, a) => { if(!map.has(k)) map.set(k, a); };
       // ANULADA não entra: nem no XP, nem em acertos/erros, nem no total do dia.
@@ -16853,7 +16896,7 @@ const Store = (function(){
       for(const u in byUnit){
         if(String(u).indexOf('__sim_') === 0) continue; // simulado não conta
         const bb = byUnit[u] || {};
-        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || !isToday(a.answeredAt)) continue; if(_anul(it)) continue; add(isBank(it) ? ('b:' + it) : ('q:' + u + ':' + b + ':' + it), a); } }
+        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || !isToday(a.answeredAt)) continue; if(_anul(it)) continue; const _ch = _quizChaveBanco(u, it); add(_ch ? ('b:' + _ch) : ('q:' + u + ':' + b + ':' + it), a); } }
       }
       // XP do dia (Gamificação — Parte G): acerto=50, erro=10; só conta as que já
       // têm correção conhecida (a.correct === true/false).
@@ -16910,13 +16953,11 @@ const Store = (function(){
       // (ex.: Banco renderiza questões antes da hidratação completar).
       // Mesmo contrato de unitProgress() — sem state, ninguém respondeu nada.
       if(!_state) return null;
-      // Y3 Fase I — Lookup primeiro no índice global por bank_id
-      // (compartilhado entre unidades). Se não achar lá, fallback no índice
-      // legado por (unitId, blockId, itemId).
-      const isBankId = _isBankItemId(itemId);
-      if(isBankId && _state.quizAnswersByBankId && _state.quizAnswersByBankId[itemId]){
-        return _state.quizAnswersByBankId[itemId];
-      }
+      // Questão do banco: a verdade é o índice compartilhado, e só ele — a gaveta
+      // do bloco é cache e pode estar velha (ex.: "Tentar novamente" dado noutro
+      // bloco). Questão do bloco / simulado: caminho por (unidade, bloco, item).
+      const chave = _quizChaveBanco(unitId, itemId);
+      if(chave) return (_state.quizAnswersByBankId && _state.quizAnswersByBankId[chave]) || null;
       if(!_state.quizAnswers) return null;
       const byBlock = (((_state.quizAnswers[unitId]||{})[blockId]||{})[itemId]) || null;
       if(byBlock) return byBlock;
@@ -16956,26 +16997,13 @@ const Store = (function(){
     // resposta SEMPRE fica no cache local sob (unidade,bloco) reais — mesmo que
     // o índice global por bank_id não tenha sido populado. Robusto a formato de
     // id (UUID ou número) e a timing de hidratação. Ignora simulados (isolados).
+    // Resposta de uma questão do banco pelo id dela (o que o Banco precisa).
+    // Antes varria todas as gavetas de todas as unidades porque o id numérico
+    // não entrava no índice compartilhado; agora entra, e a varredura sumiu.
     getQuizAnswerByItemId(itemId){
       if(!_state || itemId == null) return null;
-      const k = String(itemId);
       const byBank = _state.quizAnswersByBankId || {};
-      if(byBank[itemId]) return byBank[itemId];
-      if(byBank[k]) return byBank[k];
-      const qa = _state.quizAnswers || {};
-      for(const u in qa){
-        if(String(u).indexOf('__sim_') === 0) continue; // simulado é universo isolado
-        const byU = qa[u] || {};
-        for(const b in byU){
-          const byB = byU[b];
-          if(!byB) continue;
-          if(byB[itemId]) return byB[itemId];
-          if(byB[k]) return byB[k];
-          // ids podem ter sido salvos como número num lugar e string noutro
-          for(const x in byB){ if(String(x) === k) return byB[x]; }
-        }
-      }
-      return null;
+      return byBank[String(itemId)] || null;
     },
     getEssayAnswer(unitId, blockId, itemId){
       // Defensive: _state pode ser null antes de Store.init.
@@ -16983,10 +17011,8 @@ const Store = (function(){
       // Y3 Fase I (espelho do quiz): se itemId parece bank_id, tenta o índice
       // global primeiro — assim respostas valem tanto no LB quanto no
       // /banco/essays (banco), independente do unitId/blockId sintético.
-      const isBankId = _isBankItemId(itemId);
-      if(isBankId && _state.essaysByBankId && _state.essaysByBankId[itemId]){
-        return _state.essaysByBankId[itemId];
-      }
+      const chaveE = _quizChaveBanco(unitId, itemId);
+      if(chaveE) return (_state.essaysByBankId && _state.essaysByBankId[chaveE]) || null;
       if(!_state.essays) return null;
       const byBlock = (((_state.essays[unitId]||{})[blockId]||{})[itemId]) || null;
       if(byBlock) return byBlock;
@@ -39114,6 +39140,7 @@ if(typeof window !== 'undefined' && !window._slideCarouselBound){
 function getUnitQuizStats(unit){
   const out = { hasVerified:false, total:0, acerto:0, acertoDuvida:0, errado:0, erradoDuvida:0, correct:0, itemIds:[] };
   if(!unit || !window.Store || typeof Store.getQuizAnswer !== 'function') return out;
+  const vistos = new Set();   // a mesma questão em dois blocos da unidade conta uma vez
   (unit.groups || []).forEach(g => {
     (g.blocks || []).forEach(b => {
       if(b.type !== 'quiz' && b.type !== 'objective_questions') return;
@@ -39122,6 +39149,8 @@ function getUnitQuizStats(unit){
         if(!it || it.id == null) return;
         // ANULADA sai da conta (ver _isAnnulledItem).
         if(it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id))) return;
+        const chave = _quizChaveBanco(unit.id, it.id);
+        if(chave){ if(vistos.has(chave)) return; vistos.add(chave); }
         out.itemIds.push(it.id);
         const ans = Store.getQuizAnswer(unit.id, b.id, it.id);
         if(ans && ans.verified && ans.selected != null){
@@ -49562,7 +49591,7 @@ Renderers.questionBank = function(route){
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
   const sections = _bankBuildResultSections(shown, f.org || 'secao');
-  const synthCtx = { unitId:'__bank_q', store: _bankAnswerStore(), suppressActions: true };
+  const synthCtx = { unitId:'__bank_q', store: Store, suppressActions: true };
 
   let resultsHtml = '';
   const _ai = window._bankAiCache;
@@ -49782,17 +49811,10 @@ function _bankBuildEssaySections(filteredEssays, mode){
   return mats.map(function(id, i){ return { title: byMat[id].m.title, block: mkBlock(byMat[id].items, '_'+i) }; });
 }
 
-// Store "proxy" pro render do banco: resolve a resposta SÓ pelo id do item
-// (mesmo método robusto do filtro de Status), pra a questão na tela mostrar a
-// resposta que o aluno já deu — mesmo que ela tenha sido respondida noutra
-// unidade. As demais operações (gravar, etc.) delegam pro Store real.
-function _bankAnswerStore(){
-  const proxy = Object.create(Store);
-  proxy.getQuizAnswer = function(unitId, blockId, itemId){
-    return Store.getQuizAnswerByItemId(itemId) || Store.getQuizAnswer(unitId, blockId, itemId);
-  };
-  return proxy;
-}
+// O render do Banco usa o Store de verdade: a questão do banco tem UMA
+// identidade (_quizChaveBanco), então Store.getQuizAnswer já devolve a resposta
+// dada em qualquer unidade. O "proxy" que varria todas as gavetas por id existia
+// só porque o id numérico não entrava no índice compartilhado.
 
 /* ───────── QuestionsCompiler — "Prova Objetiva" imprimível ─────────
    Espelha o NotesCompiler: monta um HTML autossuficiente (com @page/print) a
@@ -50820,7 +50842,7 @@ Renderers.questionBank.mount = function(stageEl, route){
   const page = parseInt(route.query.p, 10) || 1;
   const shown = results.slice(0, page * PAGE_SIZE);
   const sections = _bankBuildResultSections(shown, f.org || 'secao');
-  const synthCtx = { unitId:'__bank_q', store: _bankAnswerStore(), suppressActions: true };
+  const synthCtx = { unitId:'__bank_q', store: Store, suppressActions: true };
   if(typeof Blocks !== 'undefined' && Blocks.quiz && Blocks.quiz.mount){
     stageEl.querySelectorAll('[data-bf-results]').forEach(function(el){
       const idx = parseInt(el.getAttribute('data-sec-idx'), 10) || 0;
@@ -57578,6 +57600,7 @@ function buildPerformanceReport(){
       const chapter = entry.chapter;
       const perU = perUnit[unit.id] = { agg:emptyAgg(), itemIds:[], answers:[], subjectId:m._subjectId||null, storeUnitId:(unit._storeId!=null?unit._storeId:null), moduleId:m.id, chapterId:chapter?chapter.id:null, unitId:unit.id, unitNumber:unit.number, unitTitle:unit.title, moduleLabel:m.label, moduleTitle:m.title, chapterNumber:chapter?chapter.number:null, chapterTitle:chapter?chapter.title:null };
       summary.units.total++;
+      const _itensVistos = new Set();   // a mesma questão do banco em dois blocos da unidade conta uma vez
       const unitCompleted = !!((state.unitViews||{})[unit.id] || {}).completed;
       if(unitCompleted) summary.units.done++;
 
@@ -57609,6 +57632,8 @@ function buildPerformanceReport(){
               // nem "pendente"). Vale também pra quem respondeu ANTES da anulação,
               // porque _isAnnulledItem olha o flag atual do banco.
               if(it && (it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)))) return;
+              const _chaveIt = _quizChaveBanco(unit.id, it.id);
+              if(_chaveIt){ if(_itensVistos.has(_chaveIt)) return; _itensVistos.add(_chaveIt); }
               const itTopics = Array.from(new Set([...(it.topics||[]), ...inheritTopics]));
               const itTags = Array.from(new Set([...(it.tags||[]), ...inheritTags]));
               const prior = Store.getQuizAnswer(unit.id, b.id, it.id);
