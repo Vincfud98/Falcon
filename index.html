@@ -11835,6 +11835,7 @@ window.TAG_REGISTRY = {
      de linhas). Se alguma dessas passar de ~500, paginar também. */
   const _PAG = 1000;
   /* FETCH-RESILIENTE-INICIO */
+  let _blocosP = null;                 // promessa única dos blocos de todas as unidades
   // Erro PASSAGEIRO do lado do Supabase: banco lento ("statement timeout",
   // 57014), PostgREST recarregando o cache de schema (PGRST002, 503), gateway
   // (502/504) ou rede. Vale repetir; erro de coluna/permissão não.
@@ -12009,7 +12010,6 @@ window.TAG_REGISTRY = {
      vez (1 evento → 1 redesenho) e _blocosCompletos vira true: só então as
      barras de progresso e as contagens que somam blocos mostram número. Quem
      está lendo uma unidade que já tinha os blocos na tela não é redesenhado. */
-  let _blocosP = null;
   window._blocosCompletos = false;
   window._blocosReiniciar = function(){ _blocosP = null; window._blocosCompletos = false; };
   window._ensureBlocos = function(){
@@ -12021,9 +12021,11 @@ window.TAG_REGISTRY = {
           'id', 'unit_blocks', { chave: 'id', paralelo: 4, ordenar: ['position', 'id'] });
         if(!r.error){
           const rows = r.data || [];
-          window.__blocosSilencioso = true;
-          try{ UbiqueStore.unit_blocks.replaceAll(rows); } finally { window.__blocosSilencioso = false; }
-          window._blocosCompletos = true;
+          if(window._cacheAtivo && window._cacheAtivo()){
+            const v = await _versaoDe('conteudo.unit_blocks');
+            window._cacheGravar('conteudo.unit_blocks', rows, _metaDe(v));
+          }
+          _aplicarBlocos(rows);
           if(window._bootMarca) _bootMarca('blocos');
           return rows.length;
         }
@@ -12040,6 +12042,305 @@ window.TAG_REGISTRY = {
     });
     return p;
   };
+  /* CACHE-CONTEUDO-INICIO */
+  /* ── Cópia local do conteúdo (IndexedDB) — Fase 2 do boot ─────────────────
+     Uma base por usuário (`falcon-conteudo-<uid>`), um registro por tabela:
+     { nome, rows, meta:{hash, hash_ids, n, max_updated_at, gravado_em} } e um
+     registro `_meta` { esquema }. Da 2ª visita em diante o app pinta a tela do
+     disco e confere com o servidor em 2º plano (conteudo.versoes_conteudo):
+     tabela igual não desce; diferente desce só a diferença (blocos) ou a
+     tabela (as pequenas). É acelerador, nunca dependência: sem IndexedDB
+     (modo privado, erro, cota) tudo segue pela rede. Desliga com ?semcache=1
+     ou localStorage.falcon_semcache = '1'. Some no logout. */
+  const CACHE_ESQUEMA = 1;   // suba quando uma tabela guardada ganhar coluna/formato novo
+  const _cache = { uid: null, db: null, entradas: null, ativo: null, abrindoP: null };
+  function _cacheDesligado(){
+    try{
+      if(/[?&]semcache=1/.test(location.search) || /[?&]semcache=1/.test(location.hash)) return true;
+      if(localStorage.getItem('falcon_semcache') === '1') return true;
+    }catch(_){ }
+    return typeof indexedDB === 'undefined';
+  }
+  function _cacheNome(uid){ return 'falcon-conteudo-' + String(uid); }
+  function _cacheLimparTudo(){
+    if(!_cache.db) return Promise.resolve(false);
+    return new Promise(function(resolve){
+      try{
+        const tx = _cache.db.transaction('tabelas', 'readwrite');
+        tx.objectStore('tabelas').clear();
+        tx.oncomplete = function(){ _cache.entradas = {}; resolve(true); };
+        tx.onerror = function(){ resolve(false); };
+      }catch(_){ resolve(false); }
+    });
+  }
+  // Abre (ou cria) a base do usuário e lê TODAS as entradas de uma vez.
+  // Devolve null quando a cópia local não está disponível.
+  window._cacheAbrir = function(uid){
+    if(!uid || _cacheDesligado()){
+      // desligada (ou sem usuário): fecha o que houver e segue pela rede
+      if(_cache.db){ try{ _cache.db.close(); }catch(_){ } }
+      _cache.db = null; _cache.ativo = false; _cache.entradas = null; _cache.abrindoP = null; _cache.uid = null;
+      return Promise.resolve(null);
+    }
+    if(_cache.abrindoP && _cache.uid === String(uid)) return _cache.abrindoP;
+    _cache.uid = String(uid);
+    _cache.abrindoP = new Promise(function(resolve){
+      let terminou = false;
+      const fim = function(v){ if(terminou) return; terminou = true; resolve(v); };
+      const timer = setTimeout(function(){ console.warn('[cache] IndexedDB não respondeu — seguindo pela rede'); _cache.ativo = false; fim(null); }, 2500);
+      try{
+        const req = indexedDB.open(_cacheNome(uid), 1);
+        req.onupgradeneeded = function(){ const db = req.result; if(!db.objectStoreNames.contains('tabelas')) db.createObjectStore('tabelas', { keyPath: 'nome' }); };
+        req.onerror = function(){ clearTimeout(timer); console.warn('[cache] não abriu:', req.error && req.error.message); _cache.ativo = false; fim(null); };
+        req.onblocked = function(){ clearTimeout(timer); _cache.ativo = false; fim(null); };
+        req.onsuccess = function(){
+          const db = req.result;
+          db.onversionchange = function(){ try{ db.close(); }catch(_){ } };
+          try{
+            const all = db.transaction('tabelas', 'readonly').objectStore('tabelas').getAll();
+            all.onsuccess = function(){
+              clearTimeout(timer);
+              const entradas = {};
+              (all.result || []).forEach(function(e){ if(e && e.nome) entradas[e.nome] = e; });
+              _cache.db = db; _cache.ativo = true;
+              const m = entradas._meta;
+              if(!m || m.esquema !== CACHE_ESQUEMA){
+                // esquema novo (coluna/formato novo): começa do zero
+                _cache.entradas = {};
+                _cacheLimparTudo().then(function(){ fim(_cache.entradas); });
+                return;
+              }
+              delete entradas._meta;
+              _cache.entradas = entradas;
+              fim(entradas);
+            };
+            all.onerror = function(){ clearTimeout(timer); _cache.ativo = false; fim(null); };
+          }catch(e){ clearTimeout(timer); console.warn('[cache] leitura falhou:', e && e.message); _cache.ativo = false; fim(null); }
+        };
+      }catch(e){ clearTimeout(timer); console.warn('[cache] indisponível:', e && e.message); _cache.ativo = false; fim(null); }
+    });
+    return _cache.abrindoP;
+  };
+  window._cacheAtivo = function(){ return !!_cache.ativo; };
+  // A cópia em memória nunca é entregue por referência: quem lê recebe um
+  // clone (o Store e o banco de questões mutam o que recebem à vontade).
+  function _clonar(v){
+    try{ if(typeof structuredClone === 'function') return structuredClone(v); }catch(_){ }
+    return JSON.parse(JSON.stringify(v));
+  }
+  window._cacheLer = function(nome){
+    const e = (_cache.ativo && _cache.entradas) ? _cache.entradas[nome] : null;
+    return (e && Array.isArray(e.rows)) ? { nome: e.nome, meta: e.meta, rows: _clonar(e.rows) } : null;
+  };
+  // Grava uma tabela (linhas + versão do servidor). Silenciosa em erro/cota.
+  window._cacheGravar = function(nome, rows, meta){
+    if(!_cache.ativo || !_cache.db) return Promise.resolve(false);
+    const entrada = { nome: nome, rows: rows || [], meta: Object.assign({ gravado_em: Date.now() }, meta || {}) };
+    _cache.entradas[nome] = entrada;
+    return new Promise(function(resolve){
+      try{
+        const tx = _cache.db.transaction('tabelas', 'readwrite');
+        const st = tx.objectStore('tabelas');
+        st.put(entrada);
+        st.put({ nome: '_meta', esquema: CACHE_ESQUEMA, uid: _cache.uid, gravado_em: Date.now() });
+        tx.oncomplete = function(){ resolve(true); };
+        tx.onerror = function(){ console.warn('[cache] gravação falhou (' + nome + '):', tx.error && tx.error.message); resolve(false); };
+        tx.onabort = tx.onerror;
+      }catch(e){ console.warn('[cache] gravação:', e && e.message); resolve(false); }
+    });
+  };
+  // Apaga a base do usuário (logout).
+  window._cacheApagar = function(uid){
+    return new Promise(function(resolve){
+      try{
+        if(_cache.db){ try{ _cache.db.close(); }catch(_){ } }
+        _cache.db = null; _cache.entradas = null; _cache.ativo = null; _cache.abrindoP = null; _cache.uid = null;
+        if(!uid || typeof indexedDB === 'undefined') return resolve(false);
+        const req = indexedDB.deleteDatabase(_cacheNome(uid));
+        req.onsuccess = req.onerror = req.onblocked = function(){ resolve(true); };
+        setTimeout(function(){ resolve(false); }, 1500);
+      }catch(_){ resolve(false); }
+    });
+  };
+
+  /* ── Versões e recarga do que mudou ──────────────────────────────────────
+     O boot registra cada tabela guardada com o seu LOADER (como buscar) e o
+     seu APLICADOR (onde entra no app). A conferência pede ao servidor a
+     versão de todas numa chamada só e recarrega apenas as diferentes. */
+  const _registroConteudo = {};
+  window._registrarTabelaConteudo = function(nome, def){ _registroConteudo[nome] = def; };
+  let _versoesP = null, _versoes = null, _ultimaConferencia = 0;
+  window._versoesPedir = function(){
+    const nomes = Object.keys(_registroConteudo);
+    if(!window._sb || !nomes.length || !_cache.ativo) return Promise.resolve(null);
+    _versoesP = _tentar(function(){ return window._sb.schema('conteudo').rpc('versoes_conteudo', { p_tabelas: nomes }); }, 'versoes_conteudo', '')
+      .then(function(r){
+        if(r.error){ console.warn('[versoes] indisponível:', r.error.message); return null; }
+        const mapa = {};
+        (r.data || []).forEach(function(v){ if(v && v.tabela) mapa[v.tabela] = v; });
+        _versoes = mapa; _ultimaConferencia = Date.now();
+        return mapa;
+      }).catch(function(e){ console.warn('[versoes]', e && e.message); return null; });
+    return _versoesP;
+  };
+  async function _versaoDe(nome){
+    try{ const m = _versoesP ? await _versoesP : _versoes; return m ? (m[nome] || null) : null; }catch(_){ return null; }
+  }
+  function _metaDe(v){ return v ? { hash: v.hash || null, hash_ids: v.hash_ids || null, n: v.n, max_updated_at: v.max_updated_at || null } : { hash: null }; }
+  /* Busca uma tabela de conteúdo passando pela cópia local:
+     · com cópia → devolve a cópia NA HORA (a conferência, em 2º plano, recarrega o que mudou);
+     · sem cópia → rede e grava a cópia com a versão do servidor.
+     opts.direto: uma busca só, sem paginar (tabela sem coluna id). */
+  window._carregarTabela = async function(nome, monta, ordem, rotulo, opts){
+    opts = opts || {};
+    const ent = window._cacheLer(nome);
+    if(ent) return { data: ent.rows, error: null, origem: 'cache' };
+    const r = opts.direto ? await _tentar(function(){ return monta(); }, rotulo || nome, '') : await window._fetchAllRows(monta, ordem, rotulo || nome, opts);
+    if(!r.error && _cache.ativo){
+      const v = await _versaoDe(nome);   // a conferência já está a caminho; grava com a versão certa
+      window._cacheGravar(nome, _clonar(r.data || []), _metaDe(v));   // clone: quem chamou fica com o seu
+    }
+    return r;
+  };
+  async function _hashIds(ids){
+    try{
+      if(!(window.crypto && crypto.subtle)) return null;
+      const txt = ids.slice().sort(function(a, b){ return a - b; }).join(',');
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(txt));
+      return Array.from(new Uint8Array(buf)).map(function(b){ return b.toString(16).padStart(2, '0'); }).join('');
+    }catch(_){ return null; }
+  }
+  function _unidadeAtualStoreId(){ const u = window._currentUnitId; return u ? String(u).replace(/^u/, '') : null; }
+  function _assinaturaBlocosDaUnidade(rows, sid){
+    return (rows || []).filter(function(b){ return String(b.unit_id) === String(sid); })
+      .map(function(b){ return b.id + ':' + (b.updated_at || ''); }).sort().join('|');
+  }
+  // Entrega os blocos ao Store: 1 evento, silencioso para quem está lendo uma
+  // unidade — que ganha um aviso discreto se ELA mudou.
+  function _aplicarBlocos(rows){
+    const atual = window.__hydrating ? null : _unidadeAtualStoreId();   // no boot ninguém está lendo ainda
+    let mudouAtual = false;
+    if(atual != null){
+      try{ mudouAtual = _assinaturaBlocosDaUnidade(UbiqueStore.unit_blocks.list(), atual) !== _assinaturaBlocosDaUnidade(rows, atual); }catch(_){ }
+    }
+    window.__blocosSilencioso = true; window.__blocosMudouUnidadeAtual = mudouAtual;
+    try{ UbiqueStore.unit_blocks.replaceAll(rows); } finally { window.__blocosSilencioso = false; window.__blocosMudouUnidadeAtual = false; }
+    window._blocosCompletos = true;
+  }
+  window._avisarUnidadeAtualizada = function(){
+    const stage = document.querySelector('#blockStage');
+    if(!stage || stage.querySelector('.unit-atualizada')) return;
+    const p = document.createElement('p');
+    p.className = 'unit-carregando unit-atualizada';
+    p.innerHTML = 'Esta unidade foi atualizada. <button type="button" class="unit-carregando-btn">Recarregar</button>';
+    p.querySelector('button').addEventListener('click', function(){ if(window.App && App.render) App.render(); });
+    stage.insertBefore(p, stage.firstChild);
+  };
+  // Blocos: só a DIFERENÇA desde a cópia (editados/novos por updated_at; ids
+  // conferidos pela assinatura — se entrou/saiu linha, acerta por id).
+  async function _atualizarBlocos(v){
+    const nome = 'conteudo.unit_blocks';
+    const ent = window._cacheLer(nome);
+    const sb = window._sb.schema('conteudo');
+    const monta = function(o){ return sb.from('unit_blocks').select('*', o); };
+    const mapa = new Map();
+    let completo = false;
+    if(v && ent && ent.meta && ent.meta.max_updated_at){
+      ent.rows.forEach(function(r){ mapa.set(r.id, r); });
+      const desde = ent.meta.max_updated_at;
+      const d = await window._fetchAllRows(function(o){ return monta(o).gte('updated_at', desde); }, 'id', 'unit_blocks (mudanças)', { chave: 'id' });
+      if(d.error) return false;
+      (d.data || []).forEach(function(r){ mapa.set(r.id, r); });
+      const local = await _hashIds(Array.from(mapa.keys()));
+      if(v.hash_ids && local && local === v.hash_ids){ completo = true; }
+      else {
+        const ids = await window._fetchAllRows(function(o){ return monta(o).select('id'); }, 'id', 'unit_blocks (ids)', { chave: 'id' });
+        if(ids.error) return false;
+        const noServidor = new Set((ids.data || []).map(function(r){ return r.id; }));
+        Array.from(mapa.keys()).forEach(function(id){ if(!noServidor.has(id)) mapa.delete(id); });
+        const faltam = Array.from(noServidor).filter(function(id){ return !mapa.has(id); });
+        for(let i = 0; i < faltam.length; i += 150){
+          const lote = faltam.slice(i, i + 150);
+          const r = await _tentar(function(){ return monta().in('id', lote); }, 'unit_blocks (faltantes)', String(i));
+          if(r.error) return false;
+          (r.data || []).forEach(function(row){ mapa.set(row.id, row); });
+        }
+        completo = true;
+      }
+    } else {
+      const r = await window._fetchAllRows(monta, 'id', 'unit_blocks', { chave: 'id', paralelo: 4, ordenar: ['position', 'id'] });
+      if(r.error) return false;
+      (r.data || []).forEach(function(row){ mapa.set(row.id, row); });
+      completo = true;
+    }
+    if(!completo) return false;
+    const rows = window._ordenarLinhas(Array.from(mapa.values()), ['position', 'id']);
+    await window._cacheGravar(nome, rows, _metaDe(v));
+    _aplicarBlocos(rows);
+    return true;
+  }
+  /* Confere as versões com o servidor e recarrega SÓ o que mudou. Roda no boot
+     (depois do portão) e ao voltar para a aba após 10 minutos. Sem a função de
+     versões no servidor, recarrega tudo pela rede (como antes da cópia local). */
+  let _conferindoP = null;
+  window._conferirVersoes = function(motivo){
+    if(_conferindoP) return _conferindoP;
+    _conferindoP = (async function(){
+      if(!_cache.ativo) return { mudou: [] };
+      const mapa = await window._versoesPedir();
+      const nomes = Object.keys(_registroConteudo);
+      const mudou = nomes.filter(function(nome){
+        if(!mapa) return true;                                   // sem versão: recarrega tudo
+        const v = mapa[nome]; const ent = window._cacheLer(nome);
+        if(!v) return false;                                     // o servidor não conhece a tabela
+        return !(ent && ent.meta && ent.meta.hash && ent.meta.hash === v.hash);
+      });
+      // blocos por último (é a pesada)
+      mudou.sort(function(a, b){ return (a === 'conteudo.unit_blocks') - (b === 'conteudo.unit_blocks'); });
+      let bancoMudou = false;
+      for(let i = 0; i < mudou.length; i++){
+        const nome = mudou[i], def = _registroConteudo[nome], v = mapa ? mapa[nome] : null;
+        try{
+          if(def.recarregar){ await def.recarregar(v); continue; }
+          const r = def.direto ? await _tentar(function(){ return def.monta(); }, nome, '') : await window._fetchAllRows(def.monta, def.ordem, nome, def.opts);
+          if(r.error) continue;
+          await window._cacheGravar(nome, r.data || [], _metaDe(v));
+          if(def.banco) bancoMudou = true;
+          else if(def.aplicar) def.aplicar(r.data || []);
+        }catch(e){ console.warn('[versoes] recarga de ' + nome + ' falhou:', e && e.message); }
+      }
+      // banco de questões: se alguma tabela dele mudou e ele já estava montado, remonta da cópia nova
+      if(bancoMudou && window._QBank && window._QBank.completo && typeof window._hydrateQBank === 'function'){
+        try{
+          await window._hydrateQBank();
+          if(typeof window.rebuildCourses === 'function') window.rebuildCourses();
+          if(typeof window.rebuildSimulados === 'function') window.rebuildSimulados();
+          if(window.App && App._scheduleRender) App._scheduleRender();
+        }catch(e){ console.warn('[versoes] banco de questões:', e && e.message); }
+      }
+      if(mudou.length) console.log('[versoes] atualizado (' + (motivo || '') + '):', mudou.join(', '));
+      return { mudou: mudou, semVersao: !mapa };
+    })().finally(function(){ _conferindoP = null; });
+    return _conferindoP;
+  };
+  // Voltou para a aba depois de 10 minutos: confere de novo (barato) e aplica em silêncio.
+  if(typeof document !== 'undefined'){
+    document.addEventListener('visibilitychange', function(){
+      if(document.visibilityState !== 'visible' || !_cache.ativo || !_ultimaConferencia) return;
+      if(Date.now() - _ultimaConferencia < 10 * 60 * 1000) return;
+      window._conferirVersoes('voltou para a aba').catch(function(){});
+    });
+  }
+  // Blocos da cópia local (boot quente): entram no Store antes do portão.
+  window._blocosDoCache = function(){
+    const ent = window._cacheLer('conteudo.unit_blocks');
+    if(!ent) return false;
+    _aplicarBlocos(ent.rows);
+    _blocosP = Promise.resolve(ent.rows.length);
+    if(window._bootMarca) _bootMarca('blocos');
+    return true;
+  };
+  /* CACHE-CONTEUDO-FIM */
   /* BOOT-TELEMETRIA-INICIO */
   // Marcos do carregamento (ms desde a abertura da página; após um login,
   // desde a re-hidratação) e uma linha por boot em aluno.boot_metrics — é o
@@ -12053,6 +12354,7 @@ window.TAG_REGISTRY = {
   };
   window._bootNovaRodada = function(){
     window._boot.rodada++;
+    window._boot.cache = 'frio';   // vira 'quente' se a estrutura vier do disco
     if(window._boot.rodada > 1){ window._boot.marcas = {}; window._boot.t0 = performance.now(); window._boot.enviado = false; }
   };
   async function _bootEnviar(){
@@ -12076,6 +12378,52 @@ window.TAG_REGISTRY = {
   setTimeout(function(){ if(!window._boot.enviado && window._boot.marcas.portao != null) _bootEnviar(); }, 90000);
   /* BOOT-TELEMETRIA-FIM */
   /* FETCH-RESILIENTE-FIM */
+
+  // Mapeamentos das linhas do banco para o formato que o app usa — uma fonte
+  // só, usada no boot e na recarga do que mudou.
+  function _mapSubjects(rows){
+    return (rows || []).map(d => Object.assign({}, d, {
+      totalHours: d.total_hours, coordinatorPhoto: d.coordinator_photo, coordinatorRole: d.coordinator_role,
+      bioSummary: d.bio_summary, bioBody: d.bio_body,
+    }));
+  }
+  function _mapUnits(rows){
+    return (rows || []).map(u => Object.assign({}, u, { chapter_id: u.course_chapter_id != null ? u.course_chapter_id : u.chapter_id }));
+  }
+  // Tabelas que vivem na cópia local: como buscar cada uma e onde ela entra.
+  function _registrarTabelasDoBoot(){
+    const sb = window._sb.schema('conteudo'), csb = window._sb.schema('concursos'), qsb = window._sb.schema('questoes');
+    const reg = window._registrarTabelaConteudo;
+    const st = function(nome){ return (window.UbiqueStore && UbiqueStore[nome]) ? UbiqueStore[nome] : null; };
+    const troca = function(nome, mapa){ return function(rows){ const t = st(nome); if(t) t.replaceAll(mapa ? mapa(rows) : rows); }; };
+    reg('conteudo.subjects',        { monta: () => sb.from('subjects').select('*').order('position', { nullsFirst:false }), ordem: 'id', aplicar: troca('subjects', _mapSubjects) });
+    reg('conteudo.modules',         { monta: () => sb.from('modules').select('*').order('position'), ordem: 'id', aplicar: troca('modules') });
+    reg('conteudo.course_chapters', { monta: () => sb.from('course_chapters').select('*').order('position'), ordem: 'id', aplicar: troca('chapters', rows => rows.map(c => Object.assign({}, c))) });
+    reg('conteudo.units',           { monta: () => sb.from('units').select('*').order('position'), ordem: 'id', aplicar: troca('units', _mapUnits) });
+    reg('conteudo.unit_sections',   { monta: () => sb.from('unit_sections').select('*').order('position'), ordem: 'id', aplicar: troca('unit_sections') });
+    reg('conteudo.unit_downloads',  { monta: () => sb.from('unit_downloads').select('*').order('position'), ordem: 'id', aplicar: troca('unit_downloads') });
+    reg('conteudo.tags',            { monta: () => sb.from('tags').select('*'), ordem: 'id', aplicar: troca('tags') });
+    reg('conteudo.glossary_word_classes', { monta: () => sb.from('glossary_word_classes').select('*'), direto: true, aplicar: troca('glossary_word_classes') });
+    reg('conteudo.glossary_terms',  { monta: () => sb.from('glossary_terms').select('*'), ordem: 'id', aplicar: troca('glossary_terms') });
+    reg('conteudo.verbetes',        { monta: () => sb.from('verbetes').select('*'), ordem: 'id', aplicar: troca('verbetes') });
+    reg('concursos.exams',          { monta: () => csb.from('exams').select('*'), direto: true, aplicar: troca('exams') });
+    reg('concursos.exam_subjects',  { monta: () => csb.from('exam_subjects').select('*'), direto: true, aplicar: troca('exam_subjects') });
+    reg('concursos.editais',        { monta: () => csb.from('editais').select('*'), direto: true, aplicar: troca('editais') });
+    reg('concursos.edital_topics',  { monta: () => csb.from('edital_topics').select('*'), ordem: 'id', aplicar: troca('edital_topics') });
+    reg('concursos.edital_topic_units', { monta: () => csb.from('edital_topic_units').select('*'), ordem: 'id', aplicar: troca('edital_topic_units') });
+    // banco de questões (monta window._QBank a partir delas; a recarga remonta o banco)
+    reg('questoes.questions',        { monta: () => qsb.from('questions').select('*'), ordem: 'id', banco: true });
+    reg('questoes.tf_items',         { monta: () => qsb.from('tf_items').select('*'), ordem: 'id', banco: true });
+    reg('questoes.tf_item_comments', { monta: () => qsb.from('tf_item_comments').select('*'), ordem: 'id', banco: true });
+    reg('questoes.mc_options',       { monta: () => qsb.from('mc_options').select('*'), ordem: 'id', banco: true });
+    reg('questoes.reference_texts',  { monta: () => qsb.from('reference_texts').select('*'), ordem: 'id', banco: true });
+    reg('questoes.question_reference_texts', { monta: () => qsb.from('question_reference_texts').select('*'), ordem: 'question_id', banco: true });
+    reg('questoes.essay_criteria',   { monta: () => qsb.from('essay_criteria').select('*'), ordem: 'id', banco: true });
+    reg('questoes.essay_answer_models', { monta: () => qsb.from('essay_answer_models').select('*'), ordem: 'id', banco: true });
+    reg('questoes.question_edital_topics', { monta: () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), ordem: 'question_id', banco: true });
+    // blocos: recarga por diferença
+    reg('conteudo.unit_blocks',     { recarregar: _atualizarBlocos });
+  }
 
   // Unidades que o Início mostra em "Continuar de onde parou": a mais recente
   // de cada matéria (mesma regra do Renderers.inicio). Os blocos delas descem
@@ -12120,6 +12468,15 @@ window.TAG_REGISTRY = {
       // o render final acontece UMA vez quando a hidratação termina.
       window.__hydrating = true;
       const sb = window._sb.schema('conteudo');
+      // Fase 2 — cópia local: cede a vez UMA vez (o resto do script termina de
+      // definir Auth), abre a base do usuário e pede as versões ao servidor em
+      // paralelo com tudo. Sem usuário (tela de login) ou sem IndexedDB, nada
+      // disso existe e a carga segue pela rede como sempre.
+      await null;
+      _registrarTabelasDoBoot();
+      const _uidCache = ((window.Auth && Auth.getUser && Auth.getUser()) || {}).id || null;
+      const _copiaLocal = await window._cacheAbrir(_uidCache);
+      if(_copiaLocal) window._versoesPedir();
       // Config global (tag de afiliado Amazon) — fire-and-forget, não bloqueia.
       sb.from('platform_config').select('amazon_tag').eq('id', 'default').maybeSingle()
         .then(r => { window.__amazonTag = (r && r.data && r.data.amazon_tag) || ''; })
@@ -12146,7 +12503,7 @@ window.TAG_REGISTRY = {
         // Fase 4n — hidrata catálogo de tags (admin gerencia, aluno usa pra renderizar chips)
         try {
           const csb = window._sb.schema('conteudo');
-          const { data, error } = await _fetchAllRows(() => csb.from('tags').select('*'), 'id', 'tags');
+          const { data, error } = await _carregarTabela('conteudo.tags', () => csb.from('tags').select('*'), 'id', 'tags');
           if(!error){
             if(UbiqueStore.tags) UbiqueStore.tags.replaceAll(data || []);
             console.log('[hydrate tags] ✅', { tags: data?.length || 0 });
@@ -12160,9 +12517,9 @@ window.TAG_REGISTRY = {
         try {
           const csb = window._sb.schema('conteudo');
           const [wcR, gtR, vbR] = await Promise.all([
-            csb.from('glossary_word_classes').select('*'),
-            _fetchAllRows(() => csb.from('glossary_terms').select('*'), 'id', 'glossary_terms'),
-            _fetchAllRows(() => csb.from('verbetes').select('*'), 'id', 'verbetes'),
+            _carregarTabela('conteudo.glossary_word_classes', () => csb.from('glossary_word_classes').select('*'), 'id', 'glossary_word_classes', { direto: true }),
+            _carregarTabela('conteudo.glossary_terms', () => csb.from('glossary_terms').select('*'), 'id', 'glossary_terms'),
+            _carregarTabela('conteudo.verbetes', () => csb.from('verbetes').select('*'), 'id', 'verbetes'),
           ]);
           const gErrs = [wcR.error, gtR.error, vbR.error].filter(Boolean);
           if(!gErrs.length){
@@ -12240,11 +12597,11 @@ window.TAG_REGISTRY = {
         try {
           const csb = window._sb.schema('concursos');
           const [exR, esR, edR, etR, etuR] = await Promise.all([
-            csb.from('exams').select('*'),
-            csb.from('exam_subjects').select('*'),
-            csb.from('editais').select('*'),
-            _fetchAllRows(() => csb.from('edital_topics').select('*'), 'id', 'edital_topics'),
-            _fetchAllRows(() => csb.from('edital_topic_units').select('*'), 'id', 'edital_topic_units'),
+            _carregarTabela('concursos.exams', () => csb.from('exams').select('*'), 'id', 'exams', { direto: true }),
+            _carregarTabela('concursos.exam_subjects', () => csb.from('exam_subjects').select('*'), 'id', 'exam_subjects', { direto: true }),
+            _carregarTabela('concursos.editais', () => csb.from('editais').select('*'), 'id', 'editais', { direto: true }),
+            _carregarTabela('concursos.edital_topics', () => csb.from('edital_topics').select('*'), 'id', 'edital_topics'),
+            _carregarTabela('concursos.edital_topic_units', () => csb.from('edital_topic_units').select('*'), 'id', 'edital_topic_units'),
           ]);
           // Carrega cada tabela de forma INDEPENDENTE: se uma falhar (ex.: RLS em
           // exams), as outras (edital_topics/links) ainda carregam. Antes era
@@ -12267,13 +12624,16 @@ window.TAG_REGISTRY = {
 
       // Estrutura das matérias (sem os blocos: eles descem depois do portão).
       const [subjR, modR, chR, unR, secR, dlR] = await Promise.all([
-        _fetchAllRows(() => sb.from('subjects').select('*').order('position', { nullsFirst:false }), 'id', 'subjects'),
-        _fetchAllRows(() => sb.from('modules').select('*').order('position'), 'id', 'modules'),
-        _fetchAllRows(() => sb.from('course_chapters').select('*').order('position'), 'id', 'course_chapters'),
-        _fetchAllRows(() => sb.from('units').select('*').order('position'), 'id', 'units'),
-        _fetchAllRows(() => sb.from('unit_sections').select('*').order('position'), 'id', 'unit_sections'),
-        _fetchAllRows(() => sb.from('unit_downloads').select('*').order('position'), 'id', 'unit_downloads'),
+        _carregarTabela('conteudo.subjects', () => sb.from('subjects').select('*').order('position', { nullsFirst:false }), 'id', 'subjects'),
+        _carregarTabela('conteudo.modules', () => sb.from('modules').select('*').order('position'), 'id', 'modules'),
+        _carregarTabela('conteudo.course_chapters', () => sb.from('course_chapters').select('*').order('position'), 'id', 'course_chapters'),
+        _carregarTabela('conteudo.units', () => sb.from('units').select('*').order('position'), 'id', 'units'),
+        _carregarTabela('conteudo.unit_sections', () => sb.from('unit_sections').select('*').order('position'), 'id', 'unit_sections'),
+        _carregarTabela('conteudo.unit_downloads', () => sb.from('unit_downloads').select('*').order('position'), 'id', 'unit_downloads'),
       ]);
+      if([subjR, modR, chR, unR, secR, dlR].every(function(r){ return r.origem === 'cache'; })){
+        window._boot.cache = 'quente';   // pintou do disco
+      }
 
       // Carga RESILIENTE: um erro numa tabela (ex.: uma sessão que expirou no
       // meio do boot) NÃO pode zerar todo o conteúdo. Carregamos o que veio e
@@ -12287,17 +12647,9 @@ window.TAG_REGISTRY = {
       // Mapeia course_chapters → chapters (UI usa chapter_id legado)
       const chapters = (chR.data || []).map(c => Object.assign({}, c));
       // Units: o aluno espera u.chapter_id (legado) — mapeia course_chapter_id
-      const units = (unR.data || []).map(u => Object.assign({}, u, {
-        chapter_id: u.course_chapter_id != null ? u.course_chapter_id : u.chapter_id,
-      }));
+      const units = _mapUnits(unR.data);
       // Subjects: mapeia snake_case (Supabase) → camelCase (renderers do aluno)
-      const subjects = (subjR.data || []).map(d => Object.assign({}, d, {
-        totalHours: d.total_hours,
-        coordinatorPhoto: d.coordinator_photo,
-        coordinatorRole: d.coordinator_role,
-        bioSummary: d.bio_summary,
-        bioBody: d.bio_body,
-      }));
+      const subjects = _mapSubjects(subjR.data);
 
       // Só substitui a tabela que veio SEM erro; se falhou, preserva o que já
       // existe (não apaga o conteúdo por causa de uma falha transitória).
@@ -12315,7 +12667,9 @@ window.TAG_REGISTRY = {
       // Store do aluno precisam existir para saber quais são.)
       try{
         rebuildCourses(); _ensureStoreInit();
-        const _prioritarias = _unidadesPrioritarias(4);
+        // Cópia local com os blocos: entram inteiros agora (nada desce da rede);
+        // a conferência de versões, depois do portão, traz só o que mudou.
+        const _prioritarias = window._blocosDoCache() ? [] : _unidadesPrioritarias(4);
         if(_prioritarias.length){
           await Promise.all(_prioritarias.map(function(id){ return window._hydrateBlocksForUnit(id).catch(function(){ return 0; }); }));
           if(window._bootMarca) _bootMarca('prioridade');
@@ -12338,14 +12692,14 @@ window.TAG_REGISTRY = {
       window._hydrateQBank = async function _hydrateQBank(){
         const qsb = window._sb.schema('questoes');
         const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR, qetR] = await Promise.all([
-          _fetchAllRows(() => qsb.from('questions').select('*'), 'id', 'questions'),
-          _fetchAllRows(() => qsb.from('tf_items').select('*'), 'id', 'tf_items'),
-          _fetchAllRows(() => qsb.from('tf_item_comments').select('*'), 'id', 'tf_item_comments'),
-          _fetchAllRows(() => qsb.from('mc_options').select('*'), 'id', 'mc_options'),
-          _fetchAllRows(() => qsb.from('reference_texts').select('*'), 'id', 'reference_texts'),
-          _fetchAllRows(() => qsb.from('question_reference_texts').select('*'), 'question_id', 'question_reference_texts'),
-          _fetchAllRows(() => qsb.from('essay_criteria').select('*'), 'id', 'essay_criteria'),
-          _fetchAllRows(() => qsb.from('essay_answer_models').select('*'), 'id', 'essay_answer_models'),
+          _carregarTabela('questoes.questions', () => qsb.from('questions').select('*'), 'id', 'questions'),
+          _carregarTabela('questoes.tf_items', () => qsb.from('tf_items').select('*'), 'id', 'tf_items'),
+          _carregarTabela('questoes.tf_item_comments', () => qsb.from('tf_item_comments').select('*'), 'id', 'tf_item_comments'),
+          _carregarTabela('questoes.mc_options', () => qsb.from('mc_options').select('*'), 'id', 'mc_options'),
+          _carregarTabela('questoes.reference_texts', () => qsb.from('reference_texts').select('*'), 'id', 'reference_texts'),
+          _carregarTabela('questoes.question_reference_texts', () => qsb.from('question_reference_texts').select('*'), 'question_id', 'question_reference_texts'),
+          _carregarTabela('questoes.essay_criteria', () => qsb.from('essay_criteria').select('*'), 'id', 'essay_criteria'),
+          _carregarTabela('questoes.essay_answer_models', () => qsb.from('essay_answer_models').select('*'), 'id', 'essay_answer_models'),
           // A ETIQUETA questão→tópico do edital. É o que o admin grava quando a
           // questão entra numa unidade (_ueLinkQuestionsToUnitTopics) — e que o
           // filtro do Banco IGNORAVA: ele só olhava o caminho indireto
@@ -12353,7 +12707,7 @@ window.TAG_REGISTRY = {
           // questões de HB tinham a etiqueta do Período Colonial e ZERO unidades
           // tinham o vínculo indireto — o trabalho do admin era jogado fora e o
           // aluno via 13 de 25.
-          _fetchAllRows(() => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), 'question_id', 'question_edital_topics'),
+          _carregarTabela('questoes.question_edital_topics', () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), 'question_id', 'question_edital_topics'),
         ]);
         // tf_item_comments, essay_criteria e essay_answer_models são EXTRAS:
         // se falharem, NÃO derrubam o banco — só ficam sem os dados extras.
@@ -12821,6 +13175,8 @@ window.TAG_REGISTRY = {
       if(window._bootMarca) _bootMarca('portao');
       window._ensureBlocos()
         .catch(function(){})
+        .then(function(){ return window._conferirVersoes('boot'); })   // cópia local: recarrega só o que mudou
+        .catch(function(){})
         .then(function(){ _dispararBanco(); return _carregarSimulados(); })
         .catch(function(e){ console.warn('[hydrate 2º plano]', e); });
 
@@ -13064,7 +13420,10 @@ window._hydrateDirectory = async function(){
       // Carga completa dos blocos (2º plano do boot): quem já está lendo uma
       // unidade com os blocos na tela não é redesenhado (perderia a posição).
       // As outras páginas redesenham para trocar esqueleto por número.
-      if(window.__blocosSilencioso && evt.type === 'unit_blocks:replace' && document.querySelector('#blockStage .block-wrap')) return;
+      if(window.__blocosSilencioso && evt.type === 'unit_blocks:replace' && document.querySelector('#blockStage .block-wrap')){
+        if(window.__blocosMudouUnidadeAtual && window._avisarUnidadeAtualizada) window._avisarUnidadeAtualizada();
+        return;
+      }
       _renderSoon();
     }
   });
@@ -68087,6 +68446,11 @@ window.App = App;
 
 // Logout global — bulletproof
 window.doLogout = async function(){
+  // 0) A cópia local do conteúdo é da conta que está saindo: some junto.
+  try{
+    const _uidSaindo = ((window.Auth && Auth.getUser && Auth.getUser()) || {}).id;
+    if(window._cacheApagar) await window._cacheApagar(_uidSaindo);
+  }catch(_){}
   // 1) Supabase sign-out (importante pra invalidar JWT do servidor)
   //    Com timeout 2s — em alguns browsers signOut() trava sem rejeitar,
   //    o que prendia o doLogout no await e impedia o reload.
