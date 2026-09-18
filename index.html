@@ -12005,11 +12005,13 @@ window.TAG_REGISTRY = {
     _blocosUnidadeEmCurso[chave] = p;
     try{ return await p; } finally { delete _blocosUnidadeEmCurso[chave]; }
   };
-  /* ── Blocos de TODAS as unidades: porta única, em 2º plano ───────────────
-     O Início não espera por isto. Quando termina, o Store recebe tudo de uma
-     vez (1 evento → 1 redesenho) e _blocosCompletos vira true: só então as
-     barras de progresso e as contagens que somam blocos mostram número. Quem
-     está lendo uma unidade que já tinha os blocos na tela não é redesenhado. */
+  /* ── Blocos de TODAS as unidades: porta única ────────────────────────────
+     O portão do Início espera por isto (uma pintura só, com tudo). Quando
+     termina, o Store recebe tudo de uma vez e _blocosCompletos vira true —
+     as barras de progresso e as contagens que somam blocos só mostram número
+     com ele completo (rede de segurança para o caso de o teto de tempo do
+     portão estourar). Quem está lendo uma unidade que já tinha os blocos na
+     tela não é redesenhado por uma recarga. */
   window._blocosCompletos = false;
   window._blocosReiniciar = function(){ _blocosP = null; window._blocosCompletos = false; };
   window._ensureBlocos = function(){
@@ -12285,8 +12287,10 @@ window.TAG_REGISTRY = {
   let _conferindoP = null;
   window._conferirVersoes = function(motivo){
     if(_conferindoP) return _conferindoP;
+    const silencioso = motivo !== 'boot';   // fora do boot, o que muda entra no Store sem redesenhar a tela
     _conferindoP = (async function(){
       if(!_cache.ativo) return { mudou: [] };
+      window.__conteudoSilencioso = silencioso;
       const mapa = await window._versoesPedir();
       const nomes = Object.keys(_registroConteudo);
       const mudou = nomes.filter(function(nome){
@@ -12315,12 +12319,12 @@ window.TAG_REGISTRY = {
           await window._hydrateQBank();
           if(typeof window.rebuildCourses === 'function') window.rebuildCourses();
           if(typeof window.rebuildSimulados === 'function') window.rebuildSimulados();
-          if(window.App && App._scheduleRender) App._scheduleRender();
+          if(!silencioso && window.App && App._scheduleRender) App._scheduleRender();
         }catch(e){ console.warn('[versoes] banco de questões:', e && e.message); }
       }
       if(mudou.length) console.log('[versoes] atualizado (' + (motivo || '') + '):', mudou.join(', '));
       return { mudou: mudou, semVersao: !mapa };
-    })().finally(function(){ _conferindoP = null; });
+    })().finally(function(){ _conferindoP = null; window.__conteudoSilencioso = false; });
     return _conferindoP;
   };
   // Voltou para a aba depois de 10 minutos: confere de novo (barato) e aplica em silêncio.
@@ -12423,35 +12427,6 @@ window.TAG_REGISTRY = {
     reg('questoes.question_edital_topics', { monta: () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), ordem: 'question_id', banco: true });
     // blocos: recarga por diferença
     reg('conteudo.unit_blocks',     { recarregar: _atualizarBlocos });
-  }
-
-  // Unidades que o Início mostra em "Continuar de onde parou": a mais recente
-  // de cada matéria (mesma regra do Renderers.inicio). Os blocos delas descem
-  // ANTES do portão abrir, para o cartão sair com a porcentagem e o link certos.
-  function _unidadesPrioritarias(max){
-    try{
-      const st = (window.Store && Store.get) ? Store.get() : null;
-      const views = (st && st.unitViews) ? Object.entries(st.unitViews) : [];
-      if(!views.length) return [];
-      views.sort(function(a, b){ return (b[1].lastSeenAt || 0) - (a[1].lastSeenAt || 0); });
-      const idx = {};
-      (window.COURSES || []).filter(Boolean).forEach(function(c){
-        (c.modules || []).forEach(function(m){
-          Util.unitsOfModule(m).forEach(function(e){ idx[e.unit.id] = { c: c, u: e.unit }; });
-        });
-      });
-      const porMateria = {}, out = [];
-      for(let i = 0; i < views.length && out.length < (max || 4); i++){
-        const id = views[i][0], v = views[i][1];
-        if(v.completed) continue;
-        const hit = idx[id];
-        if(!hit || porMateria[hit.c.id]) continue;
-        porMateria[hit.c.id] = true;
-        const sid = (hit.u._storeId != null) ? String(hit.u._storeId) : String(hit.u.id || '').replace(/^u/, '');
-        if(sid) out.push(sid);
-      }
-      return out;
-    }catch(_){ return []; }
   }
 
   async function hydrateFromSupabase(){
@@ -12662,19 +12637,13 @@ window.TAG_REGISTRY = {
         UbiqueStore.unit_downloads.replaceAll(dlR.data || []);
       }
       if(window._bootMarca) _bootMarca('estrutura');
-      // Blocos das unidades do "continuar de onde parou" ANTES do portão: o
-      // cartão do Início sai com a porcentagem e o link certos. (COURSES e o
-      // Store do aluno precisam existir para saber quais são.)
+      // COURSES e o Store do aluno já podem existir (as hidratações do aluno
+      // começam aqui, em paralelo com o resto); cópia local com os blocos:
+      // entram inteiros agora, sem rede.
       try{
         rebuildCourses(); _ensureStoreInit();
-        // Cópia local com os blocos: entram inteiros agora (nada desce da rede);
-        // a conferência de versões, depois do portão, traz só o que mudou.
-        const _prioritarias = window._blocosDoCache() ? [] : _unidadesPrioritarias(4);
-        if(_prioritarias.length){
-          await Promise.all(_prioritarias.map(function(id){ return window._hydrateBlocksForUnit(id).catch(function(){ return 0; }); }));
-          if(window._bootMarca) _bootMarca('prioridade');
-        }
-      }catch(e){ console.warn('[hydrate] prioridade:', e && e.message); }
+        window._blocosDoCache();
+      }catch(e){ console.warn('[hydrate] cópia dos blocos:', e && e.message); }
 
       // Fase 4m — banco de avatares (admin gerencia, aluno escolhe em /conta).
       // SAIU DO BOOT: era uma ida-e-volta inteira no meio da fila de hidratação
@@ -12959,7 +12928,7 @@ window.TAG_REGISTRY = {
          (o cache é chaveado pela IDENTIDADE do window._QBank, e a hidratação
          troca o objeto). Ao terminar, refazemos COURSES + render pra os números
          se corrigirem sem o aluno precisar fazer nada. */
-      const _dispararBanco = function(){ window._ensureQBank().then(function(ok){
+      const _dispararBanco = function(){ return window._ensureQBank().then(function(ok){
         if(!ok) return;
         if(window._bootMarca) _bootMarca('banco');
         try{
@@ -13164,21 +13133,42 @@ window.TAG_REGISTRY = {
       // ÚNICA dependência de ordem preservada: "meu perfil" TEM que rodar
       // depois da vitrine — ele sobrescreve a MINHA linha em user_profiles com
       // o que só eu enxergo. Por isso os dois ficam encadeados na MESMA tarefa.
-      await _pacotesP;
-      if(window._bootMarca) _bootMarca('pacotes');
-      /* ── PORTÃO DO INÍCIO ─────────────────────────────────────────────────
-         Daqui em diante o aluno já tem: estrutura das matérias, concursos,
-         glossário, perfis, salas e os blocos das unidades do "continuar". O
-         Início desenha COMPLETO. O resto (blocos de todas as unidades, banco
-         de questões, simulados) desce em 2º plano, sem segurar a tela. */
-      window.__hydrating = false;
-      if(window._bootMarca) _bootMarca('portao');
-      window._ensureBlocos()
+      /* ── PORTÃO DO INÍCIO: UMA pintura, com tudo pronto ──────────────────
+         Testado pelo dono (18/09): abrir cedo e completar a tela aos poucos
+         parecia plataforma quebrada (cartão brotando, número mudando, tudo
+         piscando). Então o Início só desenha quando TUDO que ele mostra está
+         em memória — e nada redesenha sozinho depois. Tudo desce em paralelo,
+         com teto de tempo por parte (uma parte travada não prende as outras):
+         pacotes pequenos, blocos de todas as unidades + conferência de versões
+         (cópia local), banco de questões, simulados, dados do aluno, sessão
+         (colegas, notificações) e as partes do Início que vêm do servidor. */
+      const _limite = function(p, ms, rotulo){
+        return Promise.race([
+          Promise.resolve(p).catch(function(e){ console.warn('[portão] ' + rotulo + ':', e && e.message); }),
+          _dorme(ms).then(function(){ console.warn('[portão] ' + rotulo + ' passou de ' + ms + ' ms — seguindo sem esperar'); })
+        ]);
+      };
+      const _blocosP2 = window._ensureBlocos()
         .catch(function(){})
         .then(function(){ return window._conferirVersoes('boot'); })   // cópia local: recarrega só o que mudou
-        .catch(function(){})
-        .then(function(){ _dispararBanco(); return _carregarSimulados(); })
-        .catch(function(e){ console.warn('[hydrate 2º plano]', e); });
+        .catch(function(){});
+      const _bancoP = _blocosP2.then(function(){ return _dispararBanco(); });
+      const _simP = _blocosP2.then(function(){ return _carregarSimulados(); });
+      const _alunoP = (window.Store && typeof Store.hidratacaoPronta === 'function') ? Store.hidratacaoPronta() : Promise.resolve();
+      const _sessaoP = window._sessaoPronta || Promise.resolve();
+      const _inicioP = (typeof window._iniPreparar === 'function') ? window._iniPreparar() : Promise.resolve();
+      await Promise.all([
+        _limite(_pacotesP, 20000, 'pacotes'),
+        _limite(_blocosP2, 25000, 'blocos'),
+        _limite(_bancoP, 25000, 'banco de questões'),
+        _limite(_simP, 25000, 'simulados'),
+        _limite(_alunoP, 15000, 'dados do aluno'),
+        _limite(_sessaoP, 10000, 'sessão'),
+        _limite(_inicioP, 12000, 'início'),
+      ]);
+      if(window._bootMarca) _bootMarca('pacotes');
+      window.__hydrating = false;
+      if(window._bootMarca) _bootMarca('portao');
 
       // Sem await: só agendam a si mesmos. Ficam DEPOIS do grupo porque a
       // antena das salas conta com as participações (bloco acima) já carregadas.
@@ -13424,6 +13414,9 @@ window._hydrateDirectory = async function(){
         if(window.__blocosMudouUnidadeAtual && window._avisarUnidadeAtualizada) window._avisarUnidadeAtualizada();
         return;
       }
+      // Atualização fora do boot (voltou para a aba): entra no Store em silêncio;
+      // a próxima navegação já usa o dado novo. Nada muda na frente do aluno.
+      if(window.__conteudoSilencioso) return;
       _renderSoon();
     }
   });
@@ -16858,6 +16851,7 @@ const Store = (function(){
     }catch(e){ console.warn('[hydrate simulados ex]', e); }
   }
 
+  let _hidratacaoP = null;   // resolve quando a rajada de hidratações do usuário assenta (portão do Início)
   return {
     init(userId, course){
       const novaChave = `ubique.coursePlatform.v3.${userId}.${course.id}`;
@@ -16881,42 +16875,39 @@ const Store = (function(){
         _persist();
         _deckPronto = false;                // sem cache: esperar a hidratação
       }
-      // Fase 4c — hidrata respostas Quiz/Essay do Supabase (assíncrono,
-      // fire-and-forget; quando termina, _emit dispara re-render)
-      _hydrateAnswersFromSupabase().catch(()=>{});
-      // Fase 4f — hidrata progresso de unidade (unitViews, completed) do Supabase
-      _hydrateUnitProgressFromSupabase().catch(()=>{});
-      // Fase 4f+ — hidrata bookmarks (checks de bloco) do Supabase
-      _hydrateBookmarksFromSupabase().catch(()=>{});
-      // Fase 4e — hidrata notes, reading_list, highlights do Supabase
-      _hydrateNotesFromSupabase().catch(()=>{});
-      // Fase 0 dos flashcards — deck próprio + tags privadas
-      _hydrateDeckFromSupabase().catch(()=>{});
-      _hydrateUserTagsFromSupabase().catch(()=>{});
-      // Fase 5A — agendamento (SM-2) + configurações por aluno
-      _hydrateSrsFromSupabase().catch(()=>{});
-      _hydrateSrsSettingsFromSupabase().catch(()=>{});
-      _hydrateActiveSessionFromSupabase().catch(()=>{});
-      _hydrateLinksFromSupabase().catch(()=>{});
-      _hydrateLeiturasFromSupabase().catch(()=>{});
-      _hydratePrefsFromSupabase().catch(()=>{});
-      _hydrateReadingListFromSupabase().catch(()=>{});
-      _hydrateHighlightsFromSupabase().catch(()=>{});
-      // Fase 4h — hidrata flashcards + simulados do Supabase
-      _hydrateFlashcardsFromSupabase().catch(()=>{});
-      // Cadernos (aba "Cadernos" da página Notas)
-      _hydrateCadernosFromSupabase().catch(()=>{});
-      // D2a — cadernos avulsos + pastas (página Cadernos)
-      _hydrateCadernosAvulsosFromSupabase().catch(()=>{});
+      // Hidratações do usuário (assíncronas). Cada uma escreve no _state e
+      // avisa os assinantes; o conjunto vira UMA promessa — o portão do Início
+      // espera por ela para pintar a tela já com os números do aluno.
+      const _ps = [];
+      const _h = function(p){ _ps.push(Promise.resolve(p).catch(()=>{})); };
+      _h(_hydrateAnswersFromSupabase());          // Fase 4c — respostas Quiz/Essay
+      _h(_hydrateUnitProgressFromSupabase());     // Fase 4f — progresso de unidade (unitViews, completed)
+      _h(_hydrateBookmarksFromSupabase());        // Fase 4f+ — bookmarks (checks de bloco)
+      _h(_hydrateNotesFromSupabase());            // Fase 4e — notes
+      _h(_hydrateDeckFromSupabase());             // Fase 0 dos flashcards — deck próprio
+      _h(_hydrateUserTagsFromSupabase());         // tags privadas
+      _h(_hydrateSrsFromSupabase());              // Fase 5A — agendamento (SM-2)
+      _h(_hydrateSrsSettingsFromSupabase());      // configurações por aluno
+      _h(_hydrateActiveSessionFromSupabase());
+      _h(_hydrateLinksFromSupabase());
+      _h(_hydrateLeiturasFromSupabase());
+      _h(_hydratePrefsFromSupabase());
+      _h(_hydrateReadingListFromSupabase());
+      _h(_hydrateHighlightsFromSupabase());
+      _h(_hydrateFlashcardsFromSupabase());       // Fase 4h — flashcards
+      _h(_hydrateCadernosFromSupabase());         // Cadernos (aba "Cadernos" da página Notas)
+      _h(_hydrateCadernosAvulsosFromSupabase());  // D2a — cadernos avulsos + pastas
       // Encadeia: depois das tentativas, hidrata as respostas item-a-item da última.
-      _hydrateSimuladosFromSupabase()
+      _h(_hydrateSimuladosFromSupabase()
         .then(() => Promise.all([
           _hydrateAllLastSimuladoResponses(),  // C/E e MC
           _hydrateAllLastSimuladoEssays(),     // S1.1 — discursivas
-        ]))
-        .catch(()=>{});
+        ])));
+      _hidratacaoP = Promise.allSettled(_ps);
       return _state;
     },
+    // Espera a rajada de hidratações do usuário assentar (nunca rejeita).
+    hidratacaoPronta(){ return _hidratacaoP || Promise.resolve(); },
     get(){ return _state; },
     // A página Cadernos chama ao abrir: re-busca do servidor (idempotente,
     // 2 selects) — garante sidebar completa mesmo se o boot pegou onda ruim.
@@ -26084,6 +26075,7 @@ if(typeof document !== 'undefined' && !window._accessVisBound){
 
 async function initUserSession(user){
   if(!user || !user.id) return;
+  const _prontos = [];   // o portão do Início espera por isto (colegas, notificações)
   // Preferências de exibição (tema/tamanho/fonte) do PERFIL — cross-device.
   if(typeof window._loadUserPrefs === 'function'){
     // O tour de primeiro acesso depende de saber se o aluno já viu (marca que
@@ -26109,7 +26101,7 @@ async function initUserSession(user){
   // 3) Notificações: hidrata + (re)liga a antena realtime do usuário ATUAL
   if(window.Notifications){
     window._lastNotifTotal = undefined; // força re-render na 1ª hidratação
-    Notifications.hydrate(user.id).then(() => { window._notifHydrateDone = true; if(window._refreshNotifsUI) window._refreshNotifsUI(); }).catch(() => { window._notifHydrateDone = true; if(window._refreshNotifsUI) window._refreshNotifsUI(); });
+    _prontos.push(Notifications.hydrate(user.id).then(() => { window._notifHydrateDone = true; if(window._refreshNotifsUI) window._refreshNotifsUI(); }).catch(() => { window._notifHydrateDone = true; if(window._refreshNotifsUI) window._refreshNotifsUI(); }));
     if(typeof Notifications.subscribeRealtime === 'function'){
       // Cancela qualquer antena anterior (de outro usuário) e religa pro atual.
       if(typeof Notifications.unsubscribeRealtime === 'function') Notifications.unsubscribeRealtime();
@@ -26131,11 +26123,12 @@ async function initUserSession(user){
   // 3.5) Diretório de perfis (vitrine) — a leitura do boot pode ter saído
   //      como anônima (42501) se a sessão ainda não tinha restaurado; aqui a
   //      sessão JÁ existe, então esta chamada nunca volta vazia por corrida.
-  if(typeof window._hydrateDirectory === 'function') window._hydrateDirectory().catch(()=>{});
+  if(typeof window._hydrateDirectory === 'function') _prontos.push(window._hydrateDirectory().catch(()=>{}));
   // 4) Follows
-  if(window.Follows && typeof Follows.hydrate === 'function') Follows.hydrate(user.id).catch(()=>{});
+  if(window.Follows && typeof Follows.hydrate === 'function') _prontos.push(Follows.hydrate(user.id).catch(()=>{}));
   // 5) Acesso do dia (entrou na plataforma — conta mesmo que só leia um texto)
   try{ _recordPlatformAccess(user.id); }catch(_){}
+  window._sessaoPronta = Promise.allSettled(_prontos);
 }
 window.initUserSession = initUserSession;
 
@@ -37959,8 +37952,8 @@ function progressBarSkeletonHTML(){
 // "Meus concursos" — tela inicial. Mesma estética de "Seus cursos", mas os
 // cards são CONCURSOS. Os do aluno abrem; os outros aparecem como "OBTER".
 // ── Avisos do admin (banner no topo do Início; vários = bolinhas) ──
-async function _iniLoadAvisos(examId){
-  const el = document.getElementById('iniAvisos'); if(!el || !window._sb) return;
+async function _iniLoadAvisos(examId, elArg){
+  const el = elArg || document.getElementById('iniAvisos'); if(!el || !window._sb) return;
   let rows = [];
   try{
     const r = await window._sb.schema('conteudo').from('avisos')
@@ -37989,8 +37982,8 @@ async function _iniLoadAvisos(examId){
 }
 
 // ── Feed "Acontecimentos" (fórum em alta + novos simulados do concurso) ──
-async function _iniLoadFeed(examId){
-  const el = document.getElementById('iniFeed'); if(!el) return;
+async function _iniLoadFeed(examId, elArg){
+  const el = elArg || document.getElementById('iniFeed'); if(!el) return;
   if(!window._sb || !examId){ el.innerHTML = '<div class="ini-ph"><span class="ini-ph-t">Sem novidades no concurso por enquanto.</span></div>'; return; }
   const _agoT = function(ts){ const d = Math.floor((Date.now() - ts) / 86400000); if(d <= 0) return 'hoje'; if(d === 1) return 'ontem'; if(d < 30) return 'há ' + d + ' dias'; try{ return new Date(ts).toLocaleDateString('pt-BR'); }catch(_){ return ''; } };
   const cards = [];
@@ -38181,9 +38174,9 @@ async function _iniLoadFeed(examId){
 }
 
 // ── Colegas agora (amigos ONLINE + o que estão fazendo, via presença) ──
-async function _iniLoadColegas(){
-  const rowEl = document.getElementById('iniColegasRow');
-  const logEl = document.getElementById('iniColegasLog');
+async function _iniLoadColegas(rowArg, logArg){
+  const rowEl = rowArg || document.getElementById('iniColegasRow');
+  const logEl = logArg || document.getElementById('iniColegasLog');
   if(!rowEl && !logEl) return;
   const empty = function(msg){ if(rowEl) rowEl.innerHTML = ''; if(logEl) logEl.innerHTML = '<div class="ini-mate-none">' + Util.esc(msg) + '</div>'; };
   const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
@@ -38497,11 +38490,15 @@ Renderers.inicio = function(){
         if(course && window.FSModal && typeof renderCourseBioModal === 'function') FSModal.open([course], 0, renderCourseBioModal);
       });
     });
-    // Etapa 4: feed Acontecimentos + Colegas agora (assíncronos, best-effort).
-    try{ if(typeof _iniLoadFeed === 'function') _iniLoadFeed(exId); }catch(_){}
-    try{ if(typeof _iniLoadColegas === 'function') _iniLoadColegas(); }catch(_){}
-    // Etapa 5: banner de avisos do admin (some sozinho se não houver ativo).
-    try{ if(typeof _iniLoadAvisos === 'function') _iniLoadAvisos(exId); }catch(_){}
+    // Etapa 4/5: feed, colegas e avisos. Na PRIMEIRA pintura depois do boot eles
+    // já vieram prontos (preparados antes do portão e encaixados no mount) —
+    // não se busca de novo, senão a tela mudaria na frente do aluno.
+    if(!window._iniPreConsumido){
+      try{ if(typeof _iniLoadFeed === 'function') _iniLoadFeed(exId); }catch(_){}
+      try{ if(typeof _iniLoadColegas === 'function') _iniLoadColegas(); }catch(_){}
+      try{ if(typeof _iniLoadAvisos === 'function') _iniLoadAvisos(exId); }catch(_){}
+    }
+    window._iniPreConsumido = false;
     // Tooltip (apelido no hover dos círculos): o data-tip só funciona com o
     // setupQuickTooltips ligado no container da página.
     try{ const pg = document.querySelector('.ini-page'); if(pg && typeof setupQuickTooltips === 'function') setupQuickTooltips(pg); }catch(_){}
@@ -38544,6 +38541,42 @@ Renderers.inicio = function(){
     <div class="ini-sec-h" data-a="3"><span>Suas matérias</span><i></i><span class="ini-hint">3 últimas acessadas</span></div>
     ${matsHtml}
   </div>`;
+};
+
+/* Partes do Início que dependem do servidor (feed, colegas, avisos) são
+   PREPARADAS durante o boot, em elementos soltos, e encaixadas na primeira
+   pintura — assim o Início aparece inteiro de uma vez, sem cartão brotando
+   depois e empurrando o resto para baixo. */
+window._iniPreparar = function(){
+  const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(!me || !me.id || !window._sb) return Promise.resolve();
+  const exId = (typeof activeExamId === 'function') ? (activeExamId() || '') : '';
+  const feed = document.createElement('div'); feed.className = 'ini-feed'; feed.id = 'iniFeed';
+  const row = document.createElement('div'); row.className = 'ini-mates-row'; row.id = 'iniColegasRow';
+  const log = document.createElement('div'); log.className = 'ini-mate-log'; log.id = 'iniColegasLog';
+  const avisos = document.createElement('div'); avisos.id = 'iniAvisos'; avisos.hidden = true;
+  const pre = { exId: String(exId), feed: feed, row: row, log: log, avisos: avisos, pronto: false };
+  window._iniPre = pre;
+  const g = function(p){ return Promise.resolve(p).catch(function(e){ console.warn('[início] preparo:', e && e.message); }); };
+  return Promise.all([
+    g((typeof _iniLoadFeed === 'function') ? _iniLoadFeed(exId, feed) : null),
+    g((typeof _iniLoadColegas === 'function') ? _iniLoadColegas(row, log) : null),
+    g((typeof _iniLoadAvisos === 'function') ? _iniLoadAvisos(exId, avisos) : null)
+  ]).then(function(){ pre.pronto = true; });
+};
+// Encaixa o que foi preparado no lugar dos espaços do Início — no mount, que
+// roda no MESMO quadro da pintura (nada muda depois na frente do aluno).
+Renderers.inicio.mount = function(stage){
+  const pre = window._iniPre;
+  if(!pre || !pre.pronto) return;
+  const exId = (typeof activeExamId === 'function') ? (activeExamId() || '') : '';
+  window._iniPre = null;                                // serve uma vez só
+  if(String(pre.exId) !== String(exId)) return;         // concurso mudou no meio: caminho normal
+  [['iniFeed', pre.feed], ['iniColegasRow', pre.row], ['iniColegasLog', pre.log], ['iniAvisos', pre.avisos]].forEach(function(par){
+    const alvo = stage.querySelector('#' + par[0]);
+    if(alvo && par[1]) alvo.replaceWith(par[1]);
+  });
+  window._iniPreConsumido = true;
 };
 
 Renderers.myExams = function(){
