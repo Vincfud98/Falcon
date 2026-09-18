@@ -1920,6 +1920,12 @@ html[data-theme="light"] .module-overlay{
 .catalog-card:hover .cprog-label,
 .module-card:hover .cprog-label,
 .unit-card:hover .cprog-label{ opacity:1; }
+/* Progresso ainda sem os blocos carregados (2º plano do boot): barra neutra
+   pulsando, sem número — nunca um "0%" falso. */
+.cprog-sk .cprog-fill{width:38%;background:rgba(255,255,255,.28);animation:cprog-sk 1.3s ease-in-out infinite}
+@keyframes cprog-sk{0%,100%{opacity:.35}50%{opacity:.85}}
+.ini-resume-prog.sk .fl{width:38%;background:rgba(200,169,126,.35);animation:cprog-sk 1.3s ease-in-out infinite}
+.rail-card-bar-sk span{width:38%;opacity:.4;animation:cprog-sk 1.3s ease-in-out infinite}
 
 /* Continue-learning rail */
 .rail{margin-top:2.5rem}
@@ -11466,6 +11472,9 @@ window.TAG_REGISTRY = {
   function _countSubjectContent(subjectId){
     const out = { videos: 0, quiz: 0, essay: 0 };
     if(!window.UbiqueStore || subjectId == null) return out;
+    // Blocos ainda descendo (2º plano do boot): sem número parcial — os
+    // cartões escondem o que é nulo e preenchem quando a carga completa.
+    if(!window._blocosCompletos) return { videos: null, quiz: null, essay: null };
     // Normalize String() — subjects.id é integer, mas pode chegar string
     // de algumas fontes (cache, query string). Mesmo padrão aplicado no admin.
     const sidStr = String(subjectId);
@@ -11840,11 +11849,109 @@ window.TAG_REGISTRY = {
   };
   const _FETCH_ESPERAS = [1200, 2500];   // 2 novas tentativas por página
   const _dorme = ms => new Promise(r => setTimeout(r, ms));
-  // opts.pag: tamanho da página (tabela pesada → página menor = statement mais
-  // curto, longe do timeout do banco).
+  /* ── Busca de TODAS as linhas de uma tabela ──────────────────────────────
+     Dois modos:
+     · OFFSET (padrão): monta() traz o próprio .order(); páginas por .range().
+       No banco, cada página ordena e pula a tabela inteira — serve para as
+       tabelas pequenas (1 página).
+     · CHAVE (opts.chave = coluna única, ex. 'id'): páginas pela chave
+       (.gt(última).order(chave).limit(pag)) — cada página custa só as próprias
+       linhas. Nesse modo monta(opcoes) NÃO leva .order() e repassa `opcoes`
+       ao .select('*', opcoes); a ordem final é feita aqui (opts.ordenar =
+       ['position','id']). Com opts.paralelo = N e chave numérica, a faixa de
+       ids é dividida e descida em N pedaços ao mesmo tempo (unit_blocks).
+     Erro passageiro (timeout, 503, rede) repete; erro definitivo devolve
+     { data: parcial, error } — quem chama NÃO aplica dado parcial. */
+  const _tentar = async function(pedir, rotulo, marca){
+    for(let tent = 0; ; tent++){
+      const r = await pedir();
+      if(!r.error || !window._ehErroPassageiro(r.error) || tent >= _FETCH_ESPERAS.length) return r;
+      console.warn('[fetchAll] ' + (rotulo || '?') + ' ' + (marca || '') + ': erro passageiro (' + r.error.message + ') — repetindo em ' + _FETCH_ESPERAS[tent] + 'ms');
+      await _dorme(_FETCH_ESPERAS[tent]);
+    }
+  };
+  // Ordena no cliente como o banco ordenaria em ASC (nulo por último).
+  window._ordenarLinhas = function(rows, campos){
+    const cs = (campos && campos.length) ? campos : ['id'];
+    return (rows || []).slice().sort(function(a, b){
+      for(let i = 0; i < cs.length; i++){
+        const c = cs[i], x = a[c], y = b[c];
+        const xn = (x == null), yn = (y == null);
+        if(xn && yn) continue;
+        if(xn) return 1;
+        if(yn) return -1;
+        if(x < y) return -1;
+        if(x > y) return 1;
+      }
+      return 0;
+    });
+  };
+  async function _fetchPorChave(monta, chave, rotulo, pag, opts){
+    const ordenar = opts.ordenar || [chave];
+    const pedirPagina = function(cursor, teto){
+      return _tentar(function(){
+        let q = monta().order(chave, { ascending: true }).limit(pag);
+        if(cursor != null) q = q.gt(chave, cursor);
+        if(teto != null) q = q.lte(chave, teto);
+        return q;
+      }, rotulo, 'depois de ' + (cursor == null ? 'início' : cursor));
+    };
+    // uma faixa (cursor exclusivo, teto inclusivo): páginas até acabar
+    const faixa = async function(cursor, teto){
+      const out = [];
+      for(let n = 0; ; n++){
+        const r = await pedirPagina(cursor, teto);
+        if(r.error) return { data: out, error: r.error };
+        const lote = r.data || [];
+        out.push.apply(out, lote);
+        if(lote.length < pag) break;
+        cursor = lote[lote.length - 1][chave];
+        if(n > 5000){ console.warn('[fetchAll] teto de segurança em ' + (rotulo || '?')); break; }
+      }
+      return { data: out, error: null };
+    };
+    let resultado = null;
+    const paralelo = Math.max(1, Math.floor(opts.paralelo || 1));
+    if(paralelo > 1){
+      // limites da faixa (menor e maior chave) + total: 2 pedidos minúsculos
+      const [rMin, rMax] = await Promise.all([
+        _tentar(function(){ return monta().select(chave).order(chave, { ascending: true }).limit(1); }, rotulo, 'menor chave'),
+        _tentar(function(){ return monta({ count: 'exact' }).select(chave).order(chave, { ascending: false }).limit(1); }, rotulo, 'maior chave')
+      ]);
+      const lo = (rMin.data && rMin.data[0]) ? rMin.data[0][chave] : null;
+      const hi = (rMax.data && rMax.data[0]) ? rMax.data[0][chave] : null;
+      const total = (rMax.count != null) ? rMax.count : null;
+      if(!rMin.error && !rMax.error && typeof lo === 'number' && typeof hi === 'number' && total != null && total > pag){
+        const nFaixas = Math.min(paralelo * 2, Math.max(2, Math.ceil(total / Math.ceil(pag / 2))));
+        const passo = Math.max(1, Math.ceil((hi - lo + 1) / nFaixas));
+        const faixas = [];
+        for(let de = lo; de <= hi; de += passo) faixas.push([de - 1, Math.min(hi, de + passo - 1)]);
+        const partes = new Array(faixas.length);
+        let erro = null, prox = 0;
+        const trabalhador = async function(){
+          while(prox < faixas.length && !erro){
+            const i = prox++;
+            const r = await faixa(faixas[i][0], faixas[i][1]);
+            if(r.error) erro = r.error;
+            partes[i] = r.data;
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(paralelo, faixas.length) }, trabalhador));
+        resultado = { data: [].concat.apply([], partes.map(function(p){ return p || []; })), error: erro };
+      }
+    }
+    if(!resultado) resultado = await faixa(null, null);
+    if(resultado.error){
+      console.warn('[fetchAll] ' + (rotulo || '?') + ' falhou (chave ' + chave + '):', resultado.error.message);
+      return { data: resultado.data, error: resultado.error };
+    }
+    return { data: window._ordenarLinhas(resultado.data, ordenar), error: null };
+  }
   window._fetchAllRows = async function(monta, ordem, rotulo, opts){
+    opts = opts || {};
+    const pag = (opts.pag > 0) ? opts.pag : _PAG;
+    if(opts.chave) return _fetchPorChave(monta, opts.chave, rotulo, pag, opts);
     const col = ordem || 'id';
-    const pag = (opts && opts.pag > 0) ? opts.pag : _PAG;
     const out = [];
     for(let de = 0; ; de += pag){
       let data = null, error = null;
@@ -11897,7 +12004,107 @@ window.TAG_REGISTRY = {
     _blocosUnidadeEmCurso[chave] = p;
     try{ return await p; } finally { delete _blocosUnidadeEmCurso[chave]; }
   };
+  /* ── Blocos de TODAS as unidades: porta única, em 2º plano ───────────────
+     O Início não espera por isto. Quando termina, o Store recebe tudo de uma
+     vez (1 evento → 1 redesenho) e _blocosCompletos vira true: só então as
+     barras de progresso e as contagens que somam blocos mostram número. Quem
+     está lendo uma unidade que já tinha os blocos na tela não é redesenhado. */
+  let _blocosP = null;
+  window._blocosCompletos = false;
+  window._blocosReiniciar = function(){ _blocosP = null; window._blocosCompletos = false; };
+  window._ensureBlocos = function(){
+    if(_blocosP) return _blocosP;
+    const p = (async function(){
+      for(let tentativa = 0; ; tentativa++){
+        const r = await window._fetchAllRows(
+          function(o){ return window._sb.schema('conteudo').from('unit_blocks').select('*', o); },
+          'id', 'unit_blocks', { chave: 'id', paralelo: 4, ordenar: ['position', 'id'] });
+        if(!r.error){
+          const rows = r.data || [];
+          window.__blocosSilencioso = true;
+          try{ UbiqueStore.unit_blocks.replaceAll(rows); } finally { window.__blocosSilencioso = false; }
+          window._blocosCompletos = true;
+          if(window._bootMarca) _bootMarca('blocos');
+          return rows.length;
+        }
+        if(tentativa >= 4) throw r.error;
+        console.warn('[blocos] carga completa falhou (' + r.error.message + ') — nova tentativa em 5 s');
+        await _dorme(5000);
+      }
+    })();
+    _blocosP = p;
+    p.catch(function(e){
+      console.warn('[blocos] desisti por agora:', e && e.message);
+      if(_blocosP === p) _blocosP = null;
+      setTimeout(function(){ if(!window._blocosCompletos) window._ensureBlocos().catch(function(){}); }, 30000);
+    });
+    return p;
+  };
+  /* BOOT-TELEMETRIA-INICIO */
+  // Marcos do carregamento (ms desde a abertura da página; após um login,
+  // desde a re-hidratação) e uma linha por boot em aluno.boot_metrics — é o
+  // que transforma "melhorou" em número (mediana/p90 por dia).
+  window.FALCON_VERSAO = '2026-09-18 fase1';
+  window._boot = { marcas: {}, t0: 0, rodada: 0, enviado: false, cache: 'frio' };
+  window._bootMarca = function(nome){
+    if(window._boot.marcas[nome] != null) return;
+    window._boot.marcas[nome] = Math.round(performance.now() - window._boot.t0);
+    if(window._boot.marcas.inicio != null && window._boot.marcas.blocos != null) _bootEnviar();
+  };
+  window._bootNovaRodada = function(){
+    window._boot.rodada++;
+    if(window._boot.rodada > 1){ window._boot.marcas = {}; window._boot.t0 = performance.now(); window._boot.enviado = false; }
+  };
+  async function _bootEnviar(){
+    if(window._boot.enviado) return;
+    window._boot.enviado = true;
+    try{
+      const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+      if(!u || !u.id || !window._sb) return;
+      const m = window._boot.marcas;
+      const con = (navigator.connection && navigator.connection.effectiveType) || null;
+      const { error } = await window._sb.schema('aluno').from('boot_metrics').insert({
+        user_id: u.id, versao: window.FALCON_VERSAO, cache: window._boot.cache,
+        estrutura_ms: m.estrutura ?? null, portao_ms: m.portao ?? null, inicio_ms: m.inicio ?? null,
+        blocos_ms: m.blocos ?? null, banco_ms: m.banco ?? null,
+        detalhes: { marcas: m, rodada: window._boot.rodada, conexao: con, largura: window.innerWidth, ua: String(navigator.userAgent || '').slice(0, 160) }
+      });
+      if(error) console.warn('[boot] telemetria não gravada:', error.message);
+    }catch(e){ console.warn('[boot] telemetria:', e && e.message); }
+  }
+  // Se os blocos ou o Início nunca marcarem (erro, outra página), manda o que houver.
+  setTimeout(function(){ if(!window._boot.enviado && window._boot.marcas.portao != null) _bootEnviar(); }, 90000);
+  /* BOOT-TELEMETRIA-FIM */
   /* FETCH-RESILIENTE-FIM */
+
+  // Unidades que o Início mostra em "Continuar de onde parou": a mais recente
+  // de cada matéria (mesma regra do Renderers.inicio). Os blocos delas descem
+  // ANTES do portão abrir, para o cartão sair com a porcentagem e o link certos.
+  function _unidadesPrioritarias(max){
+    try{
+      const st = (window.Store && Store.get) ? Store.get() : null;
+      const views = (st && st.unitViews) ? Object.entries(st.unitViews) : [];
+      if(!views.length) return [];
+      views.sort(function(a, b){ return (b[1].lastSeenAt || 0) - (a[1].lastSeenAt || 0); });
+      const idx = {};
+      (window.COURSES || []).filter(Boolean).forEach(function(c){
+        (c.modules || []).forEach(function(m){
+          Util.unitsOfModule(m).forEach(function(e){ idx[e.unit.id] = { c: c, u: e.unit }; });
+        });
+      });
+      const porMateria = {}, out = [];
+      for(let i = 0; i < views.length && out.length < (max || 4); i++){
+        const id = views[i][0], v = views[i][1];
+        if(v.completed) continue;
+        const hit = idx[id];
+        if(!hit || porMateria[hit.c.id]) continue;
+        porMateria[hit.c.id] = true;
+        const sid = (hit.u._storeId != null) ? String(hit.u._storeId) : String(hit.u.id || '').replace(/^u/, '');
+        if(sid) out.push(sid);
+      }
+      return out;
+    }catch(_){ return []; }
+  }
 
   async function hydrateFromSupabase(){
     if(!window.UBIQUE_USE_SUPABASE || !window._sb){
@@ -11905,6 +12112,8 @@ window.TAG_REGISTRY = {
     }
     try{
       console.log('[hydrate] buscando conteúdo do Supabase...');
+      if(window._bootNovaRodada) _bootNovaRodada();
+      if(window._blocosReiniciar) _blocosReiniciar();   // nova hidratação (ex.: login) recarrega os blocos
       // ANTI-FLICKER: durante a carga inicial, cada replaceAll de tabela dispara
       // um evento no store → um re-render da página inteira (5-6 piscadas feias).
       // Marcamos "hidratando" pra o subscribe NÃO re-renderizar a cada tabela;
@@ -11928,18 +12137,141 @@ window.TAG_REGISTRY = {
         const bm = {}; (window.__PROF_WORKS).forEach(r => { if(!bm[r.source_id]) bm[r.source_id] = r; });
         window.__BOOKS = bm;                                        // source_id → dados do livro
       }).catch(() => {});
-      const [subjR, modR, chR, unR, secR, blkR, dlR] = await Promise.all([
+      // Pacotes pequenos e independentes (tags, glossário, perfis, salas,
+      // admins, edital, concursos): disparam JÁ, em paralelo com a estrutura.
+      // O portão do Início espera por eles (são leves) — o corpo de cada bloco
+      // está intacto, com o try/catch próprio.
+      const _pacotesP = Promise.all([
+        (async () => {
+        // Fase 4n — hidrata catálogo de tags (admin gerencia, aluno usa pra renderizar chips)
+        try {
+          const csb = window._sb.schema('conteudo');
+          const { data, error } = await _fetchAllRows(() => csb.from('tags').select('*'), 'id', 'tags');
+          if(!error){
+            if(UbiqueStore.tags) UbiqueStore.tags.replaceAll(data || []);
+            console.log('[hydrate tags] ✅', { tags: data?.length || 0 });
+          } else {
+            console.warn('[hydrate tags] erro:', error);
+          }
+        } catch(e){ console.warn('[hydrate tags] exception:', e); }
+        })(),
+        (async () => {
+        // Fase 4l — hidrata glossário + verbetes (admin gerencia, aluno consome)
+        try {
+          const csb = window._sb.schema('conteudo');
+          const [wcR, gtR, vbR] = await Promise.all([
+            csb.from('glossary_word_classes').select('*'),
+            _fetchAllRows(() => csb.from('glossary_terms').select('*'), 'id', 'glossary_terms'),
+            _fetchAllRows(() => csb.from('verbetes').select('*'), 'id', 'verbetes'),
+          ]);
+          const gErrs = [wcR.error, gtR.error, vbR.error].filter(Boolean);
+          if(!gErrs.length){
+            if(UbiqueStore.glossary_word_classes) UbiqueStore.glossary_word_classes.replaceAll(wcR.data || []);
+            if(UbiqueStore.glossary_terms)        UbiqueStore.glossary_terms.replaceAll(gtR.data || []);
+            if(UbiqueStore.verbetes)              UbiqueStore.verbetes.replaceAll(vbR.data || []);
+            console.log('[hydrate glossario] ✅', {
+              word_classes: wcR.data?.length || 0,
+              terms: gtR.data?.length || 0,
+              verbetes: vbR.data?.length || 0,
+            });
+          } else {
+            console.warn('[hydrate glossario] erros:', gErrs);
+          }
+        } catch(e){ console.warn('[hydrate glossario] exception:', e); }
+        })(),
+        window._hydrateDirectory(),
+        (async () => {
+        // Foto do sistema (config global, crm.platform_settings) — avatar das
+        // notificações de sistema. Linha única id='default'; leitura liberada.
+        try {
+          const { data: ps, error: psErr } = await window._sb.schema('crm').from('platform_settings')
+            .select('system_avatar_url, system_avatar_transform').eq('id', 'default').maybeSingle();
+          if(!psErr && ps && ps.system_avatar_url){
+            window._systemAvatar = { url: ps.system_avatar_url, transform: ps.system_avatar_transform || { x:0, y:0, scale:1 } };
+          } else {
+            window._systemAvatar = null;
+          }
+          console.log('[hydrate system avatar] ✅', { definida: !!window._systemAvatar });
+        } catch(e){ window._systemAvatar = null; console.warn('[hydrate system avatar] exception:', e); }
+        })(),
+        (async () => {
+        // Participações em salas (status por sala) — pra notificação de convite
+        // refletir o estado: pendente → botões; já aceito → "Você entrou".
+        try {
+          const meId = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
+          window._salasMyMemberships = {};
+          if(meId){
+            const { data: mems } = await window._sb.schema('aluno').from('room_members').select('room_id, status').eq('user_id', meId);
+            (mems || []).forEach(m => { window._salasMyMemberships[m.room_id] = m.status; });
+          }
+        } catch(e){ console.warn('[hydrate memberships] exception:', e); }
+        })(),
+        (async () => {
+        // Contato — lista de admins (RPC segura; aluno não lê papéis direto).
+        // Usada pelo autocomplete do "@admin" e pelo registro de menções.
+        try {
+          const { data: adm, error: admErr } = await window._sb.rpc('list_admins');
+          window._ADMINS = (!admErr && Array.isArray(adm)) ? adm : [];
+          console.log('[hydrate admins] ✅', { admins: window._ADMINS.length });
+        } catch(e){ window._ADMINS = []; console.warn('[hydrate admins] exception:', e); }
+        })(),
+        (async () => {
+        // Fase 4j — hidrata edital_progress do aluno logado
+        try {
+          const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+          if(u && u.id){
+            const { data: epData, error: epErr } = await window._sb.schema('aluno').from('edital_progress')
+              .select('user_id, topic_id, viewed_at').eq('user_id', u.id);
+            if(!epErr && UbiqueStore.edital_progress){
+              const rows = (epData || []).map(r => ({
+                user_id: r.user_id, topic_id: r.topic_id,
+                viewed_at: r.viewed_at || new Date().toISOString()
+              }));
+              UbiqueStore.edital_progress.replaceAll(rows);
+              console.log('[hydrate edital_progress] ✅', rows.length, 'tópicos marcados');
+            } else if(epErr){
+              console.warn('[hydrate edital_progress]', epErr);
+            }
+          }
+        } catch(e){ console.warn('[hydrate edital_progress] ex:', e); }
+        })(),
+        (async () => {
+        // Fase 4i — hidrata também estrutura de concursos (exams, editais, topics, links)
+        try {
+          const csb = window._sb.schema('concursos');
+          const [exR, esR, edR, etR, etuR] = await Promise.all([
+            csb.from('exams').select('*'),
+            csb.from('exam_subjects').select('*'),
+            csb.from('editais').select('*'),
+            _fetchAllRows(() => csb.from('edital_topics').select('*'), 'id', 'edital_topics'),
+            _fetchAllRows(() => csb.from('edital_topic_units').select('*'), 'id', 'edital_topic_units'),
+          ]);
+          // Carrega cada tabela de forma INDEPENDENTE: se uma falhar (ex.: RLS em
+          // exams), as outras (edital_topics/links) ainda carregam. Antes era
+          // tudo-ou-nada e um erro em exams zerava os tópicos do edital.
+          if(UbiqueStore.exams && !exR.error)              UbiqueStore.exams.replaceAll(exR.data || []);
+          if(UbiqueStore.exam_subjects && !esR.error)      UbiqueStore.exam_subjects.replaceAll(esR.data || []);
+          if(UbiqueStore.editais && !edR.error)            UbiqueStore.editais.replaceAll(edR.data || []);
+          if(UbiqueStore.edital_topics && !etR.error)      UbiqueStore.edital_topics.replaceAll(etR.data || []);
+          if(UbiqueStore.edital_topic_units && !etuR.error) UbiqueStore.edital_topic_units.replaceAll(etuR.data || []);
+          const cerrs = [exR.error, esR.error, edR.error, etR.error, etuR.error].filter(Boolean);
+          console.log('[hydrate concursos]', {
+            exams: exR.data?.length || 0, exam_subjects: esR.data?.length || 0,
+            editais: edR.data?.length || 0, edital_topics: etR.data?.length || 0,
+            edital_topic_units: etuR.data?.length || 0, erros: cerrs.length
+          });
+          if(cerrs.length) console.warn('[hydrate concursos] erros parciais:', cerrs);
+        } catch(e){ console.warn('[hydrate concursos] exception:', e); }
+        })(),
+      ]);
+
+      // Estrutura das matérias (sem os blocos: eles descem depois do portão).
+      const [subjR, modR, chR, unR, secR, dlR] = await Promise.all([
         _fetchAllRows(() => sb.from('subjects').select('*').order('position', { nullsFirst:false }), 'id', 'subjects'),
         _fetchAllRows(() => sb.from('modules').select('*').order('position'), 'id', 'modules'),
         _fetchAllRows(() => sb.from('course_chapters').select('*').order('position'), 'id', 'course_chapters'),
         _fetchAllRows(() => sb.from('units').select('*').order('position'), 'id', 'units'),
         _fetchAllRows(() => sb.from('unit_sections').select('*').order('position'), 'id', 'unit_sections'),
-        // Página PADRÃO (1000), não menor. Medido no banco (17/09): nesta tabela o
-        // custo de cada página é FIXO — a regra de acesso é avaliada em TODAS as
-        // linhas da tabela a cada página (~1,5 s), devolva ela 200 ou 1000. Página
-        // de 200 virou 13 idas em série (~20 s de boot); com 1000 são 3. O erro
-        // passageiro (timeout) já é coberto pelas novas tentativas do _fetchAllRows.
-        _fetchAllRows(() => sb.from('unit_blocks').select('*').order('position'), 'id', 'unit_blocks'),
         _fetchAllRows(() => sb.from('unit_downloads').select('*').order('position'), 'id', 'unit_downloads'),
       ]);
 
@@ -11947,7 +12279,7 @@ window.TAG_REGISTRY = {
       // meio do boot) NÃO pode zerar todo o conteúdo. Carregamos o que veio e
       // preservamos o que já existe nas que falharam (mesmo padrão de concursos,
       // logo abaixo). Antes era tudo-ou-nada e um erro deixava a tela em branco.
-      const errs = [subjR.error, modR.error, chR.error, unR.error, secR.error, blkR.error, dlR.error].filter(Boolean);
+      const errs = [subjR.error, modR.error, chR.error, unR.error, secR.error, dlR.error].filter(Boolean);
       if(errs.length){
         console.warn('[hydrate] erros parciais no conteúdo (mantendo o que já existe):', errs);
       }
@@ -11974,10 +12306,21 @@ window.TAG_REGISTRY = {
       if(!chR.error)   UbiqueStore.chapters.replaceAll(chapters);
       if(!unR.error)   UbiqueStore.units.replaceAll(units);
       if(!secR.error)  UbiqueStore.unit_sections.replaceAll(secR.data || []);
-      if(!blkR.error)  UbiqueStore.unit_blocks.replaceAll(blkR.data || []);
       if(!dlR.error && UbiqueStore.unit_downloads){
         UbiqueStore.unit_downloads.replaceAll(dlR.data || []);
       }
+      if(window._bootMarca) _bootMarca('estrutura');
+      // Blocos das unidades do "continuar de onde parou" ANTES do portão: o
+      // cartão do Início sai com a porcentagem e o link certos. (COURSES e o
+      // Store do aluno precisam existir para saber quais são.)
+      try{
+        rebuildCourses(); _ensureStoreInit();
+        const _prioritarias = _unidadesPrioritarias(4);
+        if(_prioritarias.length){
+          await Promise.all(_prioritarias.map(function(id){ return window._hydrateBlocksForUnit(id).catch(function(){ return 0; }); }));
+          if(window._bootMarca) _bootMarca('prioridade');
+        }
+      }catch(e){ console.warn('[hydrate] prioridade:', e && e.message); }
 
       // Fase 4m — banco de avatares (admin gerencia, aluno escolhe em /conta).
       // SAIU DO BOOT: era uma ida-e-volta inteira no meio da fila de hidratação
@@ -12262,8 +12605,9 @@ window.TAG_REGISTRY = {
          (o cache é chaveado pela IDENTIDADE do window._QBank, e a hidratação
          troca o objeto). Ao terminar, refazemos COURSES + render pra os números
          se corrigirem sem o aluno precisar fazer nada. */
-      window._ensureQBank().then(function(ok){
+      const _dispararBanco = function(){ window._ensureQBank().then(function(ok){
         if(!ok) return;
+        if(window._bootMarca) _bootMarca('banco');
         try{
           if(typeof window.rebuildCourses === 'function') window.rebuildCourses();
           // Os SIMULADOS também dependem do banco: eles são montados resolvendo
@@ -12272,8 +12616,10 @@ window.TAG_REGISTRY = {
           if(typeof window.rebuildSimulados === 'function') window.rebuildSimulados();
           if(window.App && App.render) App.render();
         }catch(e){ console.warn('[qbank] re-render pós-carga falhou:', e); }
-      });
+      }); };
 
+      // Simulados: função chamada no 2º plano (depois dos blocos). Corpo intacto.
+      const _carregarSimulados = async function(){
       // S1 — hidrata SIMULADOS reais do banco (substitui a lista fake). Cada seção
       // vira um bloco de questões que referencia o banco (resolveBankGroup monta tudo).
       try {
@@ -12451,6 +12797,8 @@ window.TAG_REGISTRY = {
           }
         }catch(e){ console.warn('[sim grants]', e); window._simGrants = window._simGrants || {}; }
       } catch(e){ console.warn('[hydrate simulados] erro:', e && e.message); if(!Array.isArray(window.SIMULADOS)) window.SIMULADOS = []; }
+      if(window._bootMarca) _bootMarca('simulados');
+      };
 
       // ── HIDRATAÇÕES INDEPENDENTES, AGORA EM PARALELO ──
       // Estes blocos rodavam em FILA, cada um esperando o anterior: o tempo era
@@ -12462,129 +12810,19 @@ window.TAG_REGISTRY = {
       // ÚNICA dependência de ordem preservada: "meu perfil" TEM que rodar
       // depois da vitrine — ele sobrescreve a MINHA linha em user_profiles com
       // o que só eu enxergo. Por isso os dois ficam encadeados na MESMA tarefa.
-      await Promise.all([
-        (async () => {
-        // Fase 4n — hidrata catálogo de tags (admin gerencia, aluno usa pra renderizar chips)
-        try {
-          const csb = window._sb.schema('conteudo');
-          const { data, error } = await _fetchAllRows(() => csb.from('tags').select('*'), 'id', 'tags');
-          if(!error){
-            if(UbiqueStore.tags) UbiqueStore.tags.replaceAll(data || []);
-            console.log('[hydrate tags] ✅', { tags: data?.length || 0 });
-          } else {
-            console.warn('[hydrate tags] erro:', error);
-          }
-        } catch(e){ console.warn('[hydrate tags] exception:', e); }
-        })(),
-        (async () => {
-        // Fase 4l — hidrata glossário + verbetes (admin gerencia, aluno consome)
-        try {
-          const csb = window._sb.schema('conteudo');
-          const [wcR, gtR, vbR] = await Promise.all([
-            csb.from('glossary_word_classes').select('*'),
-            _fetchAllRows(() => csb.from('glossary_terms').select('*'), 'id', 'glossary_terms'),
-            _fetchAllRows(() => csb.from('verbetes').select('*'), 'id', 'verbetes'),
-          ]);
-          const gErrs = [wcR.error, gtR.error, vbR.error].filter(Boolean);
-          if(!gErrs.length){
-            if(UbiqueStore.glossary_word_classes) UbiqueStore.glossary_word_classes.replaceAll(wcR.data || []);
-            if(UbiqueStore.glossary_terms)        UbiqueStore.glossary_terms.replaceAll(gtR.data || []);
-            if(UbiqueStore.verbetes)              UbiqueStore.verbetes.replaceAll(vbR.data || []);
-            console.log('[hydrate glossario] ✅', {
-              word_classes: wcR.data?.length || 0,
-              terms: gtR.data?.length || 0,
-              verbetes: vbR.data?.length || 0,
-            });
-          } else {
-            console.warn('[hydrate glossario] erros:', gErrs);
-          }
-        } catch(e){ console.warn('[hydrate glossario] exception:', e); }
-        })(),
-        window._hydrateDirectory(),
-        (async () => {
-        // Foto do sistema (config global, crm.platform_settings) — avatar das
-        // notificações de sistema. Linha única id='default'; leitura liberada.
-        try {
-          const { data: ps, error: psErr } = await window._sb.schema('crm').from('platform_settings')
-            .select('system_avatar_url, system_avatar_transform').eq('id', 'default').maybeSingle();
-          if(!psErr && ps && ps.system_avatar_url){
-            window._systemAvatar = { url: ps.system_avatar_url, transform: ps.system_avatar_transform || { x:0, y:0, scale:1 } };
-          } else {
-            window._systemAvatar = null;
-          }
-          console.log('[hydrate system avatar] ✅', { definida: !!window._systemAvatar });
-        } catch(e){ window._systemAvatar = null; console.warn('[hydrate system avatar] exception:', e); }
-        })(),
-        (async () => {
-        // Participações em salas (status por sala) — pra notificação de convite
-        // refletir o estado: pendente → botões; já aceito → "Você entrou".
-        try {
-          const meId = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
-          window._salasMyMemberships = {};
-          if(meId){
-            const { data: mems } = await window._sb.schema('aluno').from('room_members').select('room_id, status').eq('user_id', meId);
-            (mems || []).forEach(m => { window._salasMyMemberships[m.room_id] = m.status; });
-          }
-        } catch(e){ console.warn('[hydrate memberships] exception:', e); }
-        })(),
-        (async () => {
-        // Contato — lista de admins (RPC segura; aluno não lê papéis direto).
-        // Usada pelo autocomplete do "@admin" e pelo registro de menções.
-        try {
-          const { data: adm, error: admErr } = await window._sb.rpc('list_admins');
-          window._ADMINS = (!admErr && Array.isArray(adm)) ? adm : [];
-          console.log('[hydrate admins] ✅', { admins: window._ADMINS.length });
-        } catch(e){ window._ADMINS = []; console.warn('[hydrate admins] exception:', e); }
-        })(),
-        (async () => {
-        // Fase 4j — hidrata edital_progress do aluno logado
-        try {
-          const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-          if(u && u.id){
-            const { data: epData, error: epErr } = await window._sb.schema('aluno').from('edital_progress')
-              .select('user_id, topic_id, viewed_at').eq('user_id', u.id);
-            if(!epErr && UbiqueStore.edital_progress){
-              const rows = (epData || []).map(r => ({
-                user_id: r.user_id, topic_id: r.topic_id,
-                viewed_at: r.viewed_at || new Date().toISOString()
-              }));
-              UbiqueStore.edital_progress.replaceAll(rows);
-              console.log('[hydrate edital_progress] ✅', rows.length, 'tópicos marcados');
-            } else if(epErr){
-              console.warn('[hydrate edital_progress]', epErr);
-            }
-          }
-        } catch(e){ console.warn('[hydrate edital_progress] ex:', e); }
-        })(),
-        (async () => {
-        // Fase 4i — hidrata também estrutura de concursos (exams, editais, topics, links)
-        try {
-          const csb = window._sb.schema('concursos');
-          const [exR, esR, edR, etR, etuR] = await Promise.all([
-            csb.from('exams').select('*'),
-            csb.from('exam_subjects').select('*'),
-            csb.from('editais').select('*'),
-            _fetchAllRows(() => csb.from('edital_topics').select('*'), 'id', 'edital_topics'),
-            _fetchAllRows(() => csb.from('edital_topic_units').select('*'), 'id', 'edital_topic_units'),
-          ]);
-          // Carrega cada tabela de forma INDEPENDENTE: se uma falhar (ex.: RLS em
-          // exams), as outras (edital_topics/links) ainda carregam. Antes era
-          // tudo-ou-nada e um erro em exams zerava os tópicos do edital.
-          if(UbiqueStore.exams && !exR.error)              UbiqueStore.exams.replaceAll(exR.data || []);
-          if(UbiqueStore.exam_subjects && !esR.error)      UbiqueStore.exam_subjects.replaceAll(esR.data || []);
-          if(UbiqueStore.editais && !edR.error)            UbiqueStore.editais.replaceAll(edR.data || []);
-          if(UbiqueStore.edital_topics && !etR.error)      UbiqueStore.edital_topics.replaceAll(etR.data || []);
-          if(UbiqueStore.edital_topic_units && !etuR.error) UbiqueStore.edital_topic_units.replaceAll(etuR.data || []);
-          const cerrs = [exR.error, esR.error, edR.error, etR.error, etuR.error].filter(Boolean);
-          console.log('[hydrate concursos]', {
-            exams: exR.data?.length || 0, exam_subjects: esR.data?.length || 0,
-            editais: edR.data?.length || 0, edital_topics: etR.data?.length || 0,
-            edital_topic_units: etuR.data?.length || 0, erros: cerrs.length
-          });
-          if(cerrs.length) console.warn('[hydrate concursos] erros parciais:', cerrs);
-        } catch(e){ console.warn('[hydrate concursos] exception:', e); }
-        })(),
-      ]);
+      await _pacotesP;
+      if(window._bootMarca) _bootMarca('pacotes');
+      /* ── PORTÃO DO INÍCIO ─────────────────────────────────────────────────
+         Daqui em diante o aluno já tem: estrutura das matérias, concursos,
+         glossário, perfis, salas e os blocos das unidades do "continuar". O
+         Início desenha COMPLETO. O resto (blocos de todas as unidades, banco
+         de questões, simulados) desce em 2º plano, sem segurar a tela. */
+      window.__hydrating = false;
+      if(window._bootMarca) _bootMarca('portao');
+      window._ensureBlocos()
+        .catch(function(){})
+        .then(function(){ _dispararBanco(); return _carregarSimulados(); })
+        .catch(function(e){ console.warn('[hydrate 2º plano]', e); });
 
       // Sem await: só agendam a si mesmos. Ficam DEPOIS do grupo porque a
       // antena das salas conta com as participações (bloco acima) já carregadas.
@@ -12635,7 +12873,7 @@ window.TAG_REGISTRY = {
         chapters: chR.data?.length || 0,
         units: unR.data?.length || 0,
         sections: secR.data?.length || 0,
-        blocks: blkR.data?.length || 0,
+        blocos: '2º plano',
         downloads: dlR.data?.length || 0,
       });
       window.__hydrating = false;
@@ -12823,6 +13061,10 @@ window._hydrateDirectory = async function(){
     if(shouldRebuild){
       rebuildCourses();
       _ensureStoreInit();
+      // Carga completa dos blocos (2º plano do boot): quem já está lendo uma
+      // unidade com os blocos na tela não é redesenhado (perderia a posição).
+      // As outras páginas redesenham para trocar esqueleto por número.
+      if(window.__blocosSilencioso && evt.type === 'unit_blocks:replace' && document.querySelector('#blockStage .block-wrap')) return;
       _renderSoon();
     }
   });
@@ -13051,7 +13293,14 @@ const Util = {
   },
   countBlocks(unit){
     return Util.unitBlockIds(unit).length;
-  }
+  },
+  // Os blocos desta unidade já estão no Store? (boot em 2º plano: até a carga
+  // completa terminar, só as unidades buscadas antes do portão têm blocos.)
+  blocosProntos(unit){
+    return !!window._blocosCompletos || Util.unitBlockIds(unit).length > 0;
+  },
+  // Números que SOMAM blocos de várias unidades só valem com a carga completa.
+  agregadoPronto(){ return !!window._blocosCompletos; }
 };
 window.Util = Util;
 
@@ -37343,6 +37592,10 @@ function progressBarHTML(pct){
   const p = Math.max(0, Math.min(100, Math.round((pct||0)*100)));
   return `<div class="cprog"><div class="cprog-fill" style="width:${p}%"></div><span class="cprog-label">${p}% concluído</span></div>`;
 }
+// Blocos ainda descendo (2º plano do boot): barra neutra, sem número.
+function progressBarSkeletonHTML(){
+  return `<div class="cprog cprog-sk"><div class="cprog-fill"></div><span class="cprog-label">carregando</span></div>`;
+}
 
 // "Meus concursos" — tela inicial. Mesma estética de "Seus cursos", mas os
 // cards são CONCURSOS. Os do aluno abrem; os outros aparecem como "OBTER".
@@ -37675,6 +37928,7 @@ Renderers.inicio = function(){
   if(window.__hydrating){
     return '<div class="ini-loading"><span class="ini-spinner"></span><span class="ini-loading-t">Carregando sua página inicial…</span></div>';
   }
+  if(window._bootMarca) _bootMarca('inicio');
   const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
   const nome = (me && (me.nickname || me.displayName || me.name)) || 'aluno';
   const h = new Date().getHours();
@@ -37745,6 +37999,7 @@ Renderers.inicio = function(){
   const _retomadas = Array.from(_porMateria.values());
   const resume = _retomadas[0] || null;
   const _outras = _retomadas.slice(1);
+  const _prontoR = resume ? Util.blocosProntos(resume.u) : false;
   const pctR = resume ? Math.round(((resume.prog && resume.prog.pct) || 0) * 100) : 0;
   const resumeHtml = resume ? `<a class="ini-resume" href="${resume.href}" data-open-course="${Util.attr(resume.c.id)}">
       <span class="ini-resume-cv" ${resume.u.cover ? `style="background-image:url('${Util.attr(resume.u.cover)}')"` : ''}><span class="ini-resume-sg">${Util.esc(String(resume.c.sigla || resume.c.title || '').toUpperCase())}${resume.u.number ? ' · ' + Util.esc(String(resume.u.number)) : ''}</span></span>
@@ -37752,7 +38007,7 @@ Renderers.inicio = function(){
         <span class="ini-resume-lb">${Util.esc(resume.c.title || '')}</span>
         <span class="ini-resume-un">${Util.esc(resume.u.title || '')}</span>
         <span class="ini-resume-mt">visto ${_ago(resume.last)}</span>
-        <span class="ini-resume-prog"><span class="tr"><span class="fl" style="width:${pctR}%"></span></span><span class="pc">${pctR}%</span></span>
+        <span class="ini-resume-prog${_prontoR ? '' : ' sk'}"><span class="tr"><span class="fl" ${_prontoR ? `style="width:${pctR}%"` : ''}></span></span><span class="pc">${_prontoR ? pctR + '%' : '…'}</span></span>
       </span>
       <span class="ini-resume-act"><span class="ini-resume-btn">Continuar &#8594;</span></span>
     </a>${_outras.length ? `<div class="ini-resume-outras">${_outras.map(function(o){
@@ -37760,7 +38015,7 @@ Renderers.inicio = function(){
       return `<a class="ini-resume-mini" href="${o.href}" data-open-course="${Util.attr(o.c.id)}">
         <span class="irm-sg">${Util.esc(String(o.c.sigla || o.c.title || '').toUpperCase())}</span>
         <span class="irm-un">${Util.esc(o.u.title || '')}</span>
-        <span class="irm-mt">visto ${_ago(o.last)} · ${pct}%</span>
+        <span class="irm-mt">visto ${_ago(o.last)} · ${Util.blocosProntos(o.u) ? pct + '%' : '…'}</span>
         <span class="irm-go">&#8594;</span>
       </a>`;
     }).join('')}</div>` : ''}` : vazio('Abra uma unidade e ela aparece aqui para você retomar.');
@@ -38142,7 +38397,7 @@ Renderers.catalog = function(route){
         : `<span class="catalog-card-cta">Em breve</span>`;
     return `<${canOpen?'a':'div'} class="catalog-card${canOpen?'':' catalog-card-locked'}${isScheduled?' catalog-card-scheduled':''}" ${canOpen?`href="${href}"`:''} ${isScheduled?`data-release-at="${Util.attr(c.releaseAt)}"`:''} data-course-id="${Util.attr(c.id)}" data-subject-id="${Util.attr(c._subjectId||'')}" data-a="${i+2}">
       <div class="catalog-card-cover" style="background-image:url('${Util.attr(c.cover||'')}')">
-        ${hasContent ? progressBarHTML(Store.courseProgress(c)) : ''}
+        ${hasContent ? (Util.agregadoPronto() ? progressBarHTML(Store.courseProgress(c)) : progressBarSkeletonHTML()) : ''}
         ${isScheduled
           ? `<div class="catalog-card-soon-badge catalog-card-countdown-badge"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:.3rem"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg><span class="catalog-card-countdown" data-countdown-target="${Util.attr(c.releaseAt)}">${Util.esc(formatReleaseCountdown(c.releaseAt))}</span></div>`
           : (!hasContent
@@ -38323,7 +38578,7 @@ Renderers.courseHome = function(){
     return `<a class="module-card" href="#/m/${m.id}" data-a="${i+2}">
       <div class="module-bg" ${bg}></div>
       <div class="module-overlay"></div>
-      ${progressBarHTML(pct)}
+      ${Util.agregadoPronto() ? progressBarHTML(pct) : progressBarSkeletonHTML()}
       <div class="module-number">${Util.esc(m.number||Util.pad2(i+1))}</div>
       <div class="module-content">
         <div class="module-label">${Util.esc(m.label||'Módulo')}</div>
@@ -38365,7 +38620,7 @@ Renderers.courseHome = function(){
       <div class="rail-card-body">
         <div class="rail-card-crumb">${Util.esc(r.m.label)} ${r.entry.chapter?' · Cap. '+r.entry.chapter.number:''}</div>
         <div class="rail-card-title">${Util.esc(r.entry.unit.title)}</div>
-        <div class="rail-card-bar"><span style="width:${Math.round(r.prog.pct*100)}%"></span></div>
+        ${Util.blocosProntos(r.entry.unit) ? `<div class="rail-card-bar"><span style="width:${Math.round(r.prog.pct*100)}%"></span></div>` : `<div class="rail-card-bar rail-card-bar-sk"><span></span></div>`}
       </div>
       ${r.entry.unit.cover ? `<div class="rail-card-thumb" style="background-image:url('${Util.attr(r.entry.unit.cover)}')"></div>` : ''}
     </a>`).join('')}</div>
@@ -38426,13 +38681,14 @@ Renderers.module = function(route){
       <a class="btn-primary" href="#/banco">${Icons.portal} Banco do curso</a>
       <a class="btn-ghost" href="#/course">${Icons.chevron} Voltar</a>
     </div>
-    <div class="module-meta" style="margin-top:1rem">Progresso do módulo: ${Util.fmtPct(pct)}</div>
+    <div class="module-meta" style="margin-top:1rem">Progresso do módulo: ${Util.agregadoPronto() ? Util.fmtPct(pct) : '…'}</div>
   </div>
   ${body}`;
 };
 
 function unitCard(unit, m, chapter){
   const prog = Store.unitProgress(unit);
+  const _pronto = Util.blocosProntos(unit);   // blocos ainda descendo → esqueleto, nunca "0%"/"0 blocos"
   const href = chapter ? `#/m/${m.id}/c/${chapter.id}/u/${unit.id}` : `#/m/${m.id}/u/${unit.id}`;
   const bg = unit.cover ? `style="background-image:url('${Util.attr(unit.cover)}')"` : '';
   // FREEMIUM (A3): unidade fora da régua → card esmaecido com cadeado. O
@@ -38454,7 +38710,7 @@ function unitCard(unit, m, chapter){
         <h4 class="unit-card-title">${Util.esc(unit.title)}</h4>
         <p class="unit-card-desc">${Util.esc(unit.description||'')}</p>
         <div class="unit-card-meta">
-          <span>${Util.countBlocks(unit)} blocos</span>
+          ${_pronto ? `<span>${Util.countBlocks(unit)} blocos</span>` : ''}
           ${unit.duration ? `<span>${unit.duration} min</span>` : ''}
           <span>Não publicada</span>
         </div>
@@ -38481,7 +38737,7 @@ function unitCard(unit, m, chapter){
   return `<a class="unit-card${locked ? ' unit-card-locked' : ''}" href="${href}">
     <div class="unit-card-bg" ${bg}></div>
     <div class="unit-card-overlay"></div>
-    ${progressBarHTML(prog.pct)}
+    ${_pronto ? progressBarHTML(prog.pct) : progressBarSkeletonHTML()}
     ${locked ? `<span class="unit-card-lock" title="Unidade do curso completo">${LOCK_IC}</span>` : `<span class="unit-card-status ${prog.state}"></span>`}
     <span class="unit-card-num">${Util.esc(unit.number)}</span>
     <div class="unit-card-content">
@@ -38489,9 +38745,9 @@ function unitCard(unit, m, chapter){
       <h4 class="unit-card-title">${Util.esc(unit.title)}</h4>
       <p class="unit-card-desc">${Util.esc(unit.description||'')}</p>
       <div class="unit-card-meta">
-        <span>${Util.countBlocks(unit)} blocos</span>
+        ${_pronto ? `<span>${Util.countBlocks(unit)} blocos</span>` : ''}
         ${unit.duration ? `<span>${unit.duration} min</span>` : ''}
-        <span>${Util.fmtPct(prog.pct)}</span>
+        <span>${_pronto ? Util.fmtPct(prog.pct) : '…'}</span>
       </div>
     </div>
   </a>`;
@@ -57374,6 +57630,10 @@ const RaioX = (function(){
 window.RaioX = RaioX;
 
 Renderers.performance = function(route){
+  // Esta página soma blocos de todas as unidades: com a carga completa ainda
+  // em 2º plano, mostra o aviso em vez de números parciais (redesenha sozinha
+  // quando os blocos chegam).
+  if(!window._blocosCompletos) return '<div class="ini-loading"><span class="ini-spinner"></span><span class="ini-loading-t">Carregando os seus números…</span></div>';
   const perf = buildPerformanceReport();
   const fmtPct = v => v == null ? '—' : Math.round(v*100)+'%';
   const fmtFrac = (n,d) => (d?`${n}/${d}`:'—');
