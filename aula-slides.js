@@ -210,12 +210,24 @@
       temVisual: function () { return atual >= 0 && slides[atual].classList.contains('has-visual'); } };
   }
 
-  /* Escala o palco de 1920 x 1080 para caber na largura do invólucro. */
-  function fit(wrap) {
+  /* Escala o palco de 1920 x 1080 para caber no invólucro.
+     Padrão: pela largura (o invólucro ganha a altura proporcional).
+     opts.contain: cabe na largura E na altura do invólucro e fica centrado
+     (player em tela cheia; o palco precisa estar position:absolute). */
+  function fit(wrap, opts) {
     var stage = wrap.querySelector('.aula-stage');
     if (!stage) return;
+    var contain = !!(opts && opts.contain);
     function aplicar() {
       var w = wrap.clientWidth || 0; if (!w) return;
+      if (contain) {
+        var h = wrap.clientHeight || 0; if (!h) return;
+        var sc = Math.min(w / 1920, h / 1080);
+        stage.style.transform = 'scale(' + sc + ')';
+        stage.style.left = Math.round((w - 1920 * sc) / 2) + 'px';
+        stage.style.top = Math.round((h - 1080 * sc) / 2) + 'px';
+        return;
+      }
       var s = w / 1920;
       stage.style.transform = 'scale(' + s + ')';
       wrap.style.height = Math.round(1080 * s) + 'px';
