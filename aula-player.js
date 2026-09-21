@@ -19,11 +19,16 @@
   var RATES = [1, 1.25, 1.5, 1.75, 2];   // as mesmas do áudio da leitura (LBAudio)
   var LOGO = '<svg viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg"><g transform="translate(0,600) scale(0.1,-0.1)" fill="currentColor" stroke="none"><path d="M1805 4190 l-1190 -1190 1193 -1192 1192 -1193 1192 1192 1193 1193 -1190 1190 c-654 654 -1192 1190 -1195 1190 -3 0 -540 -535 -1195 -1190z m1375 875 l175 -175 -178 -178 -177 -177 -177 177 -178 178 175 175 c96 96 177 175 180 175 3 0 84 -79 180 -175z m-390 -390 l175 -175 -695 -698 c-382 -383 -712 -712 -733 -731 l-37 -33 -175 178 -175 179 727 727 c400 401 730 728 733 728 3 0 84 -79 180 -175z m1335 -555 l730 -730 -178 -177 -177 -178 -732 732 -733 733 175 175 c96 96 177 175 180 175 3 0 334 -328 735 -730z m-1215 134 c-33 -87 -117 -312 -187 -499 -70 -187 -127 -341 -128 -343 -1 -1 -188 -72 -416 -158 -228 -86 -454 -171 -504 -190 -49 -19 -94 -34 -100 -34 -5 0 305 315 690 700 385 385 701 696 703 692 1 -5 -25 -81 -58 -168z m1516 -1222 c-2 -2 -75 24 -162 56 -88 33 -305 115 -484 181 -179 67 -336 127 -350 134 -13 7 -30 28 -37 47 -7 19 -88 238 -181 485 -94 248 -173 461 -177 475 -4 15 269 -251 694 -675 385 -384 699 -701 697 -703z m-1227 798 c77 -206 147 -394 156 -416 16 -39 22 -43 113 -79 83 -32 546 -206 804 -301 43 -16 74 -32 70 -36 -4 -4 -128 -52 -277 -107 -148 -54 -349 -129 -445 -166 -96 -37 -190 -72 -209 -78 -42 -14 -33 5 -206 -457 -75 -201 -150 -402 -167 -447 -17 -46 -34 -83 -37 -83 -4 0 -25 51 -49 113 -310 831 -315 844 -328 856 -8 8 -154 63 -851 324 -62 23 -113 44 -113 48 0 4 197 80 438 170 550 205 535 198 549 240 6 19 48 131 93 249 44 118 115 307 157 420 41 113 82 221 90 240 l14 35 29 -75 c16 -41 92 -244 169 -450z m-1906 -648 c92 -93 167 -173 167 -178 0 -10 -334 -347 -348 -351 -4 -2 -86 76 -182 172 l-174 176 174 174 c96 96 179 175 185 175 5 0 85 -76 178 -168z m3777 -7 l175 -175 -178 -177 -177 -178 -175 175 c-96 96 -175 178 -175 183 0 9 341 347 350 347 3 0 84 -79 180 -175z m-3302 -272 c97 -37 323 -121 501 -188 l324 -121 189 -504 c104 -276 187 -506 186 -509 -2 -3 -316 308 -700 692 -383 383 -692 697 -687 697 5 0 89 -30 187 -67z m1966 -632 c-384 -385 -700 -696 -702 -693 -1 4 83 234 187 512 188 497 190 504 223 516 18 7 148 56 288 108 140 52 350 131 465 175 116 44 216 80 224 81 8 0 -301 -315 -685 -699z m-1499 -36 c399 -399 725 -729 725 -733 0 -4 -78 -85 -174 -181 l-174 -173 -732 732 -732 733 173 173 c96 96 177 174 182 174 4 0 333 -326 732 -725z m2445 550 l175 -175 -731 -731 -730 -730 -177 175 c-97 96 -177 176 -177 178 0 7 1453 1458 1459 1458 4 0 85 -79 181 -175z m-1330 -1670 c0 -6 -79 -89 -175 -185 l-175 -175 -176 178 c-135 136 -174 180 -165 190 6 8 85 89 177 181 l167 168 173 -173 c96 -96 174 -178 174 -184z"/><path d="M2865 3409 c-168 -58 -280 -203 -292 -378 -13 -180 86 -345 255 -424 62 -29 75 -31 173 -32 101 0 108 1 180 37 98 49 162 113 207 207 112 234 -9 514 -257 591 -83 26 -187 26 -266 -1z m246 -40 c32 -8 40 -17 71 -81 20 -40 38 -86 42 -101 l7 -28 -103 3 -103 3 -3 99 c-1 55 -1 105 2 112 5 12 11 12 87 -7z m-131 -99 l0 -111 -102 3 c-120 3 -117 -1 -66 110 41 91 58 104 136 107 l32 1 0 -110z m-210 28 c0 -2 -11 -32 -24 -68 -22 -59 -26 -65 -55 -68 -49 -5 -38 28 38 111 20 22 42 35 41 25z m506 -30 c33 -36 74 -92 74 -103 0 -3 -16 -5 -37 -3 -34 3 -37 6 -53 53 -9 28 -20 58 -25 68 -12 27 8 20 41 -15z m-566 -265 l0 -113 -39 0 c-46 0 -51 11 -51 110 0 105 6 115 67 115 23 0 23 -1 23 -112z m268 0 l3 -113 -110 0 -110 0 -7 46 c-7 49 -1 155 11 174 4 7 42 10 108 8 l102 -3 3 -112z m262 91 c11 -28 13 -146 4 -181 -6 -22 -11 -23 -115 -23 l-109 0 0 108 c0 60 3 112 7 115 3 4 51 7 105 7 97 0 99 -1 108 -26z m129 11 c9 -10 20 -109 15 -138 -13 -79 -12 -77 -52 -77 l-38 0 0 113 0 114 35 -4 c19 -2 37 -6 40 -8z m-625 -323 c10 -31 20 -63 23 -70 4 -11 1 -12 -15 -3 -22 12 -92 103 -92 120 0 6 15 11 33 11 30 0 33 -3 51 -58z m236 -52 l0 -110 -30 0 c-59 0 -94 23 -127 86 -17 32 -36 76 -41 97 l-10 37 104 0 104 0 0 -110z m244 83 c-4 -16 -22 -59 -41 -96 -27 -55 -41 -71 -70 -83 -19 -8 -47 -14 -62 -12 l-26 3 -3 108 -3 107 106 0 105 0 -6 -27z m112 -1 c-19 -36 -92 -119 -100 -111 -3 3 4 30 15 60 11 30 22 60 24 67 2 6 20 12 40 12 l36 0 -15 -28z"/></g></svg>';
   var PRESETS = [
-    { id: 'resumo',   nome: 'Resumo da unidade', desc: 'A unidade inteira em 10 a 12 minutos, com questões de prova no meio.' },
+    { id: 'resumo_curto', nome: 'Resumo da unidade', desc: 'A unidade inteira, com questões de prova no meio.',
+      variantes: [
+        { id: 'resumo_curto', nome: 'Curto',  desc: '10 a 13 min, só o essencial' },
+        { id: 'resumo',       nome: 'Padrão', desc: '15 a 25 min, conforme o tamanho da unidade' }
+      ] },
     { id: 'completa', nome: 'Aula completa',     desc: 'Percorre todo o material, em partes. De 20 a 35 minutos.' },
     { id: 'questoes', nome: 'Só as questões',    desc: 'As questões de prova ligadas à unidade, comentadas uma a uma. De 5 a 10 minutos.' },
     { id: 'secao',    nome: 'Uma seção',         desc: 'Só a seção que você escolher, por completo. De 4 a 8 minutos.' }
   ];
+  var FAMILIA = PRESETS.filter(function (p) { return p.variantes; })[0];
   var ERROS = {
     sem_acesso: 'Você não tem acesso a esta unidade.',
     teto_diario: 'Você já pediu o máximo de aulas de hoje. Amanhã libera de novo.',
@@ -73,7 +78,14 @@
     var d = new Date(iso); if (isNaN(d)) return '';
     try { return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; }
   }
-  function presetNome(id) { for (var i = 0; i < PRESETS.length; i++) if (PRESETS[i].id === id) return PRESETS[i].nome; return id || ''; }
+  function presetNome(id) {
+    for (var i = 0; i < PRESETS.length; i++) {
+      var p = PRESETS[i];
+      if (p.variantes) { for (var k = 0; k < p.variantes.length; k++) if (p.variantes[k].id === id) return p.nome + ' · ' + p.variantes[k].nome; }
+      else if (p.id === id) return p.nome;
+    }
+    return id || '';
+  }
   function ls(k, v) { try { if (v === undefined) return localStorage.getItem(k); if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (_) { return null; } }
   // Chama a Edge Function e devolve sempre um objeto {ok, ...} (nunca lança).
   function invocar(body) {
@@ -159,6 +171,7 @@
   // ─── painel "Aulas desta unidade" ────────────────────────────────────────
   var Painel = (function () {
     var el = null, unit = null, dbId = null, aulas = [], precos = {}, vozes = [], vozPadrao = '', conta = null, secoes = [], pedindo = false;
+    var variante = FAMILIA ? FAMILIA.variantes[0].id : '';   // pílula escolhida no cartão do resumo
     function abrir(u) {
       if (el) fechar();
       unit = u; dbId = unitDbId(u);
@@ -192,7 +205,7 @@
       Vigia.calar(dbId);
     }
     function carregarPrecos() {
-      return sb().schema('carteira').from('tabela_custos').select('acao,valor').in('acao', ['aula_resumo', 'aula_completa', 'aula_questoes', 'aula_secao'])
+      return sb().schema('carteira').from('tabela_custos').select('acao,valor').in('acao', ['aula_resumo', 'aula_resumo_curto', 'aula_completa', 'aula_questoes', 'aula_secao'])
         .then(function (r) { var p = {}; ((r && r.data) || []).forEach(function (x) { p[String(x.acao).replace(/^aula_/, '')] = Number(x.valor); }); return p; }).catch(function () { return {}; });
     }
     function carregarConta() {
@@ -237,32 +250,59 @@
     function menorPreco() { var m = null; Object.keys(precos).forEach(function (k) { if (m == null || precos[k] < m) m = precos[k]; }); return m == null ? 1 : m; }
     function htmlPedido() {
       var tipos = PRESETS.map(function (p, i) {
-        var preco = precos[p.id];
-        return '<label class="au-tipo' + (i === 0 ? ' is-on' : '') + '"><input type="radio" name="preset" value="' + p.id + '"' + (i === 0 ? ' checked' : '') + '>'
+        var id = p.variantes ? variante : p.id, preco = precos[id];
+        return '<label class="au-tipo' + (i === 0 ? ' is-on' : '') + '"><input type="radio" name="preset" value="' + id + '"' + (i === 0 ? ' checked' : '') + (p.variantes ? ' data-fam="1"' : '') + '>'
           + '<span class="au-tipo-n">' + esc(p.nome) + '</span><span class="au-tipo-p">' + (preco != null ? fmtUbt(preco) + ' ⓤ' : '') + '</span>'
           + '<span class="au-tipo-d">' + esc(p.desc) + '</span></label>';
       }).join('');
+      var pilulas = FAMILIA ? FAMILIA.variantes.map(function (v) {
+        return '<button type="button" class="au-var' + (v.id === variante ? ' is-on' : '') + '" data-var="' + v.id + '">'
+          + '<span class="au-var-n">' + esc(v.nome) + '</span><span class="au-var-p">' + (precos[v.id] != null ? fmtUbt(precos[v.id]) + ' ⓤ' : '') + '</span>'
+          + '<span class="au-var-d">' + esc(v.desc) + '</span></button>';
+      }).join('') : '';
       var secOpts = secoes.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.titulo) + '</option>'; }).join('');
       var vozOpts = vozes.map(function (v) { return '<option value="' + esc(v.voice_id) + '"' + (v.voice_id === vozPadrao ? ' selected' : '') + '>' + esc(v.nome) + (v.voice_id === vozPadrao ? ' (padrão)' : '') + '</option>'; }).join('');
       var saldoTxt = conta ? (conta.ilimitado ? 'Saldo ilimitado' : 'Saldo: ' + fmtUbt(conta.saldo) + ' ⓤ') : '';
+      var inicial = PRESETS[0].variantes ? variante : PRESETS[0].id;   // o preco do botao segue o cartao ja selecionado
       return '<form class="au-form" novalidate>'
         + '<div class="au-f-k">Tipo da aula</div><div class="au-tipos">' + tipos + '</div>'
+        + (pilulas ? '<div class="au-f-var"><div class="au-f-k">Tamanho do resumo</div><div class="au-vars">' + pilulas + '</div></div>' : '')
         + '<div class="au-f-secao" hidden><label class="au-f-k" for="auSecao">Qual seção</label><select id="auSecao" name="secao_id" class="au-in">' + (secOpts || '<option value="">Esta unidade não tem seções</option>') + '</select></div>'
         + '<label class="au-f-k" for="auComando">Pedido especial <span>opcional</span></label>'
         + '<textarea id="auComando" name="comando" class="au-in" maxlength="600" rows="2" placeholder="Ex.: foque nas causas econômicas e traga as questões de 2019."></textarea>'
         + (vozOpts ? '<label class="au-f-k" for="auVoz">Voz</label><select id="auVoz" name="voice_id" class="au-in">' + vozOpts + '</select>' : '')
         + '<div class="au-f-foot"><span class="au-saldo">' + esc(saldoTxt) + '</span>'
-        + '<div class="au-f-acts">' + (aulas.length ? '<button type="button" class="icon-btn" data-au="lista">Minhas aulas</button>' : '') + '<button type="submit" class="btn-primary au-enviar">' + ICO.slides + ' Gerar aula · <span class="au-enviar-p">' + fmtUbt(precos.resumo != null ? precos.resumo : 1) + ' ⓤ</span></button></div></div>'
+        + '<div class="au-f-acts">' + (aulas.length ? '<button type="button" class="icon-btn" data-au="lista">Minhas aulas</button>' : '') + '<button type="submit" class="btn-primary au-enviar">' + ICO.slides + ' Gerar aula · <span class="au-enviar-p">' + fmtUbt(precos[inicial] != null ? precos[inicial] : 1) + ' ⓤ</span></button></div></div>'
         + '<div class="au-f-msg" aria-live="polite"></div></form>';
     }
     function aoMudar(ev) {
       var t = ev.target; if (!t || t.name !== 'preset') return;
       el.querySelectorAll('.au-tipo').forEach(function (l) { l.classList.toggle('is-on', l.querySelector('input').checked); });
       var sec = el.querySelector('.au-f-secao'); if (sec) sec.hidden = t.value !== 'secao';
-      var p = el.querySelector('.au-enviar-p'); if (p) p.textContent = fmtUbt(precos[t.value] != null ? precos[t.value] : '?') + ' ⓤ';
+      var vb = el.querySelector('.au-f-var'); if (vb) vb.hidden = t.getAttribute('data-fam') !== '1';
+      pintarPreco();
+    }
+    function pintarPreco() {
+      var v = (el.querySelector('input[name=preset]:checked') || {}).value;
+      var p = el.querySelector('.au-enviar-p'); if (p) p.textContent = fmtUbt(precos[v] != null ? precos[v] : '?') + ' ⓤ';
+    }
+    // pílulas Curto e Padrão: trocam o tipo dentro do cartão do resumo
+    function escolherVariante(id) {
+      variante = id;
+      var radio = el.querySelector('input[name=preset][data-fam="1"]');
+      if (radio) { radio.value = id; radio.checked = true; }
+      el.querySelectorAll('.au-var').forEach(function (b) { b.classList.toggle('is-on', b.getAttribute('data-var') === id); });
+      el.querySelectorAll('.au-tipo').forEach(function (l) { l.classList.toggle('is-on', l.querySelector('input').checked); });
+      var card = radio && radio.closest('.au-tipo'), pp = card && card.querySelector('.au-tipo-p');
+      if (pp) pp.textContent = precos[id] != null ? fmtUbt(precos[id]) + ' ⓤ' : '';
+      var sec = el.querySelector('.au-f-secao'); if (sec) sec.hidden = true;
+      var vb = el.querySelector('.au-f-var'); if (vb) vb.hidden = false;
+      pintarPreco();
     }
     function aoClicar(ev) {
       if (ev.target === el) { fechar(); return; }
+      var v = ev.target.closest ? ev.target.closest('[data-var]') : null;
+      if (v) { escolherVariante(v.getAttribute('data-var')); return; }
       var b = ev.target.closest ? ev.target.closest('[data-au]') : null; if (!b) return;
       var a = b.getAttribute('data-au');
       if (a === 'fechar') fechar();
@@ -275,7 +315,7 @@
       ev.preventDefault(); if (pedindo) return;
       var form = el.querySelector('.au-form'); if (!form) return;
       var msg = form.querySelector('.au-f-msg'), btn = form.querySelector('.au-enviar');
-      var preset = (form.querySelector('input[name=preset]:checked') || {}).value || 'resumo';
+      var preset = (form.querySelector('input[name=preset]:checked') || {}).value || 'resumo_curto';
       var comando = String((form.querySelector('[name=comando]') || {}).value || '').trim();
       var voz = (form.querySelector('[name=voice_id]') || {}).value || '';
       var secao = (form.querySelector('[name=secao_id]') || {}).value || '';
