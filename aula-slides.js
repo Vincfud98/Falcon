@@ -264,9 +264,11 @@
     },
   };
 
+  /* Duas formas de cronologia: a horizontal (linha com marcos alternados) é a padrão;
+     a vertical com painel entra quando há imagem (do slide ou de algum evento) ou quando são mais de 6 eventos. */
   function cronologiaVertical(c, ctx) {
     var evs = c.eventos || [];
-    if (evs.length > 4) return true;
+    if (evs.length > 6) return true;
     if (midiaDe(ctx, c.imagem_id)) return true;
     return evs.some(function (ev) { return !!midiaDe(ctx, ev.imagem_id); });
   }
