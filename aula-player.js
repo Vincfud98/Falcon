@@ -51,8 +51,14 @@
     imagem: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>',
     texto: '<svg viewBox="0 0 24 24"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="14" y2="18"/></svg>',
     tela: '<svg viewBox="0 0 24 24"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
-    slides: '<svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>'
+    slides: '<svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
+    sol: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="4.9" y1="4.9" x2="7" y2="7"/><line x1="17" y1="17" x2="19.1" y2="19.1"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><line x1="4.9" y1="19.1" x2="7" y2="17"/><line x1="17" y1="7" x2="19.1" y2="4.9"/></svg>',
+    lua: '<svg viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+    mais: '<svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+    menos: '<svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+    zero: '<svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>'
   };
+  var FONTES = [0.85, 0.92, 1, 1.1, 1.2, 1.32];
 
   // ─── utilidades ─────────────────────────────────────────────────────────
   function esc(s) { s = String(s == null ? '' : s); return s.replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
@@ -317,6 +323,9 @@
       el.className = 'ap';
       el.innerHTML = '<div class="ap-top"><div class="ap-top-l"><span class="ap-kicker">Aula em slides</span><span class="ap-title">' + esc(titulo) + '</span></div>'
         + '<div class="ap-top-r">'
+        + '<button type="button" class="ap-ib ap-aa" data-ap="fonte-" aria-label="Letra menor" data-tip="Letra menor">A<small>\u2212</small></button>'
+        + '<button type="button" class="ap-ib ap-aa" data-ap="fonte+" aria-label="Letra maior" data-tip="Letra maior">A<small>+</small></button>'
+        + '<button type="button" class="ap-ib" data-ap="tema" data-tip="Tema claro ou escuro">' + ICO.sol + '<span>Claro</span></button>'
         + '<button type="button" class="ap-ib" data-ap="legenda" aria-pressed="true" data-tip="Legenda">' + ICO.legenda + '<span>Legenda</span></button>'
         + '<button type="button" class="ap-ib" data-ap="visual" hidden>' + ICO.imagem + '<span>Ver imagem</span></button>'
         + '<button type="button" class="ap-ib" data-ap="tela" hidden>' + ICO.tela + '<span>Tela cheia</span></button>'
@@ -335,7 +344,10 @@
         + '<button type="button" class="ap-btn ap-play" data-ap="play" aria-label="Reproduzir">' + ICO.play + '</button>'
         + '<button type="button" class="ap-btn" data-ap="fwd" aria-label="Avançar 10 segundos">' + ICO.fwd + '</button>'
         + '<button type="button" class="ap-btn" data-ap="next" aria-label="Próximo slide">' + ICO.next + '</button></div>'
-        + '<div class="ap-ctl-r"><button type="button" class="ap-rate" data-ap="rate" data-tip="Velocidade">1x</button><span class="ap-n">– / –</span></div></div></div>';
+        + '<div class="ap-ctl-r"><button type="button" class="ap-rate" data-ap="rate" data-tip="Velocidade">1x</button><span class="ap-n">– / –</span></div></div></div>'
+        + '<div class="ap-lb" hidden><div class="ap-lb-back" data-lb="fechar"></div><div class="ap-lb-stage"><img class="ap-lb-img" alt="" draggable="false"></div>'
+        + '<div class="ap-lb-cap"><div class="ap-lb-t"></div><div class="ap-lb-x"></div></div>'
+        + '<div class="ap-lb-ctl"><button type="button" data-lb="menos" aria-label="Afastar">' + ICO.menos + '</button><button type="button" class="ap-lb-z" data-lb="zero" aria-label="Tamanho original">100%</button><button type="button" data-lb="mais" aria-label="Aproximar">' + ICO.mais + '</button><button type="button" data-lb="fechar" aria-label="Fechar">' + ICO.x + '</button></div></div>';
       document.body.appendChild(el);
       document.body.style.overflow = 'hidden';
       el.addEventListener('click', aoClicar);
@@ -348,7 +360,19 @@
       aplicarLegendaPref();
       var r = parseFloat(ls('ubique.aula.rate') || '1'); rate = RATES.indexOf(r) >= 0 ? r : 1;
       pintarRate();
+      temaClaro = ls('ubique.aula.tema') === 'claro';
+      var f = parseFloat(ls('ubique.aula.fonte') || '1'); fonteIdx = FONTES.indexOf(f) >= 0 ? FONTES.indexOf(f) : 2;
+      pintarTema();
+      Lightbox.montar(el);
     }
+    var temaClaro = false, fonteIdx = 2, revelado = {};
+    function pintarTema() {
+      if (!el) return;
+      el.classList.toggle('is-light', temaClaro);
+      var b = el.querySelector('[data-ap="tema"]'); if (b) b.innerHTML = (temaClaro ? ICO.lua : ICO.sol) + '<span>' + (temaClaro ? 'Escuro' : 'Claro') + '</span>';
+      if (ctl) ctl.tema(temaClaro);
+    }
+    function aplicarFonte() { ls('ubique.aula.fonte', String(FONTES[fonteIdx])); if (ctl) ctl.fonte(FONTES[fonteIdx]); var m = el.querySelector('[data-ap="fonte-"]'), M = el.querySelector('[data-ap="fonte+"]'); if (m) m.disabled = fonteIdx === 0; if (M) M.disabled = fonteIdx === FONTES.length - 1; }
     function falha(msg) { var c = el && el.querySelector('.ap-carregando'); if (c) c.textContent = msg; toast(msg, 'error'); }
     function preparar(row, unit) {
       aulaId = row.id; terminou = false;
@@ -365,6 +389,9 @@
       var k = el.querySelector('.ap-kicker'); if (k) k.textContent = 'Aula em slides' + (ctx.materia ? ' · ' + ctx.materia : '');
       stage = el.querySelector('.aula-stage');
       ctl = AulaSlides.mount(stage, rot, ctx);
+      revelado = {};
+      pintarTema(); aplicarFonte();
+      stage.addEventListener('aula:imagem', function (ev) { Lightbox.abrir(ev.detail); });
       var wrap = el.querySelector('.ap-stage-wrap');
       soltarFit = AulaSlides.fit(wrap, { contain: true });
       // durações e início de cada slide (a narração manda; sem áudio, o tempo estimado do roteiro)
@@ -476,6 +503,8 @@
         if (idx >= 0 && tokens[idx]) { tokens[idx].classList.add('is-on'); tokens[idx].classList.remove('is-past'); if (legendaOn) { try { tokens[idx].scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (_) { } } }
         palavraAtual = idx;
       }
+      // pergunta do professor: a resposta aparece quando a narração passa de 45% do slide
+      if (!revelado[c.id] && c.layout === 'pergunta' && lt >= 0.45 * (dur[i] || 0)) { revelado[c.id] = true; ctl.revelar(); }
       // marca-texto
       (au.destaques || []).forEach(function (d) {
         var on = lt >= d.inicio_s, chave = c.id + ':' + d.i;
@@ -516,6 +545,8 @@
       b.innerHTML = (on ? ICO.texto : ICO.imagem) + '<span>' + (on ? 'Ver texto' : 'Ver imagem') + '</span>';
     }
     function aoClicar(ev) {
+      var lbBtn = ev.target.closest ? ev.target.closest('[data-lb]') : null;
+      if (lbBtn) { Lightbox.acao(lbBtn.getAttribute('data-lb')); return; }
       var b = ev.target.closest ? ev.target.closest('[data-ap]') : null; if (!b) return;
       var a = b.getAttribute('data-ap');
       if (a === 'fechar') fechar();
@@ -528,6 +559,9 @@
       else if (a === 'legenda') { legendaOn = !legendaOn; ls('ubique.aula.legenda', legendaOn ? '1' : '0'); aplicarLegendaPref(); }
       else if (a === 'visual') { ctl.visual(); pintarVisual(); }
       else if (a === 'inicio') { tocarCena(0, 0, true); }
+      else if (a === 'tema') { temaClaro = !temaClaro; ls('ubique.aula.tema', temaClaro ? 'claro' : 'escuro'); pintarTema(); }
+      else if (a === 'fonte-') { if (fonteIdx > 0) { fonteIdx--; aplicarFonte(); } }
+      else if (a === 'fonte+') { if (fonteIdx < FONTES.length - 1) { fonteIdx++; aplicarFonte(); } }
       else if (a === 'tela') {
         try { if (document.fullscreenElement) document.exitFullscreen(); else if (el.requestFullscreen) el.requestFullscreen(); else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen(); } catch (_) { }
       }
@@ -536,13 +570,35 @@
       if (!el) return;
       var tag = (ev.target && ev.target.tagName) || '';
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') { if (ev.key === 'Escape') { fechar(); } return; }
-      if (ev.key === 'Escape') { ev.preventDefault(); fechar(); }
+      if (ev.key === 'Escape') { ev.preventDefault(); if (Lightbox.aberto()) Lightbox.fechar(); else fechar(); }
       else if (ev.key === ' ' || ev.key === 'k') { ev.preventDefault(); alternar(); }
       else if (ev.key === 'ArrowRight') { ev.preventDefault(); if (i + 1 < cenas.length) tocarCena(i + 1, 0, tocando); }
       else if (ev.key === 'ArrowLeft') { ev.preventDefault(); tocarCena(Math.max(0, i - 1), 0, tocando); }
       else if (ev.key === 'j') { irPara(inicio[i] + tempoLocal() - 10); }
       else if (ev.key === 'l') { irPara(inicio[i] + tempoLocal() + 10); }
     }
+    var Lightbox = (function () {
+      var box = null, img = null, z = 1, x = 0, y = 0, arrastando = null;
+      function montar(raiz) {
+        box = raiz.querySelector('.ap-lb'); img = box.querySelector('.ap-lb-img');
+        var st = box.querySelector('.ap-lb-stage');
+        st.addEventListener('wheel', function (ev) { ev.preventDefault(); zoom(ev.deltaY < 0 ? 1.2 : 1 / 1.2); }, { passive: false });
+        st.addEventListener('pointerdown', function (ev) { if (ev.target !== img) return; arrastando = { x: ev.clientX - x, y: ev.clientY - y }; st.setPointerCapture(ev.pointerId); });
+        st.addEventListener('pointermove', function (ev) { if (!arrastando) return; x = ev.clientX - arrastando.x; y = ev.clientY - arrastando.y; aplicar(); });
+        st.addEventListener('pointerup', function () { arrastando = null; });
+        st.addEventListener('pointercancel', function () { arrastando = null; });
+        st.addEventListener('dblclick', function () { zoom(z < 2 ? 2 / z : 1 / z); });
+      }
+      function aplicar() { img.style.transform = 'translate(' + x + 'px,' + y + 'px) scale(' + z + ')'; var zl = box.querySelector('.ap-lb-z'); if (zl) zl.textContent = Math.round(z * 100) + '%'; }
+      function zoom(f) { z = Math.max(1, Math.min(5, z * f)); if (z === 1) { x = 0; y = 0; } aplicar(); }
+      return {
+        montar: montar,
+        abrir: function (d) { if (!box) return; img.src = d.url || ''; box.querySelector('.ap-lb-t').textContent = d.titulo || ''; box.querySelector('.ap-lb-x').textContent = (d.legenda || '') + (d.credito ? ' \u00b7 ' + d.credito : ''); z = 1; x = 0; y = 0; aplicar(); box.hidden = false; },
+        fechar: function () { if (box) { box.hidden = true; img.removeAttribute('src'); } },
+        aberto: function () { return !!(box && !box.hidden); },
+        acao: function (a) { if (a === 'fechar') this.fechar(); else if (a === 'mais') zoom(1.35); else if (a === 'menos') zoom(1 / 1.35); else if (a === 'zero') { z = 1; x = 0; y = 0; aplicar(); } }
+      };
+    })();
     return { abrir: abrir, fechar: fechar, RATES: RATES };
   })();
 
