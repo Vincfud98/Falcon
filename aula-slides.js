@@ -359,9 +359,14 @@
     var cenas = (roteiro && roteiro.cenas) || [];
     stage.innerHTML = cenas.map(function (c, i) { return render(c, ctx, i, cenas.length); }).join('');
     var slides = stage.querySelectorAll('.aula-slide');
-    var atual = -1, ordemImg = 0;
+    var atual = -1, ordemImg = 0, ultimaImersiva = false;
     Array.prototype.forEach.call(slides, function (s) {
-      if (s.classList.contains('aula-imagem') && !s.classList.contains('is-imersiva')) { if (ordemImg % 2) s.classList.add('is-dir'); ordemImg++; }
+      if (s.classList.contains('aula-imagem')) {
+        // dois slides de imagem seguidos nunca têm a mesma forma: imersiva não repete, e as laterais alternam o lado
+        if (s.classList.contains('is-imersiva') && ultimaImersiva) s.classList.remove('is-imersiva');
+        ultimaImersiva = s.classList.contains('is-imersiva');
+        if (!ultimaImersiva) { if (ordemImg % 2) s.classList.add('is-dir'); ordemImg++; }
+      } else if (!s.classList.contains('aula-galeria')) ultimaImersiva = false;
       var img = s.classList.contains('aula-imagem') ? s.querySelector('.aula-frame img') : null;
       if (img) {
         var aplicar = function () { classificarImagem(s, img); if (s.classList.contains('is-active')) ajustar(s); };
