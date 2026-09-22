@@ -8784,6 +8784,8 @@ html[data-theme="light"] .cad-fc[data-fc="red"]{color:#b03434}
 .tutor-caderno-ed .fc-prop-k{font-size:0}
 .tutor-caderno-ed .fc-prop-k::before{font-family:var(--mono);font-size:.55rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);border:1px solid var(--accent-border-soft);border-radius:4px;padding:.05rem .32rem;margin-right:.4rem;vertical-align:middle}
 .tutor-caderno-ed .fc-prop-k.fc-prop-extra::before{content:'extra'}
+.tutor-caderno-ed .fc-prop-k.fc-prop-dica::before{content:'dica'}
+.tutor-caderno-ed .fc-prop-alvo{font-family:var(--mono);font-size:.78em;letter-spacing:.04em;color:var(--accent)}
 /* DICA inline (RemNote): "(?dica)" vira pílula colada ao marcador; "{texto|dica}"
    mostra a dica em itálico dentro da lacuna, entre parênteses. */
 .tutor-caderno-ed .fc-dica{font-family:var(--sans);font-size:.72em;font-style:italic;color:var(--text-mute);background:var(--bg-card);border:1px solid var(--border);border-radius:4px;padding:.02rem .38rem .02rem .3rem;margin:0 .15rem}
@@ -15722,11 +15724,14 @@ const Store = (function(){
     // senão o PostgREST recusaria TODO card por coluna desconhecida.
     const extras = Array.isArray(c.extras) ? c.extras.filter(Boolean) : [];
     if(_deckTemProps || c.hint || extras.length){ row.hint = c.hint || null; row.extras = extras.length ? extras : null; }
+    // Caderno PRÓPRIO (doc_id) e matéria (subject_id): colunas novas, mesma regra das propriedades
+    if(_deckTemDoc || c.docId || (c.subjectId != null && c.subjectId !== '')){ row.doc_id = c.docId || null; row.subject_id = (c.subjectId != null && c.subjectId !== '') ? String(c.subjectId) : null; }
     return row;
   }
-  let _deckTemProps = false;
+  let _deckTemProps = false, _deckTemDoc = false;
   function _cardFromDeckRow(r){
     if(r && ('hint' in r)) _deckTemProps = true;
+    if(r && ('doc_id' in r)) _deckTemDoc = true;
     return {
       id: r.id, kind: r.kind || 'basic',
       front: r.front || '', back: r.back || '',
@@ -15738,6 +15743,7 @@ const Store = (function(){
       unitId: r.unit_id || null, unitTitle: r.unit_title || '',
       blockId: r.block_id || null, blockTitle: r.block_title || '', blockType: r.block_type || '',
       topics: r.topics || [], tags: r.tags || [], userTags: r.user_tags || [],
+      docId: r.doc_id || null, subjectId: (r.subject_id != null && r.subject_id !== '') ? String(r.subject_id) : null,
       fcStatus: r.fc_status || 'new',
       hint: r.hint || '', extras: Array.isArray(r.extras) ? r.extras : [],
       deletedAt: r.deleted_at ? new Date(r.deleted_at).getTime() : null,
@@ -41377,7 +41383,7 @@ window.TutorIA = (function(){
       const elCad = _cadEl();
       const base = ci.node && (ci.node.nodeType === 1 ? ci.node : ci.node.parentElement);
       const linha = (base && elCad && elCad.contains(base)) ? _cadLinhaDoNo(base, elCad) : null;
-      if(linha && _cadUnit && window.Store && Store.deckList){
+      if(linha && _cadEscopo() && window.Store && Store.deckList){
         const meuId = linha.getAttribute('data-fc-id') || linha.getAttribute('data-fc-item') || null;
         let ehCard = !!meuId;
         if(!ehCard && window.FcSintaxe){
@@ -41908,8 +41914,12 @@ window.TutorIA = (function(){
     const out = [];
     if(kind === 'prop'){
       // "//extra" vira etiqueta (os caracteres ficam; só o embrulho)
-      const mp = texto.match(/^(\s*)(\/\/(extra))\b/i);
-      if(mp) out.push({ a: mp[1].length, b: mp[1].length + mp[2].length, cls: 'fc-prop-k fc-prop-' + mp[3].toLowerCase() });
+      const mp = texto.match(/^(\s*)(\/\/(extra|dica))\b([ \t]*(?:(?:lacuna\s*)?c?\d+|frente)?[ \t]*:?)?/i);
+      if(mp){
+        out.push({ a: mp[1].length, b: mp[1].length + mp[2].length, cls: 'fc-prop-k fc-prop-' + mp[3].toLowerCase() });
+        // "//dica c2:" → o alvo (c2, frente) vira etiqueta pequena
+        if(mp[3].toLowerCase() === 'dica' && mp[4] && mp[4].trim()){ const a0 = mp[1].length + mp[2].length; out.push({ a: a0, b: a0 + mp[4].length, cls: 'fc-prop-alvo' }); }
+      }
       return out;
     }
     if(kind === 'item'){
@@ -42249,7 +42259,7 @@ window.TutorIA = (function(){
   }, true);
   // conexão criada/removida em qualquer lugar → o selo da linha acompanha
   document.addEventListener('ubq:fc-links-changed', function(){
-    const el = _cadEl(); if(!el || !_cadUnit) return;
+    const el = _cadEl(); if(!el || !_cadEscopo()) return;
     try{ _fcVistaAplicar(el); }catch(_){ }
   });
   // Adoção: o caderno é o editor do deck INTEIRO da unidade — todo card vivo
@@ -42259,15 +42269,34 @@ window.TutorIA = (function(){
   // pelo aluno" (aviso apagar×restaurar) — sem ele, o ciclo ressuscitaria a
   // linha que o aluno acabou de apagar.
   let _fcCadConhecidos = new Set(), _fcCicloAtivo = false;
+  // Escopo do caderno aberto: a UNIDADE (unitId) ou o caderno PRÓPRIO (docId). Um card
+  // pertence ao escopo pela unidade ou pelo caderno em que nasceu.
+  function _cadEscopo(){
+    if(_cadDocId) return { tipo: 'doc', docId: String(_cadDocId), unitId: null, chave: 'doc:' + String(_cadDocId) };
+    if(_cadUnit && String(_cadUnit) !== 'null') return { tipo: 'unit', unitId: String(_cadUnit), docId: null, chave: String(_cadUnit) };
+    return null;
+  }
+  function _fcCardNoEscopo(card, esc){
+    esc = esc || _cadEscopo(); if(!card || !esc) return false;
+    if(esc.tipo === 'doc') return String(card.docId || '') === esc.docId;
+    return !card.docId && String(card.unitId || '') === esc.unitId;
+  }
+  // Contexto do card novo: da unidade (COURSES) ou das PROPRIEDADES do caderno próprio
+  // (matéria e tópicos do edital) — é assim que ele entra na página Flashcards.
+  function _fcCadContexto(esc){
+    if(!window.FlashcardsIA) return {};
+    return esc.tipo === 'unit' ? (FlashcardsIA.contexto ? FlashcardsIA.contexto(esc.unitId, null) : {}) : (FlashcardsIA.contextoDoc ? FlashcardsIA.contextoDoc(esc.docId, null) : {});
+  }
   function _fcCadAdotar(el){
-    if(!window.FcSintaxe || !window.Store || !Store.deckList || !_cadUnit) return;
+    const esc = _cadEscopo();
+    if(!window.FcSintaxe || !window.Store || !Store.deckList || !esc) return;
     Array.prototype.forEach.call(el.querySelectorAll('[data-fc-id],[data-fc-cz]'), function(n){
       if(!_fcForaDePortal(n)) return;
       if(n.getAttribute('data-fc-id')) _fcCadConhecidos.add(String(n.getAttribute('data-fc-id')));
       if(n.getAttribute('data-fc-cz')) _fcCadConhecidos.add(String(n.getAttribute('data-fc-cz')));
     });
     const falta = Store.deckList().filter(function(c){
-      return String(c.unitId) === String(_cadUnit) && !_fcCadConhecidos.has(String(c.id));
+      return _fcCardNoEscopo(c, esc) && !_fcCadConhecidos.has(String(c.id));
     });
     if(!falta.length) return;
     _cadMarcarSujo(el);
@@ -42285,11 +42314,12 @@ window.TutorIA = (function(){
   // Ciclo do salvamento: adota/cria/atualiza/carimba/remove mortas; sumidas → barra.
   function _fcCadCiclo(){
     if(!window.FcSintaxe || !window.Store || !Store.deckList) return;
-    const el = _cadEl(); if(!el || !_cadUnit) return;
+    const el = _cadEl(); if(!el || !_cadEscopo()) return;
     _fcCicloAtivo = true;
     try{ _fcCadCicloCorpo(el); } finally { _fcCicloAtivo = false; }
   }
   function _fcCadCicloCorpo(el){
+    const esc = _cadEscopo(); if(!esc) return;
     _fcVistaLimpar(el);
     const podeApagar = !window.Store || !Store.deckPronto || Store.deckPronto();
     _fcCadDedup(el);
@@ -42297,13 +42327,13 @@ window.TutorIA = (function(){
     const blocos = _fcCadBlocos(el);
     const parse = FcSintaxe.parseBlocos(blocos);
     const cardDe = function(id){ return Store.deckList().find(function(c){ return String(c.id) === String(id); }) || null; };
-    const prevIds = Store.deckList().filter(function(c){ return String(c.unitId) === String(_cadUnit) && _fcCadConhecidos.has(String(c.id)); }).map(function(c){ return String(c.id); });
+    const prevIds = Store.deckList().filter(function(c){ return _fcCardNoEscopo(c, esc) && _fcCadConhecidos.has(String(c.id)); }).map(function(c){ return String(c.id); });
     const rec = FcSintaxe.reconciliar(prevIds, parse, cardDe);
     // ANTES de recarimbar: o card que sumiu ainda tem LINHA? (o aluno tirou a
     // sintaxe — chaves, " :: " — e não a linha)
     const linhaViva = {};
     rec.sumiram.forEach(function(id){ linhaViva[id] = !!el.querySelector('[data-fc-id="' + id + '"],[data-fc-cz="' + id + '"]'); });
-    const ctx = (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(_cadUnit, null) : {};
+    const ctx = _fcCadContexto(esc);
     // mortas: card apagado por fora → a linha sai (o card é a fonte). Lacuna
     // morta num bloco DUPLO não leva a linha (ela é do card de texto): só as
     // chaves viram texto comum. Sem deck confiável não dá pra afirmar que
@@ -42320,10 +42350,11 @@ window.TutorIA = (function(){
     rec.criar.forEach(function(entry){
       const novo = Store.deckAdd(Object.assign({
         rich: _fcCadRicoDe(entry, blocos),
-        origin: 'caderno', unitId: String(_cadUnit), unitTitle: ctx.unitTitle || '',
+        origin: 'caderno', unitId: esc.tipo === 'unit' ? esc.unitId : null, unitTitle: esc.tipo === 'unit' ? (ctx.unitTitle || '') : '',
+        docId: esc.tipo === 'doc' ? esc.docId : null, subjectId: ctx.subjectId || null,
         moduleId: ctx.moduleId || null, chapterId: ctx.chapterId || null,
         blockId: null, blockTitle: '', blockType: 'caderno',
-        topics: ctx.moduleId ? [ctx.moduleId] : [], tags: [], userTags: [],
+        topics: Array.isArray(ctx.topics) ? ctx.topics.map(String) : [], tags: [], userTags: [],
         anchor: { start: entry.blocos[0] }
       }, _fcCadPatch(entry.card)));
       if(novo && novo.id){ entry.fcId = String(novo.id); _fcCadConhecidos.add(String(novo.id)); }
@@ -42380,8 +42411,8 @@ window.TutorIA = (function(){
     const chave = ids.map(String).slice().sort().join(',');
     if(_fcAvisoEl && _fcAvisoEl.isConnected && _fcAvisoEl.getAttribute('data-fc-avi') === chave) return;
     _fcCadAvisoFechar();
-    const pane = document.getElementById('tutorCaderno'); const el = _cadEl();
-    if(!pane || !el) return;
+    const el = _cadEl();
+    if(!el || !el.parentNode) return;
     const n = ids.length;
     _fcAvisoEl = document.createElement('div');
     _fcAvisoEl.className = 'fc-cad-aviso';
@@ -42474,9 +42505,7 @@ window.TutorIA = (function(){
   }
   // edição por fora com o caderno aberto → re-projeta a linha na hora
   document.addEventListener('ubq:fc-changed', function(ev){
-    const el = _cadEl(); if(!el || !el.isConnected) return;
-    const pane = document.getElementById('tutorCaderno');
-    if(pane && pane.hidden) return;
+    const el = _cadEl(); if(!el || !el.isConnected || !el.getClientRects().length) return;   // caderno fechado ou escondido
     if(_fcCicloAtivo) return;                              // mudança veio do próprio ciclo
     if(document.activeElement === el) return;              // não briga com quem está digitando
     const id = ev.detail && ev.detail.id; if(!id) return;
@@ -42484,7 +42513,7 @@ window.TutorIA = (function(){
     if(!head){
       // card novo desta unidade nascido por fora (IA, modal, presente) → adota na hora
       const card = Store.deckList().find(function(c){ return String(c.id) === String(id); });
-      if(card && _cadUnit && String(card.unitId) === String(_cadUnit)){
+      if(card && _fcCardNoEscopo(card)){
         try{ _fcCadAdotar(el); _fcVistaAplicar(el); _cadSchedule(); }catch(e){ console.warn('[fc caderno adoção]', e); }
       }
       return;
@@ -43287,12 +43316,12 @@ window.TutorIA = (function(){
     if(!docAlvo && (!unitAlvo || String(unitAlvo) === 'null')) return;
     if(!el.__cadDirty){ _cadStatus('salvo', stAlvo); return; }     // nada mudou aqui: não grava
     const edicoes = el.__cadEdits || 0;
-    // O ciclo de flashcards (::) é DA UNIDADE — card precisa de unitId.
-    // No avulso, :: fica como texto (decisão em aberto registrada).
+    // O ciclo de flashcards (::) roda na unidade E no caderno próprio (o card
+    // nasce com docId e herda matéria/tópicos das propriedades do caderno).
     // O ciclo des-renderiza a vista (tira os embrulhos) e ela volta logo
     // abaixo: uma seleção aberta do aluno morreria no meio. Offsets salvam.
     const snapSel = (document.activeElement === el) ? _cadSelSnap(el) : null;
-    if(unitAlvo){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
+    if(unitAlvo || docAlvo){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
     try{ _cadNormalizarBlocos(el); }catch(_){ }
     try{ _cadCelCarimbar(el); }catch(e){ console.warn('[cad cel]', e); }
     const chavePo = docAlvo ? ('doc:' + docAlvo) : String(unitAlvo);
@@ -43303,7 +43332,7 @@ window.TutorIA = (function(){
        identidade (era a "corrupção silenciosa"). O corpo é deste instante;
        a vista volta já (os portais ficam fora dela). */
     const body = _cadSanitize(_poCorpoParaSalvar(el));   // corpo CRU: o ciclo des-renderizou
-    if(unitAlvo){ try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); } }
+    if(unitAlvo || docAlvo){ try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); } }
     if(snapSel && document.activeElement === el) _cadSelRestaura(el, snapSel);
     const gravacao = (async function(){
       // PORTAL: o que você editou dentro de um buraco vai para a ORIGEM, e o
@@ -44283,52 +44312,56 @@ window.TutorIA = (function(){
     });
     linha.normalize();
   }
-  function _fcDicaOpcoes(linha, texto){
-    const out = [];
-    const semCmd = texto.replace(/\/\/dica$/i, '');
-    let kind = (window.FcSintaxe && FcSintaxe.detectar(semCmd)) || null;
-    if(!kind && linha.getAttribute('data-fc-id') && window.Store && Store.deckList){
-      const card = Store.deckList().find(function(c){ return String(c.id) === String(linha.getAttribute('data-fc-id')); });
+  // Cabeça do card a que a linha pertence: ela mesma, o título do item, ou o card acima de uma linha-filha
+  function _fcCadCabecaDe(bloco){
+    if(_fcCadEhHead(bloco) || (window.FcSintaxe && FcSintaxe.detectar(_fcCadTexto(bloco)))) return bloco;
+    if(_FC_RE_ITEM.test(_fcCadTexto(bloco))) return _fcCadMultiHead(bloco);
+    return _fcCadPropDono(bloco);
+  }
+  function _fcDicaOpcoes(head){
+    const out = []; if(!head) return out;
+    const texto = _fcCadTexto(head).replace(/\/\/dica[^\n]*$/i, '');
+    let kind = (window.FcSintaxe && FcSintaxe.detectar(texto)) || null;
+    if(!kind && head.getAttribute('data-fc-id') && window.Store && Store.deckList){
+      const card = Store.deckList().find(function(c){ return String(c.id) === String(head.getAttribute('data-fc-id')); });
       if(card) kind = card.kind;
     }
-    if(kind === 'basic' || kind === 'multi') out.push({ tipo: 'frente', rotulo: 'Frente do card', sub: kind === 'basic' ? 'aparece depois do ::' : 'aparece antes do :::' });
+    if(kind === 'basic' || kind === 'multi') out.push({ tipo: 'frente', rotulo: 'Frente do card', sub: 'aparece antes de virar o card' });
     const vistos = {};
-    _fcVistaGrupos(semCmd).forEach(function(L){
+    _fcVistaGrupos(texto).forEach(function(L){
       if(vistos[L.g]) return; vistos[L.g] = true;
-      const corpo = semCmd.slice(L.ia + L.abre, L.dica ? L.dica.ia : L.ib - 1).trim();
+      const corpo = texto.slice(L.ia + L.abre, L.dica ? L.dica.ia : L.ib - 1).trim();
       out.push({ tipo: 'lacuna', g: L.g, rotulo: 'Lacuna c' + L.g, sub: (corpo.length > 40 ? corpo.slice(0, 40) + '…' : corpo) + (L.dica ? ' · já tem dica' : '') });
     });
     return out;
   }
+  // Aplica: a propriedade "//dica <alvo>: texto" fica ABAIXO do card (reaproveita a linha-filha vazia
+  // onde o comando foi digitado; se foi na cabeça ou num item, cria a linha depois da última do card),
+  // com a palavra "texto" selecionada para digitar por cima.
   function _fcDicaAplicar(cmd, op){
-    const linha = cmd.linha; if(!linha || !linha.isConnected) return;
+    const linha = cmd.linha, head = cmd.head;
+    if(!linha || !linha.isConnected || !head || !head.isConnected) return;
     _fcVistaSource(linha);
-    const texto0 = _fcCadTexto(linha);
-    const ops = [];
-    if(cmd.b > cmd.a) ops.push({ a: cmd.a, b: cmd.b, novo: '' });
-    // o token é calculado no texto SEM o comando; `mapa` leva o offset de volta
-    // ao texto atual (o comando ainda está lá quando as edições rodam)
-    const texto = texto0.slice(0, cmd.a) + texto0.slice(cmd.b);
-    const mapa = function(pp){ return pp >= cmd.a ? pp + (cmd.b - cmd.a) : pp; };
-    let sel0 = null, sel1 = null;
-    // token "(dica: texto)" com a palavra "texto" selecionada (5 chars) para digitar por cima
-    const TOK = '(dica: texto)', TA = 7, TB = 12;
-    if(op.tipo === 'frente'){
-      const md = texto.match(/\(dica:\s*([^()\n]+)\)/i);
-      if(md){ sel0 = md.index + md[0].length - md[1].length - 1; sel1 = md.index + md[0].length - 1; }
-      else if(/ :::\s*$/.test(texto)){ const i = texto.search(/ :::\s*$/); ops.push({ a: mapa(i), b: mapa(i), novo: ' ' + TOK }); sel0 = i + 1 + TA; sel1 = i + 1 + TB; }
-      else { const i = texto.indexOf(' :: '); if(i < 0) return; const pp = i + 4; ops.push({ a: mapa(pp), b: mapa(pp), novo: TOK + ' ' }); sel0 = pp + TA; sel1 = pp + TB; }
-    } else {
-      const L = _fcVistaGrupos(texto).find(function(x){ return x.g === op.g; }); if(!L) return;
-      if(L.dica){ sel0 = L.dica.ta; sel1 = L.dica.tb; }
-      else { const pp = L.ib - 1; ops.push({ a: mapa(pp), b: mapa(pp), novo: ' ' + TOK }); sel0 = pp + 1 + TA; sel1 = pp + 1 + TB; }
+    const t0 = _fcCadTexto(linha);
+    const semCmd = t0.slice(0, cmd.a) + t0.slice(cmd.b);
+    const texto = '//dica' + (op.tipo === 'frente' ? '' : (' c' + op.g)) + ': texto';
+    let destino;
+    const ehCabecaOuItem = (linha === head) || _FC_RE_ITEM.test(t0);
+    if(!ehCabecaOuItem && !semCmd.trim()){ destino = linha; destino.textContent = texto; }
+    else {
+      _fcLinhaEditar(linha, [{ a: cmd.a, b: cmd.b, novo: '' }]);
+      try{ _fcVistaSync(linha); }catch(_){}
+      let ultimo = head; let p = head.nextElementSibling;
+      while(p && (_FC_RE_ITEM.test(_fcCadTexto(p)) || _fcCadEhProp(p))){ ultimo = p; p = p.nextElementSibling; }
+      destino = document.createElement('div');
+      const ind = linha.getAttribute('data-ind') || head.getAttribute('data-ind');
+      if(ind) destino.setAttribute('data-ind', ind);
+      destino.textContent = texto;
+      ultimo.parentNode.insertBefore(destino, ultimo.nextSibling);
     }
-    _fcLinhaEditar(linha, ops);
-    try{ _fcVistaSync(linha); }catch(_){}
-    if(sel0 != null && sel1 > sel0){
-      const pa = _fcVistaPos(linha, sel0), pb = _fcVistaPos(linha, sel1, true);
-      if(pa && pb){ try{ const r = document.createRange(); r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off); const s2 = window.getSelection(); s2.removeAllRanges(); s2.addRange(r); }catch(_){} }
-    }
+    try{ _fcVistaSync(destino); }catch(_){}
+    const pa = _fcVistaPos(destino, texto.length - 5), pb = _fcVistaPos(destino, texto.length, true);
+    if(pa && pb){ try{ const r = document.createRange(); r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off); const s2 = window.getSelection(); s2.removeAllRanges(); s2.addRange(r); }catch(_){} }
     _cadSchedule();
   }
   let _fcDicaDd = null, _fcDicaCmd = null;
@@ -44365,9 +44398,10 @@ window.TutorIA = (function(){
     const off = _fcVistaCaretOff(bloco, sel.anchorNode, sel.anchorOffset);
     if(off == null || !/\/\/dica$/i.test(texto.slice(0, off))){ _fcDicaDdFechar(); return false; }
     if(_fcDicaDd && _fcDicaCmd && _fcDicaCmd.linha === bloco) return false;   // menu já aberto para esta linha
-    const opcoes = _fcDicaOpcoes(bloco, texto);
-    if(!opcoes.length) return false;                                            // não é linha de card: fica como texto
-    const cmd = { linha: bloco, a: off - 6, b: off };
+    const head = _fcCadCabecaDe(bloco);
+    const opcoes = _fcDicaOpcoes(head);
+    if(!head || !opcoes.length) return false;                                   // não pertence a um card: fica como texto
+    const cmd = { linha: bloco, head: head, a: off - 6, b: off };
     if(opcoes.length === 1){ _fcDicaAplicar(cmd, opcoes[0]); return true; }
     _fcDicaMenu(cmd, opcoes);
     return false;
@@ -44679,7 +44713,12 @@ window.TutorIA = (function(){
     // Botão "Revisar" do cabeçalho da página: caderno próprio → os cards que o
     // CITAM (herança); caderno de unidade → os cards da unidade.
     try{
-      if(atributo === 'data-doc-id') _cadpRevisarSync(refs.cards.map(function(c){ return String(c.id); }), 'Flashcards que citam este caderno');
+      if(atributo === 'data-doc-id'){
+        // os cards NASCIDOS neste caderno (docId) e os que o citam
+        const nascidos = (window.Store && Store.deckList) ? Store.deckList().filter(function(c){ return c && !c.deletedAt && String(c.docId || '') === String(unitId); }).map(function(c){ return String(c.id); }) : [];
+        const ids = Array.from(new Set(nascidos.concat(refs.cards.map(function(c){ return String(c.id); }))));
+        _cadpRevisarSync(ids, nascidos.length ? 'Flashcards deste caderno' : 'Flashcards que citam este caderno');
+      }
       else if(window.FlashcardsPage && FlashcardsPage.unitResumo) _cadpRevisarSync(FlashcardsPage.unitResumo(unitId).ids, 'Flashcards desta unidade');
     }catch(e){ console.warn('[revisar cabeçalho]', e); }
     if(!refs.cadernos.length && !refs.cards.length) return;
@@ -46014,6 +46053,10 @@ window.TutorIA = (function(){
     el.__cadBase = (doc && doc.body) || ''; el.__cadDirty = false; el.__cadEdits = 0;
     _cadFixChips(el);
     _cadNormalizarBlocos(el);
+    try{ _fcCadDedup(el); }catch(e){ console.warn('[fc caderno dedup]', e); }
+    try{ _fcCadProjetar(el); }catch(e){ console.warn('[fc caderno projeção]', e); }
+    try{ _fcCadAdotar(el); }catch(e){ console.warn('[fc caderno adoção]', e); }
+    try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); }
     el.__poCitAntes = null;
     _portaisRender(el, 'doc:' + String(docId)).catch(function(e2){ console.warn('[portal render]', e2); });
     _emptyToggle(el);
@@ -59506,7 +59549,7 @@ const FlashcardsIA = (function(){
     out.sigla = hit.course.sigla || ''; out.materia = hit.course.title || '';
     out.courseId = hit.course.id; out.subjectId = hit.course._subjectId != null ? String(hit.course._subjectId) : '';   // id numérico da matéria (subjects.id), como a Rotina grava
     out.moduleId = hit.module.id; out.chapterId = hit.chapter ? hit.chapter.id : null;
-    out.unitTitle = hit.unit.title || ''; out.topics = [hit.module.id];
+    out.unitTitle = hit.unit.title || ''; out.topics = (hit.unit.topics || []).map(String);   // tópicos do EDITAL da unidade (antes era o módulo, que ninguém lia)
     out.unitSid = hit.unit._storeId != null ? String(hit.unit._storeId) : null;
     // unit.groups é campo FANTASMA na unidade crua: vem do UbiqueStore.
     const u = (typeof _unitWithStoreOverride === 'function') ? _unitWithStoreOverride(hit.unit) : hit.unit;
@@ -59518,6 +59561,33 @@ const FlashcardsIA = (function(){
     return out;
   }
   window._hrefDoBloco = function(unitId, blockId){ return _contexto(unitId, blockId).href || ''; };
+  // Card nascido num caderno PRÓPRIO: a matéria e os tópicos vêm das PROPRIEDADES
+  // do caderno (meta.materias / meta.edital) — mudou a propriedade, os cards seguem.
+  // O que ficou gravado no card (subject_id, topics) vale só como reserva.
+  function _contextoDoc(docId, card){
+    const out = { unitId: null, docId: String(docId), blockId: null, unitSid: null, moduleId: null, chapterId: null, unitTitle: '', docTitulo: '',
+      blockTitle: '', blockType: '', topics: [], tags: [], block: null, groupId: null, href: '#/cadernos?doc=' + encodeURIComponent(String(docId)), sigla: '', materia: '', subjectId: '' };
+    const d = (window.Store && Store.cadAvulsoPega) ? Store.cadAvulsoPega(docId) : null;
+    const meta = (d && d.meta) || {};
+    out.docTitulo = (d && d.titulo) || ''; out.unitTitle = out.docTitulo || 'Caderno';
+    out.topics = (Array.isArray(meta.edital) ? meta.edital : []).map(String).filter(Boolean);
+    if(!out.topics.length && card && Array.isArray(card.topics)) out.topics = card.topics.map(String);
+    const materias = (Array.isArray(meta.materias) ? meta.materias : []).map(String).filter(Boolean);
+    let sid = materias[0] || ((d && d.subjectId != null && d.subjectId !== '') ? String(d.subjectId) : '') || ((card && card.subjectId != null && card.subjectId !== '') ? String(card.subjectId) : '');
+    const cursos = (window.COURSES || []).filter(Boolean);
+    const porId = x => (x !== '' && x != null) ? (cursos.find(c => String(c._subjectId) === String(x)) || null) : null;
+    let curso = porId(sid);
+    if(!curso){
+      // sem matéria declarada: sobe a cadeia do tópico do edital até achar subject_id
+      const S = window.UbiqueStore;
+      const pega = id => (S && S.edital_topics && S.edital_topics.get) ? (S.edital_topics.get(id) || S.edital_topics.get(Number(id)) || S.edital_topics.get(String(id)) || null) : null;
+      out.topics.some(t0 => { let cur = t0, g = 0; while(cur != null && g++ < 20){ const tp = pega(cur); if(!tp) break; if(tp.subject_id != null){ curso = porId(tp.subject_id); if(curso) return true; } cur = tp.parent_id != null ? tp.parent_id : null; } return false; });
+    }
+    if(curso){ out.sigla = curso.sigla || ''; out.materia = curso.title || ''; out.courseId = curso.id; out.subjectId = String(curso._subjectId); }
+    else out.subjectId = sid;
+    return out;
+  }
+  function _contextoDoCard(card){ card = card || {}; return card.docId ? _contextoDoc(card.docId, card) : _contexto(card.unitId, card.blockId); }
 
   // Texto do bloco inteiro = o `content` da LINHA REAL do Store (é exatamente
   // o que o servidor compara na checagem "trecho está no bloco"). O bloco dos
@@ -59722,7 +59792,7 @@ const FlashcardsIA = (function(){
     if(texto.length < 20){ toast('Este bloco não tem texto suficiente para gerar flashcards.', 'warn'); return; }
     abrirModal({ trecho: texto, blockId: ctx.blockId, unitId: ctx.unitId });
   }
-  return { abrirPreview, abrirModal, abrirDoBloco, fecharModal, contexto: _contexto };
+  return { abrirPreview, abrirModal, abrirDoBloco, fecharModal, contexto: _contexto, contextoDoc: _contextoDoc, contextoDoCard: _contextoDoCard };
 })();
 window.FlashcardsIA = FlashcardsIA;
 
@@ -60839,7 +60909,7 @@ const Practice = (function(){
   }
   /* ── render ── */
   function _crumb(card){
-    const c = (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(card.unitId, card.blockId) : {};
+    const c = (window.FlashcardsIA && FlashcardsIA.contextoDoCard) ? FlashcardsIA.contextoDoCard(card) : {};
     const partes = [c.sigla || c.materia, c.unitTitle, c.blockTitle].filter(Boolean).map(esc);
     return partes.length ? (c.href ? '<a href="' + Util.attr(c.href) + '" class="pr-crumb">' + partes.join(' › ') + '</a>' : '<span class="pr-crumb">' + partes.join(' › ') + '</span>') : '';
   }
@@ -64372,6 +64442,12 @@ const FlashcardsPage = (function(){
   };
   function _fimDoDia(){ const d = new Date(); d.setHours(23, 59, 59, 999); return d.getTime(); }
   function _ctx(card){
+    if(card.docId){
+      // card nascido num caderno PRÓPRIO: matéria, tópicos e título vêm das propriedades do caderno
+      const kd = 'doc:' + card.docId;
+      if(!_ctxCache[kd]) _ctxCache[kd] = (window.FlashcardsIA && FlashcardsIA.contextoDoc) ? FlashcardsIA.contextoDoc(card.docId, card) : {};
+      return _ctxCache[kd];
+    }
     const k = String(card.unitId || '');
     if(!_ctxCache[k]) _ctxCache[k] = (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(card.unitId, null) : {};
     return _ctxCache[k];
@@ -64418,10 +64494,9 @@ const FlashcardsPage = (function(){
   // tópico do edital ligado à unidade (o primeiro vínculo válido). Os tópicos
   // REAIS vivem em UbiqueStore.edital_topics (code + title); Util.getTopic é
   // o registro legado de mock — fica só como reserva.
-  function _topicoDaUnidade(unitId){
-    const info = _unitInfo(unitId);
+  function _topicoDeIds(ids){
     const S = window.UbiqueStore;
-    for(const id of info.topics){
+    for(const id of (ids || [])){
       let tp = null;
       if(S && S.edital_topics && S.edital_topics.get){ tp = S.edital_topics.get(id) || S.edital_topics.get(Number(id)) || S.edital_topics.get(String(id)) || null; }
       if(!tp && Util.getTopic) tp = Util.getTopic(id);
@@ -64429,6 +64504,9 @@ const FlashcardsPage = (function(){
     }
     return null;
   }
+  function _topicoDaUnidade(unitId){ return _topicoDeIds(_unitInfo(unitId).topics); }
+  // card de caderno próprio: sem unidade; entra na matéria num "módulo" próprio
+  const _UINFO_DOC = { topics: [], order: 1e9, unitNumber: '', mod: { id: '__cad', number: '', title: 'Cadernos próprios', order: 1e8 }, cap: null };
   function linhas(){
     _ctxCache = {}; _unitIdx = null;
     const cfg = Store.srsSettings(), hoje = _fimDoDia();
@@ -64448,9 +64526,9 @@ const FlashcardsPage = (function(){
       const rev = ativos.filter(r => r.state === 'review' && (r.intervalDays || 0) < cfg.matureDays).length;
       const c = _ctx(card);
       return { card: card, ords: ords.length, due: due, novos: novos, learn: learn, dom: dom, rev: rev, off: ords.length - ativos.length, dominado: dominado, leech: leech, suspenso: suspenso, proxDue: proxDue, intervalo: intervalo, lapsos: lapsos, estado: estado,
-        topico: _topicoDaUnidade(card.unitId), unitOrder: _unitInfo(card.unitId).order, uinfo: _unitInfo(card.unitId),
+        topico: card.docId ? _topicoDeIds(c.topics || []) : _topicoDaUnidade(card.unitId), unitOrder: card.docId ? 1e9 : _unitInfo(card.unitId).order, uinfo: card.docId ? _UINFO_DOC : _unitInfo(card.unitId),
         conexoes: (window.Store && Store.linksFor) ? Store.linksFor(card.id).length : 0,
-        sigla: c.sigla || '', materia: c.materia || '', subjectId: c.subjectId || '', unitTitle: card.unitTitle || c.unitTitle || '', href: (window._hrefDoBloco && card.blockId) ? _hrefDoBloco(card.unitId, card.blockId) : '',
+        sigla: c.sigla || '', materia: c.materia || '', subjectId: c.subjectId || '', unitTitle: card.docId ? (c.unitTitle || 'Caderno') : (card.unitTitle || c.unitTitle || ''), href: card.docId ? (c.href || '') : ((window._hrefDoBloco && card.blockId) ? _hrefDoBloco(card.unitId, card.blockId) : ''),
         texto: _frenteTexto(card), busca: (_frenteTexto(card) + ' ' + (card.back || '') + ' ' + (card.lines || []).join(' ') + ' ' + (card.tags || []).join(' ') + ' ' + (card.userTags || []).join(' ')).toLowerCase() };
     });
   }
@@ -64583,8 +64661,8 @@ const FlashcardsPage = (function(){
       const tk = l.topico ? l.topico.id : '__sem';
       if(!m.topicos.has(tk)) m.topicos.set(tk, novoNo({ topico: l.topico, units: new Map() }));
       const tp = m.topicos.get(tk); soma(tp, l);
-      const uk = String(l.card.unitId || '');
-      if(!tp.units.has(uk)) tp.units.set(uk, novoNo({ unitId: uk, title: l.unitTitle || 'Sem unidade', href: l.href, order: l.unitOrder }));
+      const uk = l.card.docId ? ('doc:' + l.card.docId) : String(l.card.unitId || '');
+      if(!tp.units.has(uk)) tp.units.set(uk, novoNo({ unitId: l.card.docId ? '' : uk, doc: !!l.card.docId, title: l.unitTitle || 'Sem unidade', href: l.href, order: l.unitOrder }));
       soma(tp.units.get(uk), l);
       // estrutura: módulo → capítulo → unidade (pra praticar só um módulo/capítulo)
       if(!m.mods) m.mods = new Map();
@@ -64594,7 +64672,7 @@ const FlashcardsPage = (function(){
       const capi = (l.uinfo && l.uinfo.cap) || null; const ck = capi ? capi.id : '__';
       if(!nm.caps.has(ck)) nm.caps.set(ck, novoNo({ info: capi, units: new Map() }));
       const nc = nm.caps.get(ck); soma(nc, l);
-      if(!nc.units.has(uk)) nc.units.set(uk, novoNo({ unitId: uk, number: (l.uinfo && l.uinfo.unitNumber) || '', title: l.unitTitle || 'Sem unidade', href: l.href, order: l.unitOrder }));
+      if(!nc.units.has(uk)) nc.units.set(uk, novoNo({ unitId: l.card.docId ? '' : uk, doc: !!l.card.docId, number: (l.uinfo && l.uinfo.unitNumber) || '', title: l.unitTitle || 'Sem unidade', href: l.href, order: l.unitOrder }));
       soma(nc.units.get(uk), l);
     });
     const barra = n => {
@@ -64609,13 +64687,13 @@ const FlashcardsPage = (function(){
     const porUnidade = _t.agrupar !== 'edital';
     const chip = txt => `<span class="fcp-chip">${esc(txt)}</span>`;
     const unitRow = (m, u) => `<div class="fcp-unit fcp-lvl-u">
-          <span class="fcp-row-t"><span class="fcp-unit-t">${chip('Unidade ' + (u.number || '?'))}${u.href ? `<a href="${Util.attr(u.href)}">${esc(u.title)}</a>` : esc(u.title)}</span>${vencidos(u)}</span>${barra(u)}
+          <span class="fcp-row-t"><span class="fcp-unit-t">${chip(u.doc ? 'Caderno' : 'Unidade ' + (u.number || '?'))}${u.href ? `<a href="${Util.attr(u.href)}">${esc(u.title)}</a>` : esc(u.title)}</span>${vencidos(u)}</span>${barra(u)}
           <span class="fcp-acc-a">${_split({ ids: u.cards.join(','), subject: m.subjectId || '', unit: u.unitId, pend: u.due + u.novos, total: u.itens, label: 'Praticar', nome: (u.number ? 'Unidade ' + u.number + ' · ' : '') + u.title })}</span>
         </div>`;
     const linhasDe = m => porUnidade
       ? Array.from((m.mods || new Map()).values()).sort((a, b) => a.info.order - b.info.order).map(nm => `<details class="fcp-lvl fcp-lvl-mod" open>
-          <summary class="fcp-lvl-h"><span class="fcp-row-t"><span class="fcp-unit-t">${chip('Módulo ' + nm.info.number)}${esc(nm.info.title)}</span>${vencidos(nm)}</span>${barra(nm)}
-            <span class="fcp-acc-a">${_split({ ids: nm.cards.join(','), subject: m.subjectId || '', unit: '', pend: nm.due + nm.novos, total: nm.itens, label: 'Praticar', nome: 'Módulo ' + nm.info.number + (nm.info.title ? ' · ' + nm.info.title : '') })}</span></summary>
+          <summary class="fcp-lvl-h"><span class="fcp-row-t"><span class="fcp-unit-t">${chip(nm.info.id === '__cad' ? 'Cadernos' : 'Módulo ' + nm.info.number)}${nm.info.id === '__cad' ? '' : esc(nm.info.title)}</span>${vencidos(nm)}</span>${barra(nm)}
+            <span class="fcp-acc-a">${_split({ ids: nm.cards.join(','), subject: m.subjectId || '', unit: '', pend: nm.due + nm.novos, total: nm.itens, label: 'Praticar', nome: nm.info.id === '__cad' ? 'Cadernos próprios' : 'Módulo ' + nm.info.number + (nm.info.title ? ' · ' + nm.info.title : '') })}</span></summary>
           ${Array.from(nm.caps.values()).sort((a, b) => ((a.info && a.info.order) || 0) - ((b.info && b.info.order) || 0)).map(nc => {
             const us = Array.from(nc.units.values()).sort((a, b) => a.order - b.order).map(u => unitRow(m, u)).join('');
             if(!nc.info) return us;    // unidades soltas no módulo, sem capítulo
@@ -64980,7 +65058,7 @@ const FcSintaxe = (function(){
   const limpa = s => String(s == null ? '' : s).replace(/ /g, ' ').replace(/[ \t]+/g, ' ').trim();
   // Propriedade em LINHA (RemNote): "//extra texto" (quantas quiser, só no
   // verso) — linhas logo abaixo do bloco do card (indentadas ou não).
-  const RE_PROP = /^\s*\/\/(extra)\b[ \t]*/i;
+  const RE_PROP = /^\s*\/\/(extra|dica)\b[ \t]*/i;
   // DICA (hint) é INLINE e explícita: "(dica: texto)". Dentro da lacuna —
   // "{texto (dica: …)}" — vira o {{cN::texto::dica}} nativo do Anki e aparece
   // dentro do buraco, antes de virar; fora, colada ao marcador do card de
@@ -65000,10 +65078,16 @@ const FcSintaxe = (function(){
     const m = String(corpo || '').match(RE_DICA);
     return { t: limpa(m ? String(corpo).replace(RE_DICA_G, '') : corpo), h: m ? limpa(m[1]) : '' };
   }
+  // "//extra texto" · "//dica: texto" ou "//dica frente: texto" (frente) · "//dica c2: texto" (lacuna)
   function propDe(texto){
     const t = String(texto || '').split('\n')[0];
     const m = t.match(RE_PROP); if(!m) return null;
-    return { tipo: m[1].toLowerCase(), texto: limpa(t.slice(m[0].length)) };
+    const tipo = m[1].toLowerCase(); let resto = t.slice(m[0].length), alvo = '';
+    if(tipo === 'dica'){
+      const ma = resto.match(/^\s*(?:(?:lacuna\s*)?c?(\d+)|(frente))?\s*:\s*/i);
+      if(ma){ alvo = ma[1] ? ('c' + ma[1]) : (ma[2] ? 'frente' : ''); resto = resto.slice(ma[0].length); }
+    }
+    return { tipo: tipo, alvo: alvo, texto: limpa(resto) };
   }
   function temLacuna(texto){ RE_CHAVE.lastIndex = 0; return RE_CHAVE.test(String(texto || '')); }
   // "{n:x (dica: …)}"/"{x}" → "x": o card de TEXTO da linha não carrega as chaves
@@ -65040,7 +65124,7 @@ const FcSintaxe = (function(){
   }
   // {{cN::t}} → forma da sintaxe. Um grupo só com uma ocorrência → "{t}";
   // senão → "{N:t}" (sem ambiguidade no round-trip).
-  function clozeParaChaves(clozeText){
+  function clozeParaChaves(clozeText, semDica){
     const grupos = {}; let m;
     const re = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
     while((m = re.exec(String(clozeText || '')))){ grupos[m[1]] = (grupos[m[1]] || 0) + 1; }
@@ -65048,7 +65132,7 @@ const FcSintaxe = (function(){
     const simples = ks.length === 1 && grupos[ks[0]] === 1;
     re.lastIndex = 0;
     return String(clozeText || '').replace(re, function(_, num, corpo, dica){
-      const d = dica ? ' (dica: ' + dica + ')' : '';
+      const d = (dica && !semDica) ? ' (dica: ' + dica + ')' : '';
       return simples ? '{' + corpo + d + '}' : '{' + num + ':' + corpo + d + '}';
     });
   }
@@ -65066,13 +65150,29 @@ const FcSintaxe = (function(){
       while(j < blocos.length){
         const p = propDe(String((blocos[j] || {}).texto || ''));
         if(!p) break;
-        if(p.texto) dest.extras.push(p.texto);
+        if(p.tipo === 'extra'){ if(p.texto) dest.extras.push(p.texto); }
+        else if(p.texto){
+          if(!dest.dicas) dest.dicas = {};
+          if(/^c\d+$/.test(p.alvo)) dest.dicas[p.alvo.slice(1)] = p.texto;      // lacuna cN
+          else if(p.alvo === 'frente' || dest.temFrente) dest.hint = dest.hint || p.texto;
+          else dest.dicaSolta = dest.dicaSolta || p.texto;                       // num cloze puro, sem alvo: a 1ª lacuna
+        }
         idxs.push(j); dest.props.push(j); j++;
       }
       return j;
     };
-    const lacunaDe = function(k, textoBase){
-      const clz = limpa(chavesParaCloze(semDica(textoBase))).replace(/\n/g, ' ');
+    // "//dica cN: h" entra na lacuna como {{cN::corpo::h}} (a dica escrita dentro da chave, se houver, prevalece)
+    const comDicas = function(clz, dicas, solta){
+      let out = String(clz || '');
+      const d = Object.assign({}, dicas || {});
+      if(solta){ const m1 = out.match(/\{\{c(\d+)::/); if(m1 && !d[m1[1]]) d[m1[1]] = solta; }
+      Object.keys(d).forEach(function(g){
+        out = out.replace(new RegExp('\\{\\{c' + g + '::([\\s\\S]*?)\\}\\}', 'g'), function(m0, corpo){ return /::/.test(corpo) ? m0 : '{{c' + g + '::' + corpo + '::' + d[g] + '}}'; });
+      });
+      return out;
+    };
+    const lacunaDe = function(k, textoBase, dest){
+      const clz = comDicas(limpa(chavesParaCloze(semDica(textoBase))).replace(/\n/g, ' '), dest && dest.dicas, (dest && !dest.temFrente) ? dest.dicaSolta : '');
       if(!/\{\{c\d+::/.test(clz)) return null;
       const bk = blocos[k] || {};
       return { fcId: bk.czId || null, czId: bk.czId || null, slot: 'lacuna', blocos: [k], itens: [], props: [], card: { kind: 'cloze', clozeText: clz } };
@@ -65085,7 +65185,7 @@ const FcSintaxe = (function(){
       if(RE_MULTI.test(head)){
         const front = limpa(semDica(semChaves(head.replace(RE_MULTI, ''))));
         const idxs = [i]; const lines = []; const itens = []; const props = [];
-        const dest = { hint: dicaDe(head), extras: [], props: props };
+        const dest = { hint: dicaDe(head), extras: [], props: props, temFrente: true };
         let numerada = null;
         let j = i + 1;
         while(j < blocos.length){
@@ -65106,7 +65206,7 @@ const FcSintaxe = (function(){
           cards.push({ fcId: b.fcId || null, czId: b.czId || null, slot: 'principal', blocos: idxs, itens: itens, props: props,
             card: { kind: 'multi', front: front, lines: cheias, listStyle: numerada ? 'number' : 'bullets', hint: dest.hint, extras: dest.extras } });
           idxs.forEach(function(k){ consumido[k] = true; });
-          if(temLacuna(head)){ const e = lacunaDe(i, head.replace(RE_MULTI, '')); if(e) cards.push(e); }
+          if(temLacuna(head)){ const e = lacunaDe(i, head.replace(RE_MULTI, ''), dest); if(e) cards.push(e); }
           itens.forEach(function(k){
             const it = String((blocos[k] || {}).texto || '');
             if(!temLacuna(it)) return;
@@ -65120,12 +65220,12 @@ const FcSintaxe = (function(){
         const front = limpa(semDica(semChaves(t.slice(0, pos)))), back = limpa(semDica(semChaves(t.slice(pos + 4))));
         if(front && back){
           const idxs = [i]; const props = [];
-          const dest = { hint: dicaDe(t), extras: [], props: props };
+          const dest = { hint: dicaDe(t), extras: [], props: props, temFrente: true };
           colherProps(i + 1, dest, idxs);
           cards.push({ fcId: b.fcId || null, czId: b.czId || null, slot: 'principal', blocos: idxs, itens: [], props: props,
             card: { kind: 'basic', front: front, back: back, hint: dest.hint, extras: dest.extras } });
           idxs.forEach(function(k){ consumido[k] = true; });
-          if(temLacuna(t)){ const e3 = lacunaDe(i, t); if(e3) cards.push(e3); }
+          if(temLacuna(t)){ const e3 = lacunaDe(i, t, dest); if(e3) cards.push(e3); }
         }
         continue;
       }
@@ -65133,10 +65233,10 @@ const FcSintaxe = (function(){
         const clz = limpa(chavesParaCloze(t)).replace(/\n/g, ' ');
         if(/\{\{c\d+::/.test(clz)){
           const idxs = [i]; const props = [];
-          const dest = { hint: '', extras: [], props: props };
+          const dest = { hint: '', extras: [], props: props, temFrente: false };
           colherProps(i + 1, dest, idxs);
           cards.push({ fcId: b.fcId || null, czId: b.czId || null, slot: 'principal', blocos: idxs, itens: [], props: props,
-            card: { kind: 'cloze', clozeText: clz, hint: dest.hint, extras: dest.extras } });
+            card: { kind: 'cloze', clozeText: comDicas(clz, dest.dicas, dest.dicaSolta), hint: '', extras: dest.extras } });
           idxs.forEach(function(k){ consumido[k] = true; });
         }
       }
@@ -65145,19 +65245,32 @@ const FcSintaxe = (function(){
   }
   // card → linhas canônicas da sintaxe (projeção pro caderno):
   // [cabeça, itens…, "//dica …", "//extra …"…]; nItens/nProps dizem quem é quem.
+  // Forma CANÔNICA: a dica nunca vai na linha do card; vira propriedade abaixo dele,
+  // "//dica: h" (frente) ou "//dica cN: h" (lacuna), como o "//extra".
   function serializar(card){
     card = card || {};
     let linhas;
     const dica = limpa(card.hint);
+    const props = [];
     if(card.kind === 'multi'){
       const num = card.listStyle === 'number';
-      linhas = [limpa(card.front) + (dica ? ' (dica: ' + dica + ')' : '') + ' :::'].concat((card.lines || []).map((l, i) => (num ? (i + 1) + '. ' : '- ') + limpa(l)));
+      linhas = [limpa(card.front) + ' :::'].concat((card.lines || []).map((l, i) => (num ? (i + 1) + '. ' : '- ') + limpa(l)));
+      if(dica) props.push('//dica: ' + dica);
     }
-    else if(card.kind === 'cloze') linhas = [clozeParaChaves(card.clozeText)];
-    else linhas = [limpa(card.front) + ' :: ' + (dica ? '(dica: ' + dica + ') ' : '') + limpa(card.back)];
-    const props = [];
+    else if(card.kind === 'cloze'){
+      linhas = [clozeParaChaves(card.clozeText, true)];
+      dicasDoCloze(card.clozeText).forEach(d => props.push('//dica c' + d.g + ': ' + d.h));
+    }
+    else { linhas = [limpa(card.front) + ' :: ' + limpa(card.back)]; if(dica) props.push('//dica: ' + dica); }
     (Array.isArray(card.extras) ? card.extras : []).forEach(x => { if(limpa(x)) props.push('//extra ' + limpa(x)); });
     return { linhas: linhas.concat(props), nItens: card.kind === 'multi' ? (card.lines || []).length : 0, nProps: props.length };
+  }
+  // dicas das lacunas, uma por grupo, na ordem dos grupos
+  function dicasDoCloze(clozeText){
+    const out = []; const vistos = {}; let m;
+    const re = /\{\{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?\}\}/g;
+    while((m = re.exec(String(clozeText || '')))){ if(m[3] && !vistos[m[1]]){ vistos[m[1]] = true; out.push({ g: parseInt(m[1], 10), h: limpa(m[3]) }); } }
+    return out.sort((a, b) => a.g - b.g);
   }
   // papel de cada linha serializada: 'head' | 'item' | 'prop'
   function papelDaLinha(ser, i){ return i === 0 ? 'head' : (i <= ser.nItens ? 'item' : 'prop'); }
@@ -65320,9 +65433,8 @@ const FcRico = (function(){
     const props = ser.linhas.slice(1 + ser.nItens).map(esc2);
     if(card.kind === 'cloze'){
       if(!temTag(r.cloze)) return null;
-      return [FcSintaxe.clozeParaChaves(sanitizar(r.cloze))].concat(props);
+      return [FcSintaxe.clozeParaChaves(sanitizar(r.cloze), true)].concat(props);
     }
-    const dica = String(card.hint || '').trim();
     if(card.kind === 'multi'){
       const front = temTag(r.front) ? sanitizar(r.front) : esc2(card.front);
       const linhas = (card.lines || []).map(function(l, i){
@@ -65331,10 +65443,10 @@ const FcRico = (function(){
         return (card.listStyle === 'number' ? (i + 1) + '. ' : '- ') + corpo;
       });
       if(!temTag(r.front) && !(r.lines || []).some(temTag)) return null;
-      return [front + (dica ? ' (dica: ' + esc2(dica) + ')' : '') + ' :::'].concat(linhas).concat(props);
+      return [front + ' :::'].concat(linhas).concat(props);
     }
     if(!temTag(r.front) && !temTag(r.back)) return null;
-    return [(temTag(r.front) ? sanitizar(r.front) : esc2(card.front)) + ' :: ' + (dica ? '(dica: ' + esc2(dica) + ') ' : '') + (temTag(r.back) ? sanitizar(r.back) : esc2(card.back))].concat(props);
+    return [(temTag(r.front) ? sanitizar(r.front) : esc2(card.front)) + ' :: ' + (temTag(r.back) ? sanitizar(r.back) : esc2(card.back))].concat(props);
   }
   return { sanitizar, dividirBasico, tirarSufixoMulti, tirarMarcador, linhasHtml, temTag };
 })();
@@ -65637,7 +65749,7 @@ const AnkiApkg = (function(){
     return {
       agora: Date.now(),
       sha1hex: _sha1hex,
-      ctxDe: c => (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(c.unitId, c.blockId) : {},
+      ctxDe: c => (window.FlashcardsIA && FlashcardsIA.contextoDoCard) ? FlashcardsIA.contextoDoCard(c) : {},
       tagsDe: (c, ctx) => {
         const t = new Set();
         (c.tags || []).forEach(x => { const s2 = window._tagSlug ? _tagSlug(x) : ''; if(s2) t.add(s2); });
@@ -65675,7 +65787,7 @@ const AnkiExport = (function(){
   const escHtml = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\t/g, ' ').replace(/\r?\n/g, '<br>');
   const tagAnki = s => { const t = window._tagSlug ? window._tagSlug(s) : String(s || '').toLowerCase().replace(/\s+/g, '-'); return t.replace(/-+/g, '-'); };
   const CAB = '#separator:tab\n#html:true\n#deck column:1\n#tags column:4\n';
-  function ctxDe(card){ return (window.FlashcardsIA && FlashcardsIA.contexto) ? FlashcardsIA.contexto(card.unitId, card.blockId) : {}; }
+  function ctxDe(card){ return (window.FlashcardsIA && FlashcardsIA.contextoDoCard) ? FlashcardsIA.contextoDoCard(card) : {}; }
   function deckDe(ctx){ return 'Falcon::' + (ctx.sigla || ctx.materia || 'Geral').replace(/\s+/g, ' '); }
   function tagsDe(card, ctx){
     const t = new Set();
@@ -66189,7 +66301,7 @@ const DeckEditModal = (function(){
     } else { const host = f.querySelector('#dkSug'); if(host) host.remove(); }
     const jaLigados = new Set(Store.linksFor(_cardId).map(l => l.from === String(_cardId) ? l.to : l.from));
     const candidatos = Store.deckList().filter(c => String(c.id) !== String(_cardId) && !jaLigados.has(String(c.id)));
-    const ctxDe = c => (window.FlashcardsIA && FlashcardsIA.contexto) ? (FlashcardsIA.contexto(c.unitId, null).sigla || '') : '';
+    const ctxDe = c => (window.FlashcardsIA && FlashcardsIA.contextoDoCard) ? (FlashcardsIA.contextoDoCard(c).sigla || '') : '';
     const lista = box.querySelector('#dkPickList');
     const pinta = function(q){
       q = String(q || '').toLowerCase();
