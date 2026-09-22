@@ -9303,8 +9303,12 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cad-alca[hidden]{display:none}
 .cad-alca.tem-portal::after{content:"";position:absolute;top:1px;right:0;width:5px;height:5px;border-radius:50%;background:var(--accent);opacity:.9}
 .tutor-caderno-ed .is-arrastando{opacity:.45}
-.tutor-caderno-ed .cad-drop-alvo{box-shadow:0 -2px 0 -0.5px var(--accent)}
-.tutor-caderno-ed .cad-drop-alvo.cad-drop-abaixo{box-shadow:0 2px 0 -0.5px var(--accent)}
+.cad-alca{touch-action:none;cursor:grab}
+.cad-alca.is-drag{cursor:grabbing;opacity:1;color:var(--accent)}
+/* linha de destino do arrasto: onde a linha vai entrar, na profundidade escolhida pelo mouse */
+.cad-drop-ind{position:fixed;z-index:1210;height:2px;background:var(--accent);border-radius:1px;pointer-events:none}
+.cad-drop-ind::before{content:"";position:absolute;left:-4px;top:-3px;width:8px;height:8px;border-radius:50%;background:var(--accent)}
+.cad-drop-ind[hidden]{display:none}
 .cad-ref-flash{animation:cadRefFlash 2.4s var(--ease);border-radius:4px}
 /* ── turn into (lote 1) ── */
 .tutor-cad-menu-sep{height:1px;background:var(--border);margin:.25rem .2rem}
@@ -46723,45 +46727,111 @@ window.TutorIA = (function(){
   }
   function _alcaEsconder(){ if(_alcaEl) _alcaEl.hidden = true; _alcaLinha = null; }
   function _alcaMenuFechar(){ if(_alcaMenuEl){ _alcaMenuEl.remove(); _alcaMenuEl = null; } }
-  let _alcaDrag = null;
+  /* ── Arrastar pela alça com POINTER EVENTS (não o drag nativo do HTML) ──
+     O arrasto é nosso: funciona no mouse e no toque, leva a linha COM a
+     subárvore, mostra a linha de destino e escolhe a PROFUNDIDADE pela
+     posição horizontal (arrastar para a direita aninha, como no Workflowy).
+     Clique sem mover continua abrindo as ações da linha. */
+  let _alcaPtr = null, _alcaDropInd = null;
+  function _alcaDropIndEl(){
+    if(!_alcaDropInd){ _alcaDropInd = document.createElement('div'); _alcaDropInd.className = 'cad-drop-ind'; _alcaDropInd.hidden = true; document.body.appendChild(_alcaDropInd); }
+    return _alcaDropInd;
+  }
+  // quem rola: o editor (drawer) ou um ancestral com rolagem; null = a página
+  function _alcaScrollDe(ed){
+    let n = ed;
+    while(n && n !== document.body){
+      const cs = getComputedStyle(n);
+      if(/(auto|scroll)/.test(cs.overflowY) && n.scrollHeight > n.clientHeight + 2) return n;
+      n = n.parentElement;
+    }
+    return null;
+  }
+  // destino de um ponto (x, y): antes de `ref` (null = fim), com recuo `ind`
+  // (no máximo um nível abaixo da linha anterior — regra dos outliners)
+  function _alcaDestino(ed, bloco, x, y){
+    const passo = 1.6 * (parseFloat(getComputedStyle(document.documentElement).fontSize) || 16);
+    const cs = getComputedStyle(ed), er = ed.getBoundingClientRect();
+    const esq = er.left + (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.paddingLeft) || 0);
+    const dir = er.right - (parseFloat(cs.borderRightWidth) || 0) - (parseFloat(cs.paddingRight) || 0);
+    const linhas = Array.prototype.filter.call(ed.children, function(n){ return n.nodeType === 1 && bloco.indexOf(n) === -1; });
+    let ref = null, prev = null, yInd = er.top + (parseFloat(cs.paddingTop) || 0);
+    for(let i = 0; i < linhas.length; i++){
+      const r = linhas[i].getBoundingClientRect();
+      if(y < r.top + r.height / 2){ ref = linhas[i]; yInd = r.top; break; }
+      prev = linhas[i]; yInd = r.bottom;
+    }
+    const teto = prev ? Math.min(_CAD_IND_MAX, _cadIndDe(prev) + 1) : 0;
+    const ind = Math.max(0, Math.min(teto, Math.round((x - esq) / passo)));
+    return { ref: ref, prev: prev, ind: ind, y: yInd, esq: esq + ind * passo, dir: dir };
+  }
+  function _alcaPointerArmar(alca){
+    alca.addEventListener('pointerdown', function(e){
+      if(e.button != null && e.button !== 0) return;
+      e.preventDefault();                                    // não rouba o foco nem a seleção do editor
+      const ed = alca.__ed, linha = _alcaLinha;
+      if(!ed || !linha || !linha.isConnected) return;
+      _alcaPtr = { id: e.pointerId, x0: e.clientX, y0: e.clientY, ed: ed, linha: linha, bloco: [linha].concat(_cadSubarvore(linha)), arrastando: false, dest: null };
+      try{ alca.setPointerCapture(e.pointerId); }catch(_){ }
+    });
+    alca.addEventListener('pointermove', function(e){
+      const p = _alcaPtr; if(!p || e.pointerId !== p.id) return;
+      if(!p.arrastando){
+        if(Math.abs(e.clientX - p.x0) + Math.abs(e.clientY - p.y0) < 5) return;
+        p.arrastando = true;
+        p.bloco.forEach(function(n){ n.classList.add('is-arrastando'); });
+        alca.classList.add('is-drag');
+        _alcaMenuFechar();
+      }
+      const sc = _alcaScrollDe(p.ed);                        // rolagem perto das bordas
+      const sr = sc ? sc.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+      if(e.clientY < sr.top + 36){ if(sc) sc.scrollTop -= 10; else window.scrollBy(0, -10); }
+      else if(e.clientY > sr.bottom - 36){ if(sc) sc.scrollTop += 10; else window.scrollBy(0, 10); }
+      const d = _alcaDestino(p.ed, p.bloco, e.clientX, e.clientY);
+      p.dest = d;
+      const ind = _alcaDropIndEl();
+      ind.style.top = Math.round(d.y - 1) + 'px'; ind.style.left = Math.round(d.esq) + 'px'; ind.style.width = Math.max(40, Math.round(d.dir - d.esq)) + 'px';
+      ind.hidden = false;
+    });
+    const fim = function(e){
+      const p = _alcaPtr; if(!p || (e && e.pointerId != null && e.pointerId !== p.id)) return;
+      _alcaPtr = null;
+      try{ alca.releasePointerCapture(p.id); }catch(_){ }
+      alca.classList.remove('is-drag');
+      p.bloco.forEach(function(n){ n.classList.remove('is-arrastando'); });
+      if(_alcaDropInd) _alcaDropInd.hidden = true;
+      if(!p.arrastando) return;                              // clique: o `click` abre as ações
+      alca.__arrastou = true;                                // o click que vem depois do arrasto não abre o menu
+      const d = p.dest; if(!d || !e || e.type !== 'pointerup') return;
+      const ed = p.ed, linha = p.linha;
+      if(!linha.isConnected) return;
+      const delta = d.ind - _cadIndDe(linha);
+      const frag = document.createDocumentFragment(); p.bloco.forEach(function(n){ frag.appendChild(n); });
+      ed.insertBefore(frag, d.ref);
+      if(delta) p.bloco.forEach(function(n){ _cadIndSet(n, _cadIndDe(n) + delta); });
+      _cadTirarCarimboFilho(linha);
+      _cadListaNumerar(ed);
+      _cadMarcarSujo(ed);
+      _cadSchedule();
+      try{ _fcVistaAplicar(ed); }catch(_){ }
+      // a alça continua na linha que acabou de se mover (dá para arrastar de novo ou abrir as ações)
+      _alcaLinha = linha;
+      try{ const hr = alca.__host.getBoundingClientRect(), lr = linha.getBoundingClientRect(); alca.style.top = Math.round(lr.top - hr.top + 1) + 'px'; }catch(_){ }
+    };
+    alca.addEventListener('pointerup', fim);
+    alca.addEventListener('pointercancel', fim);
+    alca.addEventListener('lostpointercapture', function(e){ if(_alcaPtr && _alcaPtr.arrastando) fim(e); });
+    alca.addEventListener('click', function(e2){
+      e2.stopPropagation();
+      if(alca.__arrastou){ alca.__arrastou = false; return; }
+      _alcaMenuAbrir();
+    });
+  }
   function _alcaArmar(ed){
     if(ed.__alcaBound) return; ed.__alcaBound = true;
-    // ARRASTAR blocos pela alça: a posição fica gravada no corpo (é assim
-    // que o portal ganha lugar fixo no caderno de destino).
-    ed.addEventListener('dragover', function(ev){
-      if(!_alcaDrag || !ed.contains(_alcaDrag)) return;
-      let alvo = ev.target && ev.target.nodeType === 3 ? ev.target.parentElement : ev.target;
-      while(alvo && alvo.parentElement && alvo.parentElement !== ed) alvo = alvo.parentElement;
-      if(!alvo || alvo === _alcaDrag || alvo.parentElement !== ed) return;
-      ev.preventDefault();
-      const r = alvo.getBoundingClientRect();
-      const abaixo = (ev.clientY - r.top) > r.height / 2;
-      ed.querySelectorAll('.cad-drop-alvo').forEach(function(x){ if(x !== alvo) x.classList.remove('cad-drop-alvo', 'cad-drop-abaixo'); });
-      alvo.classList.add('cad-drop-alvo');
-      alvo.classList.toggle('cad-drop-abaixo', abaixo);
-    });
-    ed.addEventListener('drop', function(ev){
-      if(!_alcaDrag || !ed.contains(_alcaDrag)) return;
-      const alvo = ed.querySelector('.cad-drop-alvo');
-      ev.preventDefault();
-      if(alvo && alvo !== _alcaDrag){
-        const abaixo = alvo.classList.contains('cad-drop-abaixo');
-        alvo.classList.remove('cad-drop-alvo', 'cad-drop-abaixo');
-        // a linha vai com os FILHOS; o recuo vira o do destino (os filhos mantêm a distância)
-        const bloco = [_alcaDrag].concat(_cadSubarvore(_alcaDrag));
-        if(bloco.indexOf(alvo) === -1){
-          const delta = _cadIndDe(alvo) - _cadIndDe(_alcaDrag);
-          const frag = document.createDocumentFragment(); bloco.forEach(function(x){ frag.appendChild(x); });
-          ed.insertBefore(frag, abaixo ? _cadFimDaSubarvore(alvo).nextSibling : alvo);
-          if(delta) bloco.forEach(function(x){ _cadIndSet(x, _cadIndDe(x) + delta); });
-          _cadTirarCarimboFilho(_alcaDrag);
-          _cadListaNumerar(ed);
-        }
-        _cadSchedule();
-      }
-      if(_alcaDrag) _alcaDrag.classList.remove('is-arrastando');
-      _alcaDrag = null;
-    });
+    // ARRASTAR blocos pela alça: pointer events (ver _alcaPointerArmar) — o
+    // drag nativo nunca começava, porque o mousedown da alça chama
+    // preventDefault (para não roubar o foco do editor) e isso o cancela.
     const host = ed.parentElement; if(!host) return;
     host.classList.add('cad-com-host');
     ed.addEventListener('mousemove', function(ev){
@@ -46791,19 +46861,7 @@ window.TutorIA = (function(){
           _alcaEl.type = 'button'; _alcaEl.className = 'cad-alca';
           _alcaEl.setAttribute('data-tip', 'Ações da linha');
           _alcaEl.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor"><circle cx="9" cy="5" r="1.7"/><circle cx="15" cy="5" r="1.7"/><circle cx="9" cy="12" r="1.7"/><circle cx="15" cy="12" r="1.7"/><circle cx="9" cy="19" r="1.7"/><circle cx="15" cy="19" r="1.7"/></svg>';
-          _alcaEl.addEventListener('mousedown', function(e2){ e2.preventDefault(); });
-          _alcaEl.draggable = true;
-          _alcaEl.addEventListener('dragstart', function(e2){
-            _alcaDrag = _alcaLinha;
-            try{ e2.dataTransfer.setData('text/plain', 'cad-bloco'); e2.dataTransfer.effectAllowed = 'move'; }catch(_){ }
-            if(_alcaDrag) _alcaDrag.classList.add('is-arrastando');
-          });
-          _alcaEl.addEventListener('dragend', function(){
-            if(_alcaDrag) _alcaDrag.classList.remove('is-arrastando');
-            _alcaDrag = null;
-            document.querySelectorAll('.cad-drop-alvo').forEach(function(x){ x.classList.remove('cad-drop-alvo', 'cad-drop-abaixo'); });
-          });
-          _alcaEl.addEventListener('click', function(e2){ e2.stopPropagation(); _alcaMenuAbrir(); });
+          _alcaPointerArmar(_alcaEl);
         }
         if(_alcaEl.__host !== host){ host.appendChild(_alcaEl); _alcaEl.__host = host; }
         _alcaEl.__ed = ed;
