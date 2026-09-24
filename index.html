@@ -54878,9 +54878,29 @@ const BuscaOverview = (function(){
     }).join('') + '</div></aside>';
   }
   function _midiasDe(box){ try{ return JSON.parse(box.getAttribute('data-midias') || '[]') || []; }catch(_){ return []; } }
+  function _trechosDe(box){ try{ return JSON.parse(box.getAttribute('data-trechos') || '[]') || []; }catch(_){ return []; } }
+  // trecho de texto puro de até `max` caracteres, centrado na 1ª ocorrência do termo
+  function recorte(txt, termo, max){
+    const s = String(txt || '').replace(/\s+/g, ' ').trim(); if(s.length <= max) return s;
+    const i = _semAcento(s).indexOf(_semAcento(termo)); if(i < 0) return s.slice(0, max) + '…';
+    const ini = Math.max(0, i - Math.floor(max / 2));
+    return (ini > 0 ? '…' : '') + s.slice(ini, ini + max) + (ini + max < s.length ? '…' : '');
+  }
+  // Até 8 trechos, no máximo 2 por unidade, unidades na ordem de quem tem mais ocorrências do termo
+  function escolherTrechos(lista, contagem){
+    const porUnidade = new Map();
+    (lista || []).forEach(function(tr){ if(!tr || !tr.unit_id || !tr.texto) return; const e = porUnidade.get(tr.unit_id) || []; if(!e.some(function(x){ return x.texto === tr.texto; })) e.push(tr); porUnidade.set(tr.unit_id, e); });
+    // dentro da unidade, o trecho mais longo primeiro (parágrafo antes de título de bloco); no máximo 2
+    porUnidade.forEach(function(e, k){ e.sort(function(a, b){ return String(b.texto).length - String(a.texto).length; }); porUnidade.set(k, e.slice(0, 2)); });
+    const ordem = Array.from(porUnidade.keys()).sort(function(a, b){ return ((contagem && contagem.get(b)) || 0) - ((contagem && contagem.get(a)) || 0); });
+    const out = [];
+    for(let rodada = 0; rodada < 2; rodada++) ordem.forEach(function(u){ const tr = porUnidade.get(u)[rodada]; if(tr && out.length < 8) out.push(tr); });
+    return out;
+  }
   function _unidadesDe(box){ try{ return JSON.parse(box.getAttribute('data-unidades') || '[]') || []; }catch(_){ return []; } }
   // link da fonte: unidade (id do banco → rota) e, quando vier, bloco e parágrafo
   function _href(s){
+    if(s && s.href && /^#\//.test(String(s.href))) return String(s.href);   // fonte que veio da própria página, já com o link certo
     if(!s || !s.unit_id || !window._unitHashById) return '';
     let h = window._unitHashById(s.unit_id) || '';
     if(!h) return '';
@@ -54956,7 +54976,7 @@ const BuscaOverview = (function(){
       const resp = await fetch((window._sbUrl || '') + '/functions/v1/busca-overviews', {   // nome com que a função foi publicada no Supabase
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + token, 'apikey': window._sbKey || '', 'content-type': 'application/json' },
-        body: JSON.stringify({ termo: q, subject_id: atual, subjects: subjects, apelido: apelido, unidades_texto: _unidadesDe(box) })
+        body: JSON.stringify({ termo: q, subject_id: atual, subjects: subjects, apelido: apelido, unidades_texto: _unidadesDe(box), trechos_texto: _trechosDe(box) })
       });
       const ct = resp.headers.get('content-type') || '';
       if(ct.indexOf('application/json') >= 0){
@@ -54994,7 +55014,7 @@ const BuscaOverview = (function(){
     if(c){ _pintar(box, c, c.custo); return; }   // já gerado nesta sessão: sem nova cobrança
     _gerar(box, q);
   }
-  return { montar: montar, ligado: ligado, ligar: ligar, colher: colher };
+  return { montar: montar, ligado: ligado, ligar: ligar, colher: colher, recorte: recorte, escolherTrechos: escolherTrechos };
 })();
 window.BuscaOverview = BuscaOverview;
 /* BUSCA-OVERVIEW-FIM */
@@ -55051,6 +55071,7 @@ Renderers.search = function(route){
   const blockHits = [];
   const mediaHits = [];                // vídeos e imagens cujo título/legenda trazem o termo (Overview)
   const unidadesTexto = new Map();     // id da unidade no banco → quantas ocorrências do termo (Overview)
+  const trechosTexto = [];             // trechos do curso onde o termo aparece, com link (Overview lê mesmo sem vetorização)
 
   // Varre o curso lendo cada unidade COM o override do store (admin-edited
   // blocks). Sem isso, blocos criados/editados pelo admin não apareceriam
@@ -55119,6 +55140,7 @@ Renderers.search = function(route){
                     crumb, title: p.title || (hitInFrag ? '(verbete inline)' : '(parágrafo)'),
                     excerpt: excerpt(src, needle)
                   });
+                  if(unit._storeId != null && window.BuscaOverview) trechosTexto.push({ unit_id: String(unit._storeId), unit_title: unit.title || '', href: `${hrefBase}?g=${g.id}&b=${b.id}#p-${p.id}`, texto: BuscaOverview.recorte(src, needle, 700) });
                 }
               }
             }
@@ -55155,6 +55177,7 @@ Renderers.search = function(route){
                   title: b.title || typeLabel,
                   excerpt: excerpt(hay, needle)
                 });
+                if(unit._storeId != null && window.BuscaOverview) trechosTexto.push({ unit_id: String(unit._storeId), unit_title: unit.title || '', href: `${hrefBase}?g=${g.id}&b=${b.id}`, texto: BuscaOverview.recorte(hay, needle, 700) });
               }
             }
           }
@@ -55233,7 +55256,7 @@ Renderers.search = function(route){
       : `${renderUsers()}${renderGroup('Unidades', unitHits)}${renderGroup('Parágrafos', paraHits)}${renderGroup('Blocos de aprendizado', blockHits)}${renderGroup('Minhas notas', noteHits)}`;
 
   return `<div class="search-page">${header}
-    ${userIsExclusive ? '' : '<div class="search-ov" id="searchOv" data-q="' + Util.attr(q) + '" data-unidades="' + Util.attr(JSON.stringify(Array.from(unidadesTexto.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map(e => e[0]))) + '" data-midias="' + Util.attr(JSON.stringify(mediaHits.slice(0, 6))) + '"></div>'}
+    ${userIsExclusive ? '' : '<div class="search-ov" id="searchOv" data-q="' + Util.attr(q) + '" data-unidades="' + Util.attr(JSON.stringify(Array.from(unidadesTexto.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8).map(e => e[0]))) + '" data-midias="' + Util.attr(JSON.stringify(mediaHits.slice(0, 6))) + '" data-trechos="' + Util.attr(JSON.stringify(BuscaOverview.escolherTrechos(trechosTexto, unidadesTexto))) + '"></div>'}
     <p class="search-summary">${total} resultado${total===1?'':'s'} · "${Util.esc(q)}"</p>
     ${body}
   </div>`;
