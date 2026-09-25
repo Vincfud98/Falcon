@@ -111,7 +111,9 @@ html[data-font="sans"] .block-wrap .gloss-panel-callout{
 
   --ease:cubic-bezier(.22,1,.36,1);
 
-  --nav-h:56px;
+  --topbar-h:56px;                 /* altura da barra de navegação */
+  --rede-h:0px;                    /* altura da barra de estado da rede (o JS ajusta) */
+  --nav-h:var(--topbar-h);         /* tudo que fica preso no topo: topbar + barra da rede (o JS ajusta) */
   --side-w:280px;
 
   --fs-hero:clamp(2rem,3.6vw,4rem);
@@ -571,9 +573,19 @@ html[data-theme="light"] .tg{color:#8a8a8a;border-color:rgba(0,0,0,.12)}
      ═══════════════════════════════════════════════════════════════════ -->
 <style id="platform-shell">
 /* Top bar */
+/* Barra de estado da ligação com o servidor (Fase 1 offline) */
+.rede-barra{position:sticky;top:0;z-index:101;padding:.5rem 1.2rem;text-align:center;font-family:var(--mono);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;line-height:1.45}
+.rede-barra[hidden]{display:none}
+.rede-barra.is-offline{background:color-mix(in srgb,var(--accent) 22%,var(--bg));color:var(--accent);border-bottom:1px solid var(--accent-border)}
+.rede-barra.is-sync{background:color-mix(in srgb,#5dd49f 16%,var(--bg));color:#8fe0b8;border-bottom:1px solid rgba(93,212,159,.35)}
+.rede-barra .rede-det{opacity:.8}
+@media (max-width:640px){.rede-barra{padding:.45rem .9rem}.rede-barra .rede-det{display:none}}
+.ini-semservidor{gap:.6rem}
+.ini-semservidor .ini-loading-s{font-family:var(--sans);font-size:.8rem;color:var(--text-mute)}
+.ini-semservidor .btn-ghost{margin-top:.4rem}
 .topbar{
-  position:sticky;top:0;z-index:100;
-  height:var(--nav-h);
+  position:sticky;top:var(--rede-h);z-index:100;
+  height:var(--topbar-h);
   display:flex;align-items:center;justify-content:space-between;
   padding:0 1.6rem;
   background:rgba(11,12,15,.88);backdrop-filter:blur(18px);
@@ -12087,7 +12099,7 @@ window.TAG_REGISTRY = {
     const msg = String(error.message || error || '');
     return /statement timeout|schema cache|Failed to fetch|NetworkError|Load failed|network|timed? ?out|ECONN|502|503|504/i.test(msg);
   };
-  const _FETCH_ESPERAS = [1200, 2500];   // 2 novas tentativas por página
+  const _FETCH_ESPERAS = [1500, 4000, 10000];   // 3 novas tentativas por página, espera crescente com variação
   const _dorme = ms => new Promise(r => setTimeout(r, ms));
   /* ── Busca de TODAS as linhas de uma tabela ──────────────────────────────
      Dois modos:
@@ -12104,10 +12116,16 @@ window.TAG_REGISTRY = {
      { data: parcial, error } — quem chama NÃO aplica dado parcial. */
   const _tentar = async function(pedir, rotulo, marca){
     for(let tent = 0; ; tent++){
+      // servidor confirmado mudo: não insiste (a Rede avisa quando voltar)
+      if(tent > 0 && window.Rede && Rede.offline()) return { data: null, error: { message: 'servidor indisponível (modo offline)', offline: true } };
       const r = await pedir();
-      if(!r.error || !window._ehErroPassageiro(r.error) || tent >= _FETCH_ESPERAS.length) return r;
-      console.warn('[fetchAll] ' + (rotulo || '?') + ' ' + (marca || '') + ': erro passageiro (' + r.error.message + ') — repetindo em ' + _FETCH_ESPERAS[tent] + 'ms');
-      await _dorme(_FETCH_ESPERAS[tent]);
+      if(!r.error) return r;
+      const passageiro = window._ehErroPassageiro(r.error);
+      if(!passageiro || tent >= _FETCH_ESPERAS.length){ if(passageiro && window.Rede) Rede.falha(rotulo); return r; }
+      const ms = Math.round(_FETCH_ESPERAS[tent] * (0.8 + Math.random() * 0.4));
+      console.warn('[fetchAll] ' + (rotulo || '?') + ' ' + (marca || '') + ': erro passageiro (' + r.error.message + ') — repetindo em ' + ms + 'ms');
+      if(window.Rede) Rede.falha(rotulo);
+      await _dorme(ms);
     }
   };
   // Ordena no cliente como o banco ordenaria em ASC (nulo por último).
@@ -12279,10 +12297,121 @@ window.TAG_REGISTRY = {
     p.catch(function(e){
       console.warn('[blocos] desisti por agora:', e && e.message);
       if(_blocosP === p) _blocosP = null;
-      setTimeout(function(){ if(!window._blocosCompletos) window._ensureBlocos().catch(function(){}); }, 30000);
+      setTimeout(function(){
+        if(window._blocosCompletos) return;
+        const de_novo = function(){ window._ensureBlocos().catch(function(){}); };
+        if(window.Rede && Rede.offline()) Rede.aguardar().then(de_novo); else de_novo();   // offline: só quando voltar
+      }, 30000);
     });
     return p;
   };
+  /* REDE-INICIO */
+  /* Ligação com o servidor — Fase 1 do modo offline (2026-09-25).
+     Uma máquina de estado só: 'ok' | 'offline'. Quem falha por rede/504 avisa
+     (Rede.falha); a sonda confirma com uma leitura mínima no banco (4 s) e, se
+     o servidor estiver mudo, marca offline e volta a sondar com espera
+     crescente (5, 10, 20, 40, 60 s), além do sinal online/offline do navegador.
+     A barra no topo só aparece se a falha durar mais de 5 s (soluço não pisca)
+     e some depois de "atualizando" ao voltar. Quem precisa esperar a volta usa
+     Rede.aguardar(). Nada aqui apaga sessão nem cópia local. */
+  const Rede = (function(){
+    const cfg = { esperas: [5000, 10000, 20000, 40000, 60000], sondaMs: 4000, barraMs: 5000, syncMs: 4000 };
+    let estado = 'ok', desde = 0, tentativa = 0, timer = null, sondaP = null, barraT = null, syncT = null, esperando = [];
+    const subs = [];
+    function _emitir(){ subs.slice().forEach(function(fn){ try{ fn(estado); }catch(_){ } }); }
+    function _barra(){
+      let el = document.getElementById('redeBarra'); if(el) return el;
+      el = document.createElement('div'); el.id = 'redeBarra'; el.className = 'rede-barra'; el.hidden = true; el.setAttribute('role', 'status');
+      const tb = document.querySelector('header.topbar');
+      if(tb && tb.parentNode) tb.parentNode.insertBefore(el, tb); else if(document.body) document.body.insertBefore(el, document.body.firstChild);
+      return el;
+    }
+    // lead curto sempre visível; o detalhe some no celular (CSS) para não virar um parágrafo
+    function _mostrar(lead, detalhe, classe){
+      const el = _barra(); if(!el) return;
+      el.textContent = '';
+      const a = document.createElement('span'); a.className = 'rede-lead'; a.textContent = lead; el.appendChild(a);
+      if(detalhe){ const d = document.createElement('span'); d.className = 'rede-det'; d.textContent = ' ' + detalhe; el.appendChild(d); }
+      el.className = 'rede-barra ' + classe; el.hidden = false;
+      document.documentElement.classList.add('rede-barra-on');
+      document.documentElement.classList.toggle('rede-offline', classe === 'is-offline');
+      _medir();
+    }
+    function _esconder(){
+      const el = document.getElementById('redeBarra'); if(el) el.hidden = true;
+      document.documentElement.classList.remove('rede-barra-on', 'rede-offline');
+      _medir();
+    }
+    // A barra empurra a topbar e tudo que fica preso abaixo dela (--nav-h):
+    // mede a altura real (o texto quebra linha no celular) e publica nas variáveis.
+    function _medir(){
+      const el = document.getElementById('redeBarra'), raiz = document.documentElement;
+      if(!el || el.hidden){ raiz.style.removeProperty('--rede-h'); raiz.style.removeProperty('--nav-h'); return; }
+      const h = el.offsetHeight || 0;
+      const base = parseInt(getComputedStyle(raiz).getPropertyValue('--topbar-h'), 10) || 56;
+      raiz.style.setProperty('--rede-h', h + 'px'); raiz.style.setProperty('--nav-h', (base + h) + 'px');
+    }
+    // Sonda = leitura mínima que passa pelo banco (é o que falha quando ele trava).
+    function sondar(ms){
+      if(sondaP) return sondaP;
+      const ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+      const t = setTimeout(function(){ try{ if(ctrl) ctrl.abort(); }catch(_){ } }, ms || cfg.sondaMs);
+      const chave = window._sbKey || '';
+      sondaP = fetch((window._sbUrl || '') + '/rest/v1/subjects?select=id&limit=1', {
+        method: 'GET', cache: 'no-store', signal: ctrl ? ctrl.signal : undefined,
+        headers: { apikey: chave, Authorization: 'Bearer ' + chave, 'Accept-Profile': 'conteudo' }
+      }).then(function(r){ return r.ok; }, function(){ return false; })
+        .then(function(ok){ clearTimeout(t); sondaP = null; if(ok) _ok(); else _cair(); return ok; });
+      return sondaP;
+    }
+    function _agendar(){
+      clearTimeout(timer);
+      const ms = cfg.esperas[Math.min(tentativa, cfg.esperas.length - 1)]; tentativa++;
+      timer = setTimeout(function(){ sondar(); }, ms);
+    }
+    function _cair(){
+      if(estado !== 'offline'){
+        estado = 'offline'; desde = Date.now(); clearTimeout(syncT); _emitir();
+        clearTimeout(barraT);
+        barraT = setTimeout(function(){
+          if(estado === 'offline') _mostrar('Sem conexão com o servidor. Usando a cópia local.', 'O que ainda não foi baixado não abre e o que escrever agora não está sendo salvo.', 'is-offline');
+        }, cfg.barraMs);
+      }
+      _agendar();
+    }
+    function _ok(){
+      clearTimeout(timer); clearTimeout(barraT); tentativa = 0;
+      if(estado !== 'offline') return;
+      estado = 'ok'; const durou = Date.now() - desde; desde = 0; _emitir();
+      const fila = esperando; esperando = []; fila.forEach(function(r){ try{ r(); }catch(_){ } });
+      if(durou >= cfg.barraMs){ _mostrar('Conexão restabelecida. Atualizando…', '', 'is-sync'); clearTimeout(syncT); syncT = setTimeout(_esconder, cfg.syncMs); }
+      else _esconder();
+    }
+    // Alguém falhou por rede: confirma com a sonda (uma de cada vez).
+    function falha(motivo){ if(estado === 'offline' || sondaP) return; sondar(); }
+    function aguardar(){ return estado === 'ok' ? Promise.resolve() : new Promise(function(r){ esperando.push(r); }); }
+    try{
+      window.addEventListener('online', function(){ sondar(); });
+      window.addEventListener('offline', function(){ _cair(); });
+      window.addEventListener('resize', function(){ _medir(); });
+    }catch(_){ }
+    return {
+      estado: function(){ return estado; }, offline: function(){ return estado === 'offline'; }, desde: function(){ return desde; },
+      sondar: sondar, falha: falha, aguardar: aguardar,
+      on: function(fn){ subs.push(fn); return function(){ const i = subs.indexOf(fn); if(i >= 0) subs.splice(i, 1); }; },
+      _cfg: cfg
+    };
+  })();
+  window.Rede = Rede;
+  // Ao voltar: confere o que mudou e completa os blocos que ficaram faltando.
+  Rede.on(function(e){
+    if(e !== 'ok') return;
+    try{
+      if(window._conferirVersoes) window._conferirVersoes('reconectou').catch(function(){});
+      if(!window._blocosCompletos && window._ensureBlocos) window._ensureBlocos().catch(function(){});
+    }catch(_){ }
+  });
+  /* REDE-FIM */
   /* CACHE-CONTEUDO-INICIO */
   /* ── Cópia local do conteúdo (IndexedDB) — Fase 2 do boot ─────────────────
      Uma base por usuário (`falcon-conteudo-<uid>`), um registro por tabela:
@@ -12293,7 +12422,54 @@ window.TAG_REGISTRY = {
      tabela (as pequenas). É acelerador, nunca dependência: sem IndexedDB
      (modo privado, erro, cota) tudo segue pela rede. Desliga com ?semcache=1
      ou localStorage.falcon_semcache = '1'. Some no logout. */
-  const CACHE_ESQUEMA = 1;   // suba quando uma tabela guardada ganhar coluna/formato novo
+  const CACHE_ESQUEMA = 2;   // suba quando uma tabela guardada ganhar coluna/formato novo (2 = cifrada)
+  /* Cifra em repouso (AES-GCM, chave por usuário guardada no aparelho): quem copiar
+     os arquivos do navegador sem a chave não lê nada. Não protege do próprio aluno
+     logado — nenhuma cifra no navegador protege — e por isso é barata e silenciosa:
+     sem WebCrypto, grava como antes. */
+  const _cripto = { chaveP: null, uid: null };
+  function _chaveDoCache(uid){
+    if(!(window.crypto && crypto.subtle && crypto.getRandomValues)) return Promise.resolve(null);
+    if(_cripto.chaveP && _cripto.uid === String(uid)) return _cripto.chaveP;
+    _cripto.uid = String(uid);
+    _cripto.chaveP = (async function(){
+      const k = 'falcon-chave-' + uid;
+      let raw = null; try{ raw = localStorage.getItem(k); }catch(_){ }
+      let bytes;
+      if(raw){ bytes = Uint8Array.from(atob(raw), function(c){ return c.charCodeAt(0); }); }
+      else {
+        bytes = crypto.getRandomValues(new Uint8Array(32));
+        try{ localStorage.setItem(k, btoa(String.fromCharCode.apply(null, Array.from(bytes)))); }catch(_){ return null; }
+      }
+      try{ return await crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']); }catch(_){ return null; }
+    })();
+    return _cripto.chaveP;
+  }
+  async function _cacheCifrar(entrada){
+    const chave = await _chaveDoCache(_cache.uid);
+    if(!chave) return entrada;
+    try{
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const buf = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, chave, new TextEncoder().encode(JSON.stringify(entrada.rows || [])));
+      return { nome: entrada.nome, meta: entrada.meta, iv: iv, cifra: new Uint8Array(buf) };
+    }catch(e){ console.warn('[cache] cifra falhou, gravando aberto:', e && e.message); return entrada; }
+  }
+  async function _cacheDecifrarTodas(entradas){
+    const nomes = Object.keys(entradas);
+    if(!nomes.some(function(n){ return entradas[n] && entradas[n].cifra; })) return entradas;
+    const chave = await _chaveDoCache(_cache.uid);
+    const fora = {};
+    await Promise.all(nomes.map(async function(n){
+      const e = entradas[n]; if(!e) return;
+      if(!e.cifra){ fora[n] = e; return; }
+      if(!chave) return;   // cifrada e sem chave (outro navegador/perfil): descarta, desce pela rede
+      try{
+        const buf = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: e.iv }, chave, e.cifra);
+        fora[n] = { nome: e.nome, meta: e.meta, rows: JSON.parse(new TextDecoder().decode(buf)) };
+      }catch(_){ /* chave trocada ou dado corrompido: descarta esta tabela */ }
+    }));
+    return fora;
+  }
   const _cache = { uid: null, db: null, entradas: null, ativo: null, abrindoP: null };
   function _cacheDesligado(){
     try{
@@ -12352,8 +12528,7 @@ window.TAG_REGISTRY = {
                 return;
               }
               delete entradas._meta;
-              _cache.entradas = entradas;
-              fim(entradas);
+              _cacheDecifrarTodas(entradas).then(function(abertas){ _cache.entradas = abertas; fim(abertas); });
             };
             all.onerror = function(){ clearTimeout(timer); _cache.ativo = false; fim(null); };
           }catch(e){ clearTimeout(timer); console.warn('[cache] leitura falhou:', e && e.message); _cache.ativo = false; fim(null); }
@@ -12378,17 +12553,17 @@ window.TAG_REGISTRY = {
     if(!_cache.ativo || !_cache.db) return Promise.resolve(false);
     const entrada = { nome: nome, rows: rows || [], meta: Object.assign({ gravado_em: Date.now() }, meta || {}) };
     _cache.entradas[nome] = entrada;
-    return new Promise(function(resolve){
+    return _cacheCifrar(entrada).then(function(gravavel){ return new Promise(function(resolve){
       try{
         const tx = _cache.db.transaction('tabelas', 'readwrite');
         const st = tx.objectStore('tabelas');
-        st.put(entrada);
+        st.put(gravavel);
         st.put({ nome: '_meta', esquema: CACHE_ESQUEMA, uid: _cache.uid, gravado_em: Date.now() });
         tx.oncomplete = function(){ resolve(true); };
         tx.onerror = function(){ console.warn('[cache] gravação falhou (' + nome + '):', tx.error && tx.error.message); resolve(false); };
         tx.onabort = tx.onerror;
       }catch(e){ console.warn('[cache] gravação:', e && e.message); resolve(false); }
-    });
+    }); });
   };
   // Apaga a base do usuário (logout).
   window._cacheApagar = function(uid){
@@ -12396,6 +12571,8 @@ window.TAG_REGISTRY = {
       try{
         if(_cache.db){ try{ _cache.db.close(); }catch(_){ } }
         _cache.db = null; _cache.entradas = null; _cache.ativo = null; _cache.abrindoP = null; _cache.uid = null;
+        _cripto.chaveP = null; _cripto.uid = null;
+        try{ if(uid) localStorage.removeItem('falcon-chave-' + uid); }catch(_){ }
         if(!uid || typeof indexedDB === 'undefined') return resolve(false);
         const req = indexedDB.deleteDatabase(_cacheNome(uid));
         req.onsuccess = req.onerror = req.onblocked = function(){ resolve(true); };
@@ -12571,7 +12748,7 @@ window.TAG_REGISTRY = {
     document.addEventListener('visibilitychange', function(){
       if(document.visibilityState !== 'visible' || !_cache.ativo || !_ultimaConferencia) return;
       if(Date.now() - _ultimaConferencia < 10 * 60 * 1000) return;
-      window._conferirVersoes('voltou para a aba').catch(function(){});
+      if(!(window.Rede && Rede.offline())) window._conferirVersoes('voltou para a aba').catch(function(){});
     });
   }
   // Blocos da cópia local (boot quente): entram no Store antes do portão.
@@ -13396,15 +13573,22 @@ window.TAG_REGISTRY = {
       const _alunoP = (window.Store && typeof Store.hidratacaoPronta === 'function') ? Store.hidratacaoPronta() : Promise.resolve();
       const _sessaoP = window._sessaoPronta || Promise.resolve();
       const _inicioP = (typeof window._iniPreparar === 'function') ? window._iniPreparar() : Promise.resolve();
+      // Fase 1 offline: servidor mudo → o Início abre já com a cópia local (tetos
+      // curtos); as partes de rede seguem em 2º plano e entram quando a conexão voltar.
+      const _online = window.Rede ? await Rede.sondar() : true;
+      const _f = _online ? 1 : 0.1;
+      if(!_online) console.warn('[portão] servidor sem resposta — abrindo com a cópia local');
       await Promise.all([
-        _limite(_pacotesP, 20000, 'pacotes'),
-        _limite(_blocosP2, 25000, 'blocos'),
-        _limite(_bancoP, 25000, 'banco de questões'),
-        _limite(_simP, 25000, 'simulados'),
-        _limite(_alunoP, 15000, 'dados do aluno'),
-        _limite(_sessaoP, 10000, 'sessão'),
-        _limite(_inicioP, 12000, 'início'),
+        _limite(_pacotesP, 20000 * _f, 'pacotes'),
+        _limite(_blocosP2, 25000 * _f, 'blocos'),
+        _limite(_bancoP, 25000 * _f, 'banco de questões'),
+        _limite(_simP, 25000 * _f, 'simulados'),
+        _limite(_alunoP, 15000 * _f, 'dados do aluno'),
+        _limite(_sessaoP, 10000 * _f, 'sessão'),
+        _limite(_inicioP, 12000 * _f, 'início'),
       ]);
+      // sem servidor E sem cópia local: a tela avisa; quando a conexão voltar, recarrega sozinha
+      if(!_online && !((window.COURSES || []).length) && window.Rede) Rede.on(function(e){ if(e === 'ok') location.reload(); });
       if(window._bootMarca) _bootMarca('pacotes');
       window.__hydrating = false;
       if(window._bootMarca) _bootMarca('portao');
@@ -14061,13 +14245,20 @@ const Auth = (function(){
       if(!raw) return null;
       const cached = JSON.parse(raw);
       if(!cached || !cached.id || !cached.email) return null;
-      if(Date.now() - (cached.ts || 0) > USER_CACHE_TTL){
-        localStorage.removeItem(USER_CACHE_KEY);
-        return null;
-      }
+      // Velho (mais de 8 h) NÃO é descartado: vira "_stale" e serve de reserva
+      // quando o servidor não responde (entrada offline). Só sai quando o
+      // servidor disser que não há sessão.
+      if(Date.now() - (cached.ts || 0) > USER_CACHE_TTL) cached._stale = true;
       return cached;
     }catch(_){ return null; }
   }
+  function _semStale(c){ const o = Object.assign({}, c); delete o._stale; return o; }
+  // Prazo para uma chamada do SDK (que não aceita cancelamento): estourar o prazo
+  // significa "sem resposta", nunca "sessão inválida".
+  function _comPrazo(p, ms, rotulo){
+    return Promise.race([p, new Promise(function(_, rej){ setTimeout(function(){ rej(new Error((rotulo || 'chamada') + ' sem resposta em ' + Math.round(ms / 1000) + ' s')); }, ms); })]);
+  }
+  function _erroDeRede(err){ return !!err && /fetch|network|timeout|retry|load failed|econn/i.test(String(err.message || err.name || err)); }
   function _clearCachedSession(){
     try{ localStorage.removeItem(USER_CACHE_KEY); }catch(_){}
   }
@@ -14204,7 +14395,7 @@ const Auth = (function(){
   async function load(){
     // 1) Cache local primeiro
     const cached = _loadCachedSession();
-    if(cached){
+    if(cached && !cached._stale){
       current = cached;
       syncMockUser();
       // Espelha pro UbiqueStore.user_profiles — sem isso, Profile.needsOnboarding
@@ -14218,31 +14409,27 @@ const Auth = (function(){
     // 3) Sem cache: tenta Supabase JWT (login pode estar persistido em sb-*)
     if(window._sb){
       try {
-        const result = await Promise.race([
-          window._sb.auth.getSession(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('getSession timeout 3s')), 3000))
-        ]);
-        const { data } = result || {};
+        const result = await _comPrazo(window._sb.auth.getSession(), 12000, 'getSession');
+        const { data, error } = result || {};
+        if(error && _erroDeRede(error)) throw error;   // renovação falhou por REDE: trata como "sem resposta"
         if(data && data.session && data.session.user){
-          current = await _hydrateSupabaseUser(data.session.user);
-          _saveCachedSession(current); // hidrata cache pra próximos refreshes
-          syncMockUser();
-          return current;
+          let fresco = null;
+          try{ fresco = await _comPrazo(_hydrateSupabaseUser(data.session.user), 12000, 'perfil'); }
+          catch(e2){ console.warn('[auth] perfil sem resposta:', e2.message); if(window.Rede) Rede.falha('perfil'); }
+          if(fresco){ current = fresco; _saveCachedSession(current); syncMockUser(); return current; }
+          // sessão válida, banco mudo: segue com o que há no aparelho
+          if(cached){ current = _semStale(cached); syncMockUser(); _mirrorProfileToLocal(current); return current; }
+        } else if(cached){
+          // o servidor RESPONDEU sem sessão: não é lentidão — o aluno saiu ou a sessão venceu
+          _clearCachedSession();
         }
       } catch(e){
-        console.warn('[auth] load getSession timeout — resetando SDK:', e.message);
-        // Reset agressivo: signOut local pra zerar estado interno do SDK
-        // + limpa tokens corrompidos. Próximo signInWithPassword vai começar
-        // do zero, sem promises pendentes contaminando.
-        try {
-          await Promise.race([
-            window._sb.auth.signOut({ scope: 'local' }),
-            new Promise(r => setTimeout(r, 1500))
-          ]);
-        } catch(_){}
-        try{
-          Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
-        }catch(_){}
+        // Sem resposta (lentidão ou queda). NADA de apagar tokens: o servidor pode ter
+        // aceitado a sessão e a próxima tentativa funciona. Com cache no aparelho,
+        // mesmo antigo, entra com ele e revalida quando der.
+        console.warn('[auth] getSession sem resposta (' + e.message + ') — mantendo o que há no aparelho');
+        if(window.Rede) Rede.falha('getSession');
+        if(cached){ current = _semStale(cached); syncMockUser(); _mirrorProfileToLocal(current); _revalidateInBackground(); return current; }
       }
     }
     current = null;
@@ -14259,12 +14446,9 @@ const Auth = (function(){
       return { ok:false, kind:'no-supabase', message:'Supabase indisponível. Recarregue a página.' };
     }
     try {
-      const result = await Promise.race([
-        window._sb.auth.signInWithPassword({
-          email: normalizedEmail, password: String(password||'')
-        }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('signInWithPassword timeout 8s')), 8000))
-      ]);
+      const result = await _comPrazo(window._sb.auth.signInWithPassword({
+        email: normalizedEmail, password: String(password||'')
+      }), 20000, 'login');
       const { data, error } = result || {};
       if(error){
         return { ok:false, kind:'invalid-credentials', message:'Email ou senha incorretos.' };
@@ -14272,7 +14456,7 @@ const Auth = (function(){
       if(!data || !data.user){
         return { ok:false, kind:'unknown', message:'Resposta vazia do servidor. Tente de novo.' };
       }
-      current = await _hydrateSupabaseUser(data.user);
+      current = await _comPrazo(_hydrateSupabaseUser(data.user), 15000, 'perfil');
       syncMockUser();
       persist(current, !!remember);
       _saveCachedSession(current);
@@ -14281,17 +14465,24 @@ const Auth = (function(){
       }
       return { ok:true, user:current };
     } catch(e){
-      console.warn('[auth] login timeout/erro:', e.message);
-      // Timeout = SDK pode estar travado por sessão antiga corrompida.
-      // Limpa estado e sugere reset visível pro user.
-      try{
-        Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
-      }catch(_){}
-      return {
-        ok:false,
-        kind:'timeout',
-        message:'Problema de conexão. Clique em "Resetar sessão" e tente de novo.'
-      };
+      console.warn('[auth] login sem resposta:', e.message);
+      if(window.Rede) Rede.falha('login');
+      // O servidor pode ter aceitado o login mesmo sem responder a tempo: espera a
+      // sessão aparecer por trás (até 3 × 3 s) antes de dizer que falhou.
+      // NUNCA apaga tokens aqui — "Resetar sessão" continua como ação manual.
+      for(let i = 0; i < 3; i++){
+        try{
+          const r2 = await _comPrazo(window._sb.auth.getSession(), 3000, 'getSession');
+          const s2 = r2 && r2.data && r2.data.session;
+          if(s2 && s2.user && String(s2.user.email || '').toLowerCase() === normalizedEmail){
+            current = await _comPrazo(_hydrateSupabaseUser(s2.user), 12000, 'perfil');
+            syncMockUser(); persist(current, !!remember); _saveCachedSession(current);
+            if(current.role === 'admin'){ try{ localStorage.setItem('ubique.admin.token', JSON.stringify({ email:current.email, name:current.name||'', ts:Date.now() })); }catch(_){} }
+            return { ok:true, user:current };
+          }
+        }catch(_){ }
+      }
+      return { ok:false, kind:'timeout', message:'O servidor está demorando para responder. Aguarde alguns instantes e tente de novo.' };
     }
   }
 
@@ -38776,6 +38967,11 @@ Renderers.inicio = function(){
   // de verdade UMA vez.
   if(window.__hydrating){
     return '<div class="ini-loading"><span class="ini-spinner"></span><span class="ini-loading-t">Carregando sua página inicial…</span></div>';
+  }
+  if(window.Rede && Rede.offline() && !((window.COURSES || []).length)){
+    return '<div class="ini-loading ini-semservidor"><span class="ini-loading-t">Sem conexão com o servidor e sem cópia local neste aparelho.</span>'
+      + '<span class="ini-loading-s">Assim que a conexão voltar, a página carrega sozinha.</span>'
+      + '<button type="button" class="btn-ghost" onclick="location.reload()">Tentar agora</button></div>';
   }
   if(window._bootMarca) _bootMarca('inicio');
   const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
