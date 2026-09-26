@@ -6,7 +6,8 @@
      demora — atualizações continuam chegando normalmente, sem versão presa;
    · scripts e estilos locais e bibliotecas do CDN: cópia primeiro, renova em
      2º plano (os locais têm ?v=, então versão nova = URL nova = rede);
-   · imagens do conteúdo já vistas: cópia primeiro, com teto de entradas;
+   · imagens do conteúdo já vistas: cópia primeiro, com teto de entradas
+     (pedidas como a página pede, sem tentar CORS: sem erro no console);
    · Supabase (dados, login, funções, realtime), vídeos e o resto: NUNCA
      passam por aqui — seguem direto pela rede, e a Rede do app cuida deles. */
 'use strict';
@@ -14,12 +15,11 @@ const VERSAO = 'concha-v1';
 const C_CONCHA = VERSAO + ':concha';     // página + arquivos locais
 const C_LIBS = VERSAO + ':libs';         // bibliotecas e fontes do CDN
 const C_IMG = VERSAO + ':imagens';       // imagens do conteúdo já vistas
-const IMG_TETO = 300;
+const IMG_TETO = 120;   // resposta opaca conta ~7 MB na cota do Chrome: teto baixo
 const PRAZO_PAGINA_MS = 4000;
 const RAIZ = new URL('./', self.location.href);   // pasta do sw.js = raiz do app
 const LIB_BOOT = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js';
 const CDN_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'unpkg.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
-const semCors = new Set();               // hosts de imagem que não aceitam CORS (não guardáveis)
 
 function naRaiz(u){ return u.origin === self.location.origin && u.href.indexOf(RAIZ.href) === 0; }
 function ehApi(u){ return /supabase\.(co|in)$/.test(u.hostname) && !/^\/storage\/v1\/object\/public\//.test(u.pathname); }
@@ -111,29 +111,24 @@ async function copiaPrimeiro(ev, nome){
   return rede;
 }
 
-// Imagens do conteúdo: cópia primeiro; guarda só resposta CORS (sem "padding" de cota).
+// Imagens do conteúdo: cópia primeiro. O pedido vai como a página pediu (no-cors):
+// resposta opaca também é guardada — por isso o teto é baixo.
 function imagemGuardavel(u){
   if(naRaiz(u)) return !/\/landing\//.test(u.pathname);
-  if(u.protocol !== 'https:') return false;
-  return !semCors.has(u.hostname);
+  return u.protocol === 'https:';
 }
 async function aparar(cache){
   const chaves = await cache.keys();
   if(chaves.length <= IMG_TETO) return;
   await Promise.all(chaves.slice(0, chaves.length - IMG_TETO).map(function(k){ return cache.delete(k); }));
 }
-async function imagem(ev, u){
+async function imagem(ev){
   const req = ev.request, cache = await caches.open(C_IMG);
-  const copia = await cache.match(req.url, { ignoreVary: true });
+  const copia = await cache.match(req, { ignoreVary: true });
   if(copia) return copia;
-  try{
-    const resp = await fetch(new Request(req.url, { mode: 'cors', credentials: 'omit' }));
-    if(resp.ok) ev.waitUntil(cache.put(req.url, resp.clone()).then(function(){ return aparar(cache); }).catch(function(){}));
-    return resp;
-  }catch(_){
-    if(!naRaiz(u)) semCors.add(u.hostname);
-    return fetch(req);
-  }
+  const resp = await fetch(req);
+  if(resp && (resp.ok || resp.type === 'opaque')) ev.waitUntil(cache.put(req, resp.clone()).then(function(){ return aparar(cache); }).catch(function(){}));
+  return resp;
 }
 
 self.addEventListener('fetch', function(ev){
@@ -146,5 +141,5 @@ self.addEventListener('fetch', function(ev){
   const dest = req.destination;
   if(naRaiz(u) && /\.(js|css)(\?|$)/.test(u.pathname + u.search)){ ev.respondWith(copiaPrimeiro(ev, C_CONCHA)); return; }
   if(CDN_HOSTS.indexOf(u.hostname) >= 0 && (dest === 'script' || dest === 'style' || dest === 'font' || dest === '')){ ev.respondWith(copiaPrimeiro(ev, C_LIBS)); return; }
-  if(dest === 'image' && imagemGuardavel(u)){ ev.respondWith(imagem(ev, u)); return; }
+  if(dest === 'image' && imagemGuardavel(u)){ ev.respondWith(imagem(ev)); return; }
 });
