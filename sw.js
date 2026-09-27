@@ -11,7 +11,7 @@
    · Supabase (dados, login, funções, realtime), vídeos e o resto: NUNCA
      passam por aqui — seguem direto pela rede, e a Rede do app cuida deles. */
 'use strict';
-const VERSAO = 'concha-v1';
+const VERSAO = 'concha-v2';   // v2: cópias opacas nunca respondem a pedidos CORS (bug do supabase-js vindo do admin)
 const C_CONCHA = VERSAO + ':concha';     // página + arquivos locais
 const C_LIBS = VERSAO + ':libs';         // bibliotecas e fontes do CDN
 const C_IMG = VERSAO + ':imagens';       // imagens do conteúdo já vistas
@@ -100,11 +100,22 @@ async function pagina(ev, u){
 }
 
 // Cópia primeiro, renovação em 2º plano (scripts, estilos, libs, fontes).
+// ARMADILHA (2026-09-27): a mesma URL pode ser pedida em modo CORS (a página, com
+// crossorigin) e em modo no-cors (admin, libs sob demanda). Uma resposta OPACA
+// (no-cors) guardada na mesma chave NÃO serve a um pedido CORS: o navegador a
+// recusa, o script não carrega e o app abre sem Supabase. Regras: uma resposta
+// opaca nunca substitui uma completa já guardada, e nunca responde a pedido CORS.
 async function copiaPrimeiro(ev, nome){
   const req = ev.request, cache = await caches.open(nome);
-  const copia = await cache.match(req, { ignoreVary: true });
-  const rede = fetch(req).then(function(resp){
-    if(resp && (resp.ok || resp.type === 'opaque')) cache.put(req, resp.clone()).catch(function(){});
+  let copia = await cache.match(req, { ignoreVary: true });
+  if(copia && copia.type === 'opaque' && req.mode === 'cors') copia = null;
+  const rede = fetch(req).then(async function(resp){
+    if(!resp) return resp;
+    if(resp.ok) cache.put(req, resp.clone()).catch(function(){});
+    else if(resp.type === 'opaque'){
+      const atual = await cache.match(req, { ignoreVary: true });
+      if(!atual || atual.type === 'opaque') cache.put(req, resp.clone()).catch(function(){});
+    }
     return resp;
   });
   if(copia){ ev.waitUntil(rede.catch(function(){})); return copia; }
