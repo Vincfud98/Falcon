@@ -248,13 +248,14 @@
       var a = c.assertiva || {};
       return label('Questão de prova', 0) + titulo(c, a.origem ? '<span class="aula-tag">' + esc(a.origem) + '</span>' : '') +
         '<div class="aula-box aula-anim" style="--i:2"><div class="aula-atext">' + esc(a.texto || '') + '</div></div>' +
-        '<div class="aula-ask aula-anim" style="--i:3"><span>Como você julga?</span><span class="aula-pill">Certo</span><span class="aula-pill">Errado</span></div>' +
+        '<div class="aula-ask aula-anim" style="--i:3"><span class="aula-ask-t">Como você julga?</span><button type="button" class="aula-pill" data-julgar="Certo">Certo</button><button type="button" class="aula-pill" data-julgar="Errado">Errado</button></div>' +
         rodape(c, ctx, idx, total);
     },
     resposta: function (c, ctx, idx, total) {
       var r = c.resposta || {};
       var g = String(r.gabarito || '').toLowerCase();
-      return label('Gabarito', 0) + titulo(c) + '<div class="aula-anim" style="--i:2"><span class="aula-badge ' + (g === 'certo' ? 'certo' : 'errado') + '">' + esc(r.gabarito || '') + '</span></div>' +
+      return label('Gabarito', 0) + titulo(c) + '<div class="aula-anim" style="--i:2"><span class="aula-badge ' + (g === 'certo' ? 'certo' : 'errado') + '">' + esc(r.gabarito || '') + '</span>'
+        + '<span class="aula-veredito"><span class="aula-veredito-a">Você acertou</span><span class="aula-veredito-e">Você errou</span></span></div>' +
         itensHtml(c, r.justificativa) + rodape(c, ctx, idx, total);
     },
     encerramento: function (c, ctx, idx, total) {

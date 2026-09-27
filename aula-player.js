@@ -22,9 +22,9 @@
     { id: 'resumo_curto', nome: 'Resumo da unidade', desc: 'A unidade inteira, com questões de prova no meio.',
       variantes: [
         { id: 'resumo_curto', nome: 'Curto',  desc: '10 a 13 min, só o essencial' },
-        { id: 'resumo',       nome: 'Padrão', desc: '15 a 25 min, conforme o tamanho da unidade' }
+        { id: 'resumo',       nome: 'Padrão', desc: 'Conforme o tamanho da unidade' }
       ] },
-    { id: 'completa', nome: 'Aula completa',     desc: 'Percorre todo o material, em partes. De 20 a 35 minutos.' },
+    { id: 'completa', nome: 'Aula completa',     desc: 'Sem limite de tempo: cobre todo o material, em partes.' },
     { id: 'questoes', nome: 'Só as questões',    desc: 'As questões de prova ligadas à unidade, comentadas uma a uma. De 5 a 10 minutos.' },
     { id: 'secao',    nome: 'Uma seção',         desc: 'Só a seção que você escolher, por completo. De 4 a 8 minutos.' }
   ];
@@ -38,11 +38,14 @@
     comando_longo: 'O pedido especial pode ter no máximo 600 letras.',
     voz_invalida: 'Essa voz não está disponível.',
     unidade_inexistente: 'Não achei esta unidade no servidor.',
+    preco_extra_config: 'O preço do excedente da aula completa está mal configurado. Avise o suporte.',
+    titulo_longo: 'O nome pode ter no máximo 90 letras.',
+    aula_nao_encontrada: 'Não achei essa aula.',
     preset_invalido: 'Tipo de aula inválido.',
     rede: 'Sem conexão com o servidor. Tente de novo.',
     login: 'Sua sessão expirou. Entre de novo e tente outra vez.'
   };
-  var SEL_LISTA = 'id,preset,comando,titulo,status,etapa,parte_atual,tentativas,erro,custo_ubt,estornado_em,duracao_estimada_s,created_at,pronta_em,voz_id,secao_id,audio_pronto:roteiro->audio->>pronto,partes:plano->partes';
+  var SEL_LISTA = 'id,preset,comando,titulo,titulo_aluno,status,etapa,parte_atual,tentativas,erro,custo_ubt,estornado_em,duracao_estimada_s,created_at,pronta_em,voz_id,secao_id,audio_pronto:roteiro->audio->>pronto,partes:plano->partes';
   var ICO = {
     x: '<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
     play: '<svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg>',
@@ -59,6 +62,7 @@
     slides: '<svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>',
     sol: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="4.9" y1="4.9" x2="7" y2="7"/><line x1="17" y1="17" x2="19.1" y2="19.1"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><line x1="4.9" y1="19.1" x2="7" y2="17"/><line x1="17" y1="7" x2="19.1" y2="4.9"/></svg>',
     lua: '<svg viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
+    lapis: '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
     mais: '<svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
     menos: '<svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"/></svg>',
     zero: '<svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>'
@@ -78,6 +82,7 @@
     var d = new Date(iso); if (isNaN(d)) return '';
     try { return d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '') + ' ' + d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }); } catch (_) { return ''; }
   }
+  function nomeDaAula(a) { return (a && (a.titulo_aluno || a.titulo)) || ''; }
   function presetNome(id) {
     for (var i = 0; i < PRESETS.length; i++) {
       var p = PRESETS[i];
@@ -130,10 +135,18 @@
         .map(function (s) { return { id: s.id, titulo: s.title || 'Seção' }; });
     } catch (_) { return []; }
   }
-  function carregarAulas(dbId) {
+  function carregarAulas(dbId, sel) {
     if (!sb()) return Promise.resolve([]);
-    return sb().schema('aluno').from('aulas').select(SEL_LISTA).eq('unit_id', dbId).neq('status', 'cancelada').order('created_at', { ascending: false })
-      .then(function (r) { if (r.error) { console.warn('[aulas]', r.error); return null; } return r.data || []; }).catch(function () { return null; });
+    sel = sel || SEL_LISTA;
+    return sb().schema('aluno').from('aulas').select(sel).eq('unit_id', dbId).neq('status', 'cancelada').order('created_at', { ascending: false })
+      .then(function (r) {
+        if (r.error) {
+          // banco ainda sem a coluna do nome dado pelo aluno (SQL nº 5 não rodou): lista sem ela
+          if (/titulo_aluno/.test(String(r.error.message || '')) && /titulo_aluno,/.test(sel)) return carregarAulas(dbId, sel.replace('titulo_aluno,', ''));
+          console.warn('[aulas]', r.error); return null;
+        }
+        return r.data || [];
+      }).catch(function () { return null; });
   }
 
   // ─── vigia: avisa quando uma aula em andamento fica pronta (mesmo com o painel fechado) ──
@@ -148,8 +161,8 @@
           var v = alvo[dbId]; if (!v) return;
           rows.forEach(function (a) {
             if (!v.ids[a.id]) return;
-            if (a.status === 'pronta') { delete v.ids[a.id]; toast('A aula "' + (a.titulo || presetNome(a.preset)) + '" ficou pronta. Abra "Aula em slides" na unidade para assistir.', 'success'); }
-            else if (a.status === 'erro') { delete v.ids[a.id]; toast('A aula "' + (a.titulo || presetNome(a.preset)) + '" não deu certo' + (a.estornado_em ? ' e o valor foi devolvido.' : '.'), 'error'); }
+            if (a.status === 'pronta') { delete v.ids[a.id]; toast('A aula "' + (nomeDaAula(a) || presetNome(a.preset)) + '" ficou pronta. Abra "Aula em slides" na unidade para assistir.', 'success'); }
+            else if (a.status === 'erro') { delete v.ids[a.id]; toast('A aula "' + (nomeDaAula(a) || presetNome(a.preset)) + '" não deu certo' + (a.estornado_em ? ' e o valor foi devolvido.' : '.'), 'error'); }
           });
           if (v.cb) v.cb(rows);
           if (!Object.keys(v.ids).length) delete alvo[dbId];
@@ -170,7 +183,7 @@
 
   // ─── painel "Aulas desta unidade" ────────────────────────────────────────
   var Painel = (function () {
-    var el = null, unit = null, dbId = null, aulas = [], precos = {}, vozes = [], vozPadrao = '', conta = null, secoes = [], pedindo = false;
+    var el = null, unit = null, dbId = null, aulas = [], precos = {}, orc = null, vozes = [], vozPadrao = '', conta = null, secoes = [], pedindo = false, renomeando = null;
     var variante = FAMILIA ? FAMILIA.variantes[0].id : '';   // pílula escolhida no cartão do resumo
     function abrir(u) {
       if (el) fechar();
@@ -190,9 +203,9 @@
       el.addEventListener('submit', aoEnviar);
       el.addEventListener('change', aoMudar);
       document.addEventListener('keydown', aoTeclar);
-      Promise.all([carregarAulas(dbId), carregarPrecos(), carregarConta(), carregarVozes(), carregarVozPadrao()]).then(function (r) {
+      Promise.all([carregarAulas(dbId), carregarOrcamento(dbId), carregarConta(), carregarVozes(), carregarVozPadrao()]).then(function (r) {
         if (!el) return;
-        aulas = r[0] || []; precos = r[1]; conta = r[2]; vozes = r[3]; vozPadrao = r[4];
+        aulas = r[0] || []; orc = r[1]; precos = (orc && orc.precos) || {}; conta = r[2]; vozes = r[3]; vozPadrao = r[4];
         vista(aulas.length ? 'lista' : 'pedido');
         Vigia.vigiar(dbId, aulas, aoAtualizar);
       });
@@ -204,10 +217,25 @@
       document.body.style.overflow = '';
       Vigia.calar(dbId);
     }
+    // Orçamento da unidade: palavras do material, preço de cada tipo (a completa já com o
+    // excedente por tamanho) e minutos estimados. Sem a função no banco, cai na tabela de preços.
+    function carregarOrcamento(unidade) {
+      return sb().schema('aluno').rpc('aula_orcamento', { p_unit_id: unidade }).then(function (r) {
+        var d = r && r.data;
+        if (d && d.ok && d.precos) { var p = {}; Object.keys(d.precos).forEach(function (k) { p[k] = Number(d.precos[k]); }); return { precos: p, minutos: d.minutos || {}, palavras: Number(d.palavras) || 0, blocos_extra: Number(d.blocos_extra) || 0 }; }
+        return carregarPrecos().then(function (p) { return { precos: p, minutos: {}, palavras: 0, blocos_extra: 0 }; });
+      }).catch(function () { return carregarPrecos().then(function (p) { return { precos: p, minutos: {}, palavras: 0, blocos_extra: 0 }; }); });
+    }
     function carregarPrecos() {
       return sb().schema('carteira').from('tabela_custos').select('acao,valor').in('acao', ['aula_resumo', 'aula_resumo_curto', 'aula_completa', 'aula_questoes', 'aula_secao'])
         .then(function (r) { var p = {}; ((r && r.data) || []).forEach(function (x) { p[String(x.acao).replace(/^aula_/, '')] = Number(x.valor); }); return p; }).catch(function () { return {}; });
     }
+    function minutosDe(id) { var m = orc && orc.minutos && orc.minutos[id]; return (m && m.length === 2) ? ('cerca de ' + m[0] + ' a ' + m[1] + ' min') : ''; }
+    function descDe(p) {
+      if (p.id === 'completa') { var mc = minutosDe('completa'); return p.desc + (mc ? ' Nesta unidade: ' + mc + '.' : '') + (orc && orc.blocos_extra ? ' Unidade grande: o preço soma o excedente.' : ''); }
+      return p.desc;
+    }
+    function descVar(v) { var m = minutosDe(v.id); return v.id === 'resumo_curto' ? '10 a 13 min, só o essencial' : (m ? m.charAt(0).toUpperCase() + m.slice(1) + ', conforme o tamanho da unidade' : v.desc); }
     function carregarConta() {
       return sb().schema('carteira').from('contas').select('saldo,ilimitado').eq('user_id', uid()).maybeSingle()
         .then(function (r) { return (r && r.data) || null; }).catch(function () { return null; });
@@ -233,13 +261,17 @@
         var e = estado(a), pronta = a.status === 'pronta';
         return '<div class="au-card' + (pronta ? ' is-pronta' : '') + '" data-id="' + esc(a.id) + '">'
           + '<div class="au-card-l">'
-          + '<div class="au-card-t">' + esc(a.titulo || (pendente(a) ? 'Preparando a aula…' : presetNome(a.preset))) + '</div>'
+          + (renomeando === a.id
+              ? '<form class="au-ren" data-id="' + esc(a.id) + '"><input type="text" class="au-in" name="titulo" maxlength="90" value="' + esc(a.titulo_aluno || a.titulo || '') + '" aria-label="Nome da aula" placeholder="Nome da aula">'
+                + '<button type="submit" class="btn-primary">Salvar</button><button type="button" class="icon-btn" data-au="ren-cancelar">Cancelar</button></form>'
+              : '<div class="au-card-t">' + esc(nomeDaAula(a) || (pendente(a) ? 'Preparando a aula…' : presetNome(a.preset))) + (a.titulo_aluno && a.titulo ? '<span class="au-card-orig" title="Título gerado">' + esc(a.titulo) + '</span>' : '') + '</div>')
           + '<div class="au-card-m">' + esc(presetNome(a.preset)) + (a.secao_id && a.preset === 'secao' ? ' · ' + esc(nomeSecao(a.secao_id)) : '') + ' · ' + esc(fmtData(a.created_at)) + (a.custo_ubt ? ' · ' + fmtUbt(a.custo_ubt) + ' ⓤ' : '') + '</div>'
           + (a.comando ? '<div class="au-card-c">"' + esc(a.comando) + '"</div>' : '')
           + '<div class="au-pill is-' + e.cls + '">' + (e.cls === 'andamento' ? '<span class="au-dot"></span>' : '') + esc(e.txt) + '</div>'
           + (a.status === 'erro' && a.erro ? '<div class="au-card-e">' + esc(String(a.erro).slice(0, 160)) + '</div>' : '')
           + '</div>'
-          + '<div class="au-card-r">' + (pronta ? '<button type="button" class="btn-primary au-assistir" data-au="assistir" data-id="' + esc(a.id) + '">' + ICO.play + ' Assistir</button>' : '') + '</div>'
+          + '<div class="au-card-r">' + (pronta ? '<button type="button" class="btn-primary au-assistir" data-au="assistir" data-id="' + esc(a.id) + '">' + ICO.play + ' Assistir</button>' : '')
+          + (a.status !== 'erro' && a.status !== 'cancelada' ? '<button type="button" class="icon-btn au-ren-btn" data-au="renomear" data-id="' + esc(a.id) + '" data-tip="Renomear" aria-label="Renomear a aula">' + ICO.lapis + '</button>' : '') + '</div>'
           + '</div>';
       }).join('');
       box.innerHTML = '<div class="au-topo"><button type="button" class="btn-primary" data-au="nova">' + ICO.slides + ' Gerar aula</button>'
@@ -253,12 +285,12 @@
         var id = p.variantes ? variante : p.id, preco = precos[id];
         return '<label class="au-tipo' + (i === 0 ? ' is-on' : '') + '"><input type="radio" name="preset" value="' + id + '"' + (i === 0 ? ' checked' : '') + (p.variantes ? ' data-fam="1"' : '') + '>'
           + '<span class="au-tipo-n">' + esc(p.nome) + '</span><span class="au-tipo-p">' + (preco != null ? fmtUbt(preco) + ' ⓤ' : '') + '</span>'
-          + '<span class="au-tipo-d">' + esc(p.desc) + '</span></label>';
+          + '<span class="au-tipo-d">' + esc(descDe(p)) + '</span></label>';
       }).join('');
       var pilulas = FAMILIA ? FAMILIA.variantes.map(function (v) {
         return '<button type="button" class="au-var' + (v.id === variante ? ' is-on' : '') + '" data-var="' + v.id + '">'
           + '<span class="au-var-n">' + esc(v.nome) + '</span><span class="au-var-p">' + (precos[v.id] != null ? fmtUbt(precos[v.id]) + ' ⓤ' : '') + '</span>'
-          + '<span class="au-var-d">' + esc(v.desc) + '</span></button>';
+          + '<span class="au-var-d">' + esc(descVar(v)) + '</span></button>';
       }).join('') : '';
       var secOpts = secoes.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.titulo) + '</option>'; }).join('');
       var vozOpts = vozes.map(function (v) { return '<option value="' + esc(v.voice_id) + '"' + (v.voice_id === vozPadrao ? ' selected' : '') + '>' + esc(v.nome) + (v.voice_id === vozPadrao ? ' (padrão)' : '') + '</option>'; }).join('');
@@ -308,11 +340,30 @@
       if (a === 'fechar') fechar();
       else if (a === 'nova') vista('pedido');
       else if (a === 'lista') vista('lista');
+      else if (a === 'renomear') { renomeando = b.getAttribute('data-id'); pintarLista(); var inp = el.querySelector('.au-ren input'); if (inp) { inp.focus(); inp.select(); } }
+      else if (a === 'ren-cancelar') { renomeando = null; pintarLista(); }
       else if (a === 'assistir') { var id = b.getAttribute('data-id'); var row = null; aulas.some(function (x) { if (x.id === id) { row = x; return true; } return false; }); if (row) { fechar(); Player.abrir(row, unit); } }
     }
-    function aoTeclar(ev) { if (ev.key === 'Escape' && el) fechar(); }
+    function aoTeclar(ev) { if (ev.key === 'Escape' && el) { if (renomeando) { renomeando = null; pintarLista(); } else fechar(); } }
+    // renomear: o aluno dá o nome que quiser (vazio volta ao título gerado)
+    function renomear(form) {
+      var id = form.getAttribute('data-id'), v = String((form.querySelector('[name=titulo]') || {}).value || '').trim();
+      if (v.length > 90) { toast(ERROS.titulo_longo, 'warn'); return; }
+      var btn = form.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+      sb().schema('aluno').rpc('aula_renomear', { p_aula: id, p_titulo: v }).then(function (r) {
+        var d = r && r.data;
+        if (r && r.error) { toast(ERROS.rede, 'error'); if (btn) btn.disabled = false; return; }
+        if (!d || d.ok === false) { toast(msgErro(d && d.error, d), 'error'); if (btn) btn.disabled = false; return; }
+        aulas.forEach(function (a) { if (a.id === id) a.titulo_aluno = d.titulo_aluno || null; });
+        renomeando = null; pintarLista();
+        toast(d.titulo_aluno ? 'Aula renomeada.' : 'Nome removido: a aula volta ao título gerado.', 'success');
+      }).catch(function () { toast(ERROS.rede, 'error'); if (btn) btn.disabled = false; });
+    }
     function aoEnviar(ev) {
-      ev.preventDefault(); if (pedindo) return;
+      ev.preventDefault();
+      var ren = ev.target && ev.target.classList && ev.target.classList.contains('au-ren') ? ev.target : null;
+      if (ren) { renomear(ren); return; }
+      if (pedindo) return;
       var form = el.querySelector('.au-form'); if (!form) return;
       var msg = form.querySelector('.au-f-msg'), btn = form.querySelector('.au-enviar');
       var preset = (form.querySelector('input[name=preset]:checked') || {}).value || 'resumo_curto';
@@ -337,6 +388,7 @@
   // ─── player ──────────────────────────────────────────────────────────────
   var Player = (function () {
     var el = null, stage = null, ctl = null, cenas = [], midia = {}, dur = [], inicio = [], total = 0, i = -1;
+    var respostas = {}, julgando = null;   // questão interativa: escolha por slide de assertiva; índice do slide à espera do julgamento
     var audio = null, silencio = null, tocando = false, rate = 1, raf = 0, legendaOn = true, aulaId = null, tokens = [], palavraAtual = -1, cuesOn = {}, salvarT = 0, soltarFit = null, terminou = false, ultimoTxt = '';
     function abrir(resumo, unit) {
       if (el) fechar();
@@ -344,9 +396,13 @@
       if (!id || !sb()) return;
       if (!root.AulaSlides) { toast('O player ainda não carregou. Recarregue a página.', 'error'); return; }
       try { if (root.LBAudio && LBAudio.fecharTudo) LBAudio.fecharTudo(); } catch (_) { }
-      montar(resumo && resumo.titulo || '');
+      montar((resumo && nomeDaAula(resumo)) || '');
       Promise.all([
-        sb().schema('aluno').from('aulas').select('id,titulo,preset,roteiro,material,duracao_estimada_s').eq('id', id).maybeSingle().then(function (r) { return (r && r.data) || null; }).catch(function () { return null; }),
+        sb().schema('aluno').from('aulas').select('id,titulo,titulo_aluno,preset,roteiro,material,duracao_estimada_s').eq('id', id).maybeSingle()
+          .then(function (r) {
+            if (r && r.error && /titulo_aluno/.test(String(r.error.message || ''))) return sb().schema('aluno').from('aulas').select('id,titulo,preset,roteiro,material,duracao_estimada_s').eq('id', id).maybeSingle().then(function (r2) { return (r2 && r2.data) || null; });
+            return (r && r.data) || null;
+          }).catch(function () { return null; }),
         invocar({ acao: 'midia', aula_id: id })
       ]).then(function (r) {
         if (!el) return;
@@ -373,6 +429,7 @@
         + '<div class="ap-stage-wrap"><div class="aula-stage is-live"></div>'
         + '<button type="button" class="ap-big" data-ap="play" aria-label="Reproduzir">' + ICO.play + '</button>'
         + '<div class="ap-retomar" hidden><span></span><button type="button" data-ap="inicio">Começar do início</button></div>'
+        + '<div class="ap-julgar" hidden>Julgue a assertiva para continuar<small>Certo ou Errado na tela, ou as teclas C e E</small></div>'
         + '<div class="ap-carregando">Preparando a aula…</div></div>'
         + '<div class="ap-legenda" aria-live="off"></div>'
         + '<div class="ap-bar">'
@@ -416,7 +473,7 @@
     function falha(msg) { var c = el && el.querySelector('.ap-carregando'); if (c) c.textContent = msg; toast(msg, 'error'); }
     function preparar(row, unit) {
       aulaId = row.id; terminou = false;
-      i = -1; palavraAtual = -1; tokens = []; cuesOn = {}; silencio = null; tocando = false; ultimoTxt = '';   // estado zerado a cada abertura
+      i = -1; palavraAtual = -1; tokens = []; cuesOn = {}; silencio = null; tocando = false; ultimoTxt = ''; respostas = {}; julgando = null;   // estado zerado a cada abertura
       var rot = row.roteiro, mat = row.material || {};
       cenas = rot.cenas;
       var cat = Array.isArray(mat.midia) ? mat.midia : [];
@@ -425,7 +482,7 @@
         materia: mat.materia || '', unidadeRotulo: ((unit.label || 'Unidade') + ' ' + (unit.number || '')).trim(), unidadeTitulo: unit.title || '',
         capaUrl: (capa && capa.url) || unit.cover || '', logoSvg: LOGO, midia: cat, blocos: blocosDaUnidade(unitDbId(unit))
       };
-      var t = el.querySelector('.ap-title'); if (t) t.textContent = row.titulo || '';
+      var t = el.querySelector('.ap-title'); if (t) t.textContent = nomeDaAula(row) || '';
       var k = el.querySelector('.ap-kicker'); if (k) k.textContent = 'Aula em slides' + (ctx.materia ? ' · ' + ctx.materia : '');
       stage = el.querySelector('.aula-stage');
       ctl = AulaSlides.mount(stage, rot, ctx);
@@ -434,11 +491,10 @@
       stage.addEventListener('aula:imagem', function (ev) { Lightbox.abrir(ev.detail); });
       var wrap = el.querySelector('.ap-stage-wrap');
       soltarFit = AulaSlides.fit(wrap, { contain: true });
-      // durações e início de cada slide (a narração manda; sem áudio, o tempo estimado do roteiro)
-      dur = cenas.map(function (c) { var m = midia[c.id]; return m && m.duracao_s ? Number(m.duracao_s) : Math.max(4, Number(c.duracao_s) || 6); });
-      total = 0; inicio = dur.map(function (d) { var s = total; total += d; return s; });
-      var marks = el.querySelector('.ap-seek-marks');
-      marks.innerHTML = inicio.map(function (s, k) { return k ? '<i style="left:' + (s / total * 100) + '%"></i>' : ''; }).join('');
+      // retoma: as respostas já dadas voltam junto com a posição
+      var posR = null; try { posR = JSON.parse(ls('ubique.aula.pos.' + aulaId) || 'null'); } catch (_) { posR = null; }
+      if (posR && posR.r && typeof posR.r === 'object') respostas = posR.r;
+      recalcularTempos();
       audio = document.createElement('audio');
       audio.preload = 'auto';
       try { audio.preservesPitch = true; audio.mozPreservesPitch = true; audio.webkitPreservesPitch = true; } catch (_) { }
@@ -454,6 +510,64 @@
         var rt = el.querySelector('.ap-retomar'); rt.hidden = false; rt.querySelector('span').textContent = 'Retomando de ' + fmtTempo(inicio[pos.i] + (pos.t || 0));
       } else {
         tocarCena(0, 0, true);
+      }
+    }
+    // ── questão interativa ──
+    // Ramo do slide resposta: acertou (áudio principal) ou errou (áudio_erro), conforme o julgamento da assertiva anterior.
+    function ramoDe(k) {
+      var c = cenas[k]; if (!c || c.layout !== 'resposta' || k < 1) return null;
+      var ant = cenas[k - 1]; if (!ant || ant.layout !== 'assertiva') return null;
+      var esc = respostas[ant.id]; if (!esc) return null;
+      return esc === ((c.resposta && c.resposta.gabarito) || '') ? 'acerto' : 'erro';
+    }
+    function audioDe(c) { var k = cenas.indexOf(c); return (ramoDe(k) === 'erro' && c.audio_erro && c.audio_erro.arquivo) ? c.audio_erro : (c.audio || null); }
+    function audioAtual() { return i >= 0 ? audioDe(cenas[i]) : null; }
+    function fonteDe(k) {
+      var c = cenas[k], m = midia[c.id]; if (!m) return null;
+      if (ramoDe(k) === 'erro' && m.erro && m.erro.url) return { url: m.erro.url, duracao_s: m.erro.duracao_s };
+      return m;
+    }
+    function duracaoDe(k) { var f = fonteDe(k); return f && f.duracao_s ? Number(f.duracao_s) : Math.max(4, Number(cenas[k].duracao_s) || 6); }
+    function recalcularTempos() {
+      dur = cenas.map(function (c, k) { return duracaoDe(k); });
+      total = 0; inicio = dur.map(function (d) { var s = total; total += d; return s; });
+      var marks = el.querySelector('.ap-seek-marks');
+      if (marks) marks.innerHTML = inicio.map(function (s, k) { return k ? '<i style="left:' + (s / total * 100) + '%"></i>' : ''; }).join('');
+    }
+    // a assertiva k ainda espera julgamento (e tem um slide resposta logo depois)?
+    function pendeJulgamento(k) { var c = cenas[k]; return !!(c && c.layout === 'assertiva' && cenas[k + 1] && cenas[k + 1].layout === 'resposta' && !respostas[c.id]); }
+    function esperarJulgamento() {
+      julgando = i; setTocando(false);
+      el.classList.add('is-julgar'); var h = el.querySelector('.ap-julgar'); if (h) h.hidden = false;
+      var s = stage && stage.querySelector('.aula-slide.is-active'); if (s) { s.classList.add('is-julgar'); var t = s.querySelector('.aula-ask-t'); if (t) t.textContent = 'Julgue para continuar'; }
+    }
+    function sairDaEspera() {
+      julgando = null; el.classList.remove('is-julgar'); var h = el.querySelector('.ap-julgar'); if (h) h.hidden = true;
+      var s = stage && stage.querySelector('.aula-slide.is-active'); if (s) s.classList.remove('is-julgar');
+    }
+    function julgar(escolha) {
+      var c = cenas[i]; if (!c || c.layout !== 'assertiva' || (escolha !== 'Certo' && escolha !== 'Errado')) return;
+      if (respostas[c.id]) return;
+      respostas[c.id] = escolha; salvarPos();
+      pintarEscolha(i); recalcularTempos();
+      if (julgando === i) { sairDaEspera(); tocarCena(i + 1, 0, true); }
+    }
+    // marca a escolha nas pílulas da assertiva e o veredito no slide resposta
+    function pintarEscolha(k) {
+      var s = stage && stage.querySelector('.aula-slide.is-active'); if (!s) return;
+      var c = cenas[k];
+      if (c.layout === 'assertiva') {
+        var esc = respostas[c.id], gab = (cenas[k + 1] && cenas[k + 1].layout === 'resposta' && cenas[k + 1].resposta && cenas[k + 1].resposta.gabarito) || '';
+        Array.prototype.forEach.call(s.querySelectorAll('[data-julgar]'), function (b) {
+          var v = b.getAttribute('data-julgar');
+          b.classList.toggle('is-escolha', !!esc && v === esc);
+          b.classList.toggle('is-certa', !!esc && !!gab && v === gab);
+          b.classList.toggle('is-errada', !!esc && !!gab && v === esc && v !== gab);
+          b.disabled = !!esc;
+        });
+        var t = s.querySelector('.aula-ask-t'); if (t && esc) t.textContent = 'Você julgou ' + esc;
+      } else if (c.layout === 'resposta') {
+        var r = ramoDe(k); s.classList.toggle('is-acertou', r === 'acerto'); s.classList.toggle('is-errou', r === 'erro');
       }
     }
     function fechar() {
@@ -475,9 +589,12 @@
     }
     function tocarCena(k, offset, autoplay) {
       if (k < 0 || k >= cenas.length) return;
+      // ninguém passa de uma questão sem julgar: qualquer salto para a frente para na primeira assertiva pendente
+      for (var j = 0; j < k; j++) { if (pendeJulgamento(j)) { k = j; offset = 0; break; } }
+      if (julgando != null && julgando !== k) sairDaEspera();
       var trocou = k !== i;
-      i = k; if (trocou) { ctl.show(k); apagarMarcas(); cuesOn = {}; montarLegenda(cenas[k]); }
-      var m = midia[cenas[k].id];
+      i = k; if (trocou) { ctl.show(k); apagarMarcas(); cuesOn = {}; montarLegenda(cenas[k]); pintarEscolha(k); }
+      var m = fonteDe(k);
       var vis = el.querySelector('[data-ap="visual"]'); if (vis) { vis.hidden = !ctl.temVisual(); pintarVisual(); }
       el.querySelector('.ap-n').textContent = (k + 1) + ' / ' + cenas.length;
       terminou = false; el.classList.remove('is-fim');
@@ -499,6 +616,7 @@
     }
     function preCarregar(k) { var m = k < cenas.length && midia[cenas[k].id]; if (!m || !m.url || m._pre) return; m._pre = true; try { var a = new Audio(); a.preload = 'auto'; a.src = m.url; } catch (_) { } }
     function fimDaCena() {
+      if (pendeJulgamento(i)) { esperarJulgamento(); return; }   // a aula para até o aluno julgar
       if (i + 1 < cenas.length) tocarCena(i + 1, 0, true);
       else { terminou = true; setTocando(false); el.classList.add('is-fim'); ls('ubique.aula.pos.' + aulaId, null); pintar(); }
     }
@@ -512,6 +630,7 @@
       else { cancelAnimationFrame(raf); raf = 0; salvarPos(); }
     }
     function alternar() {
+      if (julgando != null) { var k0 = julgando; sairDaEspera(); tocarCena(k0, 0, true); return; }   // à espera do julgamento: play repete a questão
       if (terminou) { tocarCena(0, 0, true); return; }
       if (silencio) { setTocando(!tocando); return; }
       if (!audio) return;
@@ -532,7 +651,7 @@
     }
     function pintar() {
       if (!el || i < 0) return;
-      var lt = tempoLocal(), c = cenas[i], au = c.audio || {};
+      var lt = tempoLocal(), c = cenas[i], au = audioAtual() || {};
       // palavra atual
       var pal = au.palavras || [], idx = -1;
       if (pal.length) { var lo = 0, hi = pal.length - 1; while (lo <= hi) { var mid = (lo + hi) >> 1; if (pal[mid][0] <= lt) { idx = mid; lo = mid + 1; } else hi = mid - 1; } }
@@ -560,14 +679,14 @@
     function apagarMarcas() { if (!stage) return; stage.querySelectorAll('.aula-hl.is-on').forEach(function (m) { m.classList.remove('is-on'); }); }
     function montarLegenda(c) {
       var box = el.querySelector('.ap-legenda'); tokens = []; palavraAtual = -1;
-      var pal = (c.audio && c.audio.palavras) || [];
+      var au = audioDe(c) || {}; var pal = au.palavras || [];
       if (pal.length) box.innerHTML = pal.map(function (p) { return '<span class="ap-w">' + esc(p[2]) + '</span>'; }).join(' ');
       else box.innerHTML = '<span class="ap-w is-solta">' + esc(c.narracao || '') + '</span>';
       tokens = Array.prototype.slice.call(box.querySelectorAll('.ap-w'));
       if (!pal.length) tokens = [];
       box.scrollTop = 0;
     }
-    function salvarPos() { if (!aulaId || i < 0 || terminou) return; ls('ubique.aula.pos.' + aulaId, JSON.stringify({ i: i, t: Math.round(tempoLocal() * 10) / 10, ts: Date.now() })); }
+    function salvarPos() { if (!aulaId || i < 0 || terminou) return; ls('ubique.aula.pos.' + aulaId, JSON.stringify({ i: i, t: Math.round(tempoLocal() * 10) / 10, ts: Date.now(), r: respostas })); }
     function setRate(r) {
       rate = r; ls('ubique.aula.rate', String(r));
       if (audio) { try { audio.preservesPitch = true; } catch (_) { } audio.defaultPlaybackRate = r; audio.playbackRate = r; }
@@ -587,12 +706,14 @@
     function aoClicar(ev) {
       var lbBtn = ev.target.closest ? ev.target.closest('[data-lb]') : null;
       if (lbBtn) { Lightbox.acao(lbBtn.getAttribute('data-lb')); return; }
+      var jg = ev.target.closest ? ev.target.closest('[data-julgar]') : null;
+      if (jg) { julgar(jg.getAttribute('data-julgar')); return; }
       var b = ev.target.closest ? ev.target.closest('[data-ap]') : null; if (!b) return;
       var a = b.getAttribute('data-ap');
       if (a === 'fechar') fechar();
       else if (a === 'play') alternar();
       else if (a === 'prev') tocarCena(Math.max(0, i - 1), 0, tocando);
-      else if (a === 'next') { if (i + 1 < cenas.length) tocarCena(i + 1, 0, tocando); }
+      else if (a === 'next') { if (pendeJulgamento(i)) { esperarJulgamento(); } else if (i + 1 < cenas.length) tocarCena(i + 1, 0, tocando); }
       else if (a === 'back') irPara(inicio[i] + tempoLocal() - 10);
       else if (a === 'fwd') irPara(inicio[i] + tempoLocal() + 10);
       else if (a === 'rate') setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length]);
@@ -612,7 +733,9 @@
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') { if (ev.key === 'Escape') { fechar(); } return; }
       if (ev.key === 'Escape') { ev.preventDefault(); if (Lightbox.aberto()) Lightbox.fechar(); else fechar(); }
       else if (ev.key === ' ' || ev.key === 'k') { ev.preventDefault(); alternar(); }
-      else if (ev.key === 'ArrowRight') { ev.preventDefault(); if (i + 1 < cenas.length) tocarCena(i + 1, 0, tocando); }
+      else if (ev.key === 'ArrowRight') { ev.preventDefault(); if (pendeJulgamento(i)) esperarJulgamento(); else if (i + 1 < cenas.length) tocarCena(i + 1, 0, tocando); }
+      else if (ev.key === 'c' || ev.key === 'C') { if (cenas[i] && cenas[i].layout === 'assertiva') { ev.preventDefault(); julgar('Certo'); } }
+      else if (ev.key === 'e' || ev.key === 'E') { if (cenas[i] && cenas[i].layout === 'assertiva') { ev.preventDefault(); julgar('Errado'); } }
       else if (ev.key === 'ArrowLeft') { ev.preventDefault(); tocarCena(Math.max(0, i - 1), 0, tocando); }
       else if (ev.key === 'j') { irPara(inicio[i] + tempoLocal() - 10); }
       else if (ev.key === 'l') { irPara(inicio[i] + tempoLocal() + 10); }
