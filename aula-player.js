@@ -39,13 +39,15 @@
     voz_invalida: 'Essa voz não está disponível.',
     unidade_inexistente: 'Não achei esta unidade no servidor.',
     preco_extra_config: 'O preço do excedente da aula completa está mal configurado. Avise o suporte.',
+    nao_cancelavel: 'Esta aula já terminou e não pode mais ser parada.',
+    nao_excluivel: 'Só dá para excluir aulas que não deram certo.',
     titulo_longo: 'O nome pode ter no máximo 90 letras.',
     aula_nao_encontrada: 'Não achei essa aula.',
     preset_invalido: 'Tipo de aula inválido.',
     rede: 'Sem conexão com o servidor. Tente de novo.',
     login: 'Sua sessão expirou. Entre de novo e tente outra vez.'
   };
-  var SEL_LISTA = 'id,preset,comando,titulo,titulo_aluno,status,etapa,parte_atual,tentativas,erro,custo_ubt,estornado_em,duracao_estimada_s,created_at,pronta_em,voz_id,secao_id,audio_pronto:roteiro->audio->>pronto,partes:plano->partes';
+  var SEL_LISTA = 'id,preset,comando,titulo,titulo_aluno,status,etapa,parte_atual,tentativas,processando_desde,erro,custo_ubt,estornado_em,duracao_estimada_s,created_at,pronta_em,voz_id,secao_id,audio_pronto:roteiro->audio->>pronto,partes:plano->partes';
   var ICO = {
     x: '<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
     play: '<svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg>',
@@ -63,6 +65,8 @@
     sol: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="4.9" y1="4.9" x2="7" y2="7"/><line x1="17" y1="17" x2="19.1" y2="19.1"/><line x1="2" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="22" y2="12"/><line x1="4.9" y1="19.1" x2="7" y2="17"/><line x1="17" y1="7" x2="19.1" y2="4.9"/></svg>',
     lua: '<svg viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>',
     lapis: '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+    parar: '<svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>',
+    lixo: '<svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>',
     mais: '<svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
     menos: '<svg viewBox="0 0 24 24"><line x1="5" y1="12" x2="19" y2="12"/></svg>',
     zero: '<svg viewBox="0 0 24 24"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>'
@@ -135,19 +139,25 @@
         .map(function (s) { return { id: s.id, titulo: s.title || 'Seção' }; });
     } catch (_) { return []; }
   }
-  function carregarAulas(dbId, sel) {
+  // Lista do aluno: sem as paradas (canceladas) e sem as que ele excluiu (oculta_em).
+  function carregarAulas(dbId, sel, semFiltroOculta) {
     if (!sb()) return Promise.resolve([]);
     sel = sel || SEL_LISTA;
-    return sb().schema('aluno').from('aulas').select(sel).eq('unit_id', dbId).neq('status', 'cancelada').order('created_at', { ascending: false })
+    var q = sb().schema('aluno').from('aulas').select(sel).eq('unit_id', dbId).neq('status', 'cancelada');
+    if (!semFiltroOculta) q = q.is('oculta_em', null);
+    return q.order('created_at', { ascending: false })
       .then(function (r) {
         if (r.error) {
-          // banco ainda sem a coluna do nome dado pelo aluno (SQL nº 5 não rodou): lista sem ela
-          if (/titulo_aluno/.test(String(r.error.message || '')) && /titulo_aluno,/.test(sel)) return carregarAulas(dbId, sel.replace('titulo_aluno,', ''));
+          var msg = String(r.error.message || '');
+          // banco ainda sem as colunas novas (SQL nº 5 ou nº 6 não rodou): lista sem elas
+          if (/oculta_em/.test(msg) && !semFiltroOculta) return carregarAulas(dbId, sel, true);
+          if (/titulo_aluno/.test(msg) && /titulo_aluno,/.test(sel)) return carregarAulas(dbId, sel.replace('titulo_aluno,', ''), semFiltroOculta);
           console.warn('[aulas]', r.error); return null;
         }
         return r.data || [];
       }).catch(function () { return null; });
   }
+  function demorando(a) { return a.status === 'processando' && a.processando_desde && (Date.now() - Date.parse(a.processando_desde)) > 10 * 60000; }
 
   // ─── vigia: avisa quando uma aula em andamento fica pronta (mesmo com o painel fechado) ──
   var Vigia = (function () {
@@ -164,6 +174,8 @@
             if (a.status === 'pronta') { delete v.ids[a.id]; toast('A aula "' + (nomeDaAula(a) || presetNome(a.preset)) + '" ficou pronta. Abra "Aula em slides" na unidade para assistir.', 'success'); }
             else if (a.status === 'erro') { delete v.ids[a.id]; toast('A aula "' + (nomeDaAula(a) || presetNome(a.preset)) + '" não deu certo' + (a.estornado_em ? ' e o valor foi devolvido.' : '.'), 'error'); }
           });
+          // aula parada ou excluída sai da lista: o vigia para de acompanhá-la
+          Object.keys(v.ids).forEach(function (id) { if (!rows.some(function (a) { return a.id === id; })) delete v.ids[id]; });
           if (v.cb) v.cb(rows);
           if (!Object.keys(v.ids).length) delete alvo[dbId];
         });
@@ -269,8 +281,11 @@
           + (a.comando ? '<div class="au-card-c">"' + esc(a.comando) + '"</div>' : '')
           + '<div class="au-pill is-' + e.cls + '">' + (e.cls === 'andamento' ? '<span class="au-dot"></span>' : '') + esc(e.txt) + '</div>'
           + (a.status === 'erro' && a.erro ? '<div class="au-card-e">' + esc(String(a.erro).slice(0, 160)) + '</div>' : '')
+          + (demorando(a) ? '<div class="au-card-d">Esta etapa está demorando mais que o normal. Se preferir, pare a aula e peça de novo.</div>' : '')
           + '</div>'
           + '<div class="au-card-r">' + (pronta ? '<button type="button" class="btn-primary au-assistir" data-au="assistir" data-id="' + esc(a.id) + '">' + ICO.play + ' Assistir</button>' : '')
+          + (pendente(a) ? '<button type="button" class="icon-btn au-parar" data-au="parar" data-id="' + esc(a.id) + '">' + ICO.parar + '<span>Parar</span></button>' : '')
+          + (a.status === 'erro' ? '<button type="button" class="icon-btn au-excluir" data-au="excluir" data-id="' + esc(a.id) + '">' + ICO.lixo + '<span>Excluir</span></button>' : '')
           + (a.status !== 'erro' && a.status !== 'cancelada' ? '<button type="button" class="icon-btn au-ren-btn" data-au="renomear" data-id="' + esc(a.id) + '" data-tip="Renomear" aria-label="Renomear a aula">' + ICO.lapis + '</button>' : '') + '</div>'
           + '</div>';
       }).join('');
@@ -342,9 +357,35 @@
       else if (a === 'lista') vista('lista');
       else if (a === 'renomear') { renomeando = b.getAttribute('data-id'); pintarLista(); var inp = el.querySelector('.au-ren input'); if (inp) { inp.focus(); inp.select(); } }
       else if (a === 'ren-cancelar') { renomeando = null; pintarLista(); }
+      else if (a === 'parar') parar(b.getAttribute('data-id'), b);
+      else if (a === 'excluir') excluir(b.getAttribute('data-id'), b);
       else if (a === 'assistir') { var id = b.getAttribute('data-id'); var row = null; aulas.some(function (x) { if (x.id === id) { row = x; return true; } return false; }); if (row) { fechar(); Player.abrir(row, unit); } }
     }
     function aoTeclar(ev) { if (ev.key === 'Escape' && el) { if (renomeando) { renomeando = null; pintarLista(); } else fechar(); } }
+    // parar: a aula sai da fila na hora (a etapa em curso perde a trava) e o valor volta
+    function parar(id, btn) {
+      if (!root.confirm('Parar esta aula? O que já foi feito se perde e o valor volta para a sua carteira.')) return;
+      if (btn) btn.disabled = true;
+      sb().schema('aluno').rpc('aula_cancelar', { p_aula: id }).then(function (r) {
+        var d = r && r.data;
+        if ((r && r.error) || !d || d.ok === false) { if (btn) btn.disabled = false; toast(r && r.error ? ERROS.rede : msgErro(d && d.error, d), 'error'); return; }
+        var est = Number(d.estornado) || 0;
+        if (conta && est) conta.saldo = Number(conta.saldo || 0) + est;
+        aulas = aulas.filter(function (x) { return x.id !== id; }); pintarLista();
+        toast('Aula parada.' + (est ? ' ' + fmtUbt(est) + ' ⓤ voltaram para a sua carteira.' : ''), 'success');
+      }).catch(function () { if (btn) btn.disabled = false; toast(ERROS.rede, 'error'); });
+    }
+    // excluir: some da lista do aluno (o registro fica no banco para diagnóstico)
+    function excluir(id, btn) {
+      if (!root.confirm('Excluir esta aula da sua lista?')) return;
+      if (btn) btn.disabled = true;
+      sb().schema('aluno').rpc('aula_ocultar', { p_aula: id }).then(function (r) {
+        var d = r && r.data;
+        if ((r && r.error) || !d || d.ok === false) { if (btn) btn.disabled = false; toast(r && r.error ? ERROS.rede : msgErro(d && d.error, d), 'error'); return; }
+        aulas = aulas.filter(function (x) { return x.id !== id; }); pintarLista();
+        toast('Aula excluída da lista.', 'success');
+      }).catch(function () { if (btn) btn.disabled = false; toast(ERROS.rede, 'error'); });
+    }
     // renomear: o aluno dá o nome que quiser (vazio volta ao título gerado)
     function renomear(form) {
       var id = form.getAttribute('data-id'), v = String((form.querySelector('[name=titulo]') || {}).value || '').trim();
