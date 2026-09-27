@@ -99,6 +99,201 @@
     return Array.isArray(c.elementos) ? c.elementos : [];
   }
 
+
+  /* ── ESQUEMAS (Fase 7A): árvore, mapa mental, mnemônico, comparativo, quadros, pirâmide, quadro-resumo ──
+     O roteiro gravado traz cena.esquema {forma, raiz, nos[], letras[], lados[], quadros[], niveis[], rodape}.
+     O formato enxuto do modelo (rotulo = forma; elementos {rotulo,titulo,texto,nota}) também é aceito:
+     texto = itens separados por " | "; rotulo do elemento = pai (árvore/mapa) ou letra (mnemônico). */
+  var FORMAS_ESQ = ['arvore', 'mapa', 'mnemonico', 'comparativo', 'quadros', 'piramide', 'resumo'];
+  function partes(s) { return String(s == null ? '' : s).split(/\s*\|\s*/).map(function (x) { return x.trim(); }).filter(Boolean); }
+  function lerEsquema(c) {
+    var e = (c.esquema && typeof c.esquema === 'object') ? c.esquema : null;
+    var forma = String((e && e.forma) || c.rotulo || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    if (FORMAS_ESQ.indexOf(forma) < 0) forma = 'arvore';
+    var els = Array.isArray(c.elementos) ? c.elementos : [];
+    var out = { forma: forma, raiz: (e && e.raiz) || c.titulo || '', rodape: (e && e.rodape) || c.subtitulo || '', nos: [], letras: [], lados: [], quadros: [], niveis: [], palavra: (e && e.palavra) || '', estilo: (e && e.estilo) || '' };
+    if (forma === 'arvore' || forma === 'mapa' || forma === 'resumo') {
+      out.nos = (e && Array.isArray(e.nos) && e.nos.length) ? e.nos.map(function (n, i) { return { id: n.id || ('n' + (i + 1)), pai: n.pai || null, titulo: n.titulo || '', itens: Array.isArray(n.itens) ? n.itens : partes(n.texto), exemplo: n.exemplo || '', nota: n.nota || '' }; })
+        : els.map(function (x, i) { return { id: 'n' + (i + 1), pai: x.rotulo || null, titulo: x.titulo || '', itens: partes(x.texto), exemplo: x.nota || '', nota: '' }; });
+      // pai vem como título do nó pai (formato do modelo) ou como id
+      out.nos.forEach(function (n) { if (n.pai) { var p = null; out.nos.forEach(function (m) { if (m !== n && (m.id === n.pai || m.titulo === n.pai)) p = m; }); n.pai = p ? p.id : null; } });
+    } else if (forma === 'mnemonico') {
+      out.letras = (e && Array.isArray(e.letras) && e.letras.length) ? e.letras.map(function (l) { return { letra: String(l.letra || '').slice(0, 2), termo: l.termo || '', texto: l.texto || '' }; })
+        : els.map(function (x) { return { letra: String(x.rotulo || (x.titulo || ' ').charAt(0)).slice(0, 2), termo: x.titulo || '', texto: x.texto || '' }; });
+      if (!out.palavra) out.palavra = out.letras.map(function (l) { return l.letra; }).join('');
+    } else if (forma === 'comparativo') {
+      out.lados = (e && Array.isArray(e.lados) && e.lados.length) ? e.lados.map(function (l) { return { titulo: l.titulo || '', itens: Array.isArray(l.itens) ? l.itens : partes(l.texto), nota: l.nota || '' }; })
+        : els.map(function (x) { return { titulo: x.titulo || '', itens: partes(x.texto), nota: x.nota || '' }; });
+      out.lados = out.lados.slice(0, 2);
+    } else if (forma === 'quadros') {
+      out.quadros = (e && Array.isArray(e.quadros) && e.quadros.length) ? e.quadros : els.map(function (x) { return { titulo: x.titulo || '', texto: x.texto || '' }; });
+      out.quadros = out.quadros.slice(0, 5);
+    } else if (forma === 'piramide') {
+      out.niveis = (e && Array.isArray(e.niveis) && e.niveis.length) ? e.niveis : els.map(function (x) { return { titulo: x.titulo || '', texto: x.texto || '' }; });
+      out.niveis = out.niveis.slice(0, 6);
+    }
+    return out;
+  }
+  function esqRaiz(c, txt, cls) { return '<div class="aula-esq-raiz aula-anim ' + (cls || '') + '" style="--i:1" data-no="raiz">' + marcar(txt, c.destaques, c.id) + '</div>'; }
+  /* item de árvore/comparativo: "a → b → c" vira cadeia de passos com setas; "título: x / y" vira item com subcaixas */
+  function esqItem(c, it, i, cls) {
+    var s = String(it || '');
+    if (/\s→\s/.test(s) || /\s->\s/.test(s)) {
+      var passos = s.split(/\s(?:→|->)\s/);
+      return '<div class="aula-esq-cadeia aula-anim" style="--i:' + (i + 2) + '">' + passos.map(function (p, k) { return (k ? '<span class="aula-esq-seta">→</span>' : '') + '<span class="aula-esq-passo" data-lig="1">' + marcar(p, c.destaques, c.id) + '</span>'; }).join('') + '</div>';
+    }
+    var m = s.match(/^([^:]{2,60}):\s*(.+\s\/\s.+)$/);
+    if (m && m[2].split(' / ').length <= 4) {
+      return '<div class="aula-esq-it has-sub aula-anim ' + (cls || '') + '" style="--i:' + (i + 2) + '" data-lig="1"><span class="aula-esq-it-t">' + marcar(m[1], c.destaques, c.id) + '</span><span class="aula-esq-subs">' + m[2].split(' / ').map(function (x) { return '<span class="aula-esq-sub">' + marcar(x.trim(), c.destaques, c.id) + '</span>'; }).join('') + '</span></div>';
+    }
+    return '<div class="aula-esq-it aula-anim ' + (cls || '') + '" style="--i:' + (i + 2) + '" data-lig="1">' + marcar(s, c.destaques, c.id) + '</div>';
+  }
+  function esqRamo(c, no, filhos, k, nivel) {
+    var tone = (k % 2) ? 'tone-b' : 'tone-a';
+    var html = '<div class="aula-esq-ramo ' + tone + (nivel ? ' is-sub' : '') + ' aula-anim" style="--i:' + (k + 2) + '" data-ativar="' + esc(no.id) + '" data-toggle="1" data-no="' + esc(no.id) + '">'
+      + '<div class="aula-esq-cab">' + marcar(no.titulo, c.destaques, c.id) + '</div>';
+    if (no.itens.length || no.exemplo) {
+      html += '<div class="aula-esq-itens">' + no.itens.map(function (it, i) { return esqItem(c, it, i + k); }).join('')
+        + (no.exemplo ? '<div class="aula-esq-ex aula-anim" style="--i:' + (k + 4) + '">' + marcar(no.exemplo, c.destaques, c.id) + '</div>' : '') + '</div>';
+    }
+    if (filhos.length) html += '<div class="aula-esq-filhos">' + filhos.map(function (f, j) { return esqRamo(c, f.no, f.filhos, k + j + 1, nivel + 1); }).join('') + '</div>';
+    return html + '</div>';
+  }
+  function esqArvoreDe(nos) {
+    var raizes = nos.filter(function (n) { return !n.pai; });
+    function filhos(n) { return nos.filter(function (m) { return m.pai === n.id; }).map(function (m) { return { no: m, filhos: filhos(m) }; }); }
+    return raizes.map(function (n) { return { no: n, filhos: filhos(n) }; });
+  }
+  var ESQUEMAS = {
+    /* Árvore: raiz à esquerda, ramos com cabeçalho colorido, itens em caixas, exemplo e subramos; linhas ligam tudo. */
+    arvore: function (c, ctx, e) {
+      var arv = esqArvoreDe(e.nos);
+      return '<div class="aula-esq aula-esq-arvore" data-lig-modo="arvore">' + esqRaiz(c, e.raiz) + '<div class="aula-esq-ramos">' + arv.map(function (r, k) { return esqRamo(c, r.no, r.filhos, k, 0); }).join('') + '</div>'
+        + (e.rodape ? '<div class="aula-esq-rodape aula-anim" style="--i:8">' + marcar(e.rodape, c.destaques, c.id) + '</div>' : '') + '<svg class="aula-esq-lig" aria-hidden="true"></svg></div>';
+    },
+    /* Mapa mental: centro no meio, ramos para os dois lados, subnós como linhas de texto (digital, sem caixas). */
+    mapa: function (c, ctx, e) {
+      var arv = esqArvoreDe(e.nos), esq = [], dir = [];
+      function peso(nd) { var n = nd.no; return 1 + n.itens.length + (n.exemplo ? 1 : 0) + nd.filhos.reduce(function (s, f) { return s + peso(f); }, 0); }
+      var ords = arv.map(function (r, k) { return { r: r, k: k, p: peso(r) }; }), lado = {}, pd = 0, pe = 0;
+      ords.slice().sort(function (a, b) { return b.p - a.p || a.k - b.k; }).forEach(function (o) { if (pd <= pe) { lado[o.k] = 'd'; pd += o.p + 1; } else { lado[o.k] = 'e'; pe += o.p + 1; } });
+      ords.forEach(function (o) { (lado[o.k] === 'd' ? dir : esq).push([o.r, o.k]); });
+      function no(nd, k, nivel) {
+        var f = nd.filhos, n = nd.no;
+        return '<div class="aula-mm-no aula-mm-n' + nivel + ' aula-anim" style="--i:' + (k + 2) + '"' + (nivel === 1 ? ' data-ativar="' + n.id + '"' : '') + ' data-no="' + esc(n.id) + '">'
+          + '<div class="aula-mm-t"' + (nivel === 1 ? ' data-lig="1"' : '') + '>' + marcar(n.titulo, c.destaques, c.id) + '</div>'
+          + (n.itens.length ? '<div class="aula-mm-itens">' + n.itens.map(function (it) { return '<div class="aula-mm-it">' + marcar(it, c.destaques, c.id) + '</div>'; }).join('') + '</div>' : '')
+          + (n.exemplo ? '<div class="aula-mm-ex">' + marcar(n.exemplo, c.destaques, c.id) + '</div>' : '')
+          + (f.length ? '<div class="aula-mm-filhos">' + f.map(function (x, j) { return no(x, k + j + 1, nivel + 1); }).join('') + '</div>' : '') + '</div>';
+      }
+      return '<div class="aula-esq aula-esq-mapa" data-lig-modo="mapa"><div class="aula-mm-lado aula-mm-esq">' + esq.map(function (p) { return no(p[0], p[1], 1); }).join('') + '</div>'
+        + '<div class="aula-mm-centro aula-anim" style="--i:0" data-no="raiz">' + marcar(e.raiz, c.destaques, c.id) + '</div>'
+        + '<div class="aula-mm-lado aula-mm-dir">' + dir.map(function (p) { return no(p[0], p[1], 1); }).join('') + '</div>'
+        + (e.rodape ? '<div class="aula-esq-rodape aula-mm-nota aula-anim" style="--i:9">' + marcar(e.rodape, c.destaques, c.id) + '</div>' : '') + '<svg class="aula-esq-lig" aria-hidden="true"></svg></div>';
+    },
+    /* Mnemônico: fio de letras, cartas grandes com colunas ou setas com significado (varia com a posição na aula). */
+    mnemonico: function (c, ctx, e, idx) {
+      var ls = e.letras, n = ls.length, temTexto = ls.every(function (l) { return l.texto; });
+      var ordem = [['cartas', 'setas', 'fio'], ['fio', 'cartas', 'setas'], ['setas', 'fio', 'cartas']][(idx || 0) % 3];
+      var estilo = e.estilo && ordem.indexOf(e.estilo) >= 0 ? e.estilo : ordem.filter(function (s) { return s === 'fio' || (s === 'cartas' && n <= 5 && temTexto) || (s === 'setas' && n <= 7); })[0];
+      var html;
+      if (estilo === 'cartas') {
+        html = '<div class="aula-mn aula-mn-cartas aula-mn-' + n + '">' + ls.map(function (l, i) {
+          return '<div class="aula-mn-carta aula-anim" style="--i:' + (i + 2) + '" data-ativar="' + i + '"><div class="aula-mn-letra">' + esc(l.letra) + '</div><div class="aula-mn-termo">' + marcar(l.termo, c.destaques, c.id) + '</div>'
+            + (l.texto ? '<div class="aula-mn-det">' + partes(l.texto).map(function (x) { return '<div class="aula-mn-det-it">' + marcar(x, c.destaques, c.id) + '</div>'; }).join('') + '</div>' : '') + '</div>';
+        }).join('') + '</div>';
+      } else if (estilo === 'setas') {
+        html = '<div class="aula-mn aula-mn-setas">' + ls.map(function (l, i) {
+          var termo = String(l.termo || ''), ini = termo.charAt(0), resto = termo.slice(1);
+          return '<div class="aula-mn-linha aula-anim" style="--i:' + (i + 2) + '" data-ativar="' + i + '"><div class="aula-mn-chev"><span class="aula-mn-ini">' + esc(ini) + '</span>' + marcar(resto, c.destaques, c.id) + '</div><div class="aula-mn-sig">' + marcar(l.texto || '', c.destaques, c.id) + '</div></div>';
+        }).join('') + '</div>';
+      } else {
+        html = '<div class="aula-mn aula-mn-fio">' + ls.map(function (l, i) {
+          return '<div class="aula-mn-elo aula-anim" style="--i:' + (i + 2) + '" data-ativar="' + i + '"><div class="aula-mn-circ">' + esc(l.letra) + '</div><div class="aula-mn-cx"><span class="aula-mn-cx-t">' + marcar(l.termo, c.destaques, c.id) + '</span>' + (l.texto ? '<span class="aula-mn-cx-x">' + marcar(l.texto, c.destaques, c.id) + '</span>' : '') + '</div></div>';
+        }).join('') + '</div>';
+      }
+      var palavra = (e.palavra && estilo === 'setas') ? '<div class="aula-mn-palavra aula-anim" style="--i:1">' + e.palavra.split('').map(function (ch) { return '<span>' + esc(ch) + '</span>'; }).join('') + '</div>' : '';
+      return '<div class="aula-esq aula-esq-mnemonico is-' + estilo + '">' + palavra + html + (e.rodape ? '<div class="aula-esq-rodape aula-anim" style="--i:' + (n + 2) + '">' + marcar(e.rodape, c.destaques, c.id) + '</div>' : '') + '</div>';
+    },
+    /* Comparativo: duas colunas com cabeçalho colorido e uma espinha de caixas em cada lado. */
+    comparativo: function (c, ctx, e) {
+      return '<div class="aula-esq aula-esq-comparativo">' + e.lados.map(function (l, k) {
+        return '<div class="aula-cmp-col ' + (k ? 'tone-b' : 'tone-a') + ' aula-anim" style="--i:' + (k + 1) + '" data-ativar="' + k + '"><div class="aula-cmp-cab">' + marcar(l.titulo, c.destaques, c.id) + '</div><div class="aula-cmp-esp">'
+          + l.itens.map(function (it, i) { return esqItem(c, it, i + k, 'aula-cmp-it'); }).join('') + (l.nota ? '<div class="aula-esq-ex aula-anim" style="--i:' + (l.itens.length + 2) + '">' + marcar(l.nota, c.destaques, c.id) + '</div>' : '') + '</div></div>';
+      }).join('') + (e.rodape ? '<div class="aula-esq-rodape aula-anim" style="--i:8">' + marcar(e.rodape, c.destaques, c.id) + '</div>' : '') + '</div>';
+    },
+    /* Quadros: 3 a 5 estados lado a lado, cada um com a sua nota. */
+    quadros: function (c, ctx, e) {
+      var tons = ['tone-a', 'tone-r', 'tone-b', 'tone-g', 'tone-a'];
+      return '<div class="aula-esq aula-esq-quadros aula-esq-q' + e.quadros.length + '">' + e.quadros.map(function (q, i) {
+        return '<div class="aula-qd ' + tons[i % tons.length] + ' aula-anim" style="--i:' + (i + 1) + '" data-ativar="' + i + '"><div class="aula-qd-cab">' + marcar(q.titulo, c.destaques, c.id) + '</div><div class="aula-qd-x">' + marcar(q.texto, c.destaques, c.id) + '</div></div>';
+      }).join('') + (e.rodape ? '<div class="aula-esq-rodape aula-anim" style="--i:7">' + marcar(e.rodape, c.destaques, c.id) + '</div>' : '') + '</div>';
+    },
+    /* Pirâmide: níveis do topo à base, cada um com a nota ao lado. */
+    piramide: function (c, ctx, e) {
+      var n = e.niveis.length;
+      return '<div class="aula-esq aula-esq-piramide">' + e.niveis.map(function (nv, i) {
+        var w = Math.round(34 + (66 * i) / Math.max(1, n - 1));
+        return '<div class="aula-pr-nivel aula-anim" style="--i:' + (i + 1) + ';--w:' + w + '%;--k:' + i + ';--n:' + n + '" data-ativar="' + i + '"><div class="aula-pr-bloco"><span>' + marcar(nv.titulo, c.destaques, c.id) + '</span></div>' + (nv.texto ? '<div class="aula-pr-nota">' + marcar(nv.texto, c.destaques, c.id) + '</div>' : '') + '</div>';
+      }).join('') + (e.rodape ? '<div class="aula-esq-rodape aula-anim" style="--i:' + (n + 1) + '">' + marcar(e.rodape, c.destaques, c.id) + '</div>' : '') + '</div>';
+    },
+    /* Quadro-resumo: rótulo à esquerda, lista com subitens à direita (itens que começam com "· " são subitens). */
+    resumo: function (c, ctx, e) {
+      var linhas = e.nos.filter(function (n) { return !n.pai; });
+      return '<div class="aula-esq aula-esq-resumo">' + linhas.map(function (n, k) {
+        var lis = '', aberto = false;
+        n.itens.forEach(function (it) {
+          var m = String(it).match(/^[·•-]\s+(.+)$/);
+          if (m) { if (!aberto) { lis += '<ul class="aula-rs-sub">'; aberto = true; } lis += '<li>' + marcar(m[1], c.destaques, c.id) + '</li>'; }
+          else { if (aberto) { lis += '</ul>'; aberto = false; } lis += '<li class="aula-rs-it"><span class="aula-ck">' + ICON_CHECK + '</span><span>' + marcar(it, c.destaques, c.id) + '</span></li>'; }
+        });
+        if (aberto) lis += '</ul>';
+        return '<div class="aula-rs-linha aula-anim" style="--i:' + (k + 1) + '" data-ativar="' + n.id + '"><div class="aula-rs-k">' + marcar(n.titulo, c.destaques, c.id) + '</div><ul class="aula-rs-lista">' + lis + '</ul></div>';
+      }).join('') + (e.rodape ? '<div class="aula-esq-rodape aula-anim" style="--i:8">' + marcar(e.rodape, c.destaques, c.id) + '</div>' : '') + '</div>';
+    }
+  };
+  function renderEsquema(c, ctx, idx, total) {
+    var e = lerEsquema(c);
+    var corpo = (ESQUEMAS[e.forma] || ESQUEMAS.arvore)(c, ctx, e, idx);
+    var semTitulo = (e.forma === 'arvore' || e.forma === 'mapa') && e.raiz === c.titulo;   // a raiz já é o título
+    return label(rotuloUnidade(ctx) || 'Esquema', 0) + (semTitulo ? '' : titulo(c)) + corpo + rodape(c, ctx, idx, total);
+  }
+  /* Linhas de ligação dos esquemas (árvore e mapa): desenhadas depois do layout, nas medidas do palco. */
+  function desenharLigacoes(slide) {
+    var esq = slide && slide.querySelector('.aula-esq[data-lig-modo]'); if (!esq) return;
+    var svg = esq.querySelector('svg.aula-esq-lig'); if (!svg) return;
+    // posição pela cadeia de offsetParent até o próprio esquema: em pixels do palco, sem o
+    // deslocamento da animação de entrada (transform) nem a escala do player
+    function caixa(el) {
+      var l = 0, tp = 0, n = el;
+      while (n && n !== esq) { l += n.offsetLeft; tp += n.offsetTop; n = n.offsetParent; }
+      var w = el.offsetWidth, h = el.offsetHeight;
+      return { l: l, t: tp, r: l + w, b: tp + h, cx: l + w / 2, cy: tp + h / 2 };
+    }
+    var W = esq.offsetWidth, H = esq.offsetHeight, d = [];
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    function elo(a, b) { var mx = a.r + (b.l - a.r) / 2; d.push('M' + a.r.toFixed(1) + ' ' + a.cy.toFixed(1) + ' C' + mx.toFixed(1) + ' ' + a.cy.toFixed(1) + ' ' + mx.toFixed(1) + ' ' + b.cy.toFixed(1) + ' ' + b.l.toFixed(1) + ' ' + b.cy.toFixed(1)); }
+    function eloEsq(a, b) { var mx = a.l - (a.l - b.r) / 2; d.push('M' + a.l.toFixed(1) + ' ' + a.cy.toFixed(1) + ' C' + mx.toFixed(1) + ' ' + a.cy.toFixed(1) + ' ' + mx.toFixed(1) + ' ' + b.cy.toFixed(1) + ' ' + b.r.toFixed(1) + ' ' + b.cy.toFixed(1)); }
+    var modo = esq.getAttribute('data-lig-modo');
+    if (modo === 'arvore') {
+      var raiz = esq.querySelector('.aula-esq-raiz'); if (!raiz) return; var R = caixa(raiz);
+      Array.prototype.forEach.call(esq.querySelectorAll('.aula-esq-ramo'), function (ramo) {
+        var cab = ramo.querySelector(':scope > .aula-esq-cab'); if (!cab) return; var C = caixa(cab);
+        var paiRamo = ramo.parentElement.closest('.aula-esq-ramo');
+        var origem = paiRamo ? caixa(paiRamo.querySelector(':scope > .aula-esq-cab')) : R;
+        elo(origem, C);
+        var itens = ramo.querySelector(':scope > .aula-esq-itens');
+        if (itens) Array.prototype.forEach.call(itens.querySelectorAll(':scope > .aula-esq-it, :scope > .aula-esq-cadeia > .aula-esq-passo:first-child'), function (it) { elo(C, caixa(it)); });
+      });
+    } else if (modo === 'mapa') {
+      var centro = esq.querySelector('.aula-mm-centro'); if (!centro) return; var Cc = caixa(centro);
+      Array.prototype.forEach.call(esq.querySelectorAll('.aula-mm-n1 > .aula-mm-t'), function (tt) {
+        var T = caixa(tt); if (T.cx < Cc.cx) eloEsq(Cc, T); else elo(Cc, T);
+      });
+    }
+    svg.innerHTML = '<path d="' + d.join(' ') + '"/>';
+  }
+
   var LAYOUTS = {
     capa: function (c, ctx, idx, total) {
       var bg = (ctx && ctx.capaUrl) ? '<div class="aula-bgimg" style="background-image:url(\'' + esc(ctx.capaUrl) + '\')"></div>' : '';
@@ -226,6 +421,8 @@
       }).join('');
       return label(rotuloUnidade(ctx), 0) + titulo(c) + subtitulo(c) + '<div class="aula-ct aula-ct-' + n + '">' + cards + '</div>' + rodape(c, ctx, idx, total);
     },
+    /* Esquema: diagrama de caixas e linhas em sete formas (árvore, mapa mental, mnemônico, comparativo, quadros, pirâmide, quadro-resumo). */
+    esquema: function (c, ctx, idx, total) { return renderEsquema(c, ctx, idx, total); },
     /* Pergunta do professor: a resposta fica escondida até o clique (ou até a narração chegar nela). */
     pergunta: function (c, ctx, idx, total) {
       return label('Pergunta', 0) + '<div class="aula-pg-q"><div class="aula-pg-mark aula-anim" style="--i:0">?</div><div>' + titulo(c) +
@@ -281,6 +478,7 @@
   function render(cena, ctx, idx, total) {
     var layout = LAYOUTS[cena.layout] ? cena.layout : 'padrao';
     var extra = (layout === 'padrao' && midiaDe(ctx, cena.imagem_id)) ? ' has-img' : '';
+    if (layout === 'esquema') extra += ' aula-esquema-' + lerEsquema(cena).forma;
     if ((layout === 'padrao' || layout === 'imagem') && imagensDe(ctx, cena).length) extra += ' has-visual';
     if (layout === 'imagem' && imagemImersiva(cena)) extra += ' is-imersiva';
     if (layout === 'cronologia' && cronologiaVertical(cena, ctx)) extra += ' is-vertical';
@@ -320,6 +518,7 @@
       slide.style.setProperty('--aula-fz', String(fz));
       passos++;
     }
+    try { desenharLigacoes(slide); } catch (_) { }
     return fz;
   }
 
@@ -343,7 +542,7 @@
     var ligar = !(toggle && alvo.classList.contains('is-ativo'));
     Array.prototype.forEach.call(itens, function (el) { el.classList.toggle('is-ativo', ligar && el === alvo); });
     Array.prototype.forEach.call(slide.querySelectorAll('[data-panel]'), function (p) { p.classList.toggle('is-ativo', ligar && p.getAttribute('data-panel') === String(k)); });
-    var grupo = slide.querySelector('.aula-ct'); if (grupo) grupo.classList.toggle('has-ativo', ligar);
+    var grupo = slide.querySelector('.aula-ct, .aula-esq'); if (grupo) grupo.classList.toggle('has-ativo', ligar);
     var side = slide.querySelector('.aula-tlv-img');
     if (side) {
       var cap = slide.querySelector('.aula-tlv-cap');
@@ -445,5 +644,5 @@
     return function () { window.removeEventListener('resize', aplicar); };
   }
 
-  root.AulaSlides = { render: render, mount: mount, fit: fit, ajustar: ajustar, classificarImagem: classificarImagem, esc: esc, layouts: Object.keys(LAYOUTS) };
+  root.AulaSlides = { render: render, mount: mount, fit: fit, ajustar: ajustar, classificarImagem: classificarImagem, esc: esc, layouts: Object.keys(LAYOUTS), formasEsquema: FORMAS_ESQ.slice(), lerEsquema: lerEsquema };
 })(typeof window !== 'undefined' ? window : this);
