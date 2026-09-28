@@ -47,7 +47,7 @@
     rede: 'Sem conexão com o servidor. Tente de novo.',
     login: 'Sua sessão expirou. Entre de novo e tente outra vez.'
   };
-  var SEL_LISTA = 'id,preset,comando,titulo,titulo_aluno,status,etapa,parte_atual,tentativas,processando_desde,erro,custo_ubt,estornado_em,duracao_estimada_s,created_at,pronta_em,voz_id,secao_id,audio_pronto:roteiro->audio->>pronto,partes:plano->partes';
+  var SEL_LISTA = 'id,preset,comando,titulo,titulo_aluno,status,etapa,parte_atual,tentativas,processando_desde,mat_palavras:material->palavras,audio_prog:roteiro->audio_progresso,erro,custo_ubt,estornado_em,duracao_estimada_s,created_at,pronta_em,voz_id,secao_id,audio_pronto:roteiro->audio->>pronto,partes:plano->partes';
   var ICO = {
     x: '<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
     play: '<svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg>',
@@ -121,12 +121,54 @@
     if (a.status === 'na_fila' && a.etapa === 'plano') txt = 'Na fila';
     else if (a.etapa === 'plano') txt = 'Planejando a aula';
     else if (a.etapa === 'cenas') txt = 'Montando os slides' + (n > 1 ? ' · parte ' + k + ' de ' + n : '');
-    else if (a.etapa === 'revisao') txt = 'Conferindo a fidelidade ao material';
-    else if (a.etapa === 'audio') txt = 'Gravando a narração';
+    else if (a.etapa === 'revisao') txt = 'Conferindo a fidelidade' + (n > 1 ? ' · parte ' + k + ' de ' + n : ' ao material');
+    else if (a.etapa === 'audio') { var ap = a.audio_prog; txt = 'Gravando a narração' + (ap && ap.total ? ' · ' + ap.feitas + ' de ' + ap.total + ' slides' : ''); }
     else txt = 'Em andamento';
     return { cls: 'andamento', txt: txt };
   }
   function pendente(a) { return a.status === 'na_fila' || a.status === 'processando'; }
+  // ─── progresso estimado de uma aula em montagem ─────────────────────────
+  // Etapas conhecidas: plano, slides e revisão de cada parte, narração. Cada uma tem uma duração
+  // típica (pelo tamanho do material e dos slides previstos, medida nas aulas reais) e a
+  // estimativa se corrige pelo ritmo da própria aula: se as etapas feitas demoraram o dobro,
+  // as restantes também contam o dobro. A narração tem progresso exato (slides narrados).
+  var ESPERA_ROBO_S = 15;
+  function etapasDaAula(a) {
+    var partes = Array.isArray(a.partes) && a.partes.length ? a.partes : null;
+    var mil = (Number(a.mat_palavras) || 20000) / 1000;
+    var n = partes ? partes.length : (a.preset === 'resumo_curto' ? 2 : (a.preset === 'secao' ? 1 : 3));
+    var totBlocos = partes ? partes.reduce(function (s, p) { return s + (((p.blocos || []).length) || 1); }, 0) : n;
+    var lista = [{ e: 'plano', k: 0, s: 30 + 0.5 * mil }], slidesTotal = 0;
+    for (var k = 0; k < n; k++) {
+      var p = partes ? partes[k] : null, slides = p ? (Number(p.cenas_previstas) || 6) : 7;
+      var milParte = (p && p.todo_material) ? mil : mil * ((((p && (p.blocos || []).length) || 1)) / totBlocos);
+      slidesTotal += slides + 1;
+      lista.push({ e: 'cenas', k: k, s: 30 + 11 * slides + 4 * milParte });
+      lista.push({ e: 'revisao', k: k, s: 20 + 8 * slides + 3 * milParte });
+    }
+    lista.push({ e: 'audio', k: 0, s: 20 + 6 * slidesTotal });
+    return lista;
+  }
+  function progressoDaAula(a, agora) {
+    var lista = etapasDaAula(a), k = Number(a.parte_atual) || 0, idx;
+    if (a.etapa === 'plano') idx = 0;
+    else if (a.etapa === 'cenas') idx = Math.min(1 + 2 * k, lista.length - 2);
+    else if (a.etapa === 'revisao') idx = Math.min(2 + 2 * k, lista.length - 2);
+    else idx = lista.length - 1;
+    var feitoPrevisto = 0, total = 0;
+    lista.forEach(function (x, i) { total += x.s; if (i < idx) feitoPrevisto += x.s; });
+    var inicio = Date.parse(a.created_at) || agora, rodando = a.status === 'processando' && a.processando_desde;
+    var desdeEtapa = rodando ? Date.parse(a.processando_desde) : agora;
+    var feitoReal = Math.max(0, (desdeEtapa - inicio) / 1000);
+    var ritmo = feitoPrevisto >= 60 ? Math.min(3, Math.max(0.6, feitoReal / feitoPrevisto)) : 1;
+    var atual = lista[idx], esperado = atual.s * ritmo, fr;
+    if (atual.e === 'audio' && a.audio_prog && a.audio_prog.total) fr = Math.min(0.98, (Number(a.audio_prog.feitas) || 0) / a.audio_prog.total);
+    else fr = rodando ? Math.min(0.95, ((agora - desdeEtapa) / 1000) / esperado) : 0;
+    var restante = (1 - fr) * esperado + (rodando ? 0 : ESPERA_ROBO_S);
+    for (var j = idx + 1; j < lista.length; j++) restante += lista[j].s * ritmo + ESPERA_ROBO_S;
+    return { pct: Math.min(0.99, (feitoPrevisto + fr * atual.s) / total), restante_s: Math.max(0, restante) };
+  }
+  function textoRestante(s) { return s < 60 ? 'falta menos de 1 min' : 'faltam cerca de ' + Math.ceil(s / 60) + ' min'; }
   function blocosDaUnidade(dbId) {
     var mapa = {};
     try { (UbiqueStore.unit_blocks.list() || []).forEach(function (b) { if (String(b.unit_id) === String(dbId)) mapa[String(b.id)] = b.title || ''; }); } catch (_) { }
@@ -196,6 +238,7 @@
   // ─── painel "Aulas desta unidade" ────────────────────────────────────────
   var Painel = (function () {
     var el = null, unit = null, dbId = null, aulas = [], precos = {}, orc = null, vozes = [], vozPadrao = '', conta = null, secoes = [], pedindo = false, renomeando = null;
+    var relogio = null, maxPct = {};   // barra de progresso: relógio de 1 s e o maior valor já mostrado (nunca volta)
     var variante = FAMILIA ? FAMILIA.variantes[0].id : '';   // pílula escolhida no cartão do resumo
     function abrir(u) {
       if (el) fechar();
@@ -225,9 +268,26 @@
     function fechar() {
       if (!el) return;
       document.removeEventListener('keydown', aoTeclar);
+      if (relogio) { clearInterval(relogio); relogio = null; }
       el.remove(); el = null;
       document.body.style.overflow = '';
       Vigia.calar(dbId);
+    }
+    // Atualiza as barras das aulas em montagem sem redesenhar a lista (roda a cada segundo).
+    function atualizarProgresso() {
+      if (!el) return;
+      var agora = Date.now(), algum = false;
+      aulas.forEach(function (a) {
+        if (!pendente(a)) return;
+        var box = el.querySelector('.au-prog[data-prog="' + a.id + '"]'); if (!box) return;
+        algum = true;
+        var p = progressoDaAula(a, agora);
+        var pct = Math.max(maxPct[a.id] || 0, p.pct); maxPct[a.id] = pct;
+        var fill = box.querySelector('.au-prog-fill'); if (fill) fill.style.width = (pct * 100).toFixed(1) + '%';
+        var tx = box.querySelector('.au-prog-t'); if (tx) tx.textContent = textoRestante(p.restante_s);
+      });
+      if (!algum && relogio) { clearInterval(relogio); relogio = null; }
+      if (algum && !relogio) relogio = setInterval(atualizarProgresso, 1000);
     }
     // Orçamento da unidade: palavras do material, preço de cada tipo (a completa já com o
     // excedente por tamanho) e minutos estimados. Sem a função no banco, cai na tabela de preços.
@@ -281,6 +341,7 @@
           + (a.comando ? '<div class="au-card-c">"' + esc(a.comando) + '"</div>' : '')
           + '<div class="au-pill is-' + e.cls + '">' + (e.cls === 'andamento' ? '<span class="au-dot"></span>' : '') + esc(e.txt) + '</div>'
           + (a.status === 'erro' && a.erro ? '<div class="au-card-e">' + esc(String(a.erro).slice(0, 160)) + '</div>' : '')
+          + (pendente(a) ? '<div class="au-prog" data-prog="' + esc(a.id) + '"><div class="au-prog-bar"><div class="au-prog-fill" style="width:' + ((maxPct[a.id] || 0) * 100).toFixed(1) + '%"></div></div><span class="au-prog-t"></span></div>' : '')
           + (demorando(a) ? '<div class="au-card-d">Esta etapa está demorando mais que o normal. Se preferir, pare a aula e peça de novo.</div>' : '')
           + '</div>'
           + '<div class="au-card-r">' + (pronta ? '<button type="button" class="btn-primary au-assistir" data-au="assistir" data-id="' + esc(a.id) + '">' + ICO.play + ' Assistir</button>' : '')
@@ -292,6 +353,7 @@
       box.innerHTML = '<div class="au-topo"><button type="button" class="btn-primary" data-au="nova">' + ICO.slides + ' Gerar aula</button>'
         + '<span class="au-topo-s">Cada aula é sua: gerada sob medida, narrada pelo professor, a partir de ' + fmtUbt(menorPreco()) + ' ⓤ.</span></div>'
         + (cards ? '<div class="au-cards">' + cards + '</div>' : '<div class="au-vazio">Você ainda não gerou nenhuma aula desta unidade.</div>');
+      atualizarProgresso();
     }
     function nomeSecao(id) { for (var i = 0; i < secoes.length; i++) if (String(secoes[i].id) === String(id)) return secoes[i].titulo; return 'seção'; }
     function menorPreco() { var m = null; Object.keys(precos).forEach(function (k) { if (m == null || precos[k] < m) m = precos[k]; }); return m == null ? 1 : m; }
