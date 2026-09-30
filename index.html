@@ -42381,6 +42381,18 @@ window.TutorIA = (function(){
   }
   // Seletor que abre ao digitar [[
   let _refPickerEl = null, _refPickerCI = null;
+  // Últimos links usados no [[ (o mais recente primeiro), nas preferências do aluno.
+  function _refRecentes(){
+    try{ const v = (window.Store && Store.prefsGet) ? Store.prefsGet('cad_links_recentes') : null; return Array.isArray(v) ? v : []; }catch(_){ return []; }
+  }
+  function _refRecenteAdd(it){
+    try{
+      if(!it || !it.id || !it.label) return;
+      const lista = _refRecentes().filter(function(x){ return !(x && x.t === it.t && String(x.id) === String(it.id)); });
+      lista.unshift({ t: it.t, id: String(it.id), label: String(it.label) });
+      if(window.Store && Store.prefsSet) Store.prefsSet('cad_links_recentes', lista.slice(0, 12));
+    }catch(_){ }
+  }
   function _caretInfo(){
     const sel = window.getSelection(); if(!sel || !sel.rangeCount) return null;
     const r = sel.getRangeAt(0); const node = r.startContainer;
@@ -42397,8 +42409,31 @@ window.TutorIA = (function(){
     const p = _refPickerEl;
     const idx = _buildUnitIndex();
     const q = (ci.query || '').trim().toLowerCase();
-    let units;
+    // Sem busca: os últimos links usados (decisão do dono, 2026-09-30). A lista de
+    // unidades próximas só entra enquanto não houver link nenhum na memória.
+    let recHtml = '';
     if(!q){
+      try{
+        const docsRec = (window.Store && Store.cadAvulsosLista) ? (Store.cadAvulsosLista() || []) : [];
+        const rec = _refRecentes().filter(function(it){
+          if(!it) return false;
+          if(it.t === 'u') return idx.flat.some(function(u){ return String(u.id) === String(it.id); });
+          if(it.t === 'd') return String(it.id) !== String(_cadDocId || '') && docsRec.some(function(d2){ return String(d2.id) === String(it.id); });
+          return false;
+        }).slice(0, 8);
+        if(rec.length){
+          recHtml = '<div class="tutor-refsec">Recentes</div>' + rec.map(function(it){
+            return it.t === 'u'
+              ? '<button type="button" class="tutor-refopt" data-uid="' + Util.attr(it.id) + '" data-ut="' + Util.attr(it.label) + '">' + _esc(it.label) + '</button>'
+              : '<button type="button" class="tutor-refopt doc-refopt" data-did="' + Util.attr(it.id) + '" data-dt="' + Util.attr(it.label) + '">&#9998; ' + _esc(it.label) + '</button>';
+          }).join('');
+        }
+      }catch(e){ console.warn('[refpick recentes]', e); }
+    }
+    let units;
+    if(recHtml){
+      units = [];
+    } else if(!q){
       // sem busca → unidades mais próximas da atual primeiro
       units = _nearbyUnits(idx);
     } else {
@@ -42456,10 +42491,18 @@ window.TutorIA = (function(){
       const dtodos = (window.Store && Store.cadAvulsosLista) ? (Store.cadAvulsosLista() || []) : [];
       const dcands = dtodos.filter(function(d2){
         if(String(d2.id) === String(_cadDocId || '')) return false;
-        if(!q) return true;
+        if(!q) return !recHtml;   // com recentes na tela, a busca vazia não lista cadernos
         const alvo2 = ((d2.titulo || '') + ' ' + ((((d2.meta || {}).aliases) || []).join(' '))).toLowerCase();
         return alvo2.indexOf(q) >= 0;
       }).slice(0, 5);
+      // Rótulo do que vai virar chip: o título, ou o APELIDO quando foi ele que casou
+      // com a busca (decisão do dono: quem escreve "teoria liberal" quer ver "teoria liberal").
+      const rotuloDe = function(d2){
+        const tit = d2.titulo || 'Sem título';
+        if(!q || tit.toLowerCase().indexOf(q) >= 0) return { rot: tit, apelido: false, tit: tit };
+        const al = ((((d2.meta || {}).aliases) || []).map(String)).find(function(a2){ return a2.toLowerCase().indexOf(q) >= 0; });
+        return al ? { rot: al, apelido: true, tit: tit } : { rot: tit, apelido: false, tit: tit };
+      };
       // sem caderno com esse nome? cria na hora, sem sair do texto
       if(qCru.length >= 2){
         const jaTem = dtodos.some(function(d2){
@@ -42474,16 +42517,16 @@ window.TutorIA = (function(){
         const cont = {};
         dcands.forEach(function(d2){ const k = _nomeNormRef(d2.titulo); cont[k] = (cont[k] || 0) + 1; });
         docsHtml = '<div class="tutor-refsec">Cadernos próprios</div>' + dcands.map(function(d2){
-          const tit = d2.titulo || 'Sem título';
-          const ctx = cont[_nomeNormRef(d2.titulo)] > 1 ? (' \u00b7 ' + _docCtxRef(d2)) : '';
+          const r2 = rotuloDe(d2), tit = r2.rot;
+          const ctx = r2.apelido ? (' \u00b7 ' + r2.tit) : (cont[_nomeNormRef(d2.titulo)] > 1 ? (' \u00b7 ' + _docCtxRef(d2)) : '');
           return '<button type="button" class="tutor-refopt doc-refopt" data-did="' + Util.attr(d2.id) + '" data-dt="' + Util.attr(tit) + '">&#9998; ' + _esc(tit)
             + (ctx ? '<span class="tutor-refopt-ctx">' + _esc(ctx) + '</span>' : '') + '</button>';
         }).join('');
       }
     }catch(e){ console.warn('[doc refpick]', e); }
-    if(!units.length && !fcHtml && !docsHtml && !novoHtml){ _hideRefPicker(); return; }
+    if(!units.length && !fcHtml && !docsHtml && !novoHtml && !recHtml){ _hideRefPicker(); return; }
     // o data-ut guarda o rótulo COMPLETO (sigla + número + nome) — vira o chip.
-    p.innerHTML = ((fcHtml || docsHtml) && units.length ? '<div class="tutor-refsec">Unidades</div>' : '') + units.map(function(u){ return '<button type="button" class="tutor-refopt" data-uid="' + Util.attr(u.id) + '" data-ut="' + Util.attr(u.label) + '">' + _esc(u.label) + '</button>'; }).join('') + docsHtml + novoHtml;
+    p.innerHTML = recHtml + ((fcHtml || docsHtml) && units.length ? '<div class="tutor-refsec">Unidades</div>' : '') + units.map(function(u){ return '<button type="button" class="tutor-refopt" data-uid="' + Util.attr(u.id) + '" data-ut="' + Util.attr(u.label) + '">' + _esc(u.label) + '</button>'; }).join('') + docsHtml + novoHtml;
     if(fcHtml) p.innerHTML += fcHtml;
     // Fase 6E — com a busca ainda vazia, acrescenta os sugeridos semânticos
     if(_fcRefLinha && _fcRefLinha.id && !q && window.FlashcardsSugestoes){
@@ -42601,6 +42644,7 @@ window.TutorIA = (function(){
     chip.setAttribute('data-doc-id', did); chip.setAttribute('data-unit-title', titulo);
     chip.textContent = titulo;
     range.insertNode(chip);
+    _refRecenteAdd({ t: 'd', id: did, label: titulo });
     const space = document.createTextNode(' '); chip.after(space);
     const nr = document.createRange(); nr.setStartAfter(space); nr.collapse(true);
     const s = window.getSelection(); s.removeAllRanges(); s.addRange(nr);
@@ -42617,6 +42661,7 @@ window.TutorIA = (function(){
     chip.setAttribute('data-unit-id', uid); chip.setAttribute('data-unit-title', utitle);
     chip.textContent = utitle;
     range.insertNode(chip);
+    _refRecenteAdd({ t: 'u', id: uid, label: utitle });
     const space = document.createTextNode(' '); chip.after(space);
     const nr = document.createRange(); nr.setStartAfter(space); nr.collapse(true);
     const s = window.getSelection(); s.removeAllRanges(); s.addRange(nr);
@@ -42889,25 +42934,31 @@ window.TutorIA = (function(){
     while(n && n.parentElement && n.parentElement !== ed) n = n.parentElement;
     return (n && n.parentElement === ed) ? n : null;
   }
-  function _cadSelSnap(ed){
+  // comCaret: guarda também o cursor simples (sem trecho selecionado). O ciclo de
+  // salvar reconstrói as linhas-card; sem isto o cursor de quem digita num card
+  // era jogado para fora dele a cada "salvo" (bug de 2026-09-30).
+  function _cadSelSnap(ed, comCaret){
     const sel = window.getSelection();
-    if(!ed || !sel || !sel.rangeCount || sel.isCollapsed) return null;
+    if(!ed || !sel || !sel.rangeCount) return null;
+    if(sel.isCollapsed && !comCaret) return null;
     const r = sel.getRangeAt(0);
     if(!ed.contains(r.startContainer) || !ed.contains(r.endContainer)) return null;
     const la = _cadLinhaDoNo(r.startContainer, ed), lb = _cadLinhaDoNo(r.endContainer, ed);
     if(!la || !lb) return null;
     const oa = _fcVistaCaretOff(la, r.startContainer, r.startOffset), ob = _fcVistaCaretOff(lb, r.endContainer, r.endOffset);
     if(oa == null || ob == null) return null;
-    return { la: la, oa: oa, lb: lb, ob: ob };
+    return { la: la, oa: oa, lb: lb, ob: ob, colapsada: sel.isCollapsed };
   }
   // Devolve o Range restaurado (e o põe na seleção) ou null.
   function _cadSelRestaura(ed, snap){
     if(!snap || !snap.la.isConnected || !snap.lb.isConnected) return null;
-    const pa = _fcVistaPos(snap.la, snap.oa), pb = snap.ob > 0 ? _fcVistaPos(snap.lb, snap.ob, true) : _fcVistaPos(snap.lb, 0);
+    const pb = snap.ob > 0 ? _fcVistaPos(snap.lb, snap.ob, true) : _fcVistaPos(snap.lb, 0);
+    const pa = snap.colapsada ? pb : _fcVistaPos(snap.la, snap.oa);
     if(!pa || !pb) return null;
     try{
       const r = document.createRange();
-      r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off);
+      if(snap.colapsada){ r.setStart(pb.node, pb.off); r.collapse(true); }
+      else { r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off); }
       const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
       return r;
     }catch(_){ return null; }
@@ -43165,7 +43216,7 @@ window.TutorIA = (function(){
     if(!el || !window.FcSintaxe) return;
     // seleção ABERTA (aluno vai formatar): reembrulhar uma linha trocaria os
     // nós dela — guarda como offsets e devolve igual se alguma linha mudou
-    const snap = (document.activeElement === el) ? _cadSelSnap(el) : null;
+    const snap = (document.activeElement === el) ? _cadSelSnap(el, true) : null;
     let mudou = false;
     Array.prototype.forEach.call(el.children, function(l){
       if(l.nodeType !== 1 || !l.matches || !l.matches(_FC_BLOCO_SEL) || !_fcForaDePortal(l)) return;
@@ -44428,7 +44479,7 @@ window.TutorIA = (function(){
     // nasce com docId e herda matéria/tópicos das propriedades do caderno).
     // O ciclo des-renderiza a vista (tira os embrulhos) e ela volta logo
     // abaixo: uma seleção aberta do aluno morreria no meio. Offsets salvam.
-    const snapSel = (document.activeElement === el) ? _cadSelSnap(el) : null;
+    const snapSel = (document.activeElement === el) ? _cadSelSnap(el, true) : null;
     if(unitAlvo || docAlvo){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
     try{ _cadNormalizarBlocos(el); }catch(_){ }
     try{ _cadCelCarimbar(el); }catch(e){ console.warn('[cad cel]', e); }
