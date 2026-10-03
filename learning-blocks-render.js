@@ -40,7 +40,7 @@
     biography:'Biografias', citations:'Citações', timeline:'Linha do tempo',
     tables:'Tabelas', glossary:'Glossário', gallery:'Galeria',
     quote:'Citação', image:'Imagem', statistics:'Estatísticas',
-    artefact:'Artefato'
+    artefact:'Artefato', lang_exercise:'Atividade de idioma'
   };
 
   /* ─────────── parsers / utilitários ─────────── */
@@ -1415,6 +1415,38 @@
           charts.map(function(ch){ return '<li>' + e(ch.title || '(sem título)') + ' <span style="opacity:.6">[' + e(ch.type || '?') + ']</span></li>'; }).join('') +
         '</ul>';
       }
+      // ───────── ATIVIDADE DE IDIOMA (fase A1, 2026-10-03) ─────────
+      // Preview do admin: os itens como o aluno os vê, mais o gabarito em cinza.
+      // A tela do aluno (Blocks.lang_exercise no index) tem a interação; aqui é só leitura.
+      case 'lang_exercise': {
+        const L = _laLang;
+        const mod = c.modalidade || 'lacunas';
+        const itens = _lbParseList(c.itens);
+        const rot = { lacunas: 'Lacunas', ordenar: 'Ordenar frase', certo_errado: 'Certo ou errado', traducao: (c.direcao === 'para_idioma' ? 'Versão' : 'Tradução'), corrigir: 'Corrigir frases', parafrase: 'Paráfrase', abertas: 'Questões abertas' };
+        const cab = '<div class="la-pv-cab"><span class="la-pv-mod">' + e(rot[mod] || mod) + '</span>' + (c.enunciado ? '<p class="la-pv-enun">' + e(c.enunciado) + '</p>' : '') + '</div>';
+        const corpo = itens.map(function(it, i){
+          if(!it) return '';
+          const n = '<span class="la-pv-n">' + (i + 1) + '.</span> ';
+          if(mod === 'lacunas'){
+            const segs = L.lacunas(it.texto || '');
+            const html = segs.map(function(sg){ return sg.gap ? '<span class="la-pv-gap">' + e(sg.aceitas[0] || '') + '</span>' : e(sg.texto); }).join('');
+            return '<div class="la-pv-item">' + n + html + (it.explicacao ? '<div class="la-pv-key">' + e(it.explicacao) + '</div>' : '') + '</div>';
+          }
+          if(mod === 'ordenar'){
+            const pal = L.embaralhar(L.palavras(it.frase || ''), String(it.id || i));
+            return '<div class="la-pv-item">' + n + pal.map(function(w){ return '<span class="la-pv-chip">' + e(w) + '</span>'; }).join(' ') + '<div class="la-pv-key">Ordem certa: ' + e(it.frase || '') + '</div></div>';
+          }
+          if(mod === 'certo_errado'){
+            return '<div class="la-pv-item">' + n + e(it.afirmacao || '') + '<div class="la-pv-key">Gabarito: ' + (it.gabarito === 'E' ? 'Errado' : 'Certo') + (it.explicacao ? ' · ' + e(it.explicacao) : '') + '</div></div>';
+          }
+          const enun = it.trecho || it.frase || it.pergunta || '';
+          return '<div class="la-pv-item">' + n + e(enun) + (it.instrucao ? ' <em class="la-pv-instr">' + e(it.instrucao) + '</em>' : '') +
+            '<div class="la-pv-caixa">Resposta do aluno</div>' + (it.modelo ? '<div class="la-pv-key">Referência: ' + e(it.modelo) + '</div>' : '') + '</div>';
+        }).join('');
+        const vazio = itens.length ? '' : '<p class="s-body" style="color:var(--text-mute);font-style:italic">Nenhum exercício ainda. Use "+ Exercício" ou "Colar vários".</p>';
+        return '<div class="la-pv">' + cab + corpo + vazio + '</div>';
+      }
+
       default:
         return '<p class="s-body" style="color:var(--text-mute);font-style:italic">Tipo de bloco não suportado: ' + e(block.type) + '</p>';
     }
@@ -1715,6 +1747,56 @@
     });
   }
 
+  /* ─────────── ATIVIDADE DE IDIOMA — regras puras compartilhadas ───────────
+     Lacunas: "Marie [es|está] de Francia" → segmentos de texto e lacunas com as
+     respostas aceitas. Normalização e comparação valem no aluno (correção na
+     hora) e no preview do admin; mudou aqui, mudou nos dois. */
+  const _laLang = {
+    lacunas: function(texto){
+      const out = []; const re = /\[([^\[\]]+)\]/g; let last = 0; let m;
+      const t = String(texto || '');
+      while((m = re.exec(t))){
+        if(m.index > last) out.push({ gap: false, texto: t.slice(last, m.index) });
+        const aceitas = m[1].split('|').map(function(x){ return x.trim(); }).filter(Boolean);
+        out.push({ gap: true, aceitas: aceitas.length ? aceitas : [m[1].trim()] });
+        last = m.index + m[0].length;
+      }
+      if(last < t.length) out.push({ gap: false, texto: t.slice(last) });
+      return out;
+    },
+    normalizar: function(s, ignorarAcentos){
+      let v = String(s == null ? '' : s).replace(/[‘’ʼ]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim();
+      if(ignorarAcentos) v = v.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+      return v;
+    },
+    // Resposta bate com alguma das aceitas? Pontuação final solta ("estación." × "estación") não derruba.
+    confere: function(resposta, aceitas, ignorarAcentos){
+      const tira = function(x){ return _laLang.normalizar(x, ignorarAcentos).replace(/[.,;:!?¡¿]+$/g, '').trim(); };
+      const r = tira(resposta);
+      if(!r) return false;
+      return (aceitas || []).some(function(a){ return tira(a) === r; });
+    },
+    palavras: function(frase){ return String(frase || '').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean); },
+    // Embaralha de forma determinística (mesma semente, mesma ordem) e nunca
+    // devolve a ordem original quando há 2 palavras ou mais.
+    embaralhar: function(palavras, semente){
+      const arr = palavras.slice(); if(arr.length < 2) return arr;
+      let h = 2166136261; const sStr = String(semente || 'x');
+      for(let i = 0; i < sStr.length; i++){ h ^= sStr.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+      const rnd = function(){ h = (Math.imul(h, 1664525) + 1013904223) >>> 0; return h / 4294967296; };
+      for(let tent = 0; tent < 8; tent++){
+        for(let i = arr.length - 1; i > 0; i--){ const j = Math.floor(rnd() * (i + 1)); const t = arr[i]; arr[i] = arr[j]; arr[j] = t; }
+        if(arr.join(' ') !== palavras.join(' ')) return arr;
+      }
+      return arr.reverse();
+    },
+    // Ordem montada pelo aluno bate com a frase (ou com uma das aceitas)?
+    confereOrdem: function(montada, frase, aceitas, ignorarAcentos){
+      const alvo = [frase].concat(String(aceitas || '').split('|')).map(function(x){ return x.trim(); }).filter(Boolean);
+      return _laLang.confere(montada, alvo, ignorarAcentos);
+    }
+  };
+
   /* ─────────── export ─────────── */
   global.LearningBlocks = {
     render:              renderLearningBlock,
@@ -1736,7 +1818,9 @@
     unbalancedTags:           _lbUnbalancedTags,
     normalizeOrigin:          _lbNormalizeOrigin,
     questionBankIdFromOrigin: _lbQuestionBankIdFromOrigin,
-    generateUbiqueQuestionId: _lbGenerateUbiqueQuestionId
+    generateUbiqueQuestionId: _lbGenerateUbiqueQuestionId,
+    // Atividade de idioma (regras puras: lacunas, normalização, embaralhar, conferir)
+    lang:                     _laLang
   };
 
 })(typeof window !== 'undefined' ? window : this);

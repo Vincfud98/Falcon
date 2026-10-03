@@ -435,6 +435,33 @@ content: {
 
 ---
 
+### 17. `lang_exercise` — Atividade de idioma (fase A1, 2026-10-03)
+
+Só aparece no editor quando a matéria da unidade tem `conteudo.subjects.natureza = 'idioma'`. Um tipo, sete modalidades; os campos de cada item mudam com a modalidade. Objetivas (`lacunas`, `ordenar`, `certo_errado`) corrigem no navegador com `LearningBlocks.lang`; escritas (`traducao`, `corrigir`, `parafrase`, `abertas`) vão para a Edge Function `idiomas-corrigir` (cobra `idiomas_correcao_item` por item). Respostas do aluno: `aluno.student_responses` com `question_type = 'lang'` (um por item) e `'lang_geral'` (comentário geral), `question_ref = uuid('lang:<unidade>:<bloco>:<id do item>')`.
+
+```ts
+content: {
+  modalidade: 'lacunas' | 'ordenar' | 'certo_errado' | 'traducao' | 'corrigir' | 'parafrase' | 'abertas'
+  enunciado: string                      // faixa de instrução que o aluno vê
+  direcao?: 'para_pt' | 'para_idioma'    // só traducao (tradução × versão)
+  acentos?: 'exigir' | 'ignorar'         // só lacunas/ordenar: comparar com ou sem acentos e maiúsculas
+  itens: Array<{
+    id: string                           // gerado pelo admin (i + base36); as respostas ficam presas a ele
+    // lacunas:      texto ("Marie [es|está] de Francia."), explicacao?
+    // ordenar:      frase, aceitas? ("outra ordem | outra"), explicacao?
+    // certo_errado: afirmacao, gabarito ('C' | 'E'), explicacao?
+    // traducao:     trecho, modelo?
+    // corrigir:     frase, modelo?
+    // parafrase:    frase, instrucao?, modelo?
+    // abertas:      pergunta, modelo?
+  }>
+}
+```
+
+No aluno, `_hydrateStoreBlock` espalha `content` no topo: o renderer lê `block.itens`, `block.modalidade`, nunca `block.content.*`.
+
+---
+
 ## Princípio de preservação
 
 A função `mapMockBlockToStore` (a partir desta versão) **não transforma campos** — apenas:
