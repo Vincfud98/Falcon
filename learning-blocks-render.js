@@ -1437,7 +1437,7 @@
             return '<div class="la-pv-item">' + n + pal.map(function(w){ return '<span class="la-pv-chip">' + e(w) + '</span>'; }).join(' ') + '<div class="la-pv-key">Ordem certa: ' + e(it.frase || '') + '</div></div>';
           }
           if(mod === 'certo_errado'){
-            return '<div class="la-pv-item">' + n + e(it.afirmacao || '') + '<div class="la-pv-key">Gabarito: ' + (it.gabarito === 'E' ? 'Errado' : 'Certo') + (it.explicacao ? ' · ' + e(it.explicacao) : '') + '</div></div>';
+            return '<div class="la-pv-item">' + n + _laLang.afirmacaoHtml(it.afirmacao) + '<div class="la-pv-key">Gabarito: ' + (it.gabarito === 'E' ? 'Errado' : 'Certo') + (it.explicacao ? ' · ' + e(it.explicacao) : '') + '</div></div>';
           }
           const enun = it.trecho || it.frase || it.pergunta || '';
           return '<div class="la-pv-item">' + n + e(enun) + (it.instrucao ? ' <em class="la-pv-instr">' + e(it.instrucao) + '</em>' : '') +
@@ -1789,6 +1789,13 @@
         if(arr.join(' ') !== palavras.join(' ')) return arr;
       }
       return arr.reverse();
+    },
+    // Afirmação de certo ou errado em HTML seguro: tudo escapado, menos o negrito da forma proposta,
+    // <b>…</b>, como na prova. Negrito sem par fica como texto, para não vazar para o resto da página.
+    afirmacaoHtml: function(s){
+      const h = String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      const abre = (h.match(/&lt;b&gt;/gi) || []).length, fecha = (h.match(/&lt;\/b&gt;/gi) || []).length;
+      return abre && abre === fecha ? h.replace(/&lt;b&gt;/gi, '<strong>').replace(/&lt;\/b&gt;/gi, '</strong>') : h;
     },
     // Ordem montada pelo aluno bate com a frase (ou com uma das aceitas)?
     confereOrdem: function(montada, frase, aceitas, ignorarAcentos){
