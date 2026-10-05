@@ -1437,7 +1437,10 @@
         const mod = c.modalidade || 'lacunas';
         const itens = _lbParseList(c.itens);
         const rot = { lacunas: 'Lacunas', ordenar: 'Ordenar frase', certo_errado: 'Certo ou errado', traducao: (c.direcao === 'para_idioma' ? 'Versão' : 'Tradução'), corrigir: 'Corrigir frases', parafrase: 'Paráfrase', abertas: 'Questões abertas' };
-        const cab = '<div class="la-pv-cab"><span class="la-pv-mod">' + e(rot[mod] || mod) + '</span>' + (c.enunciado ? '<p class="la-pv-enun">' + e(c.enunciado) + '</p>' : '') + '</div>';
+        // o texto da atividade vem antes do enunciado, como na prova
+        const cab = '<div class="la-pv-cab"><span class="la-pv-mod">' + e(rot[mod] || mod) + '</span></div>'
+          + L.textoHtml(c.texto)
+          + (c.enunciado ? '<p class="la-pv-enun">' + e(c.enunciado) + '</p>' : '');
         const corpo = itens.map(function(it, i){
           if(!it) return '';
           const n = '<span class="la-pv-n">' + (i + 1) + '.</span> ';
@@ -1829,6 +1832,38 @@
       let lista = pars.filter(function(p){ return comTitulo(p) && p.kind !== 'subtitle' && !p.resumo; });
       if(!lista.length) lista = pars.filter(function(p){ return comTitulo(p) && p.kind === 'subtitle'; });
       return lista.map(function(p){ return { pid: String(p.id), titulo: String(p.title).trim() }; });
+    },
+    // Texto da atividade (o texto da questão, como na prova): content.texto = { titulo, paragrafos,
+    // formato, autor, fonte }. Parágrafos em texto simples; no diálogo, "Nome: fala".
+    textoParagrafos: function(texto){
+      return (texto && Array.isArray(texto.paragrafos))
+        ? texto.paragrafos.map(function(p){ return String(p == null ? '' : p).replace(/\s+/g, ' ').trim(); }).filter(Boolean)
+        : [];
+    },
+    // O mesmo HTML no aluno e no preview do admin: título, parágrafos numerados (os itens de certo ou
+    // errado citam os parágrafos) e a fonte. opts.botao: o botão de recolher (só no aluno);
+    // opts.recolhido: o texto começa recolhido.
+    textoHtml: function(texto, opts){
+      opts = opts || {};
+      const pars = _laLang.textoParagrafos(texto);
+      if(!pars.length) return '';
+      const esc = function(s){ return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+      const dialogo = texto.formato === 'dialogo';
+      const par = function(p){
+        const m = dialogo ? /^([^:]{1,40}):\s+([\s\S]+)$/.exec(p) : null;
+        return m ? '<strong>' + esc(m[1]) + ':</strong> ' + esc(m[2]) : esc(p);
+      };
+      const credito = [texto.autor, texto.fonte].map(function(x){ return String(x == null ? '' : x).trim(); }).filter(Boolean).join('. ');
+      const fechado = !!opts.recolhido;
+      return '<div class="la-texto' + (fechado ? ' is-recolhido' : '') + (dialogo ? ' is-dialogo' : '') + '" data-la-texto>'
+        + '<div class="la-texto-head"><span class="la-texto-rot">Texto</span>'
+        + (String(texto.titulo || '').trim() ? '<span class="la-texto-tit">' + esc(String(texto.titulo).trim()) + '</span>' : '')
+        + (opts.botao ? '<button type="button" class="la-link la-texto-toggle" data-la-texto-toggle aria-expanded="' + (fechado ? 'false' : 'true') + '">' + (fechado ? 'Mostrar o texto' : 'Recolher o texto') + '</button>' : '')
+        + '</div>'
+        + '<div class="tb-body la-texto-corpo">'
+        + pars.map(function(p, i){ return '<div class="la-texto-par"><span class="la-texto-n" aria-hidden="true">' + (i + 1) + '</span><p>' + par(p) + '</p></div>'; }).join('')
+        + (credito ? '<p class="la-texto-fonte">' + esc(credito) + '</p>' : '')
+        + '</div></div>';
     }
   };
 
