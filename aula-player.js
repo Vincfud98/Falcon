@@ -315,7 +315,8 @@
     function carregarVozes() {
       var p = (typeof root._vozesLeituraCarregar === 'function') ? root._vozesLeituraCarregar()
         : sb().schema('ia').from('voice_vozes').select('voice_id, nome').eq('ativo', true).order('ordem').then(function (r) { return (r && r.data) || []; });
-      return Promise.resolve(p).then(function (v) { return Array.isArray(v) ? v : []; }).catch(function () { return []; });
+      // as aulas são narradas em português: as vozes nativas das matérias de idioma ficam de fora
+      return Promise.resolve(p).then(function (v) { return Array.isArray(v) ? v.filter(function (x) { return !x.idioma || String(x.idioma).slice(0, 2) === 'pt'; }) : []; }).catch(function () { return []; });
     }
     function carregarVozPadrao() {
       return sb().from('platform_config').select('aula_voz_padrao').eq('id', 'default').maybeSingle()
