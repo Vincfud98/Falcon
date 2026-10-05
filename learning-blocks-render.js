@@ -42,6 +42,18 @@
     quote:'Citação', image:'Imagem', statistics:'Estatísticas',
     artefact:'Artefato', lang_exercise:'Atividade de idioma'
   };
+  // Bloco de texto na variante gramática (explicação de gramática das matérias de
+  // idioma). No admin a variante mora em content; no aluno, o bloco já vem com o
+  // content espalhado no nível de cima.
+  function ehGramatica(block){
+    if(!block || block.type !== 'text') return false;
+    const v = (block.content && block.content.variante != null) ? block.content.variante : block.variante;
+    return v === 'gramatica';
+  }
+  function rotuloDoBloco(block){
+    if(ehGramatica(block)) return 'Gramática';
+    return LearningBlockTypeLabel[block.type] || block.type;
+  }
 
   /* ─────────── parsers / utilitários ─────────── */
   function _lbParseList(raw){
@@ -582,6 +594,8 @@
         // .tb-section-title, título .tb-para-title. A tipografia vem de
         // ubique-reading.css, compartilhado — o preview do admin é fiel por
         // construção. Fragments: só o sublinhado + tooltip simples.
+        // Variante gramática (matérias de idioma): classe is-gramatica, largura toda.
+        const clsTexto = 'text-block' + (ehGramatica(block) ? ' is-gramatica' : '');
         if(Array.isArray(c.paragraphs) && c.paragraphs.length){
           const body = c.paragraphs.map(function(p){
             if(!p) return '';
@@ -601,10 +615,10 @@
             const descHtml = (p.title && p.description) ? '<div class="tb-para-desc">' + e(p.description) + '</div>' : '';
             return '<div class="tb-paragraph' + (p.title ? ' has-title' : '') + '" data-paragraph-id="' + attrHtml(p.id || '') + '">' + titleHtml + descHtml + html + '</div>';
           }).join('');
-          return '<div class="text-block"><div class="tb-body">' + body + '</div></div>';
+          return '<div class="' + clsTexto + '"><div class="tb-body">' + body + '</div></div>';
         }
         // Fallback: schema simples {html}
-        return '<div class="text-block"><div class="tb-body">' +
+        return '<div class="' + clsTexto + '"><div class="tb-body">' +
           (c.html || '<p style="color:var(--text-mute);font-style:italic">Sem conteúdo.</p>') + '</div></div>';
       }
       case 'video': {
@@ -1709,7 +1723,7 @@
   function renderLearningBlock(block){
     if(!block) return '';
     const e = escHtml;
-    const typeLabel = LearningBlockTypeLabel[block.type] || block.type;
+    const typeLabel = rotuloDoBloco(block);
     const desc = block.description ? '<p class="card-body" style="font-size:.85rem;margin-top:.3rem">' + e(block.description) + '</p>' : '';
     return '<article class="card" data-block-id="' + attrHtml(block.id) + '" data-block-type="' + attrHtml(block.type) + '" style="margin-bottom:1.4rem;padding:1.4rem 1.6rem;position:relative">' +
       '<div style="position:absolute;top:.7rem;right:.8rem;display:flex;gap:.4rem">' +
@@ -1801,6 +1815,20 @@
     confereOrdem: function(montada, frase, aceitas, ignorarAcentos){
       const alvo = [frase].concat(String(aceitas || '').split('|')).map(function(x){ return x.trim(); }).filter(Boolean);
       return _laLang.confere(montada, alvo, ignorarAcentos);
+    },
+    // Regra que um item treina: "<id do bloco de gramática>:<id do parágrafo>", gravada pelo editor.
+    regraRef: function(s){
+      const m = /^([^:\s]+):(\S+)$/.exec(String(s == null ? '' : s).trim());
+      return m ? { bloco: m[1], paragrafo: m[2] } : null;
+    },
+    // Tópicos de um bloco de gramática, na ordem do bloco: os parágrafos com título, menos o resumo
+    // (marcado pela explicação gerada). Bloco escrito só com subtítulos: os subtítulos.
+    topicosGramatica: function(content){
+      const pars = (content && Array.isArray(content.paragraphs)) ? content.paragraphs : [];
+      const comTitulo = function(p){ return p && p.id != null && String(p.title || '').trim(); };
+      let lista = pars.filter(function(p){ return comTitulo(p) && p.kind !== 'subtitle' && !p.resumo; });
+      if(!lista.length) lista = pars.filter(function(p){ return comTitulo(p) && p.kind === 'subtitle'; });
+      return lista.map(function(p){ return { pid: String(p.id), titulo: String(p.title).trim() }; });
     }
   };
 
@@ -1809,6 +1837,8 @@
     render:              renderLearningBlock,
     renderBody:          renderLearningBlockBody,
     label:               LearningBlockTypeLabel,
+    labelOf:             rotuloDoBloco,
+    ehGramatica:         ehGramatica,
     parseList:           _lbParseList,
     embedVideo:          _lbEmbedVideo,
     detectVideo:         _lbDetectVideo,
