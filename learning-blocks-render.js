@@ -1854,6 +1854,11 @@
         return m ? '<strong>' + esc(m[1]) + ':</strong> ' + esc(m[2]) : esc(p);
       };
       const credito = [texto.autor, texto.fonte].map(function(x){ return String(x == null ? '' : x).trim(); }).filter(Boolean).join('. ');
+      // texto do Ubique News: o link da notícia, para o aluno continuar lendo lá; o resumo chama para a completa
+      const o = texto.origem || {};
+      const nid = o.modo === 'noticia' ? String(o.noticia_id || '') : '';
+      const link = /^[A-Za-z0-9_-]{8,64}$/.test(nid) ? '<a href="https://ubiquenews.com/noticia/' + encodeURIComponent(nid) + '" target="_blank" rel="noopener">'
+        + (o.parte === 'resumo' ? 'Ler a notícia completa no Ubique News' : 'Ver a notícia no Ubique News') + '</a>' : '';
       const fechado = !!opts.recolhido;
       return '<div class="la-texto' + (fechado ? ' is-recolhido' : '') + (dialogo ? ' is-dialogo' : '') + '" data-la-texto>'
         + '<div class="la-texto-head"><span class="la-texto-rot">Texto</span>'
@@ -1862,7 +1867,7 @@
         + '</div>'
         + '<div class="tb-body la-texto-corpo">'
         + pars.map(function(p, i){ return '<div class="la-texto-par"><span class="la-texto-n" aria-hidden="true">' + (i + 1) + '</span><p>' + par(p) + '</p></div>'; }).join('')
-        + (credito ? '<p class="la-texto-fonte">' + esc(credito) + '</p>' : '')
+        + ((credito || link) ? '<p class="la-texto-fonte">' + esc(credito) + (credito && link ? '. ' : '') + link + '</p>' : '')
         + '</div></div>';
     }
   };
