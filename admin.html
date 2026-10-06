@@ -8604,6 +8604,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   .la-tx-vazio{margin-top:0}
   .la-tx-conta{flex:1;min-width:12rem}
   .la-tx-aviso[hidden]{display:none}
+  .la-tx-banco{margin:-.2rem 0 .6rem}
   .oq-ia{margin:0 0 .8rem}
   .oq-ia .la-tx{background:var(--bg-card)}
   .la-tx-aviso{margin:0 0 .6rem;padding:.5rem .7rem;border-left:2px solid #d9a55a;background:rgba(217,165,90,.08);font-size:.76rem;line-height:1.5;color:#d9a55a}
@@ -34899,6 +34900,51 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }
     return fim || { ok: false, error: 'incompleto', mensagem: 'A geração terminou sem resposta. Nada foi alterado. Tente de novo.' };
   }
+  /* Banco de textos de referência (questoes.reference_texts): a busca e a lista dos textos de uma língua,
+     numa peça só. Servem ao "Gerar itens por IA" do Banco e ao painel "Banco de textos" dos blocos da
+     unidade: texto da atividade de idioma, texto da questão e leitura. O texto do banco vem em HTML; os
+     parágrafos saem separados por linha em branco, como a função gerar-itens-ce os separa. */
+  const _bancoTextos = (function(){
+    const todos = function(){ return (typeof referenceTextsCache !== 'undefined' && referenceTextsCache) || []; };
+    const texto = (html) => String(html || '').replace(/<\s*br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|h[1-6]|blockquote)>/gi, '\n\n').replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;|&apos;/gi, "'")
+      .replace(/&#(\d+);/g, function(_, n){ return String.fromCharCode(Number(n)); }).replace(/&amp;/gi, '&')
+      .split(/\n\s*\n/).map(function(p){ return p.replace(/\s+/g, ' ').trim(); }).filter(Boolean).join('\n\n');
+    const palavras = (t) => (String(t || '').trim().match(/\S+/g) || []).length;
+    // quantos itens de Certo ou Errado já estão ligados ao texto; null quando os itens não foram lidos
+    function itens(refId){
+      if(!(typeof tfItemsCache !== 'undefined' && tfItemsCache && tfItemsCache.length)) return null;
+      const qids = new Set(((typeof questionRefsCache !== 'undefined' && questionRefsCache) || []).filter(function(l){ return String(l.reference_text_id) === String(refId); }).map(function(l){ return String(l.question_id); }));
+      return qids.size ? tfItemsCache.filter(function(t){ return qids.has(String(t.question_id)); }).length : 0;
+    }
+    // a leitura do banco acontece uma vez só, mesmo com dois painéis abertos ao mesmo tempo
+    let leitura = null;
+    async function ler(){
+      try{ if(typeof loadReferenceTexts === 'function') await loadReferenceTexts(); }
+      catch(e){ console.warn('[banco de textos] leitura:', e); }
+    }
+    function carregar(){
+      if(todos().length) return Promise.resolve();
+      if(!leitura) leitura = ler().then(function(){ leitura = null; });
+      return leitura;
+    }
+    // os textos da língua que têm texto, os mais novos primeiro; a busca olha título, autor, fonte e o texto
+    function lista(idioma, busca){
+      const f = String(busca || '').trim().toLowerCase();
+      return todos().filter(function(r){ return r && r.idioma === idioma && String(r.text || '').trim(); })
+        .filter(function(r){ return !f || [r.title, r.author, r.source, texto(r.text)].some(function(v){ return String(v || '').toLowerCase().includes(f); }); })
+        .slice().sort(function(a, b){ return (Number(b.year) || 0) - (Number(a.year) || 0); }).slice(0, 80);
+    }
+    const porId = (id) => todos().find(function(r){ return r && String(r.id) === String(id); }) || null;
+    // a linha da lista: o título, ou o começo do texto, e autor · ano · palavras · itens já cobrados
+    function linha(r){
+      const t = texto(r.text), n = itens(r.id);
+      return { titulo: r.title || (t.slice(0, 70) + (t.length > 70 ? '…' : '')),
+        meta: [r.author, r.year, palavras(t) + ' palavras', n == null ? '' : (n ? n + (n === 1 ? ' item já cobrado' : ' itens já cobrados') : 'nenhum item ainda')].filter(Boolean).join(' · ') };
+    }
+    return { texto: texto, palavras: palavras, itens: itens, carregar: carregar, tem: () => todos().length > 0, lista: lista, porId: porId, linha: linha };
+  })();
+
   (function(){
     const modal = document.getElementById('gceModal');
     if(!modal) return;
@@ -34930,41 +34976,23 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const IDIOMA_DA_LINGUA = { pt: 'pt-BR', en: 'en-US' };
     let banco = null;            // texto escolhido no banco: { id, titulo, existentes, idioma }
     let familiasSel = [];        // tipos escolhidos; vazio = como na prova
-    // o texto do banco vem em HTML: parágrafos separados por linha em branco, como a função faz
-    const htmlParaTexto = (html) => String(html || '').replace(/<\s*br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|h[1-6]|blockquote)>/gi, '\n\n').replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/gi, ' ').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0*39;|&apos;/gi, "'")
-      .replace(/&#(\d+);/g, function(_, n){ return String.fromCharCode(Number(n)); }).replace(/&amp;/gi, '&')
-      .split(/\n\s*\n/).map(function(p){ return p.replace(/\s+/g, ' ').trim(); }).filter(Boolean).join('\n\n');
-    // quantos itens de Certo ou Errado já estão ligados a um texto do banco; null quando os itens não foram lidos
-    function itensDoTexto(refId){
-      if(!(typeof tfItemsCache !== 'undefined' && tfItemsCache && tfItemsCache.length)) return null;
-      const qids = new Set(((typeof questionRefsCache !== 'undefined' && questionRefsCache) || []).filter(function(l){ return String(l.reference_text_id) === String(refId); }).map(function(l){ return String(l.question_id); }));
-      return qids.size ? tfItemsCache.filter(function(t){ return qids.has(String(t.question_id)); }).length : 0;
-    }
     function listarBanco(){
       const box = el('gceBancoItens'); if(!box) return;
-      const idioma = IDIOMA_DA_LINGUA[el('gce-lingua').value];
-      const f = el('gceBancoBusca').value.trim().toLowerCase();
-      const todos = (typeof referenceTextsCache !== 'undefined' && referenceTextsCache) || [];
-      const lista = todos.filter(function(r){ return r.idioma === idioma && String(r.text || '').trim(); })
-        .filter(function(r){ return !f || [r.title, r.author, r.source, r.text].some(function(v){ return String(v || '').toLowerCase().includes(f); }); })
-        .slice().sort(function(a, b){ return (Number(b.year) || 0) - (Number(a.year) || 0); }).slice(0, 80);
+      const f = el('gceBancoBusca').value.trim();
+      const lista = _bancoTextos.lista(IDIOMA_DA_LINGUA[el('gce-lingua').value], f);
       if(!lista.length){ box.innerHTML = '<div class="gce-nota" style="padding:.6rem .7rem">' + (f ? 'Nenhum texto com essa busca.' : 'O banco ainda não tem textos nesta língua.') + '</div>'; return; }
       box.innerHTML = lista.map(function(r){
-        const texto = htmlParaTexto(r.text), n = itensDoTexto(r.id);
-        const titulo = r.title || (texto.slice(0, 70) + (texto.length > 70 ? '…' : ''));
-        const meta = [r.author, r.year, contarPalavras(texto) + ' palavras', n == null ? '' : (n ? n + (n === 1 ? ' item já cobrado' : ' itens já cobrados') : 'nenhum item ainda')].filter(Boolean).join(' · ');
-        return '<button type="button" class="gce-banco-linha" data-gce-banco="' + esc(r.id) + '"><strong>' + esc(titulo) + '</strong><small>' + esc(meta) + '</small></button>';
+        const l = _bancoTextos.linha(r);
+        return '<button type="button" class="gce-banco-linha" data-gce-banco="' + esc(r.id) + '"><strong>' + esc(l.titulo) + '</strong><small>' + esc(l.meta) + '</small></button>';
       }).join('');
     }
     async function abrirBanco(){
       const lista = el('gceBancoLista');
       lista.hidden = !lista.hidden;
       if(lista.hidden) return;
-      const vazio = !((typeof referenceTextsCache !== 'undefined' && referenceTextsCache) || []).length;
-      if(vazio && typeof loadReferenceTexts === 'function'){
+      if(!_bancoTextos.tem()){
         el('gceBancoItens').innerHTML = '<div class="gce-nota" style="padding:.6rem .7rem">Carregando os textos…</div>';
-        try{ await loadReferenceTexts(); }catch(e){ console.warn('[gerar-itens-ce] textos do banco:', e); }
+        await _bancoTextos.carregar();
       }
       listarBanco();
       el('gceBancoBusca').focus();
@@ -34979,14 +35007,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       sair.hidden = false;
     }
     function escolherBanco(id){
-      const todos = (typeof referenceTextsCache !== 'undefined' && referenceTextsCache) || [];
-      const r = todos.find(function(x){ return String(x.id) === String(id); });
+      const r = _bancoTextos.porId(id);
       if(!r) return;
-      banco = { id: r.id, titulo: r.title || '', existentes: itensDoTexto(r.id), idioma: r.idioma };
+      banco = { id: r.id, titulo: r.title || '', existentes: _bancoTextos.itens(r.id), idioma: r.idioma };
       el('gce-titulo').value = r.title || '';
       el('gce-autor').value = r.author || '';
       el('gce-fonte').value = r.source || '';
-      el('gce-texto').value = htmlParaTexto(r.text);
+      el('gce-texto').value = _bancoTextos.texto(r.text);
       el('gce-texto').readOnly = true;
       el('gceBancoLista').hidden = true;
       pintarBanco(); contagem(); msg('');
@@ -57661,6 +57688,24 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return !!(tx && Array.isArray(tx.paragrafos) && tx.paragrafos.length && content.ia_texto_base
       && content.ia_texto_base !== _laTxAssinatura(tx) && Array.isArray(content.itens) && content.itens.length);
   }
+  // O texto veio do banco de textos e continua igual ao de lá? Devolve o id do texto no banco; editado, null.
+  // A assinatura guardada na origem é a do texto inteiro do banco, então qualquer mudança desliga.
+  function _laTxDoBanco(tx){
+    const o = tx && tx.origem;
+    if(!(o && o.modo === 'banco' && o.reference_text_id != null && o.assinatura)) return null;
+    return o.assinatura === _laTxAssinatura(tx) ? String(o.reference_text_id) : null;
+  }
+  // A linha embaixo do texto que veio do banco. No texto da questão, ela diz se os itens vão ligados ao banco.
+  function _laTxBancoNota(bid, tx){
+    const o = tx && tx.origem;
+    if(!(o && o.modo === 'banco')) return '';
+    const blk = _ueGetBlock(bid);
+    const questao = !!(blk && blk.type === 'objective_questions');
+    const nome = String(o.titulo || '').trim() || 'texto sem título';
+    if(_laTxDoBanco(tx)) return 'Do banco de textos: ' + nome + '.' + (questao ? ' Os itens gerados ficam ligados a este texto do banco, e a IA recebe o que já foi cobrado sobre ele.' : '');
+    return questao ? 'Este texto veio do banco de textos e foi editado. Os itens saem do texto editado, e ele entra no Banco como um texto novo.'
+      : 'Do banco de textos, com mudanças: ' + nome + '.';
+  }
   // O texto da atividade como fonte do Preencher com IA, no formato de _laTextosDaUnidade.
   function _laTextoProprio(bid, content){
     const tx = content && content.texto;
@@ -57681,6 +57726,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     opts = opts || {};
     const tx = content.texto || null;
     const tem = !!(tx && Array.isArray(tx.paragrafos) && tx.paragrafos.length);
+    const notaBanco = _laTxBancoNota(bid, tx);
     const editando = tem || !!_laTxAberto[bid];
     const iaAberto = window._txIaAberto(bid);
     let corpo;
@@ -57692,10 +57738,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           + _laIaCampo('la-tx-autor-' + bid, 'Autor, se houver', '<input class="field-input" id="la-tx-autor-' + bid + '" maxlength="200" value="' + esc((tx && tx.autor) || '') + '" placeholder="Ex.: Joaquim Nabuco" oninput="laTxMudou(' + bid + ')">')
           + _laIaCampo('la-tx-fonte-' + bid, 'Fonte, se houver: o aluno vê', '<input class="field-input" id="la-tx-fonte-' + bid + '" maxlength="300" value="' + esc((tx && tx.fonte) || '') + '" placeholder="Ex.: Minha formação, 1900, com adaptações" oninput="laTxMudou(' + bid + ')">')
         + '</div>'
+        + '<p class="la-ia-nota la-tx-banco" id="la-tx-banco-' + bid + '"' + (notaBanco ? '' : ' hidden') + '>' + esc(notaBanco) + '</p>'
         + '<div class="la-ia-acoes"><span class="la-ia-nota la-tx-conta" id="la-tx-conta-' + bid + '">' + esc(_laTxContagem(tx)) + '</span>'
           + '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxCriarAbrir(' + bid + ')">' + (tem ? 'Escrever outro com a IA' : 'Escrever com a IA') + '</button>'
           + '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxNoticiaAbrir(' + bid + ')">Notícia do Ubique News</button>'
           + '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxAutenticoAbrir(' + bid + ')">Texto autêntico</button>'
+          + '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxBancoAbrir(' + bid + ')">Banco de textos</button>'
           + (tem ? '<button class="btn btn-ghost btn-sm" type="button" style="color:var(--red)" onclick="laTxRemover(' + bid + ')">Remover o texto</button>'
                  : '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxFechar(' + bid + ')">Fechar</button>')
         + '</div>';
@@ -57704,6 +57752,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         + '<button class="btn btn-ghost btn-sm" type="button" style="border-color:var(--accent-border)" onclick="laTxCriarAbrir(' + bid + ')">Criar com a IA</button>'
         + '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxNoticiaAbrir(' + bid + ')">Notícia do Ubique News</button>'
         + '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxAutenticoAbrir(' + bid + ')">Texto autêntico</button>'
+        + '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxBancoAbrir(' + bid + ')">Banco de textos</button>'
         + '<button class="btn btn-ghost btn-sm" type="button" onclick="laTxColarAbrir(' + bid + ')">Colar um texto</button>'
         + '<span class="la-ia-nota">' + esc(opts.nota || 'Opcional. O aluno lê o texto em cima dos itens, como na prova, e o Preencher com IA escreve os itens sobre ele.') + '</span></div>';
     }
@@ -57729,6 +57778,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(conta) conta.textContent = _laTxContagem(b.content.texto);
     const aviso = document.getElementById('la-tx-aviso-' + bid);
     if(aviso) aviso.hidden = !_laTxMudouDepoisDosItens(b.content);
+    const nb = document.getElementById('la-tx-banco-' + bid);
+    if(nb){ const t = _laTxBancoNota(bid, b.content.texto); nb.textContent = t; nb.hidden = !t; }
     _ueSaveStructured(bid);
   };
   // Colou um texto de PDF: as quebras de linha da página viram parágrafos de verdade.
@@ -57762,13 +57813,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     _ueSaveStructured(bid);
     _ueRerenderBlockBody(bid);
   };
-  // Um painel por vez no espaço do texto: "Escrever com a IA" (ia), "Notícia do Ubique News" (noticia) ou
-  // "Texto autêntico" (autentico).
+  // Um painel por vez no espaço do texto: "Escrever com a IA" (ia), "Notícia do Ubique News" (noticia),
+  // "Texto autêntico" (autentico) ou "Banco de textos" (banco).
   const _destinoDe = function(bid){ const b = _ueGetBlock(bid); return (b && b.type === 'text') ? 'leitura' : 'atividade'; };
   window._txPainelHTML = function(bid, destino){
     const e = _txEscolhas[bid] || {};
     if(e.painel === 'noticia' && !_txAtivo[bid]) return window._txNoticiasPainelHTML(bid, destino);
     if(e.painel === 'autentico' && !_txAtivo[bid]) return window._txAutenticosPainelHTML(bid, destino);
+    if(e.painel === 'banco' && !_txAtivo[bid]) return window._txBancoPainelHTML(bid, destino);
     return window._txIaPainelHTML(bid, destino);
   };
   function _txAbrirPainel(bid, painel){
@@ -57780,11 +57832,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }
     if(painel === 'noticia') _txNoticiasCarregar(bid);
     if(painel === 'autentico') _txAutenticosCarregar(bid);
+    if(painel === 'banco') _txBancoCarregar(bid);
   }
   // Abre o painel "Escrever com a IA" dentro da área do texto (do bloco de atividade ou do de leitura).
   window.laTxCriarAbrir = function(bid){ _txAbrirPainel(bid, 'ia'); };
   window.laTxNoticiaAbrir = function(bid){ _txAbrirPainel(bid, 'noticia'); };
   window.laTxAutenticoAbrir = function(bid){ _txAbrirPainel(bid, 'autentico'); };
+  window.laTxBancoAbrir = function(bid){ _txAbrirPainel(bid, 'banco'); };
   // Algum painel está aberto (ou escrevendo) neste bloco? O editor do bloco de texto pergunta ao desenhar.
   window._txIaAberto = function(bid){ return !!(_txAtivo[bid] || (_txEscolhas[bid] && _txEscolhas[bid].aberto)); };
   function _txAlternar(bid, painel){
@@ -57799,6 +57853,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   window.txIaToggle = function(bid){ _txAlternar(bid, 'ia'); };
   window.txNoticiaToggle = function(bid){ _txAlternar(bid, 'noticia'); };
   window.txAutenticoToggle = function(bid){ _txAlternar(bid, 'autentico'); };
+  window.txBancoToggle = function(bid){ _txAlternar(bid, 'banco'); };
 
   /* ── Notícia do Ubique News (textos, etapa 2): a lista, com busca no título e janela de dias, e a
      notícia no idioma da matéria, como foi publicada, no texto da atividade ou no bloco de leitura. O
@@ -58124,6 +58179,117 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(_txEscolhas[bid]) _txEscolhas[bid].aberto = false;
       _ueRerenderBlockBody(bid);
       if(typeof window.ueToast === 'function') window.ueToast('Texto autêntico inserido, com a fonte e a licença. Revise à vontade, sem mudar o texto.', 'success');
+    } else if(onde === 'banco'){
+      if(typeof window.ueToast === 'function') window.ueToast('O texto foi gravado no bloco.', 'success');
+    } else if(typeof window.ueToast === 'function'){
+      window.ueToast('Não consegui gravar o texto no bloco. Abra o bloco e tente de novo.', 'error');
+    }
+  };
+
+  /* ── Banco de textos: os textos de referência do Banco de questões na língua da matéria, com a busca e a
+     lista do "Gerar itens por IA" (_bancoTextos). O texto entra em parágrafos comuns, com autor e fonte, e
+     a origem guarda o id do texto no banco. No texto da questão (Questões objetivas), o texto que continua
+     igual ao do banco vai ligado a ele: a IA recebe o que já foi cobrado sobre ele e a questão importada
+     fica ligada ao mesmo texto, sem cópia (oqIaGerar). Sem função nem cobrança: o admin já lê o banco. */
+  const _txBancoLido = {};   // bid → a leitura do banco já terminou (com ou sem textos)
+  function _txBancoListaHTML(bid){
+    const e = _txEscolhas[bid] || {};
+    if(!_bancoTextos.tem()) return '<p class="la-ia-nota">' + (_txBancoLido[bid] ? 'Não encontrei os textos do banco agora. Feche e abra o painel de novo.' : 'Carregando os textos do banco…') + '</p>';
+    const idioma = _txIdioma();
+    if(!idioma) return '<p class="la-ia-aviso">A matéria desta unidade não tem idioma definido.</p>';
+    const lista = _bancoTextos.lista(idioma, e.btBusca);
+    if(!lista.length) return '<p class="la-ia-nota">' + (String(e.btBusca || '').trim() ? 'Nenhum texto com essa busca.' : 'O banco ainda não tem textos nesta língua.') + '</p>';
+    return '<div class="la-nts" role="listbox" aria-label="Textos do banco">' + lista.map(function(r){
+      const on = String(e.btId) === String(r.id);
+      const l = _bancoTextos.linha(r);
+      return '<button type="button" class="la-nt' + (on ? ' is-on' : '') + '" role="option" aria-selected="' + on + '" data-bt="' + esc(r.id) + '" onclick="txBancoEscolher(' + bid + ', this)">'
+        + '<strong>' + esc(l.titulo) + '</strong><small>' + esc(l.meta) + '</small></button>';
+    }).join('') + '</div>';
+  }
+  window._txBancoPainelHTML = function(bid, destino){
+    const e = _txEscolhas[bid] || {};
+    const blk = _ueGetBlock(bid);
+    const nota = destino === 'leitura'
+      ? 'O texto entra em parágrafos comuns do bloco, com o autor e a fonte no fim.'
+      : (blk && blk.type === 'objective_questions'
+        ? 'O texto entra com o título, o autor e a fonte. Enquanto ele ficar igual ao do banco, os itens gerados ficam ligados a ele.'
+        : 'O texto entra com o título, o autor e a fonte, em parágrafos que você pode editar.');
+    return '<div class="la-ia" id="tx-bt-' + bid + '">'
+      + '<div class="la-ia-cab"><span class="s-subtitle">Banco de textos</span><button class="btn btn-ghost btn-sm" type="button" style="margin-left:auto" onclick="txBancoToggle(' + bid + ')">Fechar</button></div>'
+      + '<div class="la-ia-grade">' + _laIaCampo('tx-bt-busca-' + bid, 'Buscar', '<input class="field-input" type="text" id="tx-bt-busca-' + bid + '" maxlength="120" value="' + esc(e.btBusca || '') + '" placeholder="Título, autor, fonte ou um trecho do texto" oninput="txBancoBuscar(' + bid + ')">') + '</div>'
+      + '<div id="tx-bt-lista-' + bid + '">' + _txBancoListaHTML(bid) + '</div>'
+      + '<div class="la-ia-acoes"><button class="btn btn-sm" type="button" id="tx-bt-btn-' + bid + '" onclick="txBancoUsar(' + bid + ', \'' + destino + '\')"' + (e.btId ? '' : ' disabled') + '>Usar este texto</button>'
+      + '<span class="la-ia-nota">' + esc(nota) + '</span></div>'
+      + '<div class="la-ia-status" id="tx-bt-status-' + bid + '"></div>'
+      + '</div>';
+  };
+  function _txBancoDesenharLista(bid){ const box = document.getElementById('tx-bt-lista-' + bid); if(box) box.innerHTML = _txBancoListaHTML(bid); }
+  async function _txBancoCarregar(bid){
+    if(_bancoTextos.tem()) return;
+    _txBancoLido[bid] = false;
+    _txBancoDesenharLista(bid);
+    await _bancoTextos.carregar();
+    _txBancoLido[bid] = true;
+    _txBancoDesenharLista(bid);
+  }
+  let _txBtTimer = null;
+  window.txBancoBuscar = function(bid){
+    const el = document.getElementById('tx-bt-busca-' + bid);
+    _txEscolhas[bid] = Object.assign(_txEscolhas[bid] || {}, { btBusca: el ? el.value : '' });
+    clearTimeout(_txBtTimer);
+    _txBtTimer = setTimeout(function(){ _txBancoDesenharLista(bid); }, 200);
+  };
+  window.txBancoEscolher = function(bid, el){
+    _txEscolhas[bid] = Object.assign(_txEscolhas[bid] || {}, { btId: el.getAttribute('data-bt') });
+    document.querySelectorAll('#tx-bt-lista-' + bid + ' .la-nt').forEach(function(b){ const on = b === el; b.classList.toggle('is-on', on); b.setAttribute('aria-selected', on ? 'true' : 'false'); });
+    const btn = document.getElementById('tx-bt-btn-' + bid); if(btn) btn.disabled = false;
+  };
+  window.txBancoUsar = async function(bid, destino){
+    const e = _txEscolhas[bid] || {};
+    const st = function(t, tipo){ const box = document.getElementById('tx-bt-status-' + bid); if(box){ box.textContent = t || ''; box.className = 'la-ia-status' + (tipo ? ' ' + tipo : ''); } };
+    const r = e.btId ? _bancoTextos.porId(e.btId) : null;
+    if(!r){ st('Escolha um texto da lista.', 'erro'); return; }
+    if(r.idioma !== _txIdioma()){ st('Este texto não está na língua da matéria. Escolha outro.', 'erro'); return; }
+    // os parágrafos do texto inteiro, como a função gerar-itens-ce os separa; a assinatura é a deles
+    const inteiro = _bancoTextos.texto(r.text).split('\n\n').filter(Boolean);
+    const pars = _laTxParagrafos(inteiro.join('\n\n'));
+    if(!pars.length){ st('Este texto do banco está vazio. Escolha outro.', 'erro'); return; }
+    const blk = _ueGetBlock(bid);
+    const temTexto = destino === 'atividade'
+      ? !!(blk && blk.content && blk.content.texto && Array.isArray(blk.content.texto.paragrafos) && blk.content.texto.paragrafos.length)
+      : !!(blk && blk.content && Array.isArray(blk.content.paragraphs) && blk.content.paragraphs.length);
+    if(temTexto && !confirm(destino === 'atividade' ? 'O texto do banco vai entrar no lugar do texto atual da atividade. Os itens ficam. Continuar?' : 'O texto do banco vai entrar no lugar do texto atual deste bloco. Continuar?')) return;
+    const titulo = String(r.title || '').trim();
+    const fonte = String(r.source || '').trim() || (r.year ? String(r.year) : '');
+    // o aluno lê "autor. fonte": o autor que já está na fonte não se repete
+    const autor0 = String(r.author || '').trim();
+    const autor = autor0 && !fonte.toLowerCase().includes(autor0.toLowerCase()) ? autor0 : '';
+    const origem = { modo: 'banco', reference_text_id: String(r.id), titulo: titulo, em: new Date().toISOString() };
+    const aplicar = destino === 'atividade'
+      ? function(content){
+          content.texto = { titulo: titulo, formato: 'texto', autor: autor, fonte: fonte, paragrafos: pars,
+            origem: Object.assign({ assinatura: _laTxAssinatura({ paragrafos: inteiro }) }, origem) };
+          return content;
+        }
+      : function(content, bloco){
+          let max = 0;
+          (Array.isArray(content.paragraphs) ? content.paragraphs : []).forEach(function(p){ const m = /^[ps](\d+)$/.exec(String((p && p.id) || '')); if(m) max = Math.max(max, Number(m[1])); });
+          content.paragraphs = pars.map(function(p){ max++; return { id: 'p' + max, title: null, content: '<p>' + esc(p) + '</p>', description: '', fragments: [] }; });
+          const credito = [autor, fonte].filter(Boolean).join('. ');
+          if(credito){ max++; content.paragraphs.push({ id: 'p' + max, title: null, content: '<p><em>' + esc(credito) + '</em></p>', description: '', fragments: [] }); }
+          content.geracoes = (Array.isArray(content.geracoes) ? content.geracoes : []).concat([origem]).slice(-10);
+          if(bloco && !String(bloco.title || '').trim() && titulo){
+            bloco.title = titulo;
+            const el = document.getElementById('ue-bf-title-' + bloco.id);
+            if(el && !el.value.trim()) el.value = bloco.title;
+          }
+          return content;
+        };
+    const onde = await _txGravar(bid, aplicar);
+    if(onde === 'tela'){
+      if(_txEscolhas[bid]) _txEscolhas[bid].aberto = false;
+      _ueRerenderBlockBody(bid);
+      if(typeof window.ueToast === 'function') window.ueToast('Texto do banco inserido, com o autor e a fonte.', 'success');
     } else if(onde === 'banco'){
       if(typeof window.ueToast === 'function') window.ueToast('O texto foi gravado no bloco.', 'success');
     } else if(typeof window.ueToast === 'function'){
@@ -58514,6 +58680,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     _oqIaStatus(bid, 'Enviando…');
     const pedido = { acao: 'gerar', lingua: lingua, texto: fonte.texto, titulo: fonte.titulo, autor: fonte.autor || '', fonte: fonte.fonte || '', formato: 'soltos', n_itens: n };
     if(foco){ pedido.foco = foco; pedido.topicos = topicos.slice(0, 8); }
+    // texto igual ao do banco de textos: vai ligado a ele, a IA recebe o que já foi cobrado e a importação não copia
+    const doBanco = _laTxDoBanco(b.content.texto);
+    if(doBanco) pedido.reference_text_id = doBanco;
     const r = await window._gce.chamar(pedido);
     if(!r || !r.ok){ _oqIaBotao(bid, true); _oqIaStatus(bid, (r && r.mensagem) || 'A geração não começou.', 'erro'); return; }
     const blk = _ueGetBlock(bid);
@@ -63440,7 +63609,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
                 (_ehGram ? '<button type="button" class="btn btn-ghost btn-sm" onclick="grToggle(' + bid + ')" style="border-color:var(--accent-border);white-space:nowrap">Gerar explicação com IA</button>'
                          : '<button type="button" class="btn btn-ghost btn-sm" onclick="txIaToggle(' + bid + ')" style="border-color:var(--accent-border);white-space:nowrap">Escrever com a IA</button>'
                            + '<button type="button" class="btn btn-ghost btn-sm" onclick="txNoticiaToggle(' + bid + ')" style="white-space:nowrap">Notícia do Ubique News</button>'
-                           + '<button type="button" class="btn btn-ghost btn-sm" onclick="txAutenticoToggle(' + bid + ')" style="white-space:nowrap">Texto autêntico</button>') +
+                           + '<button type="button" class="btn btn-ghost btn-sm" onclick="txAutenticoToggle(' + bid + ')" style="white-space:nowrap">Texto autêntico</button>'
+                           + '<button type="button" class="btn btn-ghost btn-sm" onclick="txBancoToggle(' + bid + ')" style="white-space:nowrap">Banco de textos</button>') +
               '</div>' +
             '</div>' + (_ehGram ? window._grPainelHTML(bid, content)
                         : '<div id="tx-ia-slot-' + bid + '">' + (window._txIaAberto(bid) ? window._txPainelHTML(bid, 'leitura') : '') + '</div>')
