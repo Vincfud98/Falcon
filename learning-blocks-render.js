@@ -1857,8 +1857,15 @@
       // texto do Ubique News: o link da notícia, para o aluno continuar lendo lá; o resumo chama para a completa
       const o = texto.origem || {};
       const nid = o.modo === 'noticia' ? String(o.noticia_id || '') : '';
-      const link = /^[A-Za-z0-9_-]{8,64}$/.test(nid) ? '<a href="https://ubiquenews.com/noticia/' + encodeURIComponent(nid) + '" target="_blank" rel="noopener">'
+      let link = /^[A-Za-z0-9_-]{8,64}$/.test(nid) ? '<a href="https://ubiquenews.com/noticia/' + encodeURIComponent(nid) + '" target="_blank" rel="noopener">'
         + (o.parte === 'resumo' ? 'Ler a notícia completa no Ubique News' : 'Ver a notícia no Ubique News') + '</a>' : '';
+      // texto autêntico: o link da fonte e a licença, como a licença pede
+      if(o.modo === 'autentico' && /^https:\/\//.test(String(o.url || ''))){
+        const nome = esc(o.fonte_nome || 'a fonte'), lic = o.licenca || {};
+        link = '<a href="' + esc(o.url) + '" target="_blank" rel="noopener">' + (o.trecho ? 'Ler o texto completo em ' : 'Ver em ') + nome + '</a>'
+          + (lic.nome ? '. Licença: ' + (/^https:\/\//.test(String(lic.url || '')) ? '<a href="' + esc(lic.url) + '" target="_blank" rel="noopener">' + esc(lic.nome) + '</a>' : esc(lic.nome)) : '')
+          + (lic.aviso ? '. ' + esc(lic.aviso) : '');
+      }
       const fechado = !!opts.recolhido;
       return '<div class="la-texto' + (fechado ? ' is-recolhido' : '') + (dialogo ? ' is-dialogo' : '') + '" data-la-texto>'
         + '<div class="la-texto-head"><span class="la-texto-rot">Texto</span>'
