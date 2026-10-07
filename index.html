@@ -4701,6 +4701,15 @@ body.gallery-detail-open{overflow:hidden}
 .gabfs-ctl{display:inline-flex;gap:.25rem}
 .gabfs-ctl button{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:22px;padding:0 .4rem;background:transparent;border:1px solid var(--accent-border-soft,rgba(200,169,126,.18));border-radius:6px;color:var(--text-dim);font-family:var(--sans);font-size:.66rem;line-height:1;cursor:pointer;transition:all .2s var(--ease)}
 .gabfs-ctl button:hover{color:var(--accent);border-color:var(--accent-border)}
+/* sem comentário: a resposta escrita e o aviso de que o comentário vem depois */
+.qz-sat-gab{display:flex;align-items:baseline;gap:.5rem;margin-bottom:.45rem;font-family:var(--sans)}
+.qz-sat-gab-rot{font-size:.52rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
+.qz-sat-gab strong{font-weight:500;font-size:calc(.82rem * var(--gabfs,1));color:var(--accent)}
+.qz-sat-prep{
+  font-family:var(--sans);font-weight:300;font-size:calc(.7rem * var(--gabfs,1));
+  color:var(--text-mute);line-height:1.5;
+  padding:.5rem .7rem;border-left:2px solid var(--border);border-radius:0 4px 4px 0;margin-bottom:.5rem;
+}
 .qz-sat-reco{
   font-family:var(--sans);font-weight:300;font-size:calc(.68rem * var(--gabfs,1));font-style:italic;
   color:var(--text-mute);line-height:1.5;margin-top:.3rem;
@@ -22031,6 +22040,21 @@ function itemBadges(it, norm){
 
 // Y3: renderiza reference_text/reference_image individual da questão
 // (aparece ANTES do enunciado, dentro do card da questão)
+// Sem gabarito comentado, o painel lateral mostra a resposta por escrito e avisa
+// que o comentário ainda vem: as questões de prova entram no banco antes dos
+// fascículos, e o comentário chega com eles. "Em preparação" é o ESTADO de não
+// ter comentário, não um texto gravado: o primeiro comentário que entrar toma o lugar.
+function _qzSatGabaritoHTML(it){
+  if(!it) return '';
+  const opts = Array.isArray(it.options) ? it.options : [];
+  const key = String(it.key == null ? '' : it.key).trim();
+  if(!key) return '';
+  const ehCE = opts.length === 2 && /^certo$/i.test(String(opts[0])) && /^errado$/i.test(String(opts[1]));
+  const idx = opts.indexOf(it.key);
+  const rotulo = (!ehCE && idx >= 0) ? (String.fromCharCode(65 + idx) + ') ' + key) : key;
+  return '<div class="qz-sat-gab"><span class="qz-sat-gab-rot">Gabarito</span><strong>' + Util.esc(rotulo) + '</strong></div>'
+       + '<div class="qz-sat-prep">Comentário em preparação. O gabarito comentado desta questão ainda está sendo escrito.</div>';
+}
 function renderQuizItemReference(it){
   const LB = window.LearningBlocks || {};
   const sanitize = LB.sanitizeRichHTML ? LB.sanitizeRichHTML : function(x){ return x; };
@@ -22472,7 +22496,7 @@ Blocks.quiz = {
           detailEl.innerHTML = `<div class="qz-sat-item">
             ${activeItem.difficulty ? `<div class="qz-sat-diff">${Util.esc(diffLabel[activeItem.difficulty]||activeItem.difficulty)}</div>` : ''}
             ${(revealItem && activeItem.reference) ? `<div class="qz-sat-ref">${Util.esc(activeItem.reference)}</div>` : ''}
-            ${(revealItem && activeItem.comments) ? `<div class="qz-sat-comments">${_san(String(activeItem.comments))}</div>` : ''}
+            ${(revealItem && activeItem.comments) ? `<div class="qz-sat-comments">${_san(String(activeItem.comments))}</div>` : (revealItem ? _qzSatGabaritoHTML(activeItem) : '')}
             ${(revealItem && activeItem.recommendation) ? `<div class="qz-sat-reco">${Util.esc(activeItem.recommendation)}</div>` : ''}
             ${(topicChips||tagChips) ? `<div class="q-topics-tags" style="margin-top:.6rem">${topicChips}${tagChips}</div>` : ''}
           </div>`;
@@ -27615,6 +27639,11 @@ const Banco = {
   countsAll(){
     const out = {};
     Object.keys(Banco.cards).forEach(k => { out[k] = Banco.aggregateAll(k, {}).length; });
+    // as questões só do banco (sem unidade) não estão em bloco nenhum: entram na conta à parte
+    if(typeof _bankItemsForQuestions === 'function'){
+      try{ out.questions = (out.questions || 0) + _bankItemsForQuestions().filter(function(q){ return q && q._soBanco; }).length; }
+      catch(e){ console.warn('[banco] contagem das questões só do banco:', e); }
+    }
     return out;
   }
 };
@@ -54307,6 +54336,37 @@ function _bankBuiltData(){
         });
       });
     })();
+    // QUESTÕES SÓ DO BANCO: as que nenhuma unidade usa ainda (as provas inteiras
+    // entram no banco antes dos fascículos). Entram com appears_in vazio e a
+    // matéria da própria questão (questions.subject_id); o grupo é o do banco.
+    // Item de grupo que uma unidade usa só em parte também entra por aqui, e a
+    // seção de resultado junta os dois pedaços pelo grupo real (bq|id).
+    (function(){
+      const qb = window._QBank;
+      if(!(qb && Array.isArray(qb.questions) && typeof window.resolveBankGroup === 'function')) return;
+      const vistos = new Set(d.questions.map(function(q){ return String(q.id); }));
+      qb.questions.forEach(function(q){
+        if(!q || q.id == null) return;
+        if(q.type !== 'true_false' && q.type !== 'multiple_choice') return;
+        if(q.ativo === false) return;
+        const bg = window.resolveBankGroup(q.id);
+        if(!bg || !Array.isArray(bg.items) || !bg.items.length) return;
+        const sid = (q.subject_id != null && String(q.subject_id) !== '') ? String(q.subject_id) : null;
+        bg.items.forEach(function(it){
+          if(!it || it.id == null || vistos.has(String(it.id))) return;
+          vistos.add(String(it.id));
+          const item = Object.assign({}, it);
+          if(!item.statement) item.statement = it.assertion || '';
+          if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
+          item.bank_question_id = q.id;
+          item.appears_in = [];
+          item._soBanco = true;
+          item._subjectId = sid;
+          item._refTextForSearch = bg.reference_text || bg.enunciado || bg.description || '';
+          d.questions.push(item);
+        });
+      });
+    })();
     // discursivas
     (function(){
       const out = d.essays;
@@ -54386,11 +54446,30 @@ function _buildEssayBankFromBlocks(){
 // continua global (resolve qualquer questão por id pra renderizar).
 function _bankScopeFilter(items){
   const scope = (window.Banco && Banco.scopeUnitDbIdSet) ? Banco.scopeUnitDbIdSet() : null;
-  if(!scope) return items;
+  // Questão SÓ DO BANCO não tem unidade: passa pela matéria dela. O bloco da
+  // unidade já chega ao aluno filtrado pela RLS; o banco de questões não, então
+  // aqui vale a posse da matéria (_bankSubjectsVisiveis).
+  const visiveis = _bankSubjectsVisiveis();
+  if(!scope) return items.filter(function(q){ return !(q && q._soBanco) || visiveis.has(String(q._subjectId)); });
   return items.filter(function(q){
+    if(q && q._soBanco) return visiveis.has(String(q._subjectId));
     const ap = q.appears_in || [];
     return ap.some(function(a){ return a && scope.has(String(a.unit_id)); });
   });
+}
+// Matérias cujas questões só do banco o aluno pode ver: a matéria ativa, quando
+// está dentro de uma; senão, as matérias do escopo do Banco (o concurso ativo)
+// que ele POSSUI. Admin vê todas (Commerce.isOwned já diz sim para ele).
+function _bankSubjectsVisiveis(){
+  const out = new Set();
+  const subj = (typeof activeSubject === 'function') ? activeSubject() : null;
+  const cursos = subj ? [subj] : ((window.Banco && Banco.scopeCourses) ? (Banco.scopeCourses() || []) : []);
+  cursos.forEach(function(c){
+    if(!c || c._subjectId == null) return;
+    const dono = !(window.Commerce && Commerce.isOwned) || Commerce.isOwned(c.id);
+    if(dono) out.add(String(c._subjectId));
+  });
+  return out;
 }
 // Helper unificado: une QuestionBank.list() (legacy) com derivação dos
 // blocks (fonte de verdade hoje). Dedup por id pra evitar duplicatas.
@@ -54525,6 +54604,7 @@ function _bankApplyFilters(items, f, opts){
   //  - entre matérias é OU; dentro da matéria, os ramos também são OU.
   //  - "vincular um nó cobre tudo abaixo dele" (nó + descendentes).
   const _selNodes = [];
+  const _matInteiraSubj = new Set();   // matérias marcadas SEM ramo: a matéria inteira
   (f.materias || []).forEach(function(mid){
     const subs = ((f.mtopics && f.mtopics[mid]) || []).concat((f.msubs && f.msubs[mid]) || []);
     if(subs.length){ subs.forEach(function(n){ _selNodes.push(n); }); }
@@ -54532,7 +54612,11 @@ function _bankApplyFilters(items, f, opts){
     // (aba Estrutura), aplicar o nó-matéria por cima descartaria as questões da
     // unidade cujo vínculo com o edital não existe — o aluno pediu a unidade,
     // não o edital.
-    else if(mid !== f._lockedMateria && !_matComEstrutura.has(String(mid))){ _selNodes.push(mid); }
+    else if(mid !== f._lockedMateria && !_matComEstrutura.has(String(mid))){
+      _selNodes.push(mid);
+      const sid = _bankSubjectIdOfMateria(mid);
+      if(sid != null) _matInteiraSubj.add(String(sid));
+    }
   });
   if(_selNodes.length){
     const descSet = new Set();
@@ -54547,6 +54631,17 @@ function _bankApplyFilters(items, f, opts){
     const _tbq  = (window._QBank && window._QBank.topicsByQuestion) || {};
     const _tbqM = (window._QBank && window._QBank.manualTopicsByQuestion) || {};
     out = out.filter(function(q){
+      // 0) Matéria marcada INTEIRA (sem ramo): toda questão da matéria passa, com
+      // ou sem etiqueta — o aluno pediu a matéria, não um tema dela. A questão só
+      // do banco traz a matéria em si; a de unidade, pela matéria da unidade. Com
+      // um ramo marcado, vale a etiqueta (ou o vínculo da unidade), como antes.
+      if(_matInteiraSubj.size){
+        if(q._soBanco){ if(q._subjectId != null && _matInteiraSubj.has(String(q._subjectId))) return true; }
+        else {
+          const _uids = _bankQuestionUnitIds(q);
+          for(let u = 0; u < _uids.length; u++){ const cu = ctx[_uids[u]]; if(cu && cu.subject_id != null && _matInteiraSubj.has(String(cu.subject_id))) return true; }
+        }
+      }
       // 1) Campo explícito (raro mas suportado)
       if(q.edital_topic_id != null && descSet.has(String(q.edital_topic_id))) return true;
       // 1.5) A etiqueta direta questão→tópico. descSet já contém o nó
@@ -54633,7 +54728,11 @@ function _bankApplyFilters(items, f, opts){
   // (ex.: keyword "ONU" achou só a questão 3 → traz o grupo inteiro). As irmãs
   // compartilham o grupo (mesmo origin/ano), então não conflitam com os filtros.
   if(!isEssay && f.exibir === 'full' && out.length){
-    const _gk = function(q){ const u = (q && Array.isArray(q.appears_in) && q.appears_in[0]) || null; return u ? String(u.block_id)+'|'+String(u.group_id||'') : null; };
+    const _gk = function(q){
+      const u = (q && Array.isArray(q.appears_in) && q.appears_in[0]) || null;
+      if(u) return String(u.block_id)+'|'+String(u.group_id||'');
+      return (q && q._soBanco && q.bank_question_id != null) ? 'bq|' + String(q.bank_question_id) : null;   // só do banco: o grupo real
+    };
     const keys = new Set();
     out.forEach(function(q){ const k = _gk(q); if(k) keys.add(k); });
     if(keys.size){
@@ -55192,7 +55291,11 @@ Renderers.questionBank = function(route){
 // Resolve a matéria (subject) de uma unidade → {id, title, pos}.
 function _bankMateriaOfUnit(unitId, ctx, subjById){
   const c = unitId != null ? ctx[String(unitId)] : null;
-  const sid = (c && c.subject_id != null) ? String(c.subject_id) : '';
+  return _bankMateriaOfSubject(c && c.subject_id != null ? c.subject_id : null, subjById);
+}
+// A mesma ficha de matéria a partir do subjects.id (questão só do banco, sem unidade).
+function _bankMateriaOfSubject(subjectId, subjById){
+  const sid = (subjectId != null && String(subjectId) !== '') ? String(subjectId) : '';
   const s = sid ? subjById[sid] : null;
   return {
     id:    sid || '__none__',
@@ -55275,7 +55378,7 @@ function _bankBuildResultSections(filteredQuestions, mode){
     if(!(key in groupBuckets)){
       groupBuckets[key] = {
         meta: (bqid && _metaFromBank(bqid)) || originalGroupsMap[key] || { enunciado:'', reference_text:'', reference_image:'', origin:'' },
-        materia: _bankMateriaOfUnit(usage ? usage.unit_id : null, ctx, subjById),
+        materia: usage ? _bankMateriaOfUnit(usage.unit_id, ctx, subjById) : _bankMateriaOfSubject(q && q._subjectId, subjById),
         questions: []
       };
       groupKeys.push(key);
