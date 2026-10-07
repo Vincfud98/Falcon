@@ -13408,6 +13408,8 @@ window.TAG_REGISTRY = {
     reg('questoes.essay_criteria',   { monta: () => qsb.from('essay_criteria').select('*'), ordem: 'id', banco: true });
     reg('questoes.essay_answer_models', { monta: () => qsb.from('essay_answer_models').select('*'), ordem: 'id', banco: true });
     reg('questoes.question_edital_topics', { monta: () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), ordem: 'question_id', banco: true });
+    // A etiqueta POR ITEM (decisão do dono, 07/10/2026): o tema do edital mora no item C/E.
+    reg('questoes.tf_item_edital_topics', { monta: () => qsb.from('tf_item_edital_topics').select('tf_item_id, edital_topic_id, from_manual'), ordem: 'tf_item_id', banco: true });
     // blocos: recarga por diferença
     reg('conteudo.unit_blocks',     { recarregar: _atualizarBlocos });
   }
@@ -13643,7 +13645,7 @@ window.TAG_REGISTRY = {
       // primeira hidratação idêntica ao comportamento anterior.
       window._hydrateQBank = async function _hydrateQBank(){
         const qsb = window._sb.schema('questoes');
-        const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR, qetR] = await Promise.all([
+        const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR, qetR, tietR] = await Promise.all([
           _carregarTabela('questoes.questions', () => qsb.from('questions').select('*'), 'id', 'questions'),
           _carregarTabela('questoes.tf_items', () => qsb.from('tf_items').select('*'), 'id', 'tf_items'),
           _carregarTabela('questoes.tf_item_comments', () => qsb.from('tf_item_comments').select('*'), 'id', 'tf_item_comments'),
@@ -13660,6 +13662,9 @@ window.TAG_REGISTRY = {
           // tinham o vínculo indireto — o trabalho do admin era jogado fora e o
           // aluno via 13 de 25.
           _carregarTabela('questoes.question_edital_topics', () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), 'question_id', 'question_edital_topics'),
+          // A etiqueta POR ITEM (decisão do dono, 07/10/2026): nos C/E o tema vive em cada
+          // item (manual do admin ou herdado da unidade que usa o item); a da mãe é a união.
+          _carregarTabela('questoes.tf_item_edital_topics', () => qsb.from('tf_item_edital_topics').select('tf_item_id, edital_topic_id, from_manual'), 'tf_item_id', 'tf_item_edital_topics'),
         ]);
         // tf_item_comments, essay_criteria e essay_answer_models são EXTRAS:
         // se falharem, NÃO derrubam o banco — só ficam sem os dados extras.
@@ -13670,6 +13675,7 @@ window.TAG_REGISTRY = {
         // antes) — degrada, não quebra. Se este aviso aparecer com lista vazia
         // tendo dados no banco, falta policy de SELECT pra authenticated.
         if(qetR.error) console.warn('[hydrate qbank] question_edital_topics (extra) falhou:', qetR.error.message);
+        if(tietR.error) console.warn('[hydrate qbank] tf_item_edital_topics (extra) falhou:', tietR.error.message);
         // Tabelas essenciais para resolver as questões:
         const qErrs = [qR.error, tfR.error, mcR.error, rtR.error, qrtR.error].filter(Boolean);
         if(qErrs.length){
@@ -13686,6 +13692,7 @@ window.TAG_REGISTRY = {
           essayCriteria:        ecR.data  || [],
           essayAnswerModels:    eamR.data || [],
           questionEditalTopics: qetR.data || [],
+          tfItemEditalTopics:   tietR.data || [],
         };
         // Índice questão → tópicos (a etiqueta), pronto pro filtro consultar em
         // O(1). Montado UMA vez por hidratação, não a cada tecla no filtro.
@@ -13698,6 +13705,14 @@ window.TAG_REGISTRY = {
         });
         window._QBank.topicsByQuestion = _qet;
         window._QBank.manualTopicsByQuestion = _qetM;
+        // Índice item → temas (manual ou herdado da unidade: os dois são por item, logo exatos).
+        const _tbi = {};
+        (tietR.data || []).forEach(function(l){
+          if(!l || l.tf_item_id == null || l.edital_topic_id == null) return;
+          const k = String(l.tf_item_id);
+          (_tbi[k] = _tbi[k] || []).push(String(l.edital_topic_id));
+        });
+        window._QBank.topicsByItem = _tbi;
         // COMPLETO = este banco tem a plataforma inteira, e não só as questões
         // de uma unidade. As telas que CONTAM (Edital, Banco, Desempenho,
         // Simulados) só podem calcular com o banco completo — com um parcial
@@ -13710,6 +13725,7 @@ window.TAG_REGISTRY = {
           mc_options: (mcR.data||[]).length, reference_texts: (rtR.data||[]).length,
           essay_criteria: (ecR.data||[]).length, essay_answer_models: (eamR.data||[]).length,
           question_edital_topics: (qetR.data||[]).length,
+          tf_item_edital_topics: (tietR.data||[]).length,
         });
       };
 
@@ -13846,17 +13862,18 @@ window.TAG_REGISTRY = {
           // filtrar depois de saber os itens. Puxar a tabela toda aqui (149 kB)
           // desfaria metade do ganho.
           const itemIds = (tfR.data || []).map(function(t){ return String(t && t.id); }).filter(Boolean);
-          const [rtR, tfcR] = await Promise.all([
+          const [rtR, tfcR, tietR] = await Promise.all([
             rtIds.length ? qsb.from('reference_texts').select('*').in('id', rtIds) : Promise.resolve({ data: [], error: null }),
             itemIds.length ? qsb.from('tf_item_comments').select('*').in('tf_item_id', itemIds) : Promise.resolve({ data: [], error: null }),
+            itemIds.length ? qsb.from('tf_item_edital_topics').select('tf_item_id, edital_topic_id, from_manual').in('tf_item_id', itemIds) : Promise.resolve({ data: [], error: null }),
           ]);
           // Se o banco completo chegou enquanto buscávamos, ele manda — não
           // sobrescrevemos o todo com o pedaço.
           if(window._QBank && window._QBank.completo) return false;
           const base = window._QBank || {
             questions:[], tfItems:[], tfItemComments:[], mcOptions:[], referenceTexts:[],
-            questionRefTexts:[], essayCriteria:[], essayAnswerModels:[], questionEditalTopics:[],
-            topicsByQuestion:{}, completo:false
+            questionRefTexts:[], essayCriteria:[], essayAnswerModels:[], questionEditalTopics:[], tfItemEditalTopics:[],
+            topicsByQuestion:{}, topicsByItem:{}, completo:false
           };
           function junta(atual, novos, chaveDe){
             const vistos = new Set((atual || []).map(chaveDe));
@@ -13875,6 +13892,7 @@ window.TAG_REGISTRY = {
             essayCriteria:    junta(base.essayCriteria,    ecR.data,  porId),
             essayAnswerModels:junta(base.essayAnswerModels,eamR.data, porId),
             questionEditalTopics: junta(base.questionEditalTopics, qetR.data, function(x){ return String(x.question_id)+'|'+String(x.edital_topic_id); }),
+            tfItemEditalTopics:   junta(base.tfItemEditalTopics, tietR.data, function(x){ return String(x.tf_item_id)+'|'+String(x.edital_topic_id); }),
             completo: false                     // PARCIAL — a trava depende disto
           };
           const tbq = {}, tbqM = {};
@@ -13886,6 +13904,12 @@ window.TAG_REGISTRY = {
           });
           novo.topicsByQuestion = tbq;
           novo.manualTopicsByQuestion = tbqM;
+          const tbi = {};
+          (novo.tfItemEditalTopics || []).forEach(function(l){
+            if(!l || l.tf_item_id == null || l.edital_topic_id == null) return;
+            (tbi[String(l.tf_item_id)] = tbi[String(l.tf_item_id)] || []).push(String(l.edital_topic_id));
+          });
+          novo.topicsByItem = tbi;
           window._QBank = novo;               // objeto NOVO → caches se invalidam
           console.log('[qbank unidade] ✅', { unidade: chave, questoes: (qR.data||[]).length, afirmativas: (tfR.data||[]).length });
           return true;
@@ -54629,7 +54653,7 @@ function _bankApplyFilters(items, f, opts){
     // UNIÃO com o caminho indireto, não substituição: nada que aparecia
     // antes deixa de aparecer.
     const _tbq  = (window._QBank && window._QBank.topicsByQuestion) || {};
-    const _tbqM = (window._QBank && window._QBank.manualTopicsByQuestion) || {};
+    const _tbi  = (window._QBank && window._QBank.topicsByItem) || {};
     out = out.filter(function(q){
       // 0) Matéria marcada INTEIRA (sem ramo): toda questão da matéria passa, com
       // ou sem etiqueta — o aluno pediu a matéria, não um tema dela. A questão só
@@ -54647,16 +54671,14 @@ function _bankApplyFilters(items, f, opts){
       // 1.5) A etiqueta direta questão→tópico. descSet já contém o nó
       // escolhido + todos os descendentes (pai traz filhos; irmão não traz
       // irmão — a semântica que o produto quer).
-      // A etiqueta é gravada na QUESTÃO-MÃE. Nos C/E, a entrada daqui é o
-      // ITEM (q.id = tf_item) e a mãe viaja em q.bank_question_id.
-      // ITEM DE GRUPO: a etiqueta AUTOMÁTICA da mãe (from_unit) é a união das
-      // unidades que usam QUALQUER item do grupo — um item da Revolução
-      // Francesa apareceria em "Revoluções Inglesas" só porque outro item do
-      // mesmo grupo mora lá. Pro item vale apenas a marca MANUAL da mãe (o
-      // admin decidiu pelo grupo inteiro); a unidade do próprio item entra
-      // pelo caminho indireto (2), que já é por item.
+      // Nos C/E a entrada daqui é o ITEM (q.id = tf_item). Desde 07/10/2026 o
+      // tema mora no item (questoes.tf_item_edital_topics): a marca manual do
+      // admin ou a herdada da unidade que USA o item. A etiqueta da mãe é só a
+      // união dos itens — olhar nela traria o grupo inteiro (um item da
+      // Revolução Francesa aparecia em "Revolução Americana" porque outro item
+      // do mesmo grupo é de lá). Múltipla escolha e discursiva seguem na mãe.
       const ehItemDeGrupo = q.bank_question_id != null && String(q.bank_question_id) !== String(q.id);
-      const _direto = ehItemDeGrupo ? _tbqM[String(q.bank_question_id)] : _tbq[String(q.id)];
+      const _direto = ehItemDeGrupo ? _tbi[String(q.id)] : _tbq[String(q.id)];
       if(_direto){
         for(let d = 0; d < _direto.length; d++){
           if(descSet.has(_direto[d])) return true;
