@@ -3725,6 +3725,27 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
   outline:none;border-color:var(--accent);background:var(--accent-glow);
 }
 .bf-select:disabled{opacity:.55;cursor:not-allowed}
+/* Peça ao banco: pedido em linguagem natural; a IA monta os filtros. Segue .input/.input-group e .chip
+   da maquete saas-components (borda fina, fundo transparente, chips em caixa alta com espaçamento). */
+.bf-pedido{margin:0 0 1.2rem;padding:1rem 1.1rem;border:1px solid var(--accent-border-soft,var(--border));border-radius:var(--radius,6px);background:var(--accent-xlo,transparent)}
+.bf-pedido-head{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;margin-bottom:.6rem}
+.bf-pedido-title{font-family:var(--sans);font-weight:300;font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+.bf-pedido-sub{font-size:.8rem;color:var(--text-mute);font-weight:300}
+.bf-pedido-row{display:flex;gap:.6rem;align-items:stretch}
+.bf-pedido-input{flex:1;min-width:0;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:var(--radius,6px);padding:.75rem .95rem;font-family:var(--serif);font-size:.98rem;line-height:1.5;transition:border-color .25s ease, background .25s ease}
+.bf-pedido-input:focus{outline:none;border-color:var(--accent);background:var(--accent-glow)}
+.bf-pedido-input::placeholder{color:var(--text-mute);opacity:.75}
+.bf-pedido-btn{white-space:nowrap;display:inline-flex;align-items:center;gap:.45rem}
+.bf-pedido-btn[disabled]{opacity:.6;cursor:wait}
+.bf-pedido-msg{margin-top:.55rem;font-size:.82rem;color:var(--text-mute);min-height:1.1em}
+.bf-pedido-msg.is-erro{color:var(--red,#d47973)}
+.bf-pedido-entendi{margin:.9rem 0 0;font-size:.9rem;color:var(--text-dim)}
+.bf-pedido-chips{display:flex;gap:.45rem;flex-wrap:wrap;align-items:center;margin-top:.55rem}
+.bf-chip{display:inline-flex;align-items:center;gap:.45rem;padding:.32rem .72rem;border:1px solid var(--accent-border-soft,var(--border));border-radius:2px;font-family:var(--sans);font-weight:300;font-size:.64rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);background:var(--accent-xlo,transparent)}
+.bf-chip-x{cursor:pointer;opacity:.7;line-height:1;background:none;border:0;color:inherit;font:inherit;font-size:.9rem;padding:0}
+.bf-chip-x:hover{opacity:1}
+.bf-chip-limpar{cursor:pointer;background:none;border:0;color:var(--text-mute);font-family:var(--sans);font-size:.72rem;letter-spacing:.06em;text-decoration:underline;padding:0}
+@media (max-width:640px){.bf-pedido-row{flex-direction:column}}
 .bf-textarea{
   font-family:var(--serif);font-size:.95rem;line-height:1.6;resize:vertical;
   min-height:78px;
@@ -53821,6 +53842,124 @@ function _bankFiltersToQuery(f, applied){
   return out;
 }
 
+/* ═══ PEÇA AO BANCO (08/10/2026, ideia do dono) ═══════════════════════════════════
+   O aluno escreve o que quer em português. A Edge Function banco-pedido (Haiku, com o
+   edital das matérias dele em cache) devolve um FILTRO, não uma resposta: matérias (ids),
+   temas (códigos do edital), anos ou "N provas recentes", status, palavra literal, texto
+   para busca por significado. O app traduz em filtro do Banco, abre o endereço (o estado
+   do Banco É a URL) e mostra o que entendeu como chips; tirar um chip refaz o filtro sem
+   nova chamada. Nada aqui chama a IA sem o aluno pedir. */
+const _BF_PEDIDO_EXEMPLOS = [
+  'questões de PI sobre a China e as relações com o Brasil',
+  'só as que errei de HB sobre o Império',
+  'provas de 2022 em diante sobre meio ambiente',
+  'discursivas de Economia sobre inflação',
+  'questões do tema que acabei de estudar',
+  'estudei isto: cole um trecho do que você leu',
+  'as 5 provas mais recentes sobre a OMC',
+  'o que ainda não respondi de Geografia sobre urbanização',
+  'questões de História Mundial sobre a Guerra Fria',
+  'direitos humanos em PI, só provas recentes',
+  'questões sobre o MERCOSUL que eu chutei e acertei',
+  'revisar o que errei em Economia nas últimas três provas',
+];
+const _BF_STATUS_ROTULO = { unanswered:'não respondidas', answered:'já respondidas', right:'que acertei', wrong:'que errei', guess_right:'chutei e acertei', guess_wrong:'chutei e errei' };
+function _bankPedidoSessao(){ try { const s = sessionStorage.getItem('falcon_pedido_banco'); return s ? JSON.parse(s) : null; } catch(_){ return null; } }
+function _bankPedidoGuardar(obj){ try { if(obj) sessionStorage.setItem('falcon_pedido_banco', JSON.stringify(obj)); else sessionStorage.removeItem('falcon_pedido_banco'); } catch(_){} }
+// Assinatura do filtro (query sem a página p): os chips só valem enquanto a URL for a que o pedido abriu.
+function _bankPedidoAssinatura(query, isEssay){
+  const q = Object.assign({}, query || {}); delete q.p;
+  return (isEssay ? 'essays' : 'questions') + '|' + Object.keys(q).sort().map(function(k){ return k + '=' + String(q[k]); }).join('&');
+}
+// Raízes do edital por matéria e tópicos por código (só os do concurso da página).
+function _bankPedidoAux(examId){
+  const store = window.UbiqueStore;
+  const lista = function(n){ return (store && store[n] && store[n].list && store[n].list()) || []; };
+  const all = lista('edital_topics');
+  // raízes do concurso: edital cujo exam_id é o concurso, ou cujo nome o contém (mesma regra do painel)
+  let permitidos = null;
+  if(examId){
+    const xid = String(examId).toLowerCase(); permitidos = new Set();
+    lista('editais').forEach(function(e){ if((e.exam_id && String(e.exam_id).toLowerCase() === xid) || String(e.name || '').toLowerCase().indexOf(xid) >= 0) permitidos.add(String(e.id)); });
+  }
+  const byId = {}; all.forEach(function(t){ byId[String(t.id)] = t; });
+  const rootBySubject = {}, rootIds = new Set();
+  all.forEach(function(t){
+    if(!t || t.parent_id != null) return;
+    if(permitidos && !permitidos.has(String(t.edital_id))) return;
+    rootIds.add(String(t.id)); if(t.subject_id != null) rootBySubject[String(t.subject_id)] = String(t.id);
+  });
+  const byCode = {};
+  all.forEach(function(t){
+    let cur = t, depth = 0, guard = 0;
+    while(cur && cur.parent_id != null && guard++ < 30){ cur = byId[String(cur.parent_id)]; depth++; }
+    if(!cur || !rootIds.has(String(cur.id))) return;
+    const code = String(t.code || '').trim();
+    if(code) byCode[code] = { id: String(t.id), root: String(cur.id), depth: depth, title: t.title || '' };
+  });
+  return { rootBySubject: rootBySubject, byCode: byCode, byId: byId };
+}
+// A resposta da IA vira o filtro do Banco. Puro: dá para testar sem tela.
+function _bankPedidoParaFiltro(filtro, aux, anosDisponiveis){
+  filtro = filtro || {}; aux = aux || { rootBySubject:{}, byCode:{}, byId:{} };
+  const f = { keyword:'', exam:'', materias:[], modo:'edital', mtopics:{}, msubs:{}, mmods:{}, mchaps:{}, munits:{}, tags:[], origem:'', status:[], difficulty:'', anos:[], prioridade:'', exibir:'', org:'secao', aiSearch:false };
+  const addMat = function(root){ if(root && f.materias.indexOf(root) < 0) f.materias.push(root); };
+  (filtro.materias || []).forEach(function(sid){ addMat(aux.rootBySubject[String(sid)]); });
+  (filtro.temas || []).forEach(function(code){
+    const t = aux.byCode[String(code).trim()]; if(!t) return;
+    addMat(t.root);
+    if(t.depth === 0) return;                       // código da própria matéria: matéria inteira
+    const alvo = t.depth === 1 ? f.mtopics : f.msubs;
+    alvo[t.root] = alvo[t.root] || [];
+    if(alvo[t.root].indexOf(t.id) < 0) alvo[t.root].push(t.id);
+  });
+  const anos = (filtro.anos || []).map(String).filter(function(a){ return /^\d{4}$/.test(a); });
+  const rec = parseInt(filtro.recentes, 10) || 0;
+  if(rec > 0 && !anos.length) (anosDisponiveis || []).slice(0, rec).forEach(function(a){ anos.push(String(a)); });
+  f.anos = anos;
+  f.status = (filtro.status || []).filter(function(st){ return Object.prototype.hasOwnProperty.call(_BF_STATUS_ROTULO, st); });
+  const sem = String(filtro.semantica || '').trim(), pal = String(filtro.palavras || '').trim();
+  if(sem){ f.keyword = sem; f.aiSearch = true; } else if(pal){ f.keyword = pal; }
+  return f;
+}
+// Os chips do que foi entendido, lidos do PRÓPRIO filtro (o filtro é a interpretação).
+function _bankPedidoChips(f, isEssay){
+  const store = window.UbiqueStore;
+  const byId = {}; ((store && store.edital_topics && store.edital_topics.list && store.edital_topics.list()) || []).forEach(function(t){ byId[String(t.id)] = t; });
+  const nome = function(id){ const t = byId[String(id)]; return t ? ((t.code ? t.code + ' · ' : '') + (t.title || t.name || id)) : String(id); };
+  const out = [];
+  (f.materias || []).forEach(function(mid){ out.push({ tipo:'mat', valor:String(mid), rotulo: nome(mid) }); });
+  (f.materias || []).forEach(function(mid){
+    ((f.mtopics && f.mtopics[mid]) || []).concat((f.msubs && f.msubs[mid]) || []).forEach(function(tid){ out.push({ tipo:'tema', valor:String(tid), rotulo: nome(tid) }); });
+  });
+  (f.anos || []).forEach(function(a){ out.push({ tipo:'ano', valor:String(a), rotulo: String(a) }); });
+  (f.status || []).forEach(function(st){ out.push({ tipo:'status', valor:st, rotulo: _BF_STATUS_ROTULO[st] || st }); });
+  if(f.keyword) out.push({ tipo:'k', valor:'*', rotulo: (f.aiSearch ? 'por significado: ' : 'palavra: ') + String(f.keyword).slice(0, 60) });
+  return out;
+}
+function _renderBankPedido(f, isEssay, route){
+  const sess = _bankPedidoSessao();
+  const vale = !!(sess && sess.assinatura === _bankPedidoAssinatura((route && route.query) || {}, isEssay));
+  const chips = vale ? _bankPedidoChips(f, isEssay) : [];
+  const ico = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>';
+  return '<section class="bf-pedido" data-bf-pedido>'+
+    '<div class="bf-pedido-head"><span class="bf-pedido-title">Peça ao banco</span>'+
+      '<span class="bf-pedido-sub">Escreva o que você quer, em português. A IA monta os filtros e as '+(isEssay ? 'discursivas' : 'questões')+' aparecem embaixo.</span></div>'+
+    '<form class="bf-pedido-row" data-bf-pedido-form onsubmit="return false">'+
+      '<input class="bf-pedido-input" data-bf-pedido-input type="text" maxlength="2000" autocomplete="off" placeholder="'+Util.attr(_BF_PEDIDO_EXEMPLOS[0])+'" value="'+Util.attr(vale && sess.pedido ? sess.pedido : '')+'">'+
+      '<button type="submit" class="btn-primary bf-pedido-btn" data-bf-pedido-btn>'+ico+' Pedir '+
+        '<span class="ubt-cost" title="Custo em UbiTokens por pedido, proporcional ao tamanho. Debitado ao pedir."><span class="ubt-sym">ⓤ</span> ~0,01</span>'+
+      '</button>'+
+    '</form>'+
+    '<div class="bf-pedido-msg" data-bf-pedido-msg></div>'+
+    (vale ? '<p class="bf-pedido-entendi">'+Util.esc(sess.entendi || 'Entendi assim:')+'</p>'+
+      '<div class="bf-pedido-chips">'+
+        chips.map(function(c){ return '<span class="bf-chip">'+Util.esc(c.rotulo)+' <button type="button" class="bf-chip-x" data-bf-chip="'+Util.attr(c.tipo+':'+c.valor)+'" title="Tirar este filtro" aria-label="Tirar '+Util.attr(c.rotulo)+'">×</button></span>'; }).join('')+
+        '<button type="button" class="bf-chip-limpar" data-bf-pedido-limpar>limpar tudo</button>'+
+      '</div>' : '')+
+  '</section>';
+}
+
 /* Ano da questão. Prioriza a COLUNA real `year` (cadastro); só recorre ao
    código `origin` (ex.: "#15-1/2024" → 2024) como reserva (questões antigas
    sem `year` preenchido). Inéditas sem nenhum dos dois → null. */
@@ -55265,7 +55404,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
 Renderers.questionBank = function(route){
   const bankItems = _bankItemsForQuestions();
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
-  const panelHtml = _renderBankFilterPanel(bankItems, f, false);
+  const panelHtml = _renderBankPedido(f, false, route) + _renderBankFilterPanel(bankItems, f, false);
 
   // Auto-rescan silenciosa SEMPRE na abertura do banco — idempotente.
   // Garante que questões adicionadas no admin (locally) que NÃO tenham
@@ -56603,7 +56742,7 @@ Renderers.questionBank.mount = function(stageEl, route){
 Renderers.essayBank = function(route){
   const bankItems = _bankItemsForEssays();
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
-  const panelHtml = _renderBankFilterPanel(bankItems, f, true);
+  const panelHtml = _renderBankPedido(f, true, route) + _renderBankFilterPanel(bankItems, f, true);
 
   const hero = '<div class="hero">'+
     '<span class="s-label" data-a="1">Banco do curso</span>'+
@@ -56711,7 +56850,124 @@ Renderers.essayBank.mount = function(stageEl, route){
 
 /* Wire up: textarea/select changes não disparam Router.go (evita
    re-render a cada keystroke). Só o botão "Buscar" e "Limpar" navegam. */
+// Anos que existem no banco desta página, do mais novo ao mais velho (para "N provas recentes").
+function _bankAnosDisponiveis(isEssay){
+  const itens = isEssay ? _bankItemsForEssays() : _bankItemsForQuestions();
+  const set = {};
+  itens.forEach(function(q){ const y = _bankQuestionYear(q); if(y) set[String(y)] = true; });
+  return Object.keys(set).map(Number).sort(function(a, b){ return b - a; });
+}
+// Contexto do aluno para a IA: unidade atual (null no Banco) e as 3 últimas lidas, com os temas do
+// edital ligados a cada uma (edital_topic_units). Só títulos e códigos; nada pessoal.
+function _bankPedidoContexto(){
+  const store = window.UbiqueStore;
+  const tu = (store && store.edital_topic_units && store.edital_topic_units.list && store.edital_topic_units.list()) || [];
+  const byId = {}; ((store && store.edital_topics && store.edital_topics.list && store.edital_topics.list()) || []).forEach(function(t){ byId[String(t.id)] = t; });
+  const temasDa = function(unitId){
+    const a = String(unitId), b = a.replace(/^u/, ''), out = [];
+    tu.forEach(function(r){ const u = String(r.unit_id); if(u !== a && u !== b) return; const t = byId[String(r.topic_id)]; if(t && t.code && out.indexOf(String(t.code)) < 0) out.push(String(t.code)); });
+    return out.slice(0, 8);
+  };
+  const desc = function(unitId){
+    const m = (typeof _unitMetaById === 'function') ? _unitMetaById(unitId) : null; if(!m) return null;
+    return { titulo: ((m.sigla ? m.sigla + ' ' : '') + (m.number ? m.number + ' ' : '') + (m.title || '')).trim(), materia_id: m.subjectId, temas: temasDa(unitId) };
+  };
+  const atualId = window._currentUnitId ? String(window._currentUnitId) : null;
+  let views = {}; try { views = (Store.get() || {}).unitViews || {}; } catch(_){ views = {}; }
+  const recentes = Object.keys(views).sort(function(a, b){ return ((views[b] || {}).lastSeenAt || 0) - ((views[a] || {}).lastSeenAt || 0); }).slice(0, 3).map(desc).filter(Boolean);
+  return { unidade_atual: atualId ? desc(atualId) : null, recentes: recentes };
+}
+// Exemplos girando no campo, com efeito de digitação. Para ao focar ou digitar, e não roda quando o
+// sistema pede menos movimento.
+function _bankPedidoPlaceholder(input){
+  if(!input) return;
+  const lista = _BF_PEDIDO_EXEMPLOS;
+  let reduzido = false; try { reduzido = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches); } catch(_){}
+  if(reduzido || input.value){ input.setAttribute('placeholder', lista[0]); return; }
+  let i = Math.floor(Math.random() * lista.length), pos = 0, apagando = false, timer = null, parado = false;
+  const parar = function(){ parado = true; if(timer) clearTimeout(timer); timer = null; input.setAttribute('placeholder', 'Escreva o que você quer encontrar…'); };
+  const passo = function(){
+    if(parado || !input.isConnected) return;
+    const frase = lista[i % lista.length];
+    if(!apagando){
+      pos++; input.setAttribute('placeholder', frase.slice(0, pos));
+      if(pos >= frase.length){ apagando = true; timer = setTimeout(passo, 2400); return; }
+      timer = setTimeout(passo, 34 + Math.random() * 40);
+    } else {
+      pos = Math.max(0, pos - 3); input.setAttribute('placeholder', frase.slice(0, pos));
+      if(pos === 0){ apagando = false; i++; timer = setTimeout(passo, 320); return; }
+      timer = setTimeout(passo, 16);
+    }
+  };
+  input.addEventListener('focus', parar); input.addEventListener('input', parar);
+  timer = setTimeout(passo, 500);
+}
+// Tirar um chip: refaz o filtro a partir da URL, sem nova chamada à IA.
+function _bankPedidoRemover(tipo, valor, route, isEssay){
+  const f = _bankApplyLockContext(_bankParseFilters((route && route.query) || {}));
+  const sem = function(arr, v){ return (arr || []).filter(function(x){ return String(x) !== String(v); }); };
+  if(tipo === 'mat'){ f.materias = sem(f.materias, valor); if(f.mtopics) delete f.mtopics[valor]; if(f.msubs) delete f.msubs[valor]; }
+  else if(tipo === 'tema'){ (f.materias || []).forEach(function(mid){ if(f.mtopics && f.mtopics[mid]) f.mtopics[mid] = sem(f.mtopics[mid], valor); if(f.msubs && f.msubs[mid]) f.msubs[mid] = sem(f.msubs[mid], valor); }); }
+  else if(tipo === 'ano'){ f.anos = sem(f.anos, valor); }
+  else if(tipo === 'status'){ f.status = sem(f.status, valor); }
+  else if(tipo === 'k'){ f.keyword = ''; f.aiSearch = false; }
+  const q = _bankFiltersToQuery(f, true);
+  const sess = _bankPedidoSessao() || {};
+  _bankPedidoGuardar({ pedido: sess.pedido || '', entendi: sess.entendi || '', assinatura: _bankPedidoAssinatura(q, isEssay) });
+  Router.go('/banco/' + (isEssay ? 'essays' : 'questions') + Router.querystring(q));
+}
+function _wireBankPedido(stageEl, route, isEssay){
+  const sec = stageEl.querySelector('[data-bf-pedido]'); if(!sec) return;
+  const form = sec.querySelector('[data-bf-pedido-form]'), input = sec.querySelector('[data-bf-pedido-input]');
+  const btn = sec.querySelector('[data-bf-pedido-btn]'), msg = sec.querySelector('[data-bf-pedido-msg]');
+  const cardKey = isEssay ? 'essays' : 'questions';
+  _bankPedidoPlaceholder(input);
+  const diga = function(t, erro){ if(msg){ msg.textContent = t || ''; msg.classList.toggle('is-erro', !!erro); } };
+  let emVoo = false;
+  if(form) form.addEventListener('submit', function(e){
+    e.preventDefault();
+    const pedido = String((input && input.value) || '').trim();
+    if(!pedido){ if(input) input.focus(); return; }
+    if(emVoo) return;
+    emVoo = true; if(btn) btn.disabled = true; diga('Entendendo o pedido…');
+    const ctx = _bankPedidoContexto();
+    window._sb.functions.invoke('banco-pedido', { body: { pedido: pedido, pagina: cardKey, unidade_atual: ctx.unidade_atual, recentes: ctx.recentes } })
+      .then(async function(r){
+        if(r && r.error){
+          let det = ''; try { const j = await r.error.context.json(); det = (j && (j.error || j.message)) || ''; } catch(_){}
+          throw new Error(det || r.error.message || 'a função não respondeu');
+        }
+        const d = (r && r.data) || {};
+        if(d.ubt_error === 'saldo_insuficiente'){ diga('Saldo de UbiTokens insuficiente para pedir. Adicione mais na sua Carteira (Minha Conta) ou aguarde a renovação.', true); return; }
+        if(d.error) throw new Error(d.error);
+        if(window.UbtWallet) UbtWallet.load();
+        if(d.nao_entendi || !d.filtro){
+          diga((d.entendi ? 'Não consegui montar um filtro: ' + d.entendi + ' ' : 'Não entendi o pedido. ') + 'Diga a matéria e o assunto, por exemplo "questões de PI sobre a China".', true);
+          return;
+        }
+        const base = _bankApplyLockContext(_bankParseFilters((route && route.query) || {}));
+        const f = _bankPedidoParaFiltro(d.filtro, _bankPedidoAux(base.exam || null), _bankAnosDisponiveis(isEssay));
+        if(base.exam) f.exam = base.exam;
+        if(base._lockedMateria) f.materias = [base._lockedMateria];   // dentro de uma matéria, a matéria é a travada
+        const destino = (d.filtro.pagina === 'essays' || d.filtro.pagina === 'questions') ? d.filtro.pagina : cardKey;
+        const q = _bankFiltersToQuery(f, true);
+        _bankPedidoGuardar({ pedido: pedido, entendi: d.entendi || '', assinatura: _bankPedidoAssinatura(q, destino === 'essays') });
+        Router.go('/banco/' + destino + Router.querystring(q));
+      })
+      .catch(function(err){
+        console.warn('[banco-pedido]', err);
+        diga('Não consegui pedir agora: ' + (err && err.message ? err.message : err) + '. Tente de novo.', true);
+      })
+      .then(function(){ emVoo = false; if(btn) btn.disabled = false; });
+  });
+  sec.querySelectorAll('[data-bf-chip]').forEach(function(x){
+    x.addEventListener('click', function(){ const v = x.getAttribute('data-bf-chip') || ''; const i = v.indexOf(':'); _bankPedidoRemover(v.slice(0, i), v.slice(i + 1), route, isEssay); });
+  });
+  const limpar = sec.querySelector('[data-bf-pedido-limpar]');
+  if(limpar) limpar.addEventListener('click', function(){ _bankPedidoGuardar(null); Router.go('/banco/' + cardKey); });
+}
 function _wireBankFilterPanel(stageEl, route, isEssay){
+  _wireBankPedido(stageEl, route, isEssay);
   const panel = stageEl.querySelector('#bankFilterPanel');
   if(!panel) return;
   const cardKey = isEssay ? 'essays' : 'questions';
