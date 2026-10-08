@@ -53799,6 +53799,9 @@ function _bankParseFilters(routeQuery){
     org:       (q.org === 'flat' || q.org === 'mix') ? q.org : 'secao',
     // Priorizar por ano da questão: 'rec' (mais recentes) | 'ant' (mais antigas) | '' (indiferente).
     prioridade: (q.pri === 'rec' || q.pri === 'ant') ? q.pri : '',
+    // Quantidade máxima de questões (0 = sem limite). Vem do "Peça ao banco": "as 10 mais recentes"
+    // = 10 questões, da mais nova para a mais antiga (prioridade rec), e não 10 provas.
+    quantidade: Math.max(0, Math.min(500, parseInt(q.n, 10) || 0)),
     anos:      splitCSV(q.anos),          // ['2024','2023',...] — vazio = todos
     // Exibir: 'full' (grupos completos) | '' (apenas as questões que correspondem, padrão).
     exibir:    (q.exib === 'full') ? 'full' : '',
@@ -53835,6 +53838,7 @@ function _bankFiltersToQuery(f, applied){
   if(f.difficulty)  out.diff = f.difficulty;
   if(f.org && f.org !== 'secao') out.org = f.org;  // 'secao' é o padrão (implícito)
   if(f.prioridade) out.pri = f.prioridade;          // '' (indiferente) é o padrão
+  if(f.quantidade > 0) out.n = String(f.quantidade); // limite de questões (Peça ao banco)
   if(f.anos && f.anos.length) out.anos = f.anos.join(',');
   if(f.exibir === 'full') out.exib = 'full';        // '' (apenas correspondentes) é o padrão
   if(f.aiSearch)    out.ai = '1';                    // busca semântica (IA)
@@ -53902,7 +53906,7 @@ function _bankPedidoAux(examId){
 // A resposta da IA vira o filtro do Banco. Puro: dá para testar sem tela.
 function _bankPedidoParaFiltro(filtro, aux, anosDisponiveis){
   filtro = filtro || {}; aux = aux || { rootBySubject:{}, byCode:{}, byId:{} };
-  const f = { keyword:'', exam:'', materias:[], modo:'edital', mtopics:{}, msubs:{}, mmods:{}, mchaps:{}, munits:{}, tags:[], origem:'', status:[], difficulty:'', anos:[], prioridade:'', exibir:'', org:'secao', aiSearch:false };
+  const f = { keyword:'', exam:'', materias:[], modo:'edital', mtopics:{}, msubs:{}, mmods:{}, mchaps:{}, munits:{}, tags:[], origem:'', status:[], difficulty:'', anos:[], prioridade:'', exibir:'', org:'secao', aiSearch:false, quantidade:0 };
   const addMat = function(root){ if(root && f.materias.indexOf(root) < 0) f.materias.push(root); };
   (filtro.materias || []).forEach(function(sid){ addMat(aux.rootBySubject[String(sid)]); });
   (filtro.temas || []).forEach(function(code){
@@ -53920,6 +53924,11 @@ function _bankPedidoParaFiltro(filtro, aux, anosDisponiveis){
   f.status = (filtro.status || []).filter(function(st){ return Object.prototype.hasOwnProperty.call(_BF_STATUS_ROTULO, st); });
   const sem = String(filtro.semantica || '').trim(), pal = String(filtro.palavras || '').trim();
   if(sem){ f.keyword = sem; f.aiSearch = true; } else if(pal){ f.keyword = pal; }
+  // "as 10 questões mais recentes" = limite de 10 + mais recentes primeiro ("10 provas" é outra coisa: anos)
+  const qtd = parseInt(filtro.quantidade, 10) || 0;
+  if(qtd > 0) f.quantidade = Math.min(500, qtd);
+  if(filtro.ordem === 'recentes') f.prioridade = 'rec'; else if(filtro.ordem === 'antigas') f.prioridade = 'ant';
+  if(f.quantidade > 0 && !f.prioridade) f.prioridade = 'rec';
   return f;
 }
 // Os chips do que foi entendido, lidos do PRÓPRIO filtro (o filtro é a interpretação).
@@ -53935,6 +53944,9 @@ function _bankPedidoChips(f, isEssay){
   (f.anos || []).forEach(function(a){ out.push({ tipo:'ano', valor:String(a), rotulo: String(a) }); });
   (f.status || []).forEach(function(st){ out.push({ tipo:'status', valor:st, rotulo: _BF_STATUS_ROTULO[st] || st }); });
   if(f.keyword) out.push({ tipo:'k', valor:'*', rotulo: (f.aiSearch ? 'por significado: ' : 'palavra: ') + String(f.keyword).slice(0, 60) });
+  if(f.quantidade > 0) out.push({ tipo:'n', valor:String(f.quantidade), rotulo: f.quantidade + (f.quantidade === 1 ? ' questão' : ' questões') });
+  if(f.prioridade === 'rec') out.push({ tipo:'pri', valor:'rec', rotulo:'mais recentes primeiro' });
+  else if(f.prioridade === 'ant') out.push({ tipo:'pri', valor:'ant', rotulo:'mais antigas primeiro' });
   return out;
 }
 function _renderBankPedido(f, isEssay, route){
@@ -54977,6 +54989,9 @@ function _bankApplyFilters(items, f, opts){
       out = [];  // enquanto carrega; o render mostra "Buscando com IA…" e re-renderiza ao concluir
     }
   }
+  // Quantidade (Peça ao banco): corta DEPOIS de filtrar e ordenar, para "as 10 mais recentes" serem
+  // as 10 primeiras da ordem pedida.
+  if(f.quantidade > 0) out = out.slice(0, f.quantidade);
   return out;
 }
 
@@ -56911,6 +56926,8 @@ function _bankPedidoRemover(tipo, valor, route, isEssay){
   else if(tipo === 'ano'){ f.anos = sem(f.anos, valor); }
   else if(tipo === 'status'){ f.status = sem(f.status, valor); }
   else if(tipo === 'k'){ f.keyword = ''; f.aiSearch = false; }
+  else if(tipo === 'n'){ f.quantidade = 0; }
+  else if(tipo === 'pri'){ f.prioridade = ''; }
   const q = _bankFiltersToQuery(f, true);
   const sess = _bankPedidoSessao() || {};
   _bankPedidoGuardar({ pedido: sess.pedido || '', entendi: sess.entendi || '', assinatura: _bankPedidoAssinatura(q, isEssay) });
@@ -57069,7 +57086,8 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       exibir:      (panel.querySelector('input[name="bfexib"]:checked')||{}).value || '',
       org:         (panel.querySelector('input[name="bforg"]:checked')||{}).value || 'secao',
       // preserva o modo IA atual (a repintura por radio não pode perdê-lo)
-      aiSearch:    !!(route && route.query && route.query.ai === '1')
+      aiSearch:    !!(route && route.query && route.query.ai === '1'),
+      quantidade:  Math.max(0, parseInt(route && route.query && route.query.n, 10) || 0)
     };
   }
   function apply(){
