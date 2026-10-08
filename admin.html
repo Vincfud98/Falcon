@@ -30358,51 +30358,75 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
 
   // Vetoriza as questões do banco que ainda não têm vetor (busca por significado do aluno e do tutor).
-  // A Edge Function embed-questions, chamada sem id, pega até 300 pendentes por vez e grava UM vetor por
-  // questão, com o hash do texto (re-rodar não custa nada). Aqui chamamos em laço até ela dizer que não há
-  // mais. Achado de 08/10/2026: só o salvar do modal vetorizava; 1087 de 1198 questões estavam sem vetor.
+  // O botão calcula quem falta lendo as duas tabelas em páginas de 1000 (o Supabase corta em 1000 linhas:
+  // o modo de lote da própria Edge Function embed-questions cai nessa armadilha e nunca vê a questão 1001
+  // em diante) e manda os ids explicitamente, em lotes de 100. Cada questão vira UM vetor, com o hash do
+  // texto: re-rodar não custa nada. Achado de 08/10/2026: só o salvar do modal vetorizava; 1087 de 1198
+  // questões estavam sem vetor.
   async function _qVectorizePending(){
     const btn = document.getElementById('qVectorBtn');
     const msg = document.getElementById('qVectorMsg');
+    const VERDE = 'var(--green,#7cb87c)', VERMELHO = 'var(--red,#d47973)';
     const diga = function(t, cor){ if(msg){ msg.textContent = t; msg.style.color = cor || 'var(--text-mute)'; } };
     if(btn){ btn.disabled = true; btn.textContent = 'Vetorizando…'; }
     let total = 0, lote = 0;
     try {
-      const pend0 = await _qVectorPendentes();
-      if(pend0 === 0){ diga('Nada a fazer: todas as questões já têm vetor.', 'var(--green,#7cb87c)'); return; }
-      diga((pend0 == null ? 'Vetorizando' : 'Pendentes: ' + pend0 + '. Vetorizando') + ' em lotes de 300…');
-      for(let i = 0; i < 60; i++){
-        lote++;
-        const { data, error } = await supabase.functions.invoke('embed-questions', { body: { limit: 300 } });
-        if(error) throw error;
-        if(data && data.error) throw new Error(data.detail || data.error);
-        const n = (data && Number(data.embedded)) || 0;
-        total += n;
-        diga('Lote ' + lote + ': ' + n + ' questões. Total até agora: ' + total + (pend0 != null ? ' de ' + pend0 : '') + '…');
-        if(n === 0) break;
+      diga('Contando o que falta…');
+      const todas = (await _qTodasAsLinhas('questions', 'id')).map(String);
+      let feitas = null;
+      try { feitas = await _qTodasAsLinhas('question_embeddings', 'question_id'); }
+      catch(e){ console.warn('[vetorizar questões] sem leitura da tabela de vetores (falta a policy do admin)', e); }
+      if(feitas){
+        const done = new Set(feitas.map(String));
+        const pendentes = todas.filter(function(id){ return !done.has(id); });
+        if(!pendentes.length){ diga('Nada a fazer: todas as ' + todas.length + ' questões já têm vetor.', VERDE); return; }
+        const lotes = Math.ceil(pendentes.length / 100);
+        diga('Pendentes: ' + pendentes.length + ' de ' + todas.length + '. Vetorizando em ' + lotes + ' lote(s) de até 100…');
+        for(let i = 0; i < pendentes.length; i += 100){
+          lote++;
+          const pedaco = pendentes.slice(i, i + 100);
+          const { data, error } = await supabase.functions.invoke('embed-questions', { body: { question_ids: pedaco } });
+          if(error) throw error;
+          if(data && data.error) throw new Error(data.detail || data.error);
+          total += (data && Number(data.embedded)) || 0;
+          diga('Lote ' + lote + ' de ' + lotes + ': ' + total + ' vetorizadas até agora…');
+        }
+      } else {
+        // Sem leitura da tabela de vetores, a função escolhe sozinha (até 300 por chamada; ela só enxerga as
+        // primeiras 1000 questões). Roda até ela dizer que não há mais.
+        for(let i = 0; i < 60; i++){
+          lote++;
+          const { data, error } = await supabase.functions.invoke('embed-questions', { body: { limit: 300 } });
+          if(error) throw error;
+          if(data && data.error) throw new Error(data.detail || data.error);
+          const n = (data && Number(data.embedded)) || 0;
+          total += n;
+          diga('Lote ' + lote + ': ' + n + ' questões. Total até agora: ' + total + '…');
+          if(n === 0) break;
+        }
       }
-      const restam = await _qVectorPendentes();
-      if(total === 0) diga('Nada a fazer: a função não encontrou questão sem vetor.' + (restam == null ? ' (Para ver a contagem exata aqui, o admin precisa da policy de leitura da tabela de vetores.)' : ''), 'var(--green,#7cb87c)');
-      else diga('Pronto: ' + total + ' questões vetorizadas.' + (restam == null ? '' : (restam ? ' Restam ' + restam + ' sem vetor: questões sem texto para vetorizar.' : ' Nenhuma pendente.')), 'var(--green,#7cb87c)');
+      let restam = null;
+      try { const d2 = new Set((await _qTodasAsLinhas('question_embeddings', 'question_id')).map(String)); restam = todas.filter(function(id){ return !d2.has(id); }).length; } catch(_){ }
+      if(total === 0 && restam) diga('A função não vetorizou nada, mas ' + restam + ' questões seguem sem vetor: podem estar sem texto. Veja o console.', VERMELHO);
+      else diga('Pronto: ' + total + ' questões vetorizadas.' + (restam == null ? '' : (restam ? ' Restam ' + restam + ' sem vetor: questões sem texto para vetorizar.' : ' Nenhuma pendente.')), VERDE);
     } catch(e){
       console.warn('[vetorizar questões]', e);
-      diga('Erro depois de ' + total + ' vetorizadas: ' + (e && e.message ? e.message : e) + '. Clique de novo para continuar de onde parou.', 'var(--red,#d47973)');
+      diga('Erro depois de ' + total + ' vetorizadas: ' + (e && e.message ? e.message : e) + '. Clique de novo para continuar de onde parou.', VERMELHO);
     } finally {
       if(btn){ btn.disabled = false; btn.textContent = 'Vetorizar questões pendentes'; }
     }
   }
-  // Quantas questões do banco ainda não têm vetor (conta no banco, não no cache). null se não der para contar.
-  async function _qVectorPendentes(){
-    try {
-      const [q, e] = await Promise.all([
-        questoes().from('questions').select('id', { count: 'exact', head: true }),
-        questoes().from('question_embeddings').select('question_id', { count: 'exact', head: true }),
-      ]);
-      if(q.error || e.error) throw (q.error || e.error);
-      // Sem policy de leitura, a tabela de vetores devolve 0 linhas SEM erro (RLS): aí não dá para contar.
-      if((q.count || 0) > 0 && !(e.count > 0)) return null;
-      return Math.max(0, (q.count || 0) - (e.count || 0));
-    } catch(err){ console.warn('[vetorizar questões] contagem', err); return null; }
+  // Todas as linhas de uma coluna, em páginas de 1000 (o Supabase corta em 1000 por pedido).
+  async function _qTodasAsLinhas(tabela, coluna){
+    const out = [], PAG = 1000;
+    for(let de = 0; ; de += PAG){
+      const r = await questoes().from(tabela).select(coluna).order(coluna).range(de, de + PAG - 1);
+      if(r.error) throw r.error;
+      const rows = r.data || [];
+      rows.forEach(function(x){ out.push(x[coluna]); });
+      if(rows.length < PAG) break;
+    }
+    return out;
   }
   // Vetoriza uma lista de questões recém-importadas, em pedaços de 100, sem travar quem chamou.
   // Se falhar, o botão "Vetorizar questões pendentes" (IA → Conhecimento → Ingestão) completa.
