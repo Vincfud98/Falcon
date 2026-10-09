@@ -822,7 +822,11 @@
           // referenceTexts) e monta o shape do renderer. Espelho do
           // _resolveEssayItem do index.html — bugs 2/3/4 fix.
           if(rawItem && rawItem.bank_question_id){
-            const bank = (global && global._QBank) || {};
+            // No admin, a discursiva vem dos caches do editor (global.resolveBankEssayRaw, no mesmo formato
+            // do _QBank); sem isso o preview procurava no _QBank, que só existe no app do aluno, e a
+            // discursiva do banco aparecia vazia (09/10/2026). No app do aluno segue o _QBank.
+            const bank = (typeof global.resolveBankEssayRaw === 'function' && global.resolveBankEssayRaw(rawItem.bank_question_id)) ||
+                         (global && global._QBank) || {};
             const q = (bank.questions || []).find(function(x){ return String(x.id) === String(rawItem.bank_question_id); });
             if(!q) return rawItem;
             const crits = (bank.essayCriteria || [])
@@ -1015,11 +1019,9 @@
             '<div style="font-family:var(--serif);font-size:.95rem;color:var(--text);line-height:1.65;margin:0 0 .8rem;padding:.5rem .9rem;border-left:3px solid var(--accent);background:var(--bg-elev);border-radius:0 var(--radius) var(--radius) 0">' +
               statementHTML +
             '</div>' +
-            '<textarea class="field-input" rows="5" placeholder="Sua resposta..." style="width:100%;font-size:.9rem"></textarea>' +
-            '<div style="margin-top:.6rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">' +
-              '<button class="btn btn-ghost btn-sm">Enviar para correção por IA</button>' +
-              linesHint +
-            '</div>' +
+            // Preview do admin serve para conferir o CONTEÚDO (pedido do dono, 09/10/2026): sem caixa de
+            // resposta nem botão de correção, que aqui não fazem nada. Fica a extensão em linhas.
+            (linesHint ? '<div style="margin-top:.2rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">' + linesHint + '</div>' : '') +
             gabaritoHTML +
           '</article>';
         }).join('');
