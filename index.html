@@ -3746,6 +3746,27 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .bf-chip-x:hover{opacity:1}
 .bf-chip-limpar{cursor:pointer;background:none;border:0;color:var(--text-mute);font-family:var(--sans);font-size:.72rem;letter-spacing:.06em;text-decoration:underline;padding:0}
 @media (max-width:640px){.bf-pedido-row{flex-direction:column}}
+/* Seleções salvas do Banco: lista (página sem filtro aplicado) e cabeçalho da seleção aberta. */
+.bf-sel{margin:0 0 1.2rem;padding:1rem 1.1rem;border:1px solid var(--border);border-radius:var(--radius,6px)}
+.bf-sel-head{display:flex;align-items:baseline;gap:.7rem;flex-wrap:wrap}
+.bf-sel-label{font-family:var(--sans);font-weight:300;font-size:.66rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+.bf-sel-title{font-family:var(--serif);font-size:1.1rem;color:var(--text)}
+.bf-sel-meta{font-size:.8rem;color:var(--text-mute)}
+.bf-sel-entendi{margin:.5rem 0 0;font-size:.9rem;color:var(--text-dim)}
+.bf-sel-actions{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.8rem}
+.bf-sel-link{font-size:.78rem;color:var(--text-mute);text-decoration:underline;margin-left:auto}
+.bf-sel-apagar[data-armed="1"]{color:var(--red,#d47973);border-color:var(--red,#d47973)}
+.bf-sel-list{display:flex;flex-direction:column;margin-top:.6rem}
+.bf-sel-row{display:flex;align-items:center;gap:.8rem;padding:.6rem .3rem;border-top:1px solid var(--border);color:var(--text);text-decoration:none;transition:background .25s ease}
+.bf-sel-row:hover{background:var(--accent-glow)}
+.bf-sel-row-nome{font-family:var(--serif);font-size:1rem;flex:1;min-width:0}
+.bf-sel-row-meta{font-size:.78rem;color:var(--text-mute);white-space:nowrap}
+.bf-sel-row-go{color:var(--text-mute);display:inline-flex}
+.bf-sel-form{display:inline-flex;gap:.4rem;align-items:center;margin-left:auto}
+.bf-sel-input{background:transparent;color:var(--text);border:1px solid var(--border);border-radius:var(--radius,6px);padding:.45rem .7rem;font-family:var(--serif);font-size:.95rem;min-width:18rem}
+.bf-sel-input:focus{outline:none;border-color:var(--accent);background:var(--accent-glow)}
+.bf-save-sel{margin-left:auto}
+@media (max-width:640px){.bf-sel-row{flex-wrap:wrap}.bf-sel-row-meta{white-space:normal}.bf-sel-form{width:100%}.bf-sel-input{min-width:0;flex:1}}
 .bf-textarea{
   font-family:var(--serif);font-size:.95rem;line-height:1.6;resize:vertical;
   min-height:78px;
@@ -14513,7 +14534,8 @@ window.defaultUserState = function(course){
     fcLinks:[],        // conexões entre cards (aluno.flashcard_links) — Fase 6A
     fcDaily:null,      // agregado por dia dos flashcards (aluno.v_flashcard_daily) — carregado ao abrir a página
     userTags:[],       // tags privadas do aluno (aluno.user_tags)
-    banco:{ lastFilters:{}, lastCard:null }
+    banco:{ lastFilters:{}, lastCard:null },
+    selecoes:[]        // seleções salvas do Banco (aluno.selecoes_banco): nome + filtro + lista congelada
   };
 };
 /* Progresso inicial: VAZIO. Conta nova começa zerada — o progresso real
@@ -17625,6 +17647,45 @@ const Store = (function(){
       if(marcaAv !== _state.__avulsosMarca){ _state.__avulsosMarca = marcaAv; _emit(); }
     }catch(e){ console.warn('[hydrate cad avulsos ex]', e); _cadHidrRetry(); }
   }
+  // ── Seleções salvas do Banco (aluno.selecoes_banco): nome, filtro (query da URL) e lista congelada ──
+  async function _hydrateSelecoesFromSupabase(){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !_state) return;
+    try{
+      const r = await window._fetchAllRows(() => window._sb.schema('aluno').from('selecoes_banco').select('*').eq('user_id', userId), 'id', 'selecoes_banco');
+      if(r.error){ console.warn('[hydrate selecoes]', r.error); return; }
+      _state.selecoes = (r.data || []).map(x => ({
+        id: String(x.id), nome: x.nome || 'Seleção', pagina: x.pagina === 'essays' ? 'essays' : 'questions',
+        filtro: (x.filtro && typeof x.filtro === 'object') ? x.filtro : {},
+        itens: Array.isArray(x.itens) ? x.itens : [], total: Number(x.total) || 0,
+        pedido: x.pedido || '', entendi: x.entendi || '',
+        createdAt: x.created_at ? new Date(x.created_at).getTime() : Date.now(),
+        updatedAt: x.updated_at ? new Date(x.updated_at).getTime() : Date.now()
+      }));
+      _persist(); _emit();
+    }catch(e){ console.warn('[hydrate selecoes ex]', e); }
+  }
+  async function _syncSelecaoUpsert(sel){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !sel) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('selecoes_banco').upsert({
+        id: sel.id, user_id: userId, nome: sel.nome || 'Seleção', pagina: sel.pagina || 'questions',
+        filtro: sel.filtro || {}, itens: sel.itens || [], total: Number(sel.total) || 0,
+        pedido: sel.pedido || null, entendi: sel.entendi || null,
+        updated_at: new Date(sel.updatedAt || Date.now()).toISOString()
+      }, { onConflict: 'id' });
+      if(error){ console.warn('[selecao sync]', error); if(window.ueToast) ueToast('A seleção ficou só neste navegador: não consegui gravar no servidor.', 'error'); }
+    }catch(e){ console.warn('[selecao sync ex]', e); }
+  }
+  async function _syncSelecaoDelete(id){
+    const userId = _currentSupaUserId();
+    if(!userId || !window._sb || !id) return;
+    try{
+      const { error } = await window._sb.schema('aluno').from('selecoes_banco').delete().eq('id', id).eq('user_id', userId);
+      if(error) console.warn('[selecao del]', error);
+    }catch(e){ console.warn('[selecao del ex]', e); }
+  }
   async function _syncCadAvulsoUpsert(doc){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !doc) return;
@@ -18070,6 +18131,7 @@ const Store = (function(){
       _h(_hydrateFlashcardsFromSupabase());       // Fase 4h — flashcards
       _h(_hydrateCadernosFromSupabase());         // Cadernos (aba "Cadernos" da página Notas)
       _h(_hydrateCadernosAvulsosFromSupabase());  // D2a — cadernos avulsos + pastas
+      _h(_hydrateSelecoesFromSupabase());         // seleções salvas do Banco
       // Encadeia: depois das tentativas, hidrata as respostas item-a-item da última.
       _h(_hydrateSimuladosFromSupabase()
         .then(() => Promise.all([
@@ -18156,6 +18218,43 @@ const Store = (function(){
       _state.cadAvulsos = _state.cadAvulsos.filter(c => String(c.id) !== String(id));
       _emit();
       _syncCadAvulsoDelete(id).catch(()=>{});
+    },
+    // ── Seleções salvas do Banco ──
+    selecoesLista(pagina){
+      const l = (_state && Array.isArray(_state.selecoes)) ? _state.selecoes : [];
+      return l.filter(x => !pagina || x.pagina === pagina).slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    },
+    selecaoPega(id){ return (_state && Array.isArray(_state.selecoes)) ? (_state.selecoes.find(x => String(x.id) === String(id)) || null) : null; },
+    selecaoCriar(dados){
+      if(!_state) return null;
+      dados = dados || {};
+      const agora = Date.now();
+      const sel = { id: _genUuid() || ('sel' + agora), nome: String(dados.nome || 'Seleção').slice(0, 120),
+        pagina: dados.pagina === 'essays' ? 'essays' : 'questions',
+        filtro: (dados.filtro && typeof dados.filtro === 'object') ? dados.filtro : {},
+        itens: Array.isArray(dados.itens) ? dados.itens.slice(0, 500) : [], total: Number(dados.total) || 0,
+        pedido: String(dados.pedido || ''), entendi: String(dados.entendi || ''), createdAt: agora, updatedAt: agora };
+      if(!Array.isArray(_state.selecoes)) _state.selecoes = [];
+      _state.selecoes.push(sel);
+      _persist(); _emit();
+      _syncSelecaoUpsert(sel).catch(()=>{});
+      return sel;
+    },
+    selecaoSalvar(id, patch){
+      const sel = (_state && Array.isArray(_state.selecoes)) ? _state.selecoes.find(x => String(x.id) === String(id)) : null;
+      if(!sel) return null;
+      ['nome', 'filtro', 'itens', 'total', 'pedido', 'entendi'].forEach(k => { if(patch && patch[k] !== undefined) sel[k] = patch[k]; });
+      if(Array.isArray(sel.itens) && sel.itens.length > 500) sel.itens = sel.itens.slice(0, 500);
+      sel.updatedAt = Date.now();
+      _persist(); _emit();
+      _syncSelecaoUpsert(sel).catch(()=>{});
+      return sel;
+    },
+    selecaoApagar(id){
+      if(!_state || !Array.isArray(_state.selecoes)) return;
+      _state.selecoes = _state.selecoes.filter(x => String(x.id) !== String(id));
+      _persist(); _emit();
+      _syncSelecaoDelete(id).catch(()=>{});
     },
     cadPastasLista(){
       return (_state && Array.isArray(_state.cadPastas))
@@ -53802,6 +53901,8 @@ function _bankParseFilters(routeQuery){
     // Quantidade máxima de questões (0 = sem limite). Vem do "Peça ao banco": "as 10 mais recentes"
     // = 10 questões, da mais nova para a mais antiga (prioridade rec), e não 10 provas.
     quantidade: Math.max(0, Math.min(500, parseInt(q.n, 10) || 0)),
+    // Seleção salva aberta (aluno.selecoes_banco): a lista congelada manda, os demais filtros não valem.
+    sel:       String(q.sel || ''),
     anos:      splitCSV(q.anos),          // ['2024','2023',...] — vazio = todos
     // Exibir: 'full' (grupos completos) | '' (apenas as questões que correspondem, padrão).
     exibir:    (q.exib === 'full') ? 'full' : '',
@@ -53839,6 +53940,7 @@ function _bankFiltersToQuery(f, applied){
   if(f.org && f.org !== 'secao') out.org = f.org;  // 'secao' é o padrão (implícito)
   if(f.prioridade) out.pri = f.prioridade;          // '' (indiferente) é o padrão
   if(f.quantidade > 0) out.n = String(f.quantidade); // limite de questões (Peça ao banco)
+  if(f.sel)         out.sel = f.sel;                  // seleção salva aberta
   if(f.anos && f.anos.length) out.anos = f.anos.join(',');
   if(f.exibir === 'full') out.exib = 'full';        // '' (apenas correspondentes) é o padrão
   if(f.aiSearch)    out.ai = '1';                    // busca semântica (IA)
@@ -53949,6 +54051,24 @@ function _bankPedidoChips(f, isEssay){
   else if(f.prioridade === 'ant') out.push({ tipo:'pri', valor:'ant', rotulo:'mais antigas primeiro' });
   return out;
 }
+// Nome sugerido para salvar a seleção: a frase do pedido, ou os chips do filtro, ou a data.
+function _bankSelecaoNomeSugerido(f, sess, isEssay){
+  const ent = (sess && sess.entendi) ? String(sess.entendi).trim() : '';
+  if(ent) return ent.slice(0, 120);
+  const partes = _bankPedidoChips(f || {}, isEssay).filter(function(c){ return c.tipo !== 'pri' && c.tipo !== 'n'; }).map(function(c){ return c.rotulo; });
+  if(partes.length) return partes.join(' · ').slice(0, 120);
+  let dia = ''; try { dia = new Date().toLocaleDateString('pt-BR'); } catch(_){}
+  return (isEssay ? 'Discursivas' : 'Questões') + (dia ? ' de ' + dia : '');
+}
+// Quantas questões da seleção o aluno já respondeu e acertou (só objetivas).
+function _bankSelecaoAproveitamento(sel){
+  let respondidas = 0, certas = 0;
+  ((sel && sel.itens) || []).forEach(function(x){
+    const st = _bankQuestionStatus(x && x.i);
+    if(st !== 'unanswered'){ respondidas++; if(st === 'right' || st === 'guess_right') certas++; }
+  });
+  return { respondidas: respondidas, certas: certas };
+}
 function _renderBankPedido(f, isEssay, route){
   const sess = _bankPedidoSessao();
   const vale = !!(sess && sess.assinatura === _bankPedidoAssinatura((route && route.query) || {}, isEssay));
@@ -53969,7 +54089,7 @@ function _renderBankPedido(f, isEssay, route){
         chips.map(function(c){ return '<span class="bf-chip">'+Util.esc(c.rotulo)+' <button type="button" class="bf-chip-x" data-bf-chip="'+Util.attr(c.tipo+':'+c.valor)+'" title="Tirar este filtro" aria-label="Tirar '+Util.attr(c.rotulo)+'">×</button></span>'; }).join('')+
         '<button type="button" class="bf-chip-limpar" data-bf-pedido-limpar>limpar tudo</button>'+
       '</div>' : '')+
-  '</section>';
+  '</section>' + _renderBankSelecoes(f, isEssay, route);
 }
 
 /* Ano da questão. Prioriza a COLUNA real `year` (cadastro); só recorre ao
@@ -54740,6 +54860,18 @@ function _bankApplyFilters(items, f, opts){
   const ctx = _bankBuildUnitContext();
   let out = (items||[]).slice();
 
+  // ─── Seleção salva aberta (?sel=ID): devolve a lista congelada, na ordem salva. Os demais filtros
+  //     não valem aqui de propósito: mexer no painel sai da seleção. ───
+  if(f.sel){
+    const sel = (window.Store && Store.selecaoPega) ? Store.selecaoPega(f.sel) : null;
+    if(!sel) return [];
+    const pos = {};
+    (sel.itens || []).forEach(function(x, i){ if(x) pos[String(x.q) + '|' + String(x.i)] = i; });
+    const chave = function(q){ return String(q.bank_question_id != null ? q.bank_question_id : q.id) + '|' + String(q.id); };
+    return out.filter(function(q){ return Object.prototype.hasOwnProperty.call(pos, chave(q)); })
+              .sort(function(a, b){ return pos[chave(a)] - pos[chave(b)]; });
+  }
+
   // Keyword (textarea — qualquer das palavras precisa aparecer no haystack).
   // No modo IA, NÃO filtra por palavra aqui — a busca por IA (no fim) já faz a
   // UNIÃO de (match exato ∪ semântico), pra nunca perder o que o literal acharia.
@@ -55499,6 +55631,7 @@ Renderers.questionBank = function(route){
       '<div class="bf-results-head">'+
         '<span class="bf-results-count">'+results.length+' '+(results.length===1?'questão':'questões')+'</span>'+
         '<span class="bf-results-meta">Mostrando '+shown.length+' de '+results.length+' · página '+page+'</span>'+
+        (results.length && !f.sel ? '<button type="button" class="btn-ghost bf-save-sel" id="bfSalvarSel" title="Guardar esta seleção com um nome, para reabrir depois">'+Icons.bookmark+' Salvar seleção</button>' : '')+
         (results.length ? '<button type="button" class="btn-ghost bf-compile" id="bfCompile" title="Gerar um arquivo de prova imprimível (questões + folha de respostas + gabarito e comentários)">'+Icons.download+' Compilar prova</button>' : '')+
       '</div>'+
       resultsHtml +
@@ -56816,6 +56949,7 @@ Renderers.essayBank = function(route){
       '<div class="bf-results-head">'+
         '<span class="bf-results-count">'+results.length+' '+(results.length===1?'discursiva':'discursivas')+'</span>'+
         '<span class="bf-results-meta">Mostrando '+shown.length+' de '+results.length+' · página '+page+'</span>'+
+        (results.length && !f.sel ? '<button type="button" class="btn-ghost bf-save-sel" id="bfSalvarSel" title="Guardar esta seleção com um nome, para reabrir depois">'+Icons.bookmark+' Salvar seleção</button>' : '')+
         (results.length ? '<button type="button" class="btn-ghost bf-compile" id="bfCompile" title="Gerar um arquivo de prova discursiva imprimível (textos-base + comando + linhas para resposta + espelho de correção)">'+Icons.download+' Compilar prova</button>' : '')+
       '</div>'+
       resultsHtml +
@@ -56933,6 +57067,127 @@ function _bankPedidoRemover(tipo, valor, route, isEssay){
   _bankPedidoGuardar({ pedido: sess.pedido || '', entendi: sess.entendi || '', assinatura: _bankPedidoAssinatura(q, isEssay) });
   Router.go('/banco/' + (isEssay ? 'essays' : 'questions') + Router.querystring(q));
 }
+/* ═══ SELEÇÕES SALVAS (09/10/2026, ideia do dono): nome + filtro vivo + lista congelada. Na página de
+   objetivas ficam as de objetivas; na de discursivas, as de discursivas. Abrir = ?sel=ID (lista congelada,
+   na ordem salva); "rodar de novo" refaz o filtro vivo com os chips do pedido; "atualizar" congela a lista
+   nova por cima. "Praticar com tempo" vem com o desafio do dia. */
+function _renderBankSelecoes(f, isEssay, route){
+  const pagina = isEssay ? 'essays' : 'questions';
+  const dataFmt = function(ms){ try { return new Date(ms).toLocaleDateString('pt-BR'); } catch(_){ return ''; } };
+  const unid = function(n){ return n + ' ' + (isEssay ? (n === 1 ? 'discursiva' : 'discursivas') : (n === 1 ? 'questão' : 'questões')); };
+  if(f.sel){
+    const sel = (window.Store && Store.selecaoPega) ? Store.selecaoPega(f.sel) : null;
+    if(!sel) return '<section class="bf-sel bf-sel-aberta"><div class="bf-sel-head"><span class="bf-sel-label">Seleção salva</span><span class="bf-sel-title">Não encontrei esta seleção</span><a class="bf-sel-link" href="#/banco/'+pagina+'">Todas as seleções</a></div></section>';
+    const ap = isEssay ? null : _bankSelecaoAproveitamento(sel);
+    return '<section class="bf-sel bf-sel-aberta" data-bf-sel="'+Util.attr(sel.id)+'">'+
+      '<div class="bf-sel-head">'+
+        '<span class="bf-sel-label">Seleção salva</span>'+
+        '<span class="bf-sel-title" data-bf-sel-nome>'+Util.esc(sel.nome)+'</span>'+
+        '<span class="bf-sel-meta">'+unid(sel.total)+' · salva em '+dataFmt(sel.createdAt)+((ap && ap.respondidas) ? ' · '+ap.certas+' certas de '+ap.respondidas+' respondidas' : '')+'</span>'+
+      '</div>'+
+      (sel.entendi ? '<p class="bf-sel-entendi">'+Util.esc(sel.entendi)+'</p>' : '')+
+      '<div class="bf-sel-actions">'+
+        '<button type="button" class="btn-ghost" data-bf-sel-rodar title="Refaz o filtro desta seleção com o banco de hoje">Rodar de novo</button>'+
+        '<button type="button" class="btn-ghost" data-bf-sel-atualizar title="Roda o filtro e congela a lista nova por cima desta">Atualizar lista</button>'+
+        '<button type="button" class="btn-ghost" data-bf-sel-renomear>Renomear</button>'+
+        '<button type="button" class="btn-ghost bf-sel-apagar" data-bf-sel-apagar>Apagar</button>'+
+        '<a class="bf-sel-link" href="#/banco/'+pagina+'">Todas as seleções</a>'+
+      '</div>'+
+    '</section>';
+  }
+  if(f.applied) return '';
+  const lista = (window.Store && Store.selecoesLista) ? Store.selecoesLista(pagina) : [];
+  if(!lista.length) return '';
+  return '<section class="bf-sel">'+
+    '<div class="bf-sel-head"><span class="bf-sel-label">Minhas seleções</span><span class="bf-sel-meta">'+lista.length+' salva'+(lista.length === 1 ? '' : 's')+'. Clique para abrir.</span></div>'+
+    '<div class="bf-sel-list">'+ lista.map(function(sel){
+      const ap = isEssay ? null : _bankSelecaoAproveitamento(sel);
+      return '<a class="bf-sel-row" href="#/banco/'+pagina+'?sel='+encodeURIComponent(sel.id)+'&applied=1">'+
+        '<span class="bf-sel-row-nome">'+Util.esc(sel.nome)+'</span>'+
+        '<span class="bf-sel-row-meta">'+unid(sel.total)+' · '+dataFmt(sel.createdAt)+((ap && ap.respondidas) ? ' · '+ap.certas+' de '+ap.respondidas+' certas' : '')+'</span>'+
+        '<span class="bf-sel-row-go">'+Icons.chevron+'</span>'+
+      '</a>';
+    }).join('')+'</div>'+
+  '</section>';
+}
+function _wireBankSelecoes(stageEl, route, isEssay){
+  const pagina = isEssay ? 'essays' : 'questions';
+  const f = _bankApplyLockContext(_bankParseFilters((route && route.query) || {}));
+  const congelar = function(results){ return results.slice(0, 500).map(function(q){ return { q: String(q.bank_question_id != null ? q.bank_question_id : q.id), i: String(q.id) }; }); };
+  // 1. Salvar a seleção atual (nome inline; sugerido pelo pedido ou pelos chips)
+  const btn = stageEl.querySelector('#bfSalvarSel');
+  if(btn) btn.addEventListener('click', function(){
+    if(btn.parentElement && btn.parentElement.querySelector('.bf-sel-form')) return;
+    const sess = _bankPedidoSessao();
+    const vale = !!(sess && sess.assinatura === _bankPedidoAssinatura((route && route.query) || {}, isEssay));
+    const form = document.createElement('form'); form.className = 'bf-sel-form';
+    form.innerHTML = '<input class="bf-sel-input" type="text" maxlength="120" value="'+Util.attr(_bankSelecaoNomeSugerido(f, vale ? sess : null, isEssay))+'" aria-label="Nome da seleção">'+
+      '<button type="submit" class="btn-primary">Salvar</button><button type="button" class="btn-ghost" data-cancel>Cancelar</button>';
+    btn.hidden = true; btn.insertAdjacentElement('afterend', form);
+    const input = form.querySelector('input'); input.focus(); input.select();
+    form.querySelector('[data-cancel]').addEventListener('click', function(){ form.remove(); btn.hidden = false; });
+    form.addEventListener('submit', function(e){
+      e.preventDefault();
+      const nome = String(input.value || '').trim(); if(!nome){ input.focus(); return; }
+      const itens = isEssay ? _bankItemsForEssays() : _bankItemsForQuestions();
+      const results = _bankApplyFilters(itens, f, { isEssay: isEssay });
+      const lista = congelar(results);
+      const filtro = _bankFiltersToQuery(f, true); delete filtro.p; delete filtro.sel;
+      const sel = (window.Store && Store.selecaoCriar) ? Store.selecaoCriar({ nome: nome, pagina: pagina, filtro: filtro, itens: lista, total: lista.length, pedido: vale ? (sess.pedido || '') : '', entendi: vale ? (sess.entendi || '') : '' }) : null;
+      if(!sel){ if(window.ueToast) ueToast('Não consegui salvar agora.', 'error'); return; }
+      if(window.ueToast) ueToast(results.length > 500 ? 'Seleção salva com as 500 primeiras.' : 'Seleção salva.', 'success');
+      Router.go('/banco/' + pagina + Router.querystring({ sel: sel.id, applied: '1' }));
+    });
+  });
+  // 2. Seleção aberta: rodar de novo, atualizar, renomear, apagar
+  const sec = stageEl.querySelector('[data-bf-sel]'); if(!sec) return;
+  const id = sec.getAttribute('data-bf-sel');
+  const sel = (window.Store && Store.selecaoPega) ? Store.selecaoPega(id) : null; if(!sel) return;
+  const el = function(q){ return sec.querySelector(q); };
+  const filtroVivo = function(){ const fq = Object.assign({}, sel.filtro || {}, { applied: '1' }); delete fq.sel; delete fq.p; return fq; };
+  const rodar = el('[data-bf-sel-rodar]');
+  if(rodar) rodar.addEventListener('click', function(){
+    const fq = filtroVivo();
+    if(sel.entendi || sel.pedido) _bankPedidoGuardar({ pedido: sel.pedido || '', entendi: sel.entendi || '', assinatura: _bankPedidoAssinatura(fq, isEssay) });
+    Router.go('/banco/' + pagina + Router.querystring(fq));
+  });
+  const atualizar = el('[data-bf-sel-atualizar]');
+  if(atualizar) atualizar.addEventListener('click', function(){
+    const f2 = _bankApplyLockContext(_bankParseFilters(filtroVivo()));
+    if(f2.aiSearch && f2.keyword){ if(window.ueToast) ueToast('Esta seleção usa busca por significado: use "Rodar de novo" e salve uma nova.', 'error'); return; }
+    const itens = isEssay ? _bankItemsForEssays() : _bankItemsForQuestions();
+    const lista = congelar(_bankApplyFilters(itens, f2, { isEssay: isEssay }));
+    Store.selecaoSalvar(id, { itens: lista, total: lista.length });
+    if(window.ueToast) ueToast('Lista atualizada: ' + lista.length + ' ' + (isEssay ? 'discursivas' : 'questões') + '.', 'success');
+    if(window.App && App.render) App.render();
+  });
+  const renomear = el('[data-bf-sel-renomear]');
+  if(renomear) renomear.addEventListener('click', function(){
+    const nomeEl = el('[data-bf-sel-nome]'); if(!nomeEl || nomeEl.querySelector('input')) return;
+    const input = document.createElement('input'); input.className = 'bf-sel-input'; input.type = 'text'; input.maxLength = 120; input.value = sel.nome; input.setAttribute('aria-label', 'Novo nome da seleção');
+    nomeEl.textContent = ''; nomeEl.appendChild(input); input.focus(); input.select();
+    let feito = false;
+    const fim = function(salvar){
+      if(feito) return; feito = true;
+      const v = String(input.value || '').trim();
+      if(salvar && v && v !== sel.nome){ Store.selecaoSalvar(id, { nome: v }); sel.nome = v; }
+      nomeEl.textContent = sel.nome;
+    };
+    input.addEventListener('keydown', function(e){ if(e.key === 'Enter'){ e.preventDefault(); fim(true); } else if(e.key === 'Escape'){ fim(false); } });
+    input.addEventListener('blur', function(){ fim(true); });
+  });
+  const apagar = el('[data-bf-sel-apagar]');
+  if(apagar) apagar.addEventListener('click', function(){
+    if(apagar.getAttribute('data-armed') !== '1'){
+      apagar.setAttribute('data-armed', '1'); apagar.textContent = 'Confirmar: apagar esta seleção';
+      setTimeout(function(){ if(apagar.isConnected){ apagar.removeAttribute('data-armed'); apagar.textContent = 'Apagar'; } }, 5000);
+      return;
+    }
+    Store.selecaoApagar(id);
+    if(window.ueToast) ueToast('Seleção apagada.', 'success');
+    Router.go('/banco/' + pagina);
+  });
+}
 function _wireBankPedido(stageEl, route, isEssay){
   const sec = stageEl.querySelector('[data-bf-pedido]'); if(!sec) return;
   const form = sec.querySelector('[data-bf-pedido-form]'), input = sec.querySelector('[data-bf-pedido-input]');
@@ -56985,6 +57240,7 @@ function _wireBankPedido(stageEl, route, isEssay){
 }
 function _wireBankFilterPanel(stageEl, route, isEssay){
   _wireBankPedido(stageEl, route, isEssay);
+  _wireBankSelecoes(stageEl, route, isEssay);
   const panel = stageEl.querySelector('#bankFilterPanel');
   if(!panel) return;
   const cardKey = isEssay ? 'essays' : 'questions';
@@ -57087,18 +57343,19 @@ function _wireBankFilterPanel(stageEl, route, isEssay){
       org:         (panel.querySelector('input[name="bforg"]:checked')||{}).value || 'secao',
       // preserva o modo IA atual (a repintura por radio não pode perdê-lo)
       aiSearch:    !!(route && route.query && route.query.ai === '1'),
-      quantidade:  Math.max(0, parseInt(route && route.query && route.query.n, 10) || 0)
+      quantidade:  Math.max(0, parseInt(route && route.query && route.query.n, 10) || 0),
+      sel:         String((route && route.query && route.query.sel) || '')
     };
   }
   function apply(){
-    const f = gather(); f.aiSearch = false;  // "Buscar" (palavra) sai do modo IA
+    const f = gather(); f.aiSearch = false; f.sel = '';  // "Buscar" (palavra) sai do modo IA e da seleção salva
     Router.go('/banco/'+cardKey+Router.querystring(_bankFiltersToQuery(f, true)));
   }
   // Busca por IA: mesma coleta, mas marca aiSearch (usa o texto de Palavras-chave).
   function applyAi(){
     const f = gather();
     if(!String(f.keyword || '').trim()){ alert('Digite o que você quer buscar em "Palavras-chave" e clique em Buscar com IA.'); return; }
-    f.aiSearch = true;
+    f.aiSearch = true; f.sel = '';
     Router.go('/banco/'+cardKey+Router.querystring(_bankFiltersToQuery(f, true)));
   }
   // Repinta o painel. REGRA (pedido do dono): mexer em FILTRO desfaz a busca
