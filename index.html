@@ -56716,11 +56716,14 @@ const QuestionsCompiler = (function(){
     if(o.length === 2 && o.some(function(x){ return /^certo$/i.test(x); }) && o.some(function(x){ return /^errado$/i.test(x); })) return 'tf';
     return 'mc';
   }
+  // Gabarito pela MESMA regra que corrige a resposta no app (quizItemKeyIndex): o impresso sempre bate
+  // com a tela. Antes, um item antigo com gabarito gravado como "C" saía E. Gabarito booleano (true/false)
+  // vale como Certo/Errado.
   function letterOf(item){
-    if(itemKind(item) === 'tf') return (String(item.key) === 'Certo' || item.key === true) ? 'C' : 'E';
-    const opts = item.options || [];
-    const idx = opts.findIndex(function(o){ return String(o) === String(item.key); });
-    return idx >= 0 ? String.fromCharCode(65 + idx) : '?';
+    const norm = normalizeOptions(item.options || []);
+    let idx = quizItemKeyIndex(item, norm);
+    if(idx < 0 && norm.tf && typeof item.key === 'boolean') idx = item.key ? 0 : 1;
+    return idx >= 0 ? norm.display[idx] : '?';
   }
   function originTag(item){
     const LB = window.LearningBlocks || {};
@@ -56838,25 +56841,10 @@ const QuestionsCompiler = (function(){
       (meta.anos && meta.anos.length) ? ('Ano(s): ' + meta.anos.join(', ')) : '',
       'Questões: ' + flat.length
     ].filter(Boolean);
-    // ─── Identificação (anti-compartilhamento) ───
-    // Forense: vai SEMPRE no código-fonte (meta + comentário), invisível na
-    // tela. Visível só na IMPRESSÃO: faixa no topo de toda página.
-    const _nm = meta.candidato || '', _em = meta.email || '', _cpf = meta.cpf || '', _cid = meta.copiaId || '';
-    const _verified = meta.verified === true;
-    let _issuedAt = meta.issuedAt || ''; if(!_issuedAt){ try { _issuedAt = new Date().toISOString(); } catch(e){} }
-    const _licParts = [_nm, _em, _cpf].filter(Boolean);
-    // Selo de verificação: o código vem ASSINADO do servidor (rastreável). Sem
-    // ele, o documento é marcado como não verificado.
-    const _verifTxt = _verified ? ('Verificação ' + _cid) : 'SEM VERIFICAÇÃO — cópia não registrada';
-    const licLine = (_licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + '  ·  ') : '') + _verifTxt;
-    const forensic = ['emitido-para='+_nm, 'email='+_em, 'cpf='+_cpf, 'codigo='+_cid, 'verificado='+_verified, 'emitido-em='+_issuedAt].join(' | ').replace(/--+/g,'-');
-    const metaTags =
-      '<meta name="x-emitido-para" content="'+esc(_nm)+'">'+
-      '<meta name="x-email" content="'+esc(_em)+'">'+
-      '<meta name="x-cpf" content="'+esc(_cpf)+'">'+
-      '<meta name="x-codigo" content="'+esc(_cid)+'">'+
-      '<meta name="x-verificado" content="'+(_verified?'1':'0')+'">'+
-      '<meta name="x-emitido-em" content="'+esc(_issuedAt)+'">';
+    // ─── Identificação (anti-compartilhamento): nome, e-mail e CPF (CompileLicenca) ───
+    // Forense no código-fonte (meta + comentário); na impressão, marca d'água em imagem em toda página.
+    const lic = meta.lic || CompileLicenca.montar({ name: meta.candidato, email: meta.email, cpf: meta.cpf, code: meta.copiaId, ok: meta.verified === true, issuedAt: meta.issuedAt });
+    const licLine = lic.linha, forensic = lic.forense, metaTags = lic.metaTags;
     return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'+metaTags+'<title>Prova Objetiva — '+esc(meta.concursoSigla||'Ubique')+'</title><style>'+
       // Respiro FÍSICO por página SEM o cabeçalho do navegador: @page margin:0
       // (esconde data/URL do navegador) + tabela cujos thead/tfoot repetem em
@@ -56903,7 +56891,8 @@ const QuestionsCompiler = (function(){
       '.pc-ref-img{margin-bottom:6px;text-align:center}.pc-ref-img img{max-width:100%;max-height:300px;border-radius:3px}'+
       '.pc-ref-txt{font-size:10.5px;color:#2a2419;text-align:justify}'+
       '.pc-ref p{margin:0 0 .4em}.pc-ref p:last-child{margin-bottom:0}'+
-      '.pc-cmd{font-size:10.5px;margin-top:6px;font-style:italic;color:#3a3228}'+
+      // Enunciado em NEGRITO, não em itálico (pedido do dono, 09/10): o itálico fica para estrangeirismos.
+      '.pc-cmd{font-size:10.5px;margin-top:6px;font-weight:600;color:#3a3228}'+
       // Questão: número na margem esquerda (recuo), texto justificado ao lado.
       '.pc-q{-webkit-column-break-inside:avoid;page-break-inside:avoid;break-inside:avoid;position:relative;padding-left:2.2em;margin:7px 0;text-align:justify}'+
       '.pc-num{position:absolute;left:0;top:0;font-weight:700;color:#8a6a24;font-variant-numeric:tabular-nums}'+
@@ -56944,14 +56933,12 @@ const QuestionsCompiler = (function(){
       // @page margin:0 não dá pra reservar faixa por página sem reabrir o
       // cabeçalho do navegador, então a marca d'água é a escolha que atende os dois.
       // Escondida na TELA; visível só na impressão.
-      '.print-wm{display:none}'+
-      // Marca d'água: largura limitada (8%–92%) e SEM nowrap, pra o texto inteiro
-      // caber (inclusive o "Verificação …") quebrando em linhas se preciso, em vez de cortar.
-      '@media print{.print-wm{display:block;position:fixed;top:42%;left:8%;right:8%;text-align:center;transform:rotate(-24deg);transform-origin:center;font-size:14px;line-height:1.7;letter-spacing:.04em;font-weight:700;color:rgba(138,106,36,.14);z-index:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}}'+
+      // Marca d'água em IMAGEM (CompileLicenca): só na impressão, uma por página, sem texto buscável.
+      lic.css+
       '</style></head><body>'+
         '<!-- '+forensic+' -->'+
         '<button class="print-btn" onclick="window.print()">Imprimir / Salvar PDF</button>'+
-        (licLine ? '<div class="print-wm">'+esc(licLine)+'</div>' : '')+
+        lic.marca+
         '<div class="wrap">'+
         '<table class="pc-sheet">'+
           '<thead><tr><td><div class="pc-spacer"></div></td></tr></thead>'+
@@ -56976,15 +56963,8 @@ const QuestionsCompiler = (function(){
 
   function download(sections, itemById, meta){
     const html = buildHTML(sections, itemById, meta || {});
-    const blob = new Blob([html], { type:'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
     const datePart = new Date().toISOString().slice(0,10);
-    a.href = url;
-    a.download = 'prova-' + (meta && meta.concursoSigla ? String(meta.concursoSigla).toLowerCase() + '-' : '') + datePart + '.html';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+    CompileLicenca.baixar(html, 'prova-' + (meta && meta.concursoSigla ? String(meta.concursoSigla).toLowerCase() + '-' : '') + datePart + '.html');
   }
   return { download, buildHTML };
 })();
@@ -57016,6 +56996,7 @@ async function _compileIdentity(kind, ref, contentText){
     ok: false,
     name: (window.MOCK_USER && window.MOCK_USER.name) || '',
     email: (window.MOCK_USER && window.MOCK_USER.email) || '',
+    cpf: _userCpf(),
     code: '', token: '',
     issuedAt: (function(){ try { return new Date().toISOString(); } catch(_){ return ''; } })()
   };
@@ -57030,9 +57011,87 @@ async function _compileIdentity(kind, ref, contentText){
     finally { if(_t) clearTimeout(_t); }
     const d = r && r.data;
     if(!d || !d.ok || !d.code) return fallback;
-    return { ok: true, name: d.name || fallback.name, email: d.email || fallback.email, code: d.code, token: d.token || '', issuedAt: d.issued_at || fallback.issuedAt };
+    // CPF: o do servidor (compile-token lê o perfil do aluno pela sessão); sem ele, o do perfil local.
+    return { ok: true, name: d.name || fallback.name, email: d.email || fallback.email, cpf: d.cpf || fallback.cpf, code: d.code, token: d.token || '', issuedAt: d.issued_at || fallback.issuedAt };
   }catch(_){ return fallback; }
 }
+
+/* ── Licença dos arquivos baixados (09/10/2026, pedido do dono) ──
+   Todo arquivo que o aluno baixa para ler ou imprimir leva nome, e-mail e CPF dele: no cabeçalho
+   (texto) e numa marca d'água desenhada como IMAGEM, que só aparece na impressão e não é achada por
+   busca de texto dentro do arquivo. Sem CPF cadastrado, nada é baixado (o aluno vai para Minha conta).
+   Nenhum arquivo baixado impede edição; o que garante o rastro é o registro no servidor (código de
+   verificação + impressão digital do conteúdo, em compile-token). */
+const CompileLicenca = (function(){
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+  // Marca d'água: o texto da licença desenhado num PNG transparente, inclinado, em letras claras.
+  function marcaImagem(linha){
+    try{
+      const W = 1600, H = 1000;
+      const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      const ctx = cv.getContext('2d'); if(!ctx) return '';
+      ctx.translate(W / 2, H / 2); ctx.rotate(-24 * Math.PI / 180);
+      ctx.fillStyle = 'rgba(138,106,36,0.16)';
+      ctx.font = 'bold 40px Arial, Helvetica, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      const palavras = String(linha || '').split(/\s+/).filter(Boolean), linhas = [];
+      let atual = '';
+      palavras.forEach(function(w){
+        const tenta = atual ? atual + ' ' + w : w;
+        if(ctx.measureText(tenta).width > 1250 && atual){ linhas.push(atual); atual = w; } else atual = tenta;
+      });
+      if(atual) linhas.push(atual);
+      const alt = 62, y0 = -((linhas.length - 1) * alt) / 2;
+      linhas.forEach(function(l, i){ ctx.fillText(l, 0, y0 + i * alt); });
+      return cv.toDataURL('image/png');
+    }catch(_){ return ''; }
+  }
+  // Na tela não aparece; na impressão, uma por página (position:fixed repete em cada folha).
+  const css = '.print-wm{display:none}' +
+    '@media print{.print-wm{display:block;position:fixed;top:50%;left:50%;width:180mm;max-width:92%;height:auto;transform:translate(-50%,-50%);z-index:0;pointer-events:none}' +
+    'div.print-wm{width:auto;left:8%;right:8%;transform:translate(0,-50%) rotate(-24deg);text-align:center;font-size:14px;line-height:1.7;font-weight:700;color:rgba(138,106,36,.14)}}';
+  // Pacote da licença a partir da identidade do servidor (_compileIdentity).
+  function montar(ident){
+    ident = ident || {};
+    const nome = ident.name || '', email = ident.email || '', cpf = ident.cpf || _userCpf() || '';
+    const codigo = ident.code || '', verificado = ident.ok === true;
+    let emitidoEm = ident.issuedAt || ''; if(!emitidoEm){ try { emitidoEm = new Date().toISOString(); } catch(_){} }
+    const partes = [nome, email, cpf ? ('CPF ' + cpf) : ''].filter(Boolean);
+    const verif = verificado ? ('Verificação ' + codigo) : 'SEM VERIFICAÇÃO — cópia não registrada';
+    const linha = (partes.length ? ('Licenciado para ' + partes.join('  ·  ') + '  ·  ') : '') + verif;
+    const forense = ['emitido-para=' + nome, 'email=' + email, 'cpf=' + cpf, 'codigo=' + codigo, 'verificado=' + verificado, 'emitido-em=' + emitidoEm].join(' | ').replace(/--+/g, '-');
+    const metaTags =
+      '<meta name="x-emitido-para" content="' + esc(nome) + '">' +
+      '<meta name="x-email" content="' + esc(email) + '">' +
+      '<meta name="x-cpf" content="' + esc(cpf) + '">' +
+      '<meta name="x-codigo" content="' + esc(codigo) + '">' +
+      '<meta name="x-verificado" content="' + (verificado ? '1' : '0') + '">' +
+      '<meta name="x-emitido-em" content="' + esc(emitidoEm) + '">';
+    const img = marcaImagem(linha);
+    const marca = img ? ('<img class="print-wm" alt="" src="' + img + '">') : ('<div class="print-wm">' + esc(linha) + '</div>');
+    return { nome: nome, email: email, cpf: cpf, codigo: codigo, verificado: verificado, emitidoEm: emitidoEm, linha: linha, forense: forense, metaTags: metaTags, marca: marca, css: css };
+  }
+  // Sem CPF no perfil, não baixa: avisa e oferece abrir Minha conta.
+  function exigeCpf(){
+    if(_userCpf()) return true;
+    try{
+      if(window.confirm('Para baixar arquivos da plataforma, cadastre seu CPF em Minha conta. Ele vai impresso em todo arquivo, por segurança.\n\nAbrir Minha conta agora?')) location.hash = '#/conta';
+    }catch(_){}
+    return false;
+  }
+  // Download com folga: liberar o arquivo logo após o clique cortava o download em alguns navegadores.
+  function baixar(html, nome){
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = nome;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){ try{ a.remove(); }catch(_){} try{ URL.revokeObjectURL(url); }catch(_){} }, 4000);
+  }
+  return { montar: montar, exigeCpf: exigeCpf, baixar: baixar, css: css };
+})();
+window.CompileLicenca = CompileLicenca;
 
 /* ───────── TextCompiler — "Compilar texto" da unidade (item 2) ─────────
    Reúne os learning blocks de TEXTO e PONTOS-CHAVE de uma unidade num HTML
@@ -57171,18 +57230,9 @@ const TextCompiler = (function(){
   }
 
   function buildHTML(bodyInner, unit, ident, cadHtml, meta){
-    const _nm = ident.name || '', _em = ident.email || '', _cid = ident.code || '', _verified = ident.ok === true;
-    const _issuedAt = ident.issuedAt || '';
-    const _licParts = [_nm, _em].filter(Boolean);
-    const _verifTxt = _verified ? ('Verificação ' + _cid) : 'SEM VERIFICAÇÃO — cópia não registrada';
-    const licLine = (_licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + '  ·  ') : '') + _verifTxt;
-    const forensic = ['emitido-para=' + _nm, 'email=' + _em, 'codigo=' + _cid, 'verificado=' + _verified, 'emitido-em=' + _issuedAt].join(' | ').replace(/--+/g, '-');
-    const metaTags =
-      '<meta name="x-emitido-para" content="' + esc(_nm) + '">' +
-      '<meta name="x-email" content="' + esc(_em) + '">' +
-      '<meta name="x-codigo" content="' + esc(_cid) + '">' +
-      '<meta name="x-verificado" content="' + (_verified ? '1' : '0') + '">' +
-      '<meta name="x-emitido-em" content="' + esc(_issuedAt) + '">';
+    // Nome, e-mail e CPF (CompileLicenca, 09/10/2026): capa e marca d'água em imagem na impressão.
+    const lic = CompileLicenca.montar(ident);
+    const licLine = lic.linha, forensic = lic.forense, metaTags = lic.metaTags;
     // Matéria/módulo saem no `.cover-sub` e a data no `.cover-date` (abaixo) —
     // não há bloco de "infos" separado nesta capa.
     // Capa: imagem da unidade (saneada p/ não quebrar url()/atributo) + subtítulo
@@ -57290,13 +57340,12 @@ const TextCompiler = (function(){
       '.cad-fc[data-fc="red"]{color:#b03434}' +
       // imagens do texto não entram (só texto)
       '.tb-body img{display:none}' +
-      // marca d'água diagonal (só na impressão)
-      '.print-wm{display:none}' +
-      '@media print{.print-wm{display:block;position:fixed;top:42%;left:8%;right:8%;text-align:center;transform:rotate(-24deg);transform-origin:center;font-size:14px;line-height:1.7;letter-spacing:.04em;font-weight:700;color:rgba(138,106,36,.14);z-index:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}}' +
+      // marca d'água em imagem (só na impressão)
+      lic.css +
       '</style></head><body>' +
       '<!-- ' + forensic + ' -->' +
       '<button class="print-btn" onclick="window.print()">Imprimir / Salvar PDF</button>' +
-      (licLine ? '<div class="print-wm">' + esc(licLine) + '</div>' : '') +
+      lic.marca +
       // CAPA de página inteira: imagem da unidade + gradiente + texto (estilo do PDF)
       '<section class="cover-page' + (coverBg ? '' : ' no-img') + '">' +
         (coverBg ? '<div class="cover-img" style="background-image:url(&quot;' + coverBg + '&quot;)"></div>' : '') +
@@ -57326,18 +57375,13 @@ const TextCompiler = (function(){
   }
 
   function downloadFile(html, name){
-    try{
-      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = name;
-      document.body.appendChild(a); a.click();
-      setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 500);
-    }catch(e){ console.warn('[compilar texto] download falhou:', e); alert('Não consegui baixar o arquivo.'); }
+    try{ CompileLicenca.baixar(html, name); }
+    catch(e){ console.warn('[compilar texto] download falhou:', e); alert('Não consegui baixar o arquivo.'); }
   }
 
   return {
     async download(unit, ctxMeta){
+      if(!CompileLicenca.exigeCpf()) return;
       const blocks = collectBlocks(unit);
       if(!blocks.length){ alert('Esta unidade não tem blocos de texto ou pontos-chave para compilar.'); return; }
       // 1) render num container vivo oculto e aplica grifos + notas.
@@ -57376,6 +57420,7 @@ const TextCompiler = (function(){
 })();
 
 async function _bankCompileProva(route){
+  if(!CompileLicenca.exigeCpf()) return;
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
   const bankItems = _bankItemsForQuestions();
   const results = _bankApplyFilters(bankItems, f, { isEssay:false });
@@ -57394,13 +57439,15 @@ async function _bankCompileProva(route){
   let dateStr = '';
   try { dateStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); } catch(e){}
   // Identidade VERIFICÁVEL do servidor (registra a compilação e assina o código).
-  // Fingerprint do conteúdo = ids + enunciados das questões compiladas.
-  const _contentText = results.map(function(it){ return String(it && it.id) + ':' + String((it && it.enunciado) || ''); }).join('|');
+  // Impressão digital do conteúdo = ids + TEXTO de cada item (assertiva e alternativas). Antes lia um
+  // campo "enunciado" que o item não tem, e só os ids entravam.
+  const _contentText = results.map(function(it){ return String(it && it.id) + ':' + String((it && it.assertion) || '') + (it && Array.isArray(it.options) && it.options.length > 2 ? '|' + it.options.join('|') : ''); }).join('|');
   const _ident = await _compileIdentity('prova-objetiva', (f.exam || '') + '|' + materias.join(','), _contentText);
   QuestionsCompiler.download(sections, itemById, {
+    lic:          CompileLicenca.montar(_ident),
     candidato:    _ident.name,
     email:        _ident.email,
-    cpf:          _userCpf(),
+    cpf:          _ident.cpf,
     copiaId:      _ident.code,      // código verificável do servidor (vazio se não verificado)
     verified:     _ident.ok,
     issuedAt:     _ident.issuedAt,
@@ -57531,13 +57578,9 @@ const EssaysCompiler = (function(){
   function buildHTML(sections, meta){
     // Identificação (anti-compartilhamento) — calculada ANTES do corpo/espelho
     // pra carimbar a licença em CADA questão e em CADA item do espelho.
-    const _nm = meta.candidato || '', _em = meta.email || '', _cpf = meta.cpf || '', _cid = meta.copiaId || '';
-    const _verified = meta.verified === true;
-    let _issuedAt = meta.issuedAt || ''; if(!_issuedAt){ try { _issuedAt = new Date().toISOString(); } catch(e){} }
-    const _licParts = [_nm, _em, _cpf].filter(Boolean);
-    const _verifTxt = _verified ? ('Verificação ' + _cid) : 'SEM VERIFICAÇÃO — cópia não registrada';
-    const licLine = (_licParts.length ? ('Licenciado para ' + _licParts.join('  ·  ') + '  ·  ') : '') + _verifTxt;
-    const forensic = ['emitido-para='+_nm, 'email='+_em, 'cpf='+_cpf, 'codigo='+_cid, 'verificado='+_verified, 'emitido-em='+_issuedAt].join(' | ').replace(/--+/g,'-');
+    // Nome, e-mail e CPF (CompileLicenca): faixa em cada questão, capa e marca d'água em imagem na impressão.
+    const lic = meta.lic || CompileLicenca.montar({ name: meta.candidato, email: meta.email, cpf: meta.cpf, code: meta.copiaId, ok: meta.verified === true, issuedAt: meta.issuedAt });
+    const licLine = lic.linha, forensic = lic.forense;
     const flat = [];
     const corpo = buildCorpo(sections, flat, licLine);
     meta.total = flat.length;
@@ -57548,13 +57591,7 @@ const EssaysCompiler = (function(){
       (meta.anos && meta.anos.length) ? ('Ano(s): ' + meta.anos.join(', ')) : '',
       'Discursivas: ' + flat.length
     ].filter(Boolean);
-    const metaTags =
-      '<meta name="x-emitido-para" content="'+esc(_nm)+'">'+
-      '<meta name="x-email" content="'+esc(_em)+'">'+
-      '<meta name="x-cpf" content="'+esc(_cpf)+'">'+
-      '<meta name="x-codigo" content="'+esc(_cid)+'">'+
-      '<meta name="x-verificado" content="'+(_verified?'1':'0')+'">'+
-      '<meta name="x-emitido-em" content="'+esc(_issuedAt)+'">';
+    const metaTags = lic.metaTags;
     return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">'+metaTags+'<title>Prova Discursiva — '+esc(meta.concursoSigla||'Ubique')+'</title><style>'+
       // Respiro FÍSICO por página SEM o cabeçalho do navegador: @page margin:0
       // (esconde data/URL do navegador) + tabela cujos thead/tfoot repetem em
@@ -57638,9 +57675,11 @@ const EssaysCompiler = (function(){
       '.es-txt p{margin:0 0 .4em}'+
       '.es-model{margin:4px 0 8px;padding:6px 8px;background:#faf7f0;border-radius:3px;border:1px solid #ece2cf}'+
       '.es-model-head{font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:#8a6a24;font-weight:700;margin-bottom:3px}'+
+      lic.css+
       '</style></head><body>'+
         '<!-- '+forensic+' -->'+
         '<button class="print-btn" onclick="window.print()">Imprimir / Salvar PDF</button>'+
+        lic.marca+
         '<div class="wrap">'+
         '<table class="pc-sheet">'+
           '<thead><tr><td><div class="pc-spacer"></div></td></tr></thead>'+
@@ -57662,15 +57701,8 @@ const EssaysCompiler = (function(){
 
   function download(sections, meta){
     const html = buildHTML(sections, meta || {});
-    const blob = new Blob([html], { type:'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
     const datePart = new Date().toISOString().slice(0,10);
-    a.href = url;
-    a.download = 'prova-discursiva-' + (meta && meta.concursoSigla ? String(meta.concursoSigla).toLowerCase() + '-' : '') + datePart + '.html';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+    CompileLicenca.baixar(html, 'prova-discursiva-' + (meta && meta.concursoSigla ? String(meta.concursoSigla).toLowerCase() + '-' : '') + datePart + '.html');
   }
   return { download, buildHTML };
 })();
@@ -57678,6 +57710,7 @@ window.EssaysCompiler = EssaysCompiler;
 
 // Junta tudo e dispara o download da PROVA DISCURSIVA a partir dos filtros atuais.
 async function _bankCompileEssayProva(route){
+  if(!CompileLicenca.exigeCpf()) return;
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
   const bankItems = _bankItemsForEssays();
   const results = _bankApplyFilters(bankItems, f, { isEssay:true });
@@ -57695,9 +57728,10 @@ async function _bankCompileEssayProva(route){
   const _contentText = results.map(function(it){ return String(it && it.id) + ':' + String((it && (it.enunciado || it.command)) || ''); }).join('|');
   const _ident = await _compileIdentity('prova-discursiva', (f.exam || '') + '|' + materias.join(','), _contentText);
   EssaysCompiler.download(sections, {
+    lic:          CompileLicenca.montar(_ident),
     candidato:    _ident.name,
     email:        _ident.email,
-    cpf:          _userCpf(),
+    cpf:          _ident.cpf,
     copiaId:      _ident.code,
     verified:     _ident.ok,
     issuedAt:     _ident.issuedAt,
@@ -59074,7 +59108,8 @@ Renderers.notes.mount = function(stageEl, route){
   });
   // Compile highlights
   const hlCompile = stageEl.querySelector('#hlCompileBtn');
-  if(hlCompile) hlCompile.addEventListener('click', () => {
+  if(hlCompile) hlCompile.addEventListener('click', async () => {
+    if(!CompileLicenca.exigeCpf()) return;
     const highlights = Store.getHighlights();
     if(!highlights.length){ alert('Nenhum destaque para compilar.'); return; }
     const colorLabels = {red:'Vermelho',pink:'Rosa',orange:'Laranja',blue:'Azul',green:'Verde',yellow:'Amarelo',underline:'Sublinhado',veil:'Oculto'};
@@ -59082,13 +59117,10 @@ Renderers.notes.mount = function(stageEl, route){
     const now = new Date();
     const dateStr = now.toLocaleDateString('pt-BR',{day:'2-digit',month:'long',year:'numeric'});
     let body = highlights.map(h => `<div style="margin-bottom:1rem;padding:.8rem;border-left:4px solid ${h.color==='veil'?'#333':h.color==='underline'?'#c8a97e':h.color};background:#f8f5ef"><p style="font-size:14px;line-height:1.6;color:#1a1712">${h.text.replace(/</g,'&lt;')}</p><small style="color:#8a7e68">${colorLabels[h.color]||h.color}</small></div>`).join('');
-    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Destaques — ${course.title}</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;max-width:760px;margin:0 auto;padding:2rem;color:#1a1712}h1{font-size:28px;margin-bottom:.5rem}p.sub{color:#8a7e68;margin-bottom:2rem;font-size:13px}</style></head><body><h1>Meus destaques</h1><p class="sub">${course.title} · Compilado em ${dateStr} · ${highlights.length} destaque${highlights.length===1?'':'s'}</p>${body}</body></html>`;
-    const blob = new Blob([html],{type:'text/html;charset=utf-8'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = `destaques-${new Date().toISOString().slice(0,10)}.html`;
-    document.body.appendChild(a); a.click();
-    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+    // Nome, e-mail e CPF registrados no servidor (CompileLicenca, 09/10/2026).
+    const lic = CompileLicenca.montar(await _compileIdentity('destaques', 'notas', highlights.map(h => String((h && h.text) || '')).join('|')));
+    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">${lic.metaTags}<title>Destaques — ${course.title}</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;max-width:760px;margin:0 auto;padding:2rem;color:#1a1712}h1{font-size:28px;margin-bottom:.5rem}p.sub{color:#8a7e68;margin-bottom:2rem;font-size:13px}${lic.css}</style></head><body><!-- ${lic.forense} -->${lic.marca}<h1>Meus destaques</h1><p class="sub">${course.title} · Compilado em ${dateStr} · ${highlights.length} destaque${highlights.length===1?'':'s'}</p><p class="lic" style="margin:-1.6rem 0 2rem;font-family:Arial,sans-serif;font-size:10px;color:#8a7e68">${Util.esc(lic.linha)}</p>${body}</body></html>`;
+    CompileLicenca.baixar(html, `destaques-${new Date().toISOString().slice(0,10)}.html`);
   });
   // Restore highlights tab if query has hl filters
   if(route.query && (route.query.hlModule || route.query.hlUnit)){
@@ -59143,7 +59175,8 @@ Renderers.notes.mount = function(stageEl, route){
   });
   // Compilar cadernos filtrados num documento de estudo (HTML para baixar).
   const cadCompile = stageEl.querySelector('#cadCompileBtn');
-  if(cadCompile) cadCompile.addEventListener('click', () => {
+  if(cadCompile) cadCompile.addEventListener('click', async () => {
+    if(!CompileLicenca.exigeCpf()) return;
     const cards = Array.from(stageEl.querySelectorAll('.cad-card'));
     if(!cards.length){ alert('Nenhum caderno para compilar. Ajuste os filtros.'); return; }
     const byUnit = {}; (Store.listCadernos()||[]).forEach(c => { byUnit[String(c.unitId)] = c; });
@@ -59155,11 +59188,10 @@ Renderers.notes.mount = function(stageEl, route){
       return `<section class="cad-sec"><div class="cad-sec-sub">${esc(sub)}</div><h2>${esc(title)}</h2><div class="cad-sec-body">${c.body||''}</div></section>`;
     }).join('');
     const now = new Date(); const dateStr = now.toLocaleDateString('pt-BR',{day:'2-digit',month:'long',year:'numeric'});
-    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Meus cadernos</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;max-width:780px;margin:0 auto;padding:2.5rem;color:#1a1712}h1{font-size:28px;margin-bottom:.3rem}p.sub{color:#8a7e68;margin-bottom:2.4rem;font-size:13px}.cad-sec{margin-bottom:2.2rem;padding-bottom:1.6rem;border-bottom:1px solid #e7e0d4}.cad-sec-sub{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#a08e6a;margin-bottom:.3rem}.cad-sec h2{font-size:20px;margin-bottom:.7rem}.cad-sec-body{font-size:15px;line-height:1.7}.cad-sec-body .tutor-ref{background:#efe7d6;border-radius:4px;padding:0 .25em;font-style:normal;color:#7a5b1e}.cad-sec-body h3{font-size:16px;margin:1rem 0 .4rem}.cad-sec-body ul,.cad-sec-body ol{margin:.5rem 0 .5rem 1.4rem}</style></head><body><h1>Meus cadernos</h1><p class="sub">Compilado em ${dateStr} · ${cards.length} caderno${cards.length===1?'':'s'}</p>${sections}</body></html>`;
-    const blob = new Blob([html],{type:'text/html;charset=utf-8'}); const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = `cadernos-${new Date().toISOString().slice(0,10)}.html`;
-    document.body.appendChild(a); a.click();
-    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+    // Nome, e-mail e CPF registrados no servidor (CompileLicenca, 09/10/2026).
+    const lic = CompileLicenca.montar(await _compileIdentity('cadernos', 'notas', sections));
+    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">${lic.metaTags}<title>Meus cadernos</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;max-width:780px;margin:0 auto;padding:2.5rem;color:#1a1712}h1{font-size:28px;margin-bottom:.3rem}p.sub{color:#8a7e68;margin-bottom:2.4rem;font-size:13px}.cad-sec{margin-bottom:2.2rem;padding-bottom:1.6rem;border-bottom:1px solid #e7e0d4}.cad-sec-sub{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#a08e6a;margin-bottom:.3rem}.cad-sec h2{font-size:20px;margin-bottom:.7rem}.cad-sec-body{font-size:15px;line-height:1.7}.cad-sec-body .tutor-ref{background:#efe7d6;border-radius:4px;padding:0 .25em;font-style:normal;color:#7a5b1e}.cad-sec-body h3{font-size:16px;margin:1rem 0 .4rem}.cad-sec-body ul,.cad-sec-body ol{margin:.5rem 0 .5rem 1.4rem}${lic.css}</style></head><body><!-- ${lic.forense} -->${lic.marca}<h1>Meus cadernos</h1><p class="sub">Compilado em ${dateStr} · ${cards.length} caderno${cards.length===1?'':'s'}</p><p class="lic" style="margin:-1.6rem 0 2rem;font-family:Arial,sans-serif;font-size:10px;color:#8a7e68">${Util.esc(lic.linha)}</p>${sections}</body></html>`;
+    CompileLicenca.baixar(html, `cadernos-${new Date().toISOString().slice(0,10)}.html`);
   });
   // Auto-ativa a aba Cadernos se houver filtro de caderno na URL — ou um
   // deep-link openCaderno (vindo do card "Suas anotações" do tutor).
@@ -59313,7 +59345,9 @@ const NotesCompiler = (function(){
     return bits;
   }
 
-  function buildHTML(notes, filters, groupBy){
+  function buildHTML(notes, filters, groupBy, lic){
+    // Nome, e-mail e CPF (CompileLicenca, 09/10/2026); sem licença pronta, monta com a identidade local.
+    lic = lic || CompileLicenca.montar({});
     const groups = groupNotes(notes, groupBy);
     const course = window.COURSE;
     const now = new Date();
@@ -59354,6 +59388,7 @@ const NotesCompiler = (function(){
 <html lang="pt-BR">
 <head>
 <meta charset="utf-8">
+${lic.metaTags}
 <title>Dossiê de estudo — ${esc(course.title)}</title>
 <style>
 @page{size:A4;margin:22mm 18mm}
@@ -59394,9 +59429,12 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid rgba(26,23,18,.25);
   .wrap{padding:0;max-width:none}
   .group,.note{page-break-inside:avoid}
 }
+${lic.css}
 </style>
 </head>
 <body>
+<!-- ${lic.forense} -->
+${lic.marca}
 <div class="wrap">
   <header class="cover">
     <div class="kicker">Dossiê de estudo</div>
@@ -59408,6 +59446,7 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid rgba(26,23,18,.25);
       <div><strong>Total de notas</strong>${notes.length}</div>
       <div><strong>Agrupamento</strong>${esc({module:'Módulo / unidade',topic:'Tópico',tag:'Tag',date:'Data'}[groupBy]||'Módulo')}</div>
     </div>
+    <div class="lic" style="margin-top:14px;font-family:Arial,sans-serif;font-size:10px;color:#8a7e68">${esc(lic.linha)}</div>
     ${fBits.length ? `<div class="filters">
       <div class="filters-label">Filtros aplicados</div>
       <ul>${fBits.map(b => `<li>${esc(b)}</li>`).join('')}</ul>
@@ -59420,17 +59459,12 @@ footer{margin-top:48px;padding-top:18px;border-top:1px solid rgba(26,23,18,.25);
 </html>`;
   }
 
-  function download(notes, filters, groupBy){
-    const html = buildHTML(notes, filters, groupBy);
-    const blob = new Blob([html], { type:'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    const datePart = new Date().toISOString().slice(0,10);
-    a.href = url;
-    a.download = `dossie-notas-${datePart}.html`;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
+  async function download(notes, filters, groupBy){
+    if(!CompileLicenca.exigeCpf()) return;
+    const conteudo = (notes || []).map(n => String((n && n.id) || '') + ':' + String((n && (n.text || n.body)) || '')).join('|');
+    const lic = CompileLicenca.montar(await _compileIdentity('dossie-notas', 'notas', conteudo));
+    const html = buildHTML(notes, filters, groupBy, lic);
+    CompileLicenca.baixar(html, `dossie-notas-${new Date().toISOString().slice(0,10)}.html`);
   }
 
   return { download, buildHTML };
@@ -64194,14 +64228,16 @@ const RaioX = (function(){
     });
   }
 
-  // Documento avulso (padrão dos compiladores): HTML autossuficiente pra
-  // imprimir/guardar. Sem código verificável — é um documento pessoal.
-  function _download(report){
+  // Documento avulso (padrão dos compiladores): HTML autossuficiente pra imprimir/guardar. Desde
+  // 09/10/2026 leva nome, e-mail e CPF e é registrado no servidor como os outros (CompileLicenca).
+  async function _download(report){
+    if(!CompileLicenca.exigeCpf()) return;
+    const lic = CompileLicenca.montar(await _compileIdentity('raiox', 'raiox:' + String(report.id || report.created_at || ''), JSON.stringify(report.findings || {})));
     const f = report.findings || {};
     const nome = (window.MOCK_USER && (MOCK_USER.name || MOCK_USER.nickname)) || '';
     const email = (window.MOCK_USER && MOCK_USER.email) || '';
     // Marca d'água de impressão (mesmo estilo dos compiladores) + capa.
-    const licText = (nome || email ? 'Licenciado para ' + [nome, email].filter(Boolean).join('  ·  ') + '  ·  ' : '') + 'Raio-X do desempenho · Grupo Ubique';
+    const licText = lic.linha;
     const agD = report.aggregates || {};
     const perLabD = (agD.periodo && agD.periodo.label && agD.periodo.label !== 'todo o histórico') ? agD.periodo.label : '';
     const matLabD = (agD.materia_filtro && agD.materia_filtro.nome) ? agD.materia_filtro.nome : '';
@@ -64225,13 +64261,12 @@ const RaioX = (function(){
       if(!b.diagnostico) return '';
       return '<h2>' + _esc(t) + '</h2><p>' + _esc(b.diagnostico).replace(/\n/g, '<br>') + '</p>' + evDoc(b.evidencias);
     };
-    const html = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Raio-X do desempenho — ' + _esc(_fmtData(report.created_at)) + '</title>' +
+    const html = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' + lic.metaTags + '<title>Raio-X do desempenho — ' + _esc(_fmtData(report.created_at)) + '</title>' +
       '<link href="https://fonts.googleapis.com/css2?family=Cardo:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">' +
       '<style>' +
       '@page{size:A4;margin:0}*{box-sizing:border-box}body{margin:0;font-family:Georgia,serif;color:#1e1a12;background:#fff}' +
-      // Marca d'água (só na impressão) — mesmo estilo dos compiladores.
-      '.print-wm{display:none}' +
-      '@media print{.print-wm{display:block;position:fixed;top:42%;left:8%;right:8%;text-align:center;transform:rotate(-24deg);transform-origin:center;font-size:14px;line-height:1.7;letter-spacing:.04em;font-weight:700;color:rgba(138,106,36,.14);z-index:0;-webkit-print-color-adjust:exact;print-color-adjust:exact}}' +
+      // Marca d'água em imagem (só na impressão), igual à dos compiladores.
+      lic.css +
       // Capa de página inteira (padrão do Compilar texto, fundo marrom da marca).
       '.cover-page{position:relative;width:100%;height:100vh;overflow:hidden;background:linear-gradient(135deg,#2a2212,#4a3a1e);page-break-after:always;break-after:page;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
       '.cover-shade{position:absolute;inset:0;background:linear-gradient(to bottom,rgba(20,16,8,.15) 0%,rgba(20,16,8,.35) 45%,rgba(20,16,8,.92) 100%)}' +
@@ -64277,7 +64312,7 @@ const RaioX = (function(){
       '.print-btn{position:fixed;top:14px;right:14px;padding:.6rem 1rem;background:#8a6a24;color:#fff;border:none;border-radius:4px;font:600 13px Arial;cursor:pointer}@media print{.print-btn{display:none}}' +
       '.meta{margin-top:1.6rem;font-size:10px;color:#8a7e68;font-family:Arial}' +
       '</style></head><body><button class="print-btn" onclick="window.print()">Imprimir / Salvar PDF</button>' +
-      '<div class="print-wm">' + _esc(licText) + '</div>' +
+      '<!-- ' + lic.forense + ' -->' + lic.marca +
       '<section class="cover-page"><div class="cover-shade"></div>' +
         '<div class="cover-brand">Grupo Ubique</div>' +
         '<div class="cover-text">' +
@@ -64325,14 +64360,8 @@ const RaioX = (function(){
       })() : '') +
       '<div class="meta">Gerado pelo Grupo Ubique a partir das respostas reais do aluno nas questões de Certo/Errado. ' + _esc((report.aggregates && report.aggregates.escopo) || 'Questões anuladas e simulados não entram na conta.') + '</div>' +
       '</td></tr></tbody></table></div></body></html>';
-    try{
-      const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = 'raiox-' + String(report.created_at || '').slice(0, 10) + '.html';
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
-    }catch(e){ console.warn('[raiox] download:', e); }
+    try{ CompileLicenca.baixar(html, 'raiox-' + String(report.created_at || '').slice(0, 10) + '.html'); }
+    catch(e){ console.warn('[raiox] download:', e); }
   }
 
   return { open: open };
@@ -69762,7 +69791,9 @@ const CadernosPage = (function(){
      @page margin:0 suprime o cabeçalho e o rodapé do NAVEGADOR (data, título,
      URL, página); o respiro de cada folha vem da tabela-espaçadora: thead e
      tfoot repetem em TODA página impressa (mesma técnica dos compiladores). */
-  function _expHtmlDoc(titulo, body, capa, ctx){
+  function _expHtmlDoc(titulo, body, capa, ctx, lic){
+    // Nome, e-mail e CPF (CompileLicenca, 09/10/2026): faixa abaixo do título e marca d'água na impressão.
+    lic = lic || CompileLicenca.montar({});
     const aluno = (window.MOCK_USER && (window.MOCK_USER.nickname || window.MOCK_USER.name)) || '';
     const quando = new Date().toLocaleDateString('pt-BR');
     const posC = Object.assign({ x: 50, y: 50, z: 1 }, (capa && capa.pos) || {});
@@ -69773,7 +69804,7 @@ const CadernosPage = (function(){
     if(aluno) metaBits.push('Caderno de <b>' + Util.esc(aluno) + '</b>');
     if(ctx) metaBits.push(Util.esc(String(ctx)));
     metaBits.push('exportado em ' + Util.esc(quando));
-    return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>' + Util.esc(titulo || 'Caderno') + '</title>'
+    return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' + lic.metaTags + '<title>' + Util.esc(titulo || 'Caderno') + '</title>'
       + '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
       + '<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Outfit:wght@300;400;500;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">'
       + '<style>'
@@ -69843,7 +69874,9 @@ const CadernosPage = (function(){
       + 'h2,h3,h4{page-break-after:avoid}.exp-card,[data-li],.cad-callout,table.cad-tab{page-break-inside:avoid}'
       + '.print-btn{position:fixed;top:14px;right:14px;background:#8a6a24;color:#fff;border:none;border-radius:4px;padding:8px 14px;font-family:"Outfit","Helvetica Neue",Arial,sans-serif;font-size:11px;letter-spacing:.08em;text-transform:uppercase;cursor:pointer}'
       + '@media print{.print-btn{display:none}}'
+      + lic.css
       + '</style></head><body>'
+      + '<!-- ' + lic.forense + ' -->' + lic.marca
       + '<button class="print-btn" onclick="window.print()">Imprimir / Salvar PDF</button>'
       + '<table class="exp-sheet"><thead><tr><td><div class="exp-spacer"></div></td></tr></thead>'
       + '<tfoot><tr><td><div class="exp-spacer"></div></td></tr></tfoot>'
@@ -69851,6 +69884,7 @@ const CadernosPage = (function(){
       + capaHtml
       + '<div class="kicker">Ubique &middot; Caderno</div>'
       + '<h1>' + Util.esc(titulo || 'Caderno') + '</h1>'
+      + '<div class="exp-lic" style="font-family:Arial,sans-serif;font-size:8pt;color:#8a7e68;margin:1mm 0 3mm">' + Util.esc(lic.linha) + '</div>'
       + '<div class="meta">' + metaBits.map(function(x){ return '<span>' + x + '</span>'; }).join('') + '</div>'
       + (body || '')
       + '</div></td></tr></tbody></table>'
@@ -69861,20 +69895,24 @@ const CadernosPage = (function(){
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = nome;
     document.body.appendChild(a); a.click();
-    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 400);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 4000);
   }
-  function _expor(formato, titulo, body, capa, ctx){
+  async function _expor(formato, titulo, body, capa, ctx){
+    if(!CompileLicenca.exigeCpf()) return;
     const nome = _norm(titulo || 'caderno').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'caderno';
     body = _expLimparCorpo(body);
+    // PDF: a janela abre JÁ, ainda no clique (depois da espera do servidor o navegador a bloquearia).
+    const w = (formato !== 'md' && formato !== 'html') ? window.open('', '_blank') : null;
+    if(formato !== 'md' && formato !== 'html' && !w){ if(window.ueToast) ueToast('O navegador bloqueou a janela de impressão — permita pop-ups para exportar em PDF.', 'warn'); return; }
+    // Nome, e-mail e CPF registrados no servidor (CompileLicenca, 09/10/2026).
+    const lic = CompileLicenca.montar(await _compileIdentity('caderno', 'caderno:' + nome, body));
     if(formato === 'md'){
       const capaMd = (capa && capa.url) ? '![Capa](' + capa.url + ')\n\n' : '';
-      _baixar(nome + '.md', capaMd + '# ' + (titulo || 'Caderno') + '\n\n' + _cadParaMd(body), 'text/markdown');
+      _baixar(nome + '.md', capaMd + '# ' + (titulo || 'Caderno') + '\n\n> ' + lic.linha + '\n\n' + _cadParaMd(body), 'text/markdown');
       return;
     }
-    const doc = _expHtmlDoc(titulo, body, capa, ctx);
+    const doc = _expHtmlDoc(titulo, body, capa, ctx, lic);
     if(formato === 'html'){ _baixar(nome + '.html', doc, 'text/html'); return; }
-    const w = window.open('', '_blank');
-    if(!w){ if(window.ueToast) ueToast('O navegador bloqueou a janela de impressão — permita pop-ups para exportar em PDF.', 'warn'); return; }
     w.document.write(doc); w.document.close();
     // imprime só depois das fontes (senão o PDF sai na fonte de reserva); teto de 2,5 s sem internet
     const imprimir = function(){ try{ w.print(); }catch(_){ } };
