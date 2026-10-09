@@ -54629,7 +54629,7 @@ function _bankBuiltData(){
                 if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
                 item.bank_question_id = g.bank_question_id;  // p/ mapear a busca semântica (IA)
                 item.appears_in = [{ unit_id: b.unit_id, block_id: b.id, group_id: g.id }];
-                item._refTextForSearch = bg.reference_text || bg.enunciado || bg.description || '';
+                item._refTextForSearch = _bankGrupoTexto(bg);
                 out.push(item);
               });
               return;
@@ -54649,7 +54649,7 @@ function _bankBuiltData(){
             const item = Object.assign({}, q);
             if(!item.source_type) item.source_type = item.origin ? 'past_exam' : 'ubique';
             item.appears_in = [{ unit_id: b.unit_id, block_id: b.id, group_id: g.id }];
-            item._refTextForSearch = g.reference_text || g.enunciado || g.description || '';
+            item._refTextForSearch = _bankGrupoTexto(g);
             out.push(item);
           });
         });
@@ -54683,7 +54683,7 @@ function _bankBuiltData(){
           item._soBanco = true;
           item._subjectId = sid;
           item._subjectIds = sids;
-          item._refTextForSearch = bg.reference_text || bg.enunciado || bg.description || '';
+          item._refTextForSearch = _bankGrupoTexto(bg);
           d.questions.push(item);
         });
       });
@@ -54838,18 +54838,57 @@ function _bankItemsForEssays(){
   return _bankScopeFilter(out);
 }
 
-/* Match exato (lexical) de um item contra um termo já em minúsculas.
-   Varre enunciado/afirmativa/comentário/comando/alternativas/texto de apoio. */
-function _bankItemMatchesKeyword(q, needle, isEssay){
-  if(!needle) return true;
-  const pieces = [q.statement, q.assertion, q.comment, q.command, q.prompt, q.reference_text, q._refTextForSearch];
+/* Busca por palavra (09/10/2026). Antes: frase inteira, sensível a acento, e o campo de comentário
+   lido era um que não existe. Agora:
+   · ignora acento, maiúsculas e HTML ("independencia" acha "Independência");
+   · TODAS as palavras precisam aparecer, em qualquer ordem ("china comércio" acha "comércio com a China");
+   · cada palavra casa pelo começo de uma palavra do texto ("guerra" acha "guerras"; "onu" NÃO acha "bônus");
+   · trecho entre aspas é frase exata ("guerra fria");
+   · varre afirmativa, enunciado, comando, texto-base do grupo, alternativas, comentários e o código da questão. */
+function _bankNorm(x){
+  let t = String(x == null ? '' : x).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ');
+  try { t = t.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch(_){}
+  return t.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+// Texto do grupo para a busca: texto-base, enunciado e descrição JUNTOS.
+function _bankGrupoTexto(g){
+  if(!g) return '';
+  return [g.reference_text, g.enunciado, g.description].filter(Boolean).join(' • ');
+}
+let _bankConsultaCache = { raw: null, termos: null };
+function _bankConsultaTermos(consulta){
+  const raw = String(consulta == null ? '' : consulta);
+  if(_bankConsultaCache.raw === raw) return _bankConsultaCache.termos;
+  const termos = [];
+  const esc = function(w){ return w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); };
+  const resto = raw.replace(/["“”]([^"“”]+)["“”]/g, function(_, frase){
+    const f = _bankNorm(frase); if(f) termos.push(new RegExp('(^|[^a-z0-9])' + esc(f)));
+    return ' ';
+  });
+  _bankNorm(resto).split(/[^a-z0-9]+/).filter(Boolean).forEach(function(w){ termos.push(new RegExp('(^|[^a-z0-9])' + esc(w))); });
+  _bankConsultaCache = { raw: raw, termos: termos };
+  return termos;
+}
+const _bankHaystackCache = new WeakMap();
+function _bankHaystack(q, isEssay){
+  if(q && typeof q === 'object' && _bankHaystackCache.has(q)) return _bankHaystackCache.get(q);
+  const pieces = [q.statement, q.assertion, q.comments, q.comment, q.command, q.prompt, q.enunciado, q.reference_text, q._refTextForSearch, q.origin];
   if(Array.isArray(q.options)){
     q.options.forEach(function(o){ pieces.push(typeof o === 'string' ? o : (o && (o.text || o.label))); });
   }
   if(isEssay && Array.isArray(q.criteria)){
-    q.criteria.forEach(function(c){ pieces.push(c.label, c.description); });
+    q.criteria.forEach(function(c){ pieces.push(c && c.label, c && c.description); });
   }
-  return pieces.filter(Boolean).join(' • ').toLowerCase().indexOf(needle) >= 0;
+  const h = _bankNorm(pieces.filter(Boolean).join(' • '));
+  if(q && typeof q === 'object') _bankHaystackCache.set(q, h);
+  return h;
+}
+function _bankItemMatchesKeyword(q, consulta, isEssay){
+  const termos = _bankConsultaTermos(consulta);
+  if(!termos.length) return true;
+  const h = _bankHaystack(q, isEssay);
+  for(let i = 0; i < termos.length; i++){ if(!termos[i].test(h)) return false; }
+  return true;
 }
 
 /* Engine: aplica todos os filtros a uma lista de items (bank questions ou
@@ -54872,11 +54911,11 @@ function _bankApplyFilters(items, f, opts){
               .sort(function(a, b){ return pos[chave(a)] - pos[chave(b)]; });
   }
 
-  // Keyword (textarea — qualquer das palavras precisa aparecer no haystack).
+  // Keyword (textarea — TODAS as palavras, em qualquer ordem, sem acento; "entre aspas" = frase exata).
   // No modo IA, NÃO filtra por palavra aqui — a busca por IA (no fim) já faz a
   // UNIÃO de (match exato ∪ semântico), pra nunca perder o que o literal acharia.
   if(f.keyword && !f.aiSearch){
-    const needle = f.keyword.toLowerCase();
+    const needle = f.keyword;
     out = out.filter(function(q){ return _bankItemMatchesKeyword(q, needle, isEssay); });
   }
   // CONCURSO — match em camadas:
@@ -55105,7 +55144,7 @@ function _bankApplyFilters(items, f, opts){
     const cache = window._bankAiCache;
     if(cache && cache.q === f.keyword && cache.status === 'ready'){
       const ids = cache.ids, rank = cache.rank;
-      const needle = String(f.keyword).toLowerCase();
+      const needle = String(f.keyword);
       // UNIÃO: passa se for semelhante por significado (acima do corte) OU se
       // tiver match EXATO da palavra — assim a IA nunca perde o que o literal acha.
       // Vale objetivas E discursivas: ambas expõem bank_question_id e estão
@@ -55501,7 +55540,7 @@ function _renderBankFilterPanel(bankItems, f, isEssay){
     // Palavras-chave (sempre no topo, full-width)
     '<div class="bf-field bf-field-full">'+
       '<label class="bf-label">Palavras-chave</label>'+
-      '<textarea class="bf-textarea" data-bf="keyword" placeholder="Busca no enunciado, nas alternativas e nos comentários…" rows="2">'+Util.esc(f.keyword||'')+'</textarea>'+
+      '<textarea class="bf-textarea" data-bf="keyword" placeholder="Palavras em qualquer ordem, sem se preocupar com acento. Use aspas para frase exata: &quot;guerra fria&quot;" rows="2">'+Util.esc(f.keyword||'')+'</textarea>'+
     '</div>'+
     // ─── Concurso, matérias (multi) e edital por matéria ───
     sectionHead(editalLabel, editalHint) +
