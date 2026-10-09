@@ -27816,6 +27816,52 @@ const Banco = {
     return Array.isArray(content.items) ? content.items.map(it => Object.assign({}, it)) : [];
   },
 
+  // Blocos de cada unidade, já em ordem de posição: Map(unit_id do banco → blocos). Antes cada
+  // unidade varria a lista INTEIRA de blocos da plataforma, uma vez por cartão do Banco (a
+  // "travadinha" ao abrir a página, 09/10/2026). Montado uma vez e refeito só quando os blocos
+  // mudam (_bankBlocksRev, o mesmo sinal que renova a lista de questões do Banco).
+  _blocosPorUnidade(){
+    if(typeof _bankWireRev === 'function') _bankWireRev();
+    const rev = (typeof _bankBlocksRev !== 'undefined') ? _bankBlocksRev : 0;
+    const c = Banco.__blocosCache;
+    if(c && c.rev === rev) return c.mapa;
+    const lista = (window.UbiqueStore && window.UbiqueStore.unit_blocks && window.UbiqueStore.unit_blocks.list()) || [];
+    const mapa = new Map();
+    lista.forEach(b => {
+      if(!b || b.unit_id == null) return;
+      const k = String(b.unit_id);
+      let arr = mapa.get(k);
+      if(!arr){ arr = []; mapa.set(k, arr); }
+      arr.push(b);
+    });
+    mapa.forEach(arr => arr.sort((a,b) => (a.position||0) - (b.position||0)));
+    Banco.__blocosCache = { rev: rev, mapa: mapa };
+    return mapa;
+  },
+
+  // Quantos itens o bloco tem para o cartão: a MESMA regra do _extractItemsFromBlock, sem copiar
+  // os itens (a contagem dos cartões só precisa do número).
+  _contarItensDoBloco(block, card){
+    const content = (block && block.content) || {};
+    if(card.extract === 'concepts') return Array.isArray(content.concepts) ? content.concepts.length : 0;
+    if(card.extract === 'quiz'){
+      let n = 0;
+      (content.groups || []).forEach(qg => {
+        if(qg && qg.bank_question_id && typeof window.resolveBankGroup === 'function'){
+          const bg = window.resolveBankGroup(qg.bank_question_id, qg.bank_item_ids, qg.bank_item_comments);
+          if(bg && Array.isArray(bg.items)) n += bg.items.length;
+          return;
+        }
+        const list = (qg.questions && qg.questions.length) ? qg.questions
+                   : (qg.items     && qg.items.length)     ? qg.items
+                   : [];
+        n += list.length;
+      });
+      return n;
+    }
+    return Array.isArray(content.items) ? content.items.length : 0;
+  },
+
   aggregate(moduleId, cardKey, filters){
     filters = filters || {};
     const mod = Util.findModule(moduleId); if(!mod) return [];
@@ -27824,16 +27870,14 @@ const Banco = {
     if(filters.chapter) entries = entries.filter(e => e.chapterId === filters.chapter);
     if(filters.unit)    entries = entries.filter(e => e.unit.id === filters.unit);
 
-    const allBlocks = (window.UbiqueStore && window.UbiqueStore.unit_blocks && window.UbiqueStore.unit_blocks.list()) || [];
+    const porUnidade = Banco._blocosPorUnidade();
     const blockTypes = new Set(card.blockTypes || []);
 
     let items = [];
     entries.forEach(e => {
       const dbUnitId = Banco._unitDbId(e.unit);
       if(!dbUnitId) return;
-      const blocksHere = allBlocks
-        .filter(b => String(b.unit_id) === dbUnitId && blockTypes.has(b.type))
-        .sort((a,b) => (a.position||0) - (b.position||0));
+      const blocksHere = (porUnidade.get(dbUnitId) || []).filter(b => blockTypes.has(b.type));
       blocksHere.forEach(b => {
         const extracted = Banco._extractItemsFromBlock(b, card);
         extracted.forEach(it => items.push(Object.assign({}, it, {
@@ -27925,14 +27969,62 @@ const Banco = {
     });
     return allItems;
   },
+  // Números dos cartões da página Banco (09/10/2026): os dez cartões contados numa passada só pelos
+  // blocos de cada unidade do escopo, sem copiar itens, e guardados até algo mudar: blocos ou
+  // estrutura do curso (revisões), banco de questões carregado, matéria/concurso ativo e matérias que
+  // o aluno possui. Mesmos números da conta antiga (aggregateAll de cada cartão + questões só do
+  // banco visíveis); conferido em teste lado a lado.
   countsAll(){
+    if(typeof _bankWireRev === 'function') _bankWireRev();
+    const cursos = Banco.scopeCourses() || [];
+    const visiveis = (typeof _bankSubjectsVisiveis === 'function') ? _bankSubjectsVisiveis() : new Set();
+    const chave = [
+      (typeof _bankBlocksRev !== 'undefined') ? _bankBlocksRev : 0,
+      (typeof _unitCtxRev !== 'undefined') ? _unitCtxRev : 0,
+      cursos.map(c => String(c && c.id)).join(','),
+      Array.from(visiveis).sort().join(','),
+    ].join('|');
+    const qb = window._QBank || null;
+    const memo = Banco.__countsCache;
+    if(memo && memo.chave === chave && memo.qb === qb && memo.cursos === window.COURSES) return Object.assign({}, memo.out);
+
     const out = {};
-    Object.keys(Banco.cards).forEach(k => { out[k] = Banco.aggregateAll(k, {}).length; });
-    // as questões só do banco (sem unidade) não estão em bloco nenhum: entram na conta à parte
-    if(typeof _bankItemsForQuestions === 'function'){
-      try{ out.questions = (out.questions || 0) + _bankItemsForQuestions().filter(function(q){ return q && q._soBanco; }).length; }
-      catch(e){ console.warn('[banco] contagem das questões só do banco:', e); }
+    const keys = Object.keys(Banco.cards);
+    keys.forEach(k => { out[k] = 0; });
+    const porTipo = {};                      // tipo de bloco → cartões que o leem
+    keys.forEach(k => (Banco.cards[k].blockTypes || []).forEach(t => { (porTipo[t] = porTipo[t] || []).push(k); }));
+    const porUnidade = Banco._blocosPorUnidade();
+    cursos.forEach(course => {
+      (course.modules || []).forEach(m => {
+        const mod = Util.findModule(m.id); if(!mod) return;
+        Util.unitsOfModule(mod).forEach(e => {
+          const dbUnitId = Banco._unitDbId(e.unit);
+          if(!dbUnitId) return;
+          (porUnidade.get(dbUnitId) || []).forEach(b => {
+            (porTipo[b.type] || []).forEach(k => { out[k] += Banco._contarItensDoBloco(b, Banco.cards[k]); });
+          });
+        });
+      });
+    });
+    // As questões só do banco (sem unidade) não estão em bloco nenhum: entram na conta à parte,
+    // contadas na lista já montada do Banco (_bankBuiltData, guardada pela mesma revisão), com a
+    // mesma regra da lista: sem repetir id e só das matérias que o aluno vê.
+    if(typeof _bankBuiltData === 'function'){
+      try{
+        const vistos = new Set();
+        let soBanco = 0;
+        const fromBank = (window.QuestionBank && QuestionBank.list) ? QuestionBank.list() : [];
+        _bankBuiltData().questions.concat(fromBank).forEach(q => {
+          if(!q || !q.id) return;
+          const id = String(q.id);
+          if(vistos.has(id)) return;
+          vistos.add(id);
+          if(q._soBanco && _bankItemSubjectIds(q).some(s => visiveis.has(s))) soBanco++;
+        });
+        out.questions = (out.questions || 0) + soBanco;
+      }catch(e){ console.warn('[banco] contagem das questões só do banco:', e); }
     }
+    Banco.__countsCache = { chave: chave, qb: qb, cursos: window.COURSES, out: Object.assign({}, out) };
     return out;
   }
 };
