@@ -62781,7 +62781,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // title, subtitle, author, source, image_url e text (HTML). A junction
   // questoes.question_reference_texts liga ao grupo via question_id +
   // reference_text_id + ordem. Pacote D/E.
-  async function _ueBankPersistReferenceTexts(bankQuestionId, refs, examId, year){
+  // `criados` (opcional): recebe os ids dos textos CRIADOS aqui (não os do banco só ligados), para o
+  // importador apagá-los se o grupo novo for desfeito.
+  async function _ueBankPersistReferenceTexts(bankQuestionId, refs, examId, year, criados){
     if(!Array.isArray(refs) || !refs.length) return 0;
     let n = 0;
     for(let i = 0; i < refs.length; i++){
@@ -62810,6 +62812,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         console.warn('[import] reference_texts insert falhou:', rt.error && rt.error.message);
         continue;
       }
+      if(Array.isArray(criados)) criados.push(rt.data.id);
       await questoes().from('question_reference_texts').insert({
         question_id:       bankQuestionId,
         reference_text_id: rt.data.id,
@@ -63528,9 +63531,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // Dedup: com origin, o CÓDIGO é a identidade (como sempre foi). Sem origin
     // (Ubique), a identidade é o TEXTO — gêmea achada é COMPLETADA igualzinho
     // (era o buraco que gerou as triplicatas de GEO).
-    const existingGroup = code
+    // g._grupoBanco: grupo do banco achado pelo código dos ITENS na conferência antes de gravar
+    // (_ueImportConferirItens), quando o código do grupo no JSON não existe no banco.
+    const existingGroup = g._grupoBanco || (code
       ? _ueBankFindGroupByOrigin(code)
-      : _ueBankFindGroupTwinByText(qType, objQs, g);
+      : _ueBankFindGroupTwinByText(qType, objQs, g));
+    // Numeração e rótulo dos itens pelo código do grupo DO BANCO quando ele foi achado pelos itens
+    // (grupo-faixa [#97-98/2025]: o item [#98/2025] é o número 98).
+    const codeItens = (g._grupoBanco && g._grupoBanco.origin) ? String(g._grupoBanco.origin) : code;
     let bankQuestionId, wasExisting = false, gabAdded = 0, importedItemIds = [];
 
     if(existingGroup){
@@ -63542,7 +63550,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           .filter(function(t){ return String(t.question_id) === String(bankQuestionId); })
           .map(function(t){ return String(t.id); });
         await _ueFreezeGroupInOtherBlocks(bankQuestionId, currentIds, exceptBid);
-        const merged = await _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId);
+        const merged = await _ueMergeTfItems(bankQuestionId, objQs, codeItens, numero, year, subjectId);
         importedItemIds = merged.itemIds; gabAdded = merged.gabAdded; if(Array.isArray(merged.avisos)) Array.prototype.push.apply(allAvisos, merged.avisos);
       }
       // MC já existente = 1 questão; reusa como está (sem duplicar opções).
@@ -63569,31 +63577,42 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }).select().single();
       if(ins.error || !ins.data){ throw new Error('questions: ' + (ins.error && ins.error.message)); }
       bankQuestionId = ins.data.id;
-
-      // Pacote D/E — reference_texts[] ricos (vencem o legacy single).
-      if(Array.isArray(g.reference_texts) && g.reference_texts.length){
-        await _ueBankPersistReferenceTexts(bankQuestionId, g.reference_texts, examId, year);
-      } else if(g.reference_text){
-        const rt = await questoes().from('reference_texts').insert({ text: g.reference_text, exam_id: examId, year: year }).select().single();
-        if(rt.data) await questoes().from('question_reference_texts').insert({ question_id: bankQuestionId, reference_text_id: rt.data.id, ordem: 1 });
-      }
-
-      if(qType === 'true_false'){
-        const merged = await _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId);
-        importedItemIds = merged.itemIds; gabAdded = merged.gabAdded; if(Array.isArray(merged.avisos)) Array.prototype.push.apply(allAvisos, merged.avisos);
-      } else {
-        const q = objQs[0] || {};
-        // Múltipla escolha: o tema (opcional no JSON) vai para a própria questão.
-        if(Array.isArray(q._temaIds) && q._temaIds.length){
-          const rt2 = await questoes().from('question_edital_topics').upsert(q._temaIds.map(function(tid){ return { question_id: bankQuestionId, edital_topic_id: tid, from_manual: true }; }), { onConflict: 'question_id,edital_topic_id' });
-          if(rt2.error) allAvisos.push('Grupo ' + (code || '') + ': não consegui gravar o tema do edital (' + rt2.error.message + ').');
+      // Grupo novo: se algo falhar daqui até o fim, ele é DESFEITO (09/10/2026). Antes ficava vazio no
+      // banco, e a próxima tentativa o achava pelo código e falhava do mesmo jeito.
+      const textosCriados = [];
+      try{
+        // Pacote D/E — reference_texts[] ricos (vencem o legacy single).
+        if(Array.isArray(g.reference_texts) && g.reference_texts.length){
+          await _ueBankPersistReferenceTexts(bankQuestionId, g.reference_texts, examId, year, textosCriados);
+        } else if(g.reference_text){
+          const rt = await questoes().from('reference_texts').insert({ text: g.reference_text, exam_id: examId, year: year }).select().single();
+          if(rt.data){ textosCriados.push(rt.data.id); await questoes().from('question_reference_texts').insert({ question_id: bankQuestionId, reference_text_id: rt.data.id, ordem: 1 }); }
         }
-        const opts = Array.isArray(q.options) ? q.options : [];
-        for(let i = 0; i < opts.length; i++){
-          const o = opts[i];
-          await questoes().from('mc_options').insert({ question_id: bankQuestionId, letra: o.label || String.fromCharCode(65 + i), opcao: o.text || '', correct: !!o.correct, comment: o.comment || null });
+
+        if(qType === 'true_false'){
+          const merged = await _ueMergeTfItems(bankQuestionId, objQs, code, numero, year, subjectId);
+          importedItemIds = merged.itemIds; gabAdded = merged.gabAdded; if(Array.isArray(merged.avisos)) Array.prototype.push.apply(allAvisos, merged.avisos);
+        } else {
+          const q = objQs[0] || {};
+          // Múltipla escolha: o tema (opcional no JSON) vai para a própria questão.
+          if(Array.isArray(q._temaIds) && q._temaIds.length){
+            const rt2 = await questoes().from('question_edital_topics').upsert(q._temaIds.map(function(tid){ return { question_id: bankQuestionId, edital_topic_id: tid, from_manual: true }; }), { onConflict: 'question_id,edital_topic_id' });
+            if(rt2.error) allAvisos.push('Grupo ' + (code || '') + ': não consegui gravar o tema do edital (' + rt2.error.message + ').');
+          }
+          const opts = Array.isArray(q.options) ? q.options : [];
+          for(let i = 0; i < opts.length; i++){
+            const o = opts[i];
+            await questoes().from('mc_options').insert({ question_id: bankQuestionId, letra: o.label || String.fromCharCode(65 + i), opcao: o.text || '', correct: !!o.correct, comment: o.comment || null });
+          }
         }
+      }catch(e){
+        const desfeito = await _ueDesfazerGrupoNovo(bankQuestionId, textosCriados);
+        throw new Error(String((e && e.message) || e) + (desfeito
+          ? ' O grupo ' + (code || 'novo') + ' criado nesta tentativa foi desfeito; nada dele ficou no banco.'
+          : ' Não consegui desfazer o grupo ' + (code || 'novo') + ' criado nesta tentativa: apague-o no banco de questões antes de importar de novo.'));
       }
+      // Um grupo com o mesmo código mais adiante no JSON passa a achar este.
+      if(Array.isArray(questionsCache)) questionsCache.push(ins.data);
     }
 
     console.log('[import] grupo objetivo', wasExisting ? 'completado' : 'criado', ':', bankQuestionId, '| itens desta importação:', importedItemIds.length);
@@ -63622,6 +63641,125 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const alvo = window._ueOriginNorm(code).toLowerCase();
     if(!alvo) return null;
     return (questionsCache || []).find(function(q){ return q.origin && window._ueOriginNorm(q.origin).toLowerCase() === alvo; }) || null;
+  }
+
+  /* IMPORT-CONFERE-INICIO */
+  // ═══ Conferência dos ITENS C/E antes de gravar (09/10/2026, aprovado pelo dono) ═══
+  // O código de um item é único no banco inteiro (trava tf_items_origin_unico). O importador achava
+  // o grupo só pelo código do GRUPO: o grupo sequencial escrito com o código do item ("[#97/2025]"
+  // no lugar de "[#97-98/2025]") não era achado, o grupo novo era criado e o item batia na trava,
+  // deixando o grupo vazio no banco. Agora, ANTES de gravar qualquer coisa:
+  //   • grupo cujo código não existe, mas cujos itens já estão num único grupo do banco: é esse
+  //     grupo (g._grupoBanco), e o resumo avisa;
+  //   • item que já está em OUTRO grupo do banco (pelo código, ou pelo mesmo texto com outro
+  //     código) ou que aparece em dois grupos diferentes do JSON: para tudo, sem gravar nada;
+  //   • item com o código de um item do banco mas com texto diferente: só avisa (vale o do banco,
+  //     como no gabarito divergente).
+  // Devolve { erros, avisos }. Grupo de múltipla escolha e grupo sem C/E ficam de fora.
+  // Chave de TEXTO para comparar itens: sem tags, com as entidades HTML decodificadas (&quot;, &ecirc;)
+  // e só com letras e números, em minúsculas. Aspas retas ou curvas e espaços não contam.
+  function _ueTextoChave(html){
+    let s = String(html || '').replace(/<[^>]*>/g, ' ');
+    if(s.indexOf('&') >= 0){
+      if(typeof document !== 'undefined' && document.createElement){ const ta = document.createElement('textarea'); ta.innerHTML = s; s = ta.value; }
+      else s = s.replace(/&#(\d+);/g, function(_, n){ return String.fromCharCode(parseInt(n, 10)); }).replace(/&[a-z]+;/gi, ' ');
+    }
+    return s.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  }
+  function _ueImportConferirItens(groups){
+    const erros = [], avisos = [];
+    const porCodigo = {}, porTexto = {};
+    (tfItemsCache || []).forEach(function(t){
+      const o = _ueTfChaveOrigin(t.origin);
+      if(o) porCodigo[o] = t;
+      const s = _ueTextoChave(t.assertiva);
+      if(s){ if(!porTexto[s]) porTexto[s] = []; porTexto[s].push(t); }
+    });
+    const grupoDoBanco = function(qid){ return (questionsCache || []).find(function(x){ return String(x.id) === String(qid); }) || null; };
+    const codigoDoGrupo = function(qid){ const q = grupoDoBanco(qid); return (q && q.origin) ? q.origin : 'sem código'; };
+    const destinoDoItem = {};              // código do item → destino nesta importação
+    (groups || []).forEach(function(g){
+      const code = String(g.origin || '').trim();
+      const qs = Array.isArray(g.questions) ? g.questions : [];
+      const objQs = qs.filter(function(q){ return q.type !== 'essay'; });
+      if(!objQs.length || objQs.some(function(q){ return q.type === 'multiple_choice'; })) return;
+      const gm = code.match(/#(\d+)/), ym = code.match(/\/(\d{4})\]/);
+      const numero = gm ? parseInt(gm[1], 10) : null;
+      const year = ym ? parseInt(ym[1], 10) : (parseInt(g.ano, 10) || null);
+      const rotuloG = code || 'Ubique';
+      // Código de cada item: o mesmo que _ueMergeTfItems vai usar na gravação.
+      const itens = objQs.map(function(q, i){
+        const origin = q.origin || ((code && numero) ? ('[#' + numero + '-' + (i + 1) + '/' + year + ']') : null);
+        const chave = _ueTfChaveOrigin(origin);
+        return { origin: origin, chave: chave, noBanco: chave ? (porCodigo[chave] || null) : null, texto: _ueTextoChave(q.statement || q.assertion), pos: i + 1 };
+      });
+      // Sem código (Ubique): o grupo é a gêmea por texto, a mesma que a gravação vai completar.
+      const porGrupo = code ? _ueBankFindGroupByOrigin(code) : _ueBankFindGroupTwinByText('true_false', objQs, g);
+      let alvo = porGrupo ? String(porGrupo.id) : null;
+      if(!alvo){
+        const grupos = Array.from(new Set(itens.filter(function(x){ return x.noBanco; }).map(function(x){ return String(x.noBanco.question_id); })));
+        const achado = grupos.length === 1 ? grupoDoBanco(grupos[0]) : null;
+        if(achado){
+          g._grupoBanco = achado;
+          alvo = String(achado.id);
+          avisos.push('Grupo ' + rotuloG + ' do JSON: os itens já estão no grupo ' + (achado.origin || 'sem código') + ' do banco; usei esse grupo.');
+        }
+      }
+      const destino = alvo || ('novo:' + (code ? _ueTfChaveOrigin(code) : ('ubique-' + (groups.indexOf(g)))));
+      itens.forEach(function(x){
+        const rot = x.origin || ('item ' + x.pos + ' do grupo ' + rotuloG);
+        if(x.noBanco && String(x.noBanco.question_id) !== alvo){
+          erros.push('Grupo ' + rotuloG + ', item ' + rot + ': este código já é de um item do grupo ' + codigoDoGrupo(x.noBanco.question_id) + ' do banco. Use o código desse grupo no JSON, ou confira o código do item.');
+          return;
+        }
+        if(x.noBanco && x.texto && _ueTextoChave(x.noBanco.assertiva) !== x.texto){
+          avisos.push('Item ' + rot + ': o texto do JSON é diferente do texto do banco. Mantido o do banco; para trocar, abra a questão no banco.');
+        }
+        if(!x.noBanco && x.texto && porTexto[x.texto]){
+          const outro = porTexto[x.texto].find(function(t){ return String(t.question_id) !== alvo; });
+          if(outro){
+            erros.push('Grupo ' + rotuloG + ', item ' + rot + ': o mesmo texto já está no banco como ' + (outro.origin || 'item sem código') + ', no grupo ' + codigoDoGrupo(outro.question_id) + '. Entraria repetido com outro código; confira o código no JSON.');
+            return;
+          }
+          // Mesmo texto DENTRO do grupo de destino, com outro código: a gravação reaproveita o item do banco.
+          const mesmo = porTexto[x.texto].find(function(t){ return String(t.question_id) === alvo; });
+          if(mesmo && x.origin && String(mesmo.origin || '').trim()){
+            avisos.push('Item ' + rot + ': o mesmo texto já está neste grupo como ' + mesmo.origin + '. Usei o item do banco, com o código ' + mesmo.origin + '.');
+          }
+        }
+        if(x.chave){
+          if(destinoDoItem[x.chave] && destinoDoItem[x.chave].destino !== destino){
+            erros.push('Item ' + rot + ': aparece em dois grupos diferentes do JSON (' + destinoDoItem[x.chave].grupo + ' e ' + rotuloG + '). Deixe em um só.');
+          } else if(!destinoDoItem[x.chave]){
+            destinoDoItem[x.chave] = { destino: destino, grupo: rotuloG };
+          }
+        }
+      });
+    });
+    return { erros: erros, avisos: avisos };
+  }
+  /* IMPORT-CONFERE-FIM */
+
+  // Desfaz um grupo NOVO que falhou no meio da gravação (09/10/2026): apaga a questão, que leva junto
+  // em cascata itens, alternativas, ligações e temas, e os textos de apoio criados nesta tentativa.
+  // Sem isso o grupo ficava vazio no banco e a próxima tentativa o achava pelo código e falhava igual.
+  async function _ueDesfazerGrupoNovo(questionId, textosCriados){
+    try{
+      const del = await questoes().from('questions').delete().eq('id', questionId).select('id');
+      if(del.error || !del.data || !del.data.length){
+        console.error('[import] não consegui desfazer o grupo novo', questionId, del.error && del.error.message);
+        return false;
+      }
+      if(Array.isArray(textosCriados) && textosCriados.length){
+        const dt = await questoes().from('reference_texts').delete().in('id', textosCriados);
+        if(dt.error) console.warn('[import] textos de apoio do grupo desfeito ficaram no banco:', dt.error.message);
+      }
+      if(Array.isArray(tfItemsCache)) tfItemsCache = tfItemsCache.filter(function(t){ return String(t.question_id) !== String(questionId); });
+      return true;
+    }catch(e){
+      console.error('[import] erro ao desfazer o grupo novo', questionId, e);
+      return false;
+    }
   }
 
   // E3.5 — em questão repetida (mesmo código), ADICIONA os gabaritos comentados que
@@ -63780,6 +63918,19 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }
     }catch(e){ show('<span style="color:var(--red)">' + esc(e.message) + '</span>', false); return; }
 
+    // Itens C/E conferidos contra o banco inteiro ANTES de gravar (09/10/2026): grupo achado pelo código
+    // dos itens quando o do grupo não existe; item que já está em outro grupo para tudo, sem gravar nada.
+    groups.forEach(function(g){ delete g._grupoBanco; });
+    const conferencia = _ueImportConferirItens(groups);
+    if(conferencia.erros.length){
+      show('<span style="color:var(--red)"><strong>Nada foi importado.</strong> ' + conferencia.erros.length + (conferencia.erros.length === 1 ? ' item precisa' : ' itens precisam') + ' de correção no JSON:</span>'
+        + '<ul style="margin:.3rem 0 0;padding-left:1.2rem;font-size:.74rem;color:var(--red)">'
+        + conferencia.erros.slice(0, 10).map(function(m){ return '<li>' + esc(m) + '</li>'; }).join('')
+        + (conferencia.erros.length > 10 ? '<li>… e mais ' + (conferencia.erros.length - 10) + '</li>' : '')
+        + '</ul>', false);
+      return;
+    }
+
     // BUGFIX (importação em massa pra unidade): coleta TODAS as refs criadas
     // (essays + objetivas), cada uma com seu type — antes o caller só
     // recebia bankQuestionId (1 id), perdendo essays múltiplas de um grupo
@@ -63791,6 +63942,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const allChildErrors = [];
     const allAvisos = (window._ueOqParseAvisos || []).slice();   // descartes do parser + numeração dos itens C/E
     Array.prototype.push.apply(allAvisos, avisosConcurso);
+    Array.prototype.push.apply(allAvisos, conferencia.avisos);   // grupo achado pelos itens, texto diferente do banco
     try{
       // Bloco de destino (quando é unidade) — não "congelar" ele no freeze.
       const exceptBid = (target === 'unit' && ret) ? ret.bid : null;
@@ -63804,7 +63956,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         if(Array.isArray(r.avisos)) Array.prototype.push.apply(allAvisos, r.avisos);
         if(Array.isArray(r.essaysReusadas)) Array.prototype.push.apply(essaysReuse, r.essaysReusadas);
         if(typeof r.gabAdded === 'number') gabAdded += r.gabAdded;
-        if(r.wasExisting){ dupes++; if(g.origin) dupeCodes.push(g.origin); }
+        if(r.wasExisting){ dupes++; const cod = (g._grupoBanco && g._grupoBanco.origin) || g.origin; if(cod) dupeCodes.push(cod); }
         else created++;
       }
     }catch(e){
@@ -63948,7 +64100,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
              '</ul>';
     }
     if(allAvisos.length){
-      msg += '<br><span style="color:var(--accent)">Numeração dos itens: ' + allAvisos.length + ' observação(ões)</span><ul style="margin:.3rem 0 0;padding-left:1.2rem;font-size:.72rem;color:var(--text-dim)">' +
+      msg += '<br><span style="color:var(--accent)">Observações da importação: ' + allAvisos.length + '</span><ul style="margin:.3rem 0 0;padding-left:1.2rem;font-size:.72rem;color:var(--text-dim)">' +
              allAvisos.slice(0, 8).map(function(a){ return '<li>' + esc(a) + '</li>'; }).join('') +
              (allAvisos.length > 8 ? '<li>… e mais ' + (allAvisos.length - 8) + '</li>' : '') +
              '</ul>';
