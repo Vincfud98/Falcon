@@ -12929,16 +12929,21 @@ window.TAG_REGISTRY = {
     }
     return { data: window._ordenarLinhas(resultado.data, ordenar), error: null };
   }
+  // `ordem`: uma coluna ou uma LISTA de colunas. Tabela de ligação sem id (questão × tópico, item × tag…)
+  // precisa da ordem pelo PAR inteiro: ordenada só pela 1ª coluna, que se repete, o banco desempata de jeito
+  // diferente em cada página e a virada de página repetia uma linha e pulava outra (09/10/2026).
   window._fetchAllRows = async function(monta, ordem, rotulo, opts){
     opts = opts || {};
     const pag = (opts.pag > 0) ? opts.pag : _PAG;
     if(opts.chave) return _fetchPorChave(monta, opts.chave, rotulo, pag, opts);
-    const col = ordem || 'id';
+    const cols = Array.isArray(ordem) && ordem.length ? ordem : [ordem || 'id'];
+    const col = cols.join(',');
+    const ordenado = function(){ let q = monta(); cols.forEach(function(c){ q = q.order(c, { ascending: true }); }); return q; };
     const out = [];
     for(let de = 0; ; de += pag){
       let data = null, error = null;
       for(let tent = 0; ; tent++){
-        const r = await monta().order(col, { ascending: true }).range(de, de + pag - 1);
+        const r = await ordenado().range(de, de + pag - 1);
         data = r.data; error = r.error;
         if(!error || !window._ehErroPassageiro(error) || tent >= _FETCH_ESPERAS.length) break;
         console.warn('[fetchAll] ' + (rotulo || '?') + ' página ' + de + ': erro passageiro (' + error.message + ') — repetindo em ' + _FETCH_ESPERAS[tent] + 'ms');
@@ -13341,14 +13346,22 @@ window.TAG_REGISTRY = {
      · com cópia → devolve a cópia NA HORA (a conferência, em 2º plano, recarrega o que mudou);
      · sem cópia → rede e grava a cópia com a versão do servidor.
      opts.direto: uma busca só, sem paginar (tabela sem coluna id). */
+  // Cópia local de tabela de ORDEM COMPOSTA (lista de colunas) só vale se foi lida com essa mesma ordem.
+  // As cópias de antes de 09/10/2026 foram lidas paginando por uma coluna que se repete e podem ter perdido
+  // linhas na virada de página; a assinatura da ordem as descarta uma vez, sem esperar o conteúdo mudar.
+  window._ordemAssinatura = function(ordem){ return Array.isArray(ordem) ? ordem.join(',') : null; };
+  window._cacheOrdemConfere = function(ent, ordem){
+    const sig = window._ordemAssinatura(ordem);
+    return !sig || !!(ent && ent.meta && ent.meta.ordem === sig);
+  };
   window._carregarTabela = async function(nome, monta, ordem, rotulo, opts){
     opts = opts || {};
     const ent = window._cacheLer(nome);
-    if(ent) return { data: ent.rows, error: null, origem: 'cache' };
+    if(ent && window._cacheOrdemConfere(ent, ordem)) return { data: ent.rows, error: null, origem: 'cache' };
     const r = opts.direto ? await _tentar(function(){ return monta(); }, rotulo || nome, '') : await window._fetchAllRows(monta, ordem, rotulo || nome, opts);
     if(!r.error && _cache.ativo){
       const v = await _versaoDe(nome);   // a conferência já está a caminho; grava com a versão certa
-      window._cacheGravar(nome, _clonar(r.data || []), _metaDe(v));   // clone: quem chamou fica com o seu
+      window._cacheGravar(nome, _clonar(r.data || []), Object.assign(_metaDe(v), { ordem: window._ordemAssinatura(ordem) }));   // clone: quem chamou fica com o seu
     }
     return r;
   };
@@ -13445,6 +13458,7 @@ window.TAG_REGISTRY = {
         if(!mapa) return true;                                   // sem versão: recarrega tudo
         const v = mapa[nome]; const ent = window._cacheLer(nome);
         if(!v) return false;                                     // o servidor não conhece a tabela
+        if(!window._cacheOrdemConfere(ent, _registroConteudo[nome] && _registroConteudo[nome].ordem)) return true;   // cópia lida com a ordem antiga
         return !(ent && ent.meta && ent.meta.hash && ent.meta.hash === v.hash);
       });
       // blocos por último (é a pesada)
@@ -13456,7 +13470,7 @@ window.TAG_REGISTRY = {
           if(def.recarregar){ await def.recarregar(v); continue; }
           const r = def.direto ? await _tentar(function(){ return def.monta(); }, nome, '') : await window._fetchAllRows(def.monta, def.ordem, nome, def.opts);
           if(r.error) continue;
-          await window._cacheGravar(nome, r.data || [], _metaDe(v));
+          await window._cacheGravar(nome, r.data || [], Object.assign(_metaDe(v), { ordem: window._ordemAssinatura(def.ordem) }));
           if(def.banco) bancoMudou = true;
           else if(def.aplicar) def.aplicar(r.data || []);
         }catch(e){ console.warn('[versoes] recarga de ' + nome + ' falhou:', e && e.message); }
@@ -13569,15 +13583,15 @@ window.TAG_REGISTRY = {
     reg('questoes.tf_item_comments', { monta: () => qsb.from('tf_item_comments').select('*'), ordem: 'id', banco: true });
     reg('questoes.mc_options',       { monta: () => qsb.from('mc_options').select('*'), ordem: 'id', banco: true });
     reg('questoes.reference_texts',  { monta: () => qsb.from('reference_texts').select('*'), ordem: 'id', banco: true });
-    reg('questoes.question_reference_texts', { monta: () => qsb.from('question_reference_texts').select('*'), ordem: 'question_id', banco: true });
+    reg('questoes.question_reference_texts', { monta: () => qsb.from('question_reference_texts').select('*'), ordem: ['question_id', 'reference_text_id'], banco: true });
     reg('questoes.essay_criteria',   { monta: () => qsb.from('essay_criteria').select('*'), ordem: 'id', banco: true });
     reg('questoes.essay_answer_models', { monta: () => qsb.from('essay_answer_models').select('*'), ordem: 'id', banco: true });
-    reg('questoes.question_edital_topics', { monta: () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), ordem: 'question_id', banco: true });
+    reg('questoes.question_edital_topics', { monta: () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), ordem: ['question_id', 'edital_topic_id'], banco: true });
     // A etiqueta POR ITEM (decisão do dono, 07/10/2026): o tema do edital mora no item C/E.
-    reg('questoes.tf_item_edital_topics', { monta: () => qsb.from('tf_item_edital_topics').select('tf_item_id, edital_topic_id, from_manual'), ordem: 'tf_item_id', banco: true });
-    reg('questoes.question_subjects', { monta: () => qsb.from('question_subjects').select('question_id, subject_id'), ordem: 'question_id', banco: true });
-    reg('questoes.question_tags', { monta: () => qsb.from('question_tags').select('question_id, tag_id'), ordem: 'question_id', banco: true });
-    reg('questoes.tf_item_tags', { monta: () => qsb.from('tf_item_tags').select('tf_item_id, tag_id'), ordem: 'tf_item_id', banco: true });
+    reg('questoes.tf_item_edital_topics', { monta: () => qsb.from('tf_item_edital_topics').select('tf_item_id, edital_topic_id, from_manual'), ordem: ['tf_item_id', 'edital_topic_id'], banco: true });
+    reg('questoes.question_subjects', { monta: () => qsb.from('question_subjects').select('question_id, subject_id'), ordem: ['question_id', 'subject_id'], banco: true });
+    reg('questoes.question_tags', { monta: () => qsb.from('question_tags').select('question_id, tag_id'), ordem: ['question_id', 'tag_id'], banco: true });
+    reg('questoes.tf_item_tags', { monta: () => qsb.from('tf_item_tags').select('tf_item_id, tag_id'), ordem: ['tf_item_id', 'tag_id'], banco: true });
     // blocos: recarga por diferença
     reg('conteudo.unit_blocks',     { recarregar: _atualizarBlocos });
   }
@@ -13819,7 +13833,7 @@ window.TAG_REGISTRY = {
           _carregarTabela('questoes.tf_item_comments', () => qsb.from('tf_item_comments').select('*'), 'id', 'tf_item_comments'),
           _carregarTabela('questoes.mc_options', () => qsb.from('mc_options').select('*'), 'id', 'mc_options'),
           _carregarTabela('questoes.reference_texts', () => qsb.from('reference_texts').select('*'), 'id', 'reference_texts'),
-          _carregarTabela('questoes.question_reference_texts', () => qsb.from('question_reference_texts').select('*'), 'question_id', 'question_reference_texts'),
+          _carregarTabela('questoes.question_reference_texts', () => qsb.from('question_reference_texts').select('*'), ['question_id', 'reference_text_id'], 'question_reference_texts'),
           _carregarTabela('questoes.essay_criteria', () => qsb.from('essay_criteria').select('*'), 'id', 'essay_criteria'),
           _carregarTabela('questoes.essay_answer_models', () => qsb.from('essay_answer_models').select('*'), 'id', 'essay_answer_models'),
           // A ETIQUETA questão→tópico do edital. É o que o admin grava quando a
@@ -13829,18 +13843,18 @@ window.TAG_REGISTRY = {
           // questões de HB tinham a etiqueta do Período Colonial e ZERO unidades
           // tinham o vínculo indireto — o trabalho do admin era jogado fora e o
           // aluno via 13 de 25.
-          _carregarTabela('questoes.question_edital_topics', () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), 'question_id', 'question_edital_topics'),
+          _carregarTabela('questoes.question_edital_topics', () => qsb.from('question_edital_topics').select('question_id, edital_topic_id, from_manual'), ['question_id', 'edital_topic_id'], 'question_edital_topics'),
           // A etiqueta POR ITEM (decisão do dono, 07/10/2026): nos C/E o tema vive em cada
           // item (manual do admin ou herdado da unidade que usa o item); a da mãe é a união.
-          _carregarTabela('questoes.tf_item_edital_topics', () => qsb.from('tf_item_edital_topics').select('tf_item_id, edital_topic_id, from_manual'), 'tf_item_id', 'tf_item_edital_topics'),
+          _carregarTabela('questoes.tf_item_edital_topics', () => qsb.from('tf_item_edital_topics').select('tf_item_id, edital_topic_id, from_manual'), ['tf_item_id', 'edital_topic_id'], 'tf_item_edital_topics'),
           // As MATÉRIAS da questão (questoes.question_subjects): uma questão pode ter mais de uma
           // ([#36/2005] é HB e ECO). Decisão do dono (17/07 e 08/10): basta ter uma para ver, e a
           // questão só do banco aparece nas duas. A de unidade passa pela matéria da unidade.
-          _carregarTabela('questoes.question_subjects', () => qsb.from('question_subjects').select('question_id, subject_id'), 'question_id', 'question_subjects'),
+          _carregarTabela('questoes.question_subjects', () => qsb.from('question_subjects').select('question_id, subject_id'), ['question_id', 'subject_id'], 'question_subjects'),
           // As TAGS das questões (questoes.question_tags / tf_item_tags → conteudo.tags). Sem elas, toda
           // questão do banco chegava sem etiqueta e marcar uma tag no filtro esvaziava o resultado.
-          _carregarTabela('questoes.question_tags', () => qsb.from('question_tags').select('question_id, tag_id'), 'question_id', 'question_tags'),
-          _carregarTabela('questoes.tf_item_tags', () => qsb.from('tf_item_tags').select('tf_item_id, tag_id'), 'tf_item_id', 'tf_item_tags'),
+          _carregarTabela('questoes.question_tags', () => qsb.from('question_tags').select('question_id, tag_id'), ['question_id', 'tag_id'], 'question_tags'),
+          _carregarTabela('questoes.tf_item_tags', () => qsb.from('tf_item_tags').select('tf_item_id, tag_id'), ['tf_item_id', 'tag_id'], 'tf_item_tags'),
         ]);
         // tf_item_comments, essay_criteria e essay_answer_models são EXTRAS:
         // se falharem, NÃO derrubam o banco — só ficam sem os dados extras.
