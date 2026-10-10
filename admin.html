@@ -11080,8 +11080,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             <span id="fascVectorMsg" style="font-size:.8rem;color:var(--text-mute)"></span>
           </div>
           <div class="readonly-notice" style="margin-bottom:1.5rem;display:flex;gap:.8rem;align-items:center;flex-wrap:wrap">
-            <div style="flex:1;min-width:220px"><strong>Busca por significado — questões do banco.</strong> Cada questão vira um vetor para o "Buscar com IA" do aluno e para as questões que o tutor sugere. Salvar uma questão no modal e importar pela tela já vetorizam sozinhos; as cargas por SQL, não. Depois de cada carga, clique aqui: o botão vetoriza só as questões sem vetor, em lotes de 300, e mostra o andamento.</div>
-            <button class="btn btn-ghost btn-sm" id="qVectorBtn">Vetorizar questões pendentes</button>
+            <div style="flex:1;min-width:220px"><strong>Busca por significado — questões do banco.</strong> Cada questão vira um vetor para o "Buscar com IA" do aluno e para as questões que o tutor sugere. Salvar uma questão no modal e importar pela tela já vetorizam sozinhos; as cargas por SQL, não. Depois de cada carga ou correção por SQL, clique aqui: o botão confere todas as questões e refaz só o vetor das que estão sem vetor ou tiveram o texto mudado (texto, comentário do item, texto de apoio); as iguais não custam nada.</div>
+            <button class="btn btn-ghost btn-sm" id="qVectorBtn">Vetorizar e atualizar questões</button>
             <span id="qVectorMsg" style="font-size:.8rem;color:var(--text-mute)"></span>
           </div>
 
@@ -30469,63 +30469,44 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }
   }
 
-  // Vetoriza as questões do banco que ainda não têm vetor (busca por significado do aluno e do tutor).
-  // O botão calcula quem falta lendo as duas tabelas em páginas de 1000 (o Supabase corta em 1000 linhas:
-  // o modo de lote da própria Edge Function embed-questions cai nessa armadilha e nunca vê a questão 1001
-  // em diante) e manda os ids explicitamente, em lotes de 100. Cada questão vira UM vetor, com o hash do
-  // texto: re-rodar não custa nada. Achado de 08/10/2026: só o salvar do modal vetorizava; 1087 de 1198
-  // questões estavam sem vetor.
+  // Vetoriza as questões do banco (busca por significado do aluno e do tutor). Manda TODAS, em lotes de 50, com
+  // os ids explícitos: a Edge Function embed-questions monta o texto de cada uma (enunciado, comando, texto de
+  // apoio, itens e o comentário do item), compara com o hash guardado e só chama a IA para a que está sem vetor ou
+  // mudou. Antes (08/10) o botão mandava só as questões SEM vetor, e um texto corrigido por SQL ficava com o vetor
+  // velho (10/10/2026: 16 questões corrigidas precisaram de um SQL para apagar o vetor). Lote de 50, e não de 100:
+  // a função lê os itens do lote numa consulta só, e o Supabase corta em 1000 linhas.
   async function _qVectorizePending(){
     const btn = document.getElementById('qVectorBtn');
     const msg = document.getElementById('qVectorMsg');
     const VERDE = 'var(--green,#7cb87c)', VERMELHO = 'var(--red,#d47973)';
     const diga = function(t, cor){ if(msg){ msg.textContent = t; msg.style.color = cor || 'var(--text-mute)'; } };
-    if(btn){ btn.disabled = true; btn.textContent = 'Vetorizando…'; }
-    let total = 0, lote = 0;
+    const LOTE = 50;
+    if(btn){ btn.disabled = true; btn.textContent = 'Conferindo…'; }
+    let total = 0, lote = 0, conferidas = 0;
     try {
-      diga('Contando o que falta…');
+      diga('Contando as questões…');
       const todas = (await _qTodasAsLinhas('questions', 'id')).map(String);
-      let feitas = null;
-      try { feitas = await _qTodasAsLinhas('question_embeddings', 'question_id'); }
-      catch(e){ console.warn('[vetorizar questões] sem leitura da tabela de vetores (falta a policy do admin)', e); }
-      if(feitas){
-        const done = new Set(feitas.map(String));
-        const pendentes = todas.filter(function(id){ return !done.has(id); });
-        if(!pendentes.length){ diga('Nada a fazer: todas as ' + todas.length + ' questões já têm vetor.', VERDE); return; }
-        const lotes = Math.ceil(pendentes.length / 100);
-        diga('Pendentes: ' + pendentes.length + ' de ' + todas.length + '. Vetorizando em ' + lotes + ' lote(s) de até 100…');
-        for(let i = 0; i < pendentes.length; i += 100){
-          lote++;
-          const pedaco = pendentes.slice(i, i + 100);
-          const { data, error } = await supabase.functions.invoke('embed-questions', { body: { question_ids: pedaco } });
-          if(error) throw error;
-          if(data && data.error) throw new Error(data.detail || data.error);
-          total += (data && Number(data.embedded)) || 0;
-          diga('Lote ' + lote + ' de ' + lotes + ': ' + total + ' vetorizadas até agora…');
-        }
-      } else {
-        // Sem leitura da tabela de vetores, a função escolhe sozinha (até 300 por chamada; ela só enxerga as
-        // primeiras 1000 questões). Roda até ela dizer que não há mais.
-        for(let i = 0; i < 60; i++){
-          lote++;
-          const { data, error } = await supabase.functions.invoke('embed-questions', { body: { limit: 300 } });
-          if(error) throw error;
-          if(data && data.error) throw new Error(data.detail || data.error);
-          const n = (data && Number(data.embedded)) || 0;
-          total += n;
-          diga('Lote ' + lote + ': ' + n + ' questões. Total até agora: ' + total + '…');
-          if(n === 0) break;
-        }
+      const lotes = Math.ceil(todas.length / LOTE);
+      diga('Conferindo ' + todas.length + ' questões em ' + lotes + ' lotes…');
+      for(let i = 0; i < todas.length; i += LOTE){
+        lote++;
+        const pedaco = todas.slice(i, i + LOTE);
+        const { data, error } = await supabase.functions.invoke('embed-questions', { body: { question_ids: pedaco } });
+        if(error) throw error;
+        if(data && data.error) throw new Error(data.detail || data.error);
+        total += (data && Number(data.embedded)) || 0;
+        conferidas += pedaco.length;
+        diga('Lote ' + lote + ' de ' + lotes + ': ' + conferidas + ' conferidas, ' + total + ' vetorizadas ou atualizadas…');
       }
       let restam = null;
       try { const d2 = new Set((await _qTodasAsLinhas('question_embeddings', 'question_id')).map(String)); restam = todas.filter(function(id){ return !d2.has(id); }).length; } catch(_){ }
-      if(total === 0 && restam) diga('A função não vetorizou nada, mas ' + restam + ' questões seguem sem vetor: podem estar sem texto. Veja o console.', VERMELHO);
-      else diga('Pronto: ' + total + ' questões vetorizadas.' + (restam == null ? '' : (restam ? ' Restam ' + restam + ' sem vetor: questões sem texto para vetorizar.' : ' Nenhuma pendente.')), VERDE);
+      diga('Pronto: ' + todas.length + ' conferidas, ' + total + (total === 1 ? ' vetorizada ou atualizada.' : ' vetorizadas ou atualizadas.')
+        + (restam ? ' ' + restam + ' seguem sem vetor: questões sem texto para vetorizar.' : ''), restam ? VERMELHO : VERDE);
     } catch(e){
       console.warn('[vetorizar questões]', e);
-      diga('Erro depois de ' + total + ' vetorizadas: ' + (e && e.message ? e.message : e) + '. Clique de novo para continuar de onde parou.', VERMELHO);
+      diga('Erro no lote ' + lote + ' (' + total + ' vetorizadas até ali): ' + (e && e.message ? e.message : e) + '. Clique de novo: o que já está certo não é refeito.', VERMELHO);
     } finally {
-      if(btn){ btn.disabled = false; btn.textContent = 'Vetorizar questões pendentes'; }
+      if(btn){ btn.disabled = false; btn.textContent = 'Vetorizar e atualizar questões'; }
     }
   }
   // Todas as linhas de uma coluna, em páginas de 1000 (o Supabase corta em 1000 por pedido).
@@ -30540,12 +30521,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     }
     return out;
   }
-  // Vetoriza uma lista de questões recém-importadas, em pedaços de 100, sem travar quem chamou.
-  // Se falhar, o botão "Vetorizar questões pendentes" (IA → Conhecimento → Ingestão) completa.
+  // Vetoriza uma lista de questões recém-importadas, em pedaços de 50 (o Supabase corta em 1000 linhas a leitura
+  // dos itens do pedaço na Edge Function), sem travar quem chamou.
+  // Se falhar, o botão "Vetorizar e atualizar questões" (IA → Conhecimento → Ingestão) completa.
   function _qVectorizeIds(ids){
     const lista = (ids || []).map(String).filter(Boolean);
-    for(let i = 0; i < lista.length; i += 100){
-      const pedaco = lista.slice(i, i + 100);
+    for(let i = 0; i < lista.length; i += 50){
+      const pedaco = lista.slice(i, i + 50);
       supabase.functions.invoke('embed-questions', { body: { question_ids: pedaco } })
         .then(function(r){ if(r && r.error) console.warn('[embed-questions lote]', r.error); else console.log('[embed-questions lote] ok', pedaco.length, r && r.data); })
         .catch(function(e){ console.warn('[embed-questions lote ex]', e); });
