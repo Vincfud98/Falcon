@@ -1315,6 +1315,9 @@
     overflow:hidden;
     transition:border-color .15s;
   }
+  .iuf-area{container-type:inline-size}
+  /* quadro estreito (capas quadradas de 140px): rótulos curtos, "URL" e "banco" */
+  @container (max-width: 200px){ .iuf-btn .iuf-longo{display:none} }
   .iuf-area.has-image{border-style:solid;border-color:rgba(200,169,126,.3)}
   .iuf-area.dragover{border-color:var(--accent);background:rgba(200,169,126,.1)}
   /* Hero do simulado: faixa horizontal pequena */
@@ -17467,6 +17470,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // - Drag & drop
   // - Botão "Upload" (file picker)
   // - Botão "Importar de URL" (fetch + re-upload no SEU storage)
+  // - Botão "Do banco" (escolhe uma imagem do banco de imagens, sem subir de novo)
+  // - Imagem do banco (public.images) NUNCA é apagada por este campo: trocar ou
+  //   remover só desliga a imagem daqui. A mesma capa pode estar em várias provas;
+  //   apagar de vez é só na galeria do banco de imagens (10/10/2026).
   // - Preview imediato
   // - Botão "Remover" (apaga do bucket se path conhecido)
   // - Validação de tipo e tamanho
@@ -17541,7 +17548,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       </div>
       <div class="iuf-actions">
         <button type="button" class="iuf-btn" data-act="upload">Upload</button>
-        <button type="button" class="iuf-btn" data-act="from-url">Importar URL</button>
+        <button type="button" class="iuf-btn" data-act="from-url" title="Importar de um endereço (URL)"><span class="iuf-longo">Importar </span>URL</button>
+        <button type="button" class="iuf-btn" data-act="from-bank" title="Escolher uma imagem que já está no banco de imagens"><span class="iuf-longo">Do </span>banco</button>
         <button type="button" class="iuf-btn danger" data-act="remove" style="display:none">Remover</button>
       </div>
       <div class="iuf-progress" style="display:none">enviando…</div>
@@ -17767,9 +17775,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
         const { data: urlData } = supabase.storage.from(bucket).getPublicUrl(path);
 
-        // Remove a antiga do storage (best-effort)
+        // A antiga sai do storage só se NÃO for do banco de imagens (ver noBanco)
         const oldPath = currentPath;
         const oldImageId = currentImageId;
+        const oldUrl = currentUrl;
 
         currentUrl = urlData.publicUrl;
         currentPath = path;
@@ -17812,12 +17821,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           }
         }
 
-        // Cleanup: arquivo antigo + linha images antiga
-        if(oldPath && oldPath !== path){
+        // Arquivo antigo: só sai se não estiver no banco de imagens (lá ele pode
+        // ser a capa de outra prova). A linha do banco nunca sai daqui.
+        if(oldPath && oldPath !== path && !oldImageId && !(await noBanco(oldUrl))){
           await supabase.storage.from(bucket).remove([oldPath]).catch(() => {});
-        }
-        if(oldImageId && oldImageId !== currentImageId){
-          await supabase.from('images').delete().eq('id', oldImageId).then(() => {}, () => {});
         }
 
         refreshDisplay();
@@ -17856,7 +17863,6 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         const oldImageId = currentImageId;
         currentUrl = url; currentPath = null; currentImageId = imgRow ? imgRow.id : null;
         setMetaInputsFromState();
-        if(oldImageId && oldImageId !== currentImageId){ await supabase.from('images').delete().eq('id', oldImageId).then(() => {}, () => {}); }
       } else {
         currentUrl = url; currentPath = null;
       }
@@ -17930,14 +17936,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
     async function removeCurrent(){
       if(!currentUrl) return;
-      if(!confirm('Remover esta imagem?')) return;
+      const doBanco = !!currentImageId || await noBanco(currentUrl);
+      if(!confirm(doBanco ? 'Tirar a imagem daqui? Ela continua no banco de imagens.' : 'Remover esta imagem?')) return;
       setProgress('removendo…');
       try {
-        if(currentPath){
+        if(currentPath && !doBanco){
           await supabase.storage.from(bucket).remove([currentPath]).catch(() => {});
-        }
-        if(currentImageId){
-          await supabase.from('images').delete().eq('id', currentImageId).then(() => {}, () => {});
         }
         currentUrl = null;
         currentPath = null;
@@ -17951,9 +17955,45 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }
     }
 
+    // A imagem está no banco de imagens (public.images)? Então outro lugar pode
+    // estar usando: nada daqui a apaga.
+    async function noBanco(url){
+      if(!url) return false;
+      if((imagesLibraryCache || []).some(i => i.public_url === url)) return true;
+      try{
+        const { data } = await supabase.from('images').select('id').eq('public_url', url).limit(1);
+        return !!(data && data.length);
+      }catch(_){ return true; }        // na dúvida, não apaga
+    }
+
+    // "Do banco": a imagem escolhida passa a ser a deste campo, sem upload. O
+    // arquivo não é deste campo (currentPath nulo), então trocar não o apaga.
+    function usarDoBanco(img){
+      if(!img || !img.public_url) return;
+      currentUrl = img.public_url;
+      currentPath = null;
+      currentImageId = metadataInputs ? (img.id || null) : null;
+      if(metadataInputs){
+        currentMeta = { title: img.title || '', slug: img.slug || '', alt_text: img.alt_text || '' };
+        if(fullMeta){ currentMeta.artist = img.artist || ''; currentMeta.credit = img.credit || ''; currentMeta.description = img.description || ''; }
+        setMetaInputsFromState();
+      }
+      refreshDisplay();
+      onChange(currentUrl, { path: null, image_id: currentImageId });
+    }
+    async function abrirBanco(){
+      if(typeof window.ueImgBankOpen !== 'function'){ notifyError('O banco de imagens não carregou. Recarregue a página.'); return; }
+      if(!(imagesLibraryCache || []).length && typeof loadImagesLibrary === 'function'){
+        setProgress('carregando o banco…');
+        try{ await loadImagesLibrary(); } finally { setProgress(null); }
+      }
+      window.ueImgBankOpen({ onPick: usarDoBanco });
+    }
+
     // Listeners
     container.querySelector('[data-act="upload"]').addEventListener('click', () => fileInput.click());
     container.querySelector('[data-act="from-url"]').addEventListener('click', importFromUrl);
+    container.querySelector('[data-act="from-bank"]').addEventListener('click', abrirBanco);
     container.querySelector('[data-act="remove"]').addEventListener('click', removeCurrent);
     fileInput.addEventListener('change', (e) => {
       if(e.target.files[0]) uploadFile(e.target.files[0]);
@@ -45959,9 +45999,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }).join('');
   }
 
+  let _ueImgPickOverflowAntes = '';   // o picker abre por cima de outro modal (campo de imagem): devolve o estado dele
   function _ueImgBankClose(){
     if(_ueImgPickOverlay) _ueImgPickOverlay.classList.remove('active');
-    document.body.style.overflow = '';
+    document.body.style.overflow = _ueImgPickOverflowAntes;
     _ueImgPickOpts = { multi:false, onPick:null, onPickMany:null };
     _ueImgPickSelected = new Set();
   }
@@ -46130,6 +46171,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     _ueImgRenderSubjChips();
     _ueImgBankRenderGrid();
     _updateImgAddBtn();
+    _ueImgPickOverflowAntes = document.body.style.overflow;
     _ueImgPickOverlay.classList.add('active');
     document.body.style.overflow = 'hidden';
   };
