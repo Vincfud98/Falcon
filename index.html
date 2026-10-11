@@ -11755,7 +11755,7 @@ body[data-app-section="admin"] .tb-brand span.tb-suffix{color:var(--text-dim)}
 })();
 </script>
 
-<!-- Supabase — verificação de acesso à plataforma (platform_access) -->
+<!-- Supabase — verificação de acesso à plataforma (matrículas) -->
 <script>
 /* CONCHA-INICIO — service worker: a página e o que ela precisa ficam no aparelho
    e o site abre sem rede (sw.js). Registro relativo: vale na raiz e em qualquer pasta. */
@@ -15372,7 +15372,7 @@ const Auth = (function(){
   function allUsers(){
     return users.map(publicUser);
   }
-  // ── acesso à plataforma (platform_access) ──────────────────
+  // ── acesso à plataforma (matrículas, via aluno.meu_acesso) ──────────
   const ACCESS_KEY = 'ubique.platform.access';
 
   function storeAccessData(data, remember){
@@ -15394,101 +15394,37 @@ const Auth = (function(){
     }catch(e){}
   }
 
-  // FASE D: matérias COMPRADAS (matrículas ativas em vendas.enrollments).
-  // O servidor já libera o conteúdo por elas (conteudo.aluno_tem_materia);
-  // aqui a UI acompanha: viram acesso 'custom' na régua do cliente.
-  // O RLS só devolve as matrículas do próprio aluno.
-  async function _comprasSubjectIds(){
-    try{
-      if(!window._sb) return [];
-      const { data: enr, error } = await window._sb.schema('vendas').from('enrollments')
-        .select('product_id, ends_at, status')
-        .eq('status', 'active');
-      if(error || !enr || !enr.length) return [];
-      const nowMs = Date.now();
-      const pids = [...new Set(enr
-        .filter(e => !e.ends_at || new Date(e.ends_at).getTime() > nowMs)
-        .map(e => e.product_id))];
-      if(!pids.length) return [];
-      const { data: prods, error: e2 } = await window._sb.schema('catalogo').from('products')
-        .select('id, subject_id').in('id', pids);
-      if(e2 || !prods) return [];
-      return [...new Set(prods.map(p => p.subject_id).filter(v => v != null))];
-    }catch(_){ return []; }
-  }
-  async function _mergeCompras(base){
-    try{
-      if(!base || !base.allowed) return base;   // suspenso: compra não fura a suspensão
-      const t = base.access_type;
-      if(t !== 'free' && t !== 'custom') return base; // full/complete: já vê tudo
-      const compradas = await _comprasSubjectIds();
-      if(!compradas.length) return base;
-      const subj = [...new Set([...(base.subject_ids || []).map(String), ...compradas.map(String)])];
-      // Os concursos das matérias compradas SEMPRE entram no universo do
-      // aluno — sem isso, o card do concurso na Loja não abre como "Acessar".
-      const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list)
-        ? (UbiqueStore.exam_subjects.list() || []) : [];
-      const compradasStr = compradas.map(String);
-      const extra = rel.filter(es => compradasStr.includes(String(es.subject_id))).map(es => String(es.exam_id));
-      const exams = [...new Set([...(base.exam_ids || []).map(String), ...extra])];
-      return { allowed: true, access_type: 'custom', subject_ids: subj, exam_ids: exams };
-    }catch(_){ return base; }
-  }
-
-  // Consulta acesso à plataforma. Prioriza Supabase (source-of-truth);
-  // só cai pro UbiqueStore se Supabase indisponível.
-  // Retorna { allowed, access_type, subject_ids, reason? }
-  async function checkPlatformAccess(email){
-    const normEmail = email.trim().toLowerCase();
-
-    // 1ª fonte: Supabase (crm.platform_access) — fresca, atualizada em tempo real
-    if(window.UBIQUE_USE_SUPABASE && window._sb){
+  // Acesso do aluno, decidido no SERVIDOR (aluno.meu_acesso, troca da Portaria
+  // pela Matrícula, 11/10/2026): matrículas ativas (compras e cortesias); até a
+  // etapa 5 da troca o servidor ainda soma a Portaria antiga. Devolve
+  // { allowed, access_type, subject_ids, exam_ids, vencimentos, reason? }:
+  //   conta suspensa → allowed:false · sem matéria → 'free' (degustação) ·
+  //   com matérias → 'custom' · admin → 'full'.
+  // Sem resposta do servidor: o último acesso conhecido; sem ele, degustação
+  // (nunca libera tudo por falha).
+  async function checkPlatformAccess(){
+    if(window._sb){
       try{
-        const { data, error } = await window._sb.schema('crm')
-          .from('platform_access')
-          .select('status, access_type, subject_ids, exam_ids')
-          .eq('email', normEmail)
-          .maybeSingle();
-        if(!error){
-          // FREEMIUM (A3c): fora da Portaria não barra mais — vira conta
-          // GRATUITA (degustação: 1ª unidade de cada matéria; resto cadeado).
-          // FASE D: em qualquer caso, as matérias COMPRADAS entram na régua.
-          if(!data) return await _mergeCompras({ allowed: true, access_type: 'free', subject_ids: [], exam_ids: [] });
-          if(data.status === 'suspended') return { allowed: false, reason: 'suspended' };
-          return await _mergeCompras({
+        const { data, error } = await window._sb.schema('aluno').rpc('meu_acesso');
+        if(!error && data && typeof data === 'object'){
+          if(!data.ativa) return { allowed: false, reason: 'suspended' };
+          const concursos = (data.concursos || []).map(String);
+          if(data.admin) return { allowed: true, access_type: 'full', subject_ids: [], exam_ids: concursos };
+          const materias = (data.materias || []).map(String);
+          return {
             allowed: true,
-            access_type: data.access_type || 'full',
-            subject_ids: Array.isArray(data.subject_ids) ? data.subject_ids : [],
-            exam_ids: Array.isArray(data.exam_ids) ? data.exam_ids : [],
-          });
+            access_type: materias.length ? 'custom' : 'free',
+            subject_ids: materias,
+            exam_ids: concursos,
+            vencimentos: data.vencimentos || {},
+          };
         }
-        // Se error (rede/RLS), cai pro fallback UbiqueStore abaixo
-        console.warn('[checkPlatformAccess] supabase error, falling back:', error.message);
-      }catch(e){
-        console.warn('[checkPlatformAccess] supabase ex:', e.message);
-      }
+        console.warn('[acesso] meu_acesso falhou:', error && error.message);
+      }catch(e){ console.warn('[acesso] meu_acesso ex:', e && e.message); }
     }
-
-    // 2ª fonte (fallback): UbiqueStore local
-    if(window.UbiqueStore){
-      const list = window.UbiqueStore.platform_access.list();
-      if(list.length === 0){
-        return { allowed: true, access_type: 'full', subject_ids: [], exam_ids: [] };
-      }
-      const found = list.find(x => (x.email||'').toLowerCase() === normEmail);
-      // FREEMIUM (A3c): fora da Portaria → conta gratuita (não barra mais).
-      if(!found) return { allowed: true, access_type: 'free', subject_ids: [], exam_ids: [] };
-      if(found.status === 'suspended') return { allowed: false, reason: 'suspended' };
-      return {
-        allowed: true,
-        access_type: found.access_type || 'full',
-        subject_ids: Array.isArray(found.subject_ids) ? found.subject_ids : [],
-        exam_ids: Array.isArray(found.exam_ids) ? found.exam_ids : [],
-      };
-    }
-
-    // Sem store nem Supabase → libera (fallback seguro)
-    return { allowed: true, access_type: 'full', subject_ids: [], exam_ids: [] };
+    const ultimo = loadAccessData();
+    if(ultimo && ultimo.allowed) return ultimo;
+    return { allowed: true, access_type: 'free', subject_ids: [], exam_ids: [] };
   }
 
   // Verifica se o conteúdo está liberado para o usuário. A posse é por MATÉRIA
@@ -15590,7 +15526,14 @@ const Auth = (function(){
       // tempo real) — idempotente por usuário, definida fora do Auth.
       try{ if(typeof window.initEnrollmentsRealtime === 'function') window.initEnrollmentsRealtime(); }catch(_){}
       if(current && current.email && !(isAdmin && isAdmin())){
-        checkPlatformAccess(current.email).then(acc => {
+        checkPlatformAccess().then(acc => {
+          // Conta suspensa: sai na hora, com aviso na tela de entrada (a chave não
+          // começa com "ubique." porque o doLogout limpa essas).
+          if(acc && acc.allowed === false){
+            try{ sessionStorage.setItem('falcon.aviso.entrada', 'Conta suspensa. Fale com a equipe da Ubique.'); }catch(_){}
+            if(typeof window.doLogout === 'function') window.doLogout();
+            return;
+          }
           if(acc && acc.allowed){
             const remembered = !!localStorage.getItem(ACCESS_KEY);
             storeAccessData(acc, remembered);
@@ -15822,7 +15765,7 @@ const Commerce = (function(){
     if(!course) return false;
     // Admin enxerga tudo.
     if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return true;
-    // Posse vem do acesso real (crm.platform_access).
+    // Posse vem do acesso real (matrículas, via aluno.meu_acesso).
     const a = (window.Auth && Auth.loadAccessData) ? Auth.loadAccessData() : null;
     if(a && a.allowed){
       // Conta GRATUITA (freemium, A3): não possui matéria nenhuma — o que ela
@@ -16059,7 +16002,11 @@ function initEnrollmentsRealtime(){
       .on('postgres_changes', { event: '*', schema: 'vendas', table: 'enrollments' }, (payload) => {
         try{
           const row = payload && payload.new;
-          if(!row || row.status !== 'active') return;
+          if(!row || row.status !== 'active'){
+            // acesso pausado, cancelado ou apagado: só refaz a régua (sem aviso)
+            if(window.Auth && typeof Auth.refreshAccess === 'function') Auth.refreshAccess();
+            return;
+          }
           const announce = () => {
             const nome = (window.Shop && Shop.nameForProduct) ? Shop.nameForProduct(row.product_id) : '';
             const msg = payload.eventType === 'UPDATE'
@@ -33688,6 +33635,11 @@ Renderers.login.mount = function(stageEl){
     statusEl.hidden = true;
     // Reset só aparece em casos específicos (timeout). Não mais por default.
   }
+  // Saída por conta suspensa (boot ou entrada pelo Google): mostra o motivo aqui.
+  try{
+    const _avisoEntrada = sessionStorage.getItem('falcon.aviso.entrada');
+    if(_avisoEntrada){ sessionStorage.removeItem('falcon.aviso.entrada'); showError(_avisoEntrada); }
+  }catch(_){}
   function showStatus(msg){
     statusEl.hidden = false; statusEl.textContent = msg;
     errorEl.hidden = true;
@@ -33792,12 +33744,10 @@ Renderers.login.mount = function(stageEl){
   async function _finishLogin(user){
     if(user.role !== 'admin'){
       showStatus('Verificando acesso à plataforma…');
-      const access = await Auth.checkPlatformAccess(user.email);
+      const access = await Auth.checkPlatformAccess();
       if(!access.allowed){
         await Auth.logout();
-        showError(access.reason === 'suspended'
-          ? 'Conta suspensa. Contate o administrador.'
-          : 'Acesso não autorizado. Solicite liberação ao administrador.');
+        showError('Conta suspensa. Fale com a equipe da Ubique.');
         setBusy(false);
         return;
       }
