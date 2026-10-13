@@ -1,5 +1,6 @@
 /* raiox-render.js — o desenho do relatório do Raio-X, num lugar só (13/10/2026).
    Usado pelo app do aluno (index.html: Raio-X do desempenho) e pelo painel (admin.html: análises do mentor).
+   Também desenha a pauta do encontro da mentoria (pautaHtml e pautaDocumentoHtml).
    Funções puras: recebem o relatório { findings, aggregates, created_at, titulo } e devolvem HTML.
    voz 'aluno': o texto de sempre ("Seu perfil de erro"). voz 'mentor': sobre o aluno, para o mentor ler.
    Os números dos gráficos e do quadro vêm SEMPRE dos agregados (calculados no servidor), nunca do texto da IA. */
@@ -64,6 +65,12 @@
       '.rx-card.bad{border-left-color:#d47973}.rx-card.bad .rx-card-t{color:#d47973}',
       '.rx-card.warn{border-left-color:#e0b45a}.rx-card.warn .rx-card-t{color:#e0b45a}',
       '.rx-meta{margin-top:1.2rem;font-size:.68rem;color:var(--text-mute);font-family:var(--mono)}',
+      // pauta do encontro (mentoria)
+      '.rx-pa-link{display:inline-block;margin-top:.45rem;font-family:var(--sans);font-size:.68rem;letter-spacing:.06em;color:var(--accent);text-decoration:none;border-bottom:1px solid var(--accent-border)}',
+      '.rx-pa-link:hover{border-bottom-color:var(--accent)}',
+      '.rx-pa-priv{margin-top:.35rem;font-size:.74rem;color:var(--text-mute);line-height:1.5}',
+      '.rx-pa-num{font-family:var(--sans);font-size:.72rem;color:var(--text-dim);margin:.1rem 0 .45rem;line-height:1.5}',
+      '.rx-pa-roteiro td:first-child{color:var(--text);white-space:nowrap}.rx-pa-roteiro td:nth-child(2){text-align:left;white-space:normal}',
   ];
   function estilos(){
     if(document.getElementById('rxRenderStyles')) return;
@@ -459,39 +466,12 @@
       '<div class="rx-meta">' + V.meta + _esc((ag && ag.escopo) || 'Questões anuladas e simulados não entram na conta.') + '</div>';
   }
 
-  function documentoHtml(report, opts){
-    opts = opts || {};
-    const V = _voz(opts.voz);
-    const lic = opts.lic || null;     // licença dos compiladores (app do aluno); o painel do mentor não usa
-    const f = report.findings || {};
-    const nome = opts.nome || '';
-    // Marca d'água de impressão (mesmo estilo dos compiladores) + capa.
+  // A casca do documento para imprimir ou baixar (capa de página inteira, folha A4, marca d'água quando houver
+  // licença). O Raio-X e a pauta do encontro usam a mesma; muda só o miolo.
+  function _docShell(o){
+    const lic = o.lic || null;
     const licText = lic ? lic.linha : '';
-    const agD = report.aggregates || {};
-    const perLabD = (agD.periodo && agD.periodo.label && agD.periodo.label !== 'todo o histórico') ? agD.periodo.label : '';
-    const matLabD = (agD.materia_filtro && agD.materia_filtro.nome) ? agD.materia_filtro.nome : '';
-    const rcLabD = (agD.recorte && agD.recorte.label) ? agD.recorte.label : '';
-    const coverSub = [nome, _fmtData(report.created_at), perLabD, matLabD, rcLabD].filter(Boolean).join(' · ');
-    const ch = _chartsFromAgg(agD, V);
-    const nomeAlvo = opts.nome || (agD.alvo && (agD.alvo.nome || agD.alvo.turma)) || '';
-    const sec = function(t, x){ return x ? '<h2>' + _esc(t) + '</h2><p>' + _esc(x).replace(/\n/g, '<br>') + '</p>' : ''; };
-    const list = function(t, arr, fmt){ return (Array.isArray(arr) && arr.length) ? '<h2>' + _esc(t) + '</h2><ul>' + arr.map(fmt).join('') + '</ul>' : ''; };
-    const evDoc = function(arr){
-      if(!Array.isArray(arr) || !arr.length) return '';
-      return arr.map(function(e){
-        const met = [e.aluno, e.materia || e.origem].filter(Boolean).join(' · ');
-        return '<div class="ev"><i>&ldquo;' + _hlTrecho(e.trecho, e.destaque) + '&rdquo;</i>' +
-          (met ? ' <span class="ev-m">— ' + _esc(met) + '</span>' : '') +
-          (e.o_que_houve ? '<div class="ev-c">' + _esc(e.o_que_houve) + '</div>' : '') + '</div>';
-      }).join('');
-    };
-    const secB = function(t, b){
-      if(!b) return '';
-      if(typeof b === 'string') return sec(t, b);
-      if(!b.diagnostico) return '';
-      return '<h2>' + _esc(t) + '</h2><p>' + _esc(b.diagnostico).replace(/\n/g, '<br>') + '</p>' + evDoc(b.evidencias);
-    };
-    const html = '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' + (lic ? lic.metaTags : '') + '<title>Raio-X do desempenho — ' + _esc(_fmtData(report.created_at)) + '</title>' +
+    return '<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">' + (lic ? lic.metaTags : '') + '<title>' + _esc(o.titulo) + '</title>' +
       '<link href="https://fonts.googleapis.com/css2?family=Cardo:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">' +
       '<style>' +
       '@page{size:A4;margin:0}*{box-sizing:border-box}body{margin:0;font-family:Georgia,serif;color:#1e1a12;background:#fff}' +
@@ -541,19 +521,56 @@
       '.ev-m{font-family:Arial;font-size:10px;color:#8a7e68}.ev-c{color:#3a3228;font-size:12.5px;margin-top:.2rem}' +
       '.print-btn{position:fixed;top:14px;right:14px;padding:.6rem 1rem;background:#8a6a24;color:#fff;border:none;border-radius:4px;font:600 13px Arial;cursor:pointer}@media print{.print-btn{display:none}}' +
       '.meta{margin-top:1.6rem;font-size:10px;color:#8a7e68;font-family:Arial}' +
+      (o.css || '') +
       '</style></head><body><button class="print-btn" onclick="window.print()">Imprimir / Salvar PDF</button>' +
       (lic ? '<!-- ' + lic.forense + ' -->' + lic.marca : '') +
       '<section class="cover-page"><div class="cover-shade"></div>' +
         '<div class="cover-brand">Grupo Ubique</div>' +
         '<div class="cover-text">' +
-          '<div class="cover-eyebrow">Diagnóstico do perfil de erro</div>' +
-          '<h1 class="cover-title">Raio-X do desempenho</h1>' +
-          (coverSub ? '<div class="cover-sub">' + _esc(coverSub) + '</div>' : '') +
+          '<div class="cover-eyebrow">' + _esc(o.capaEyebrow) + '</div>' +
+          '<h1 class="cover-title">' + _esc(o.capaTitulo) + '</h1>' +
+          (o.capaSub ? '<div class="cover-sub">' + _esc(o.capaSub) + '</div>' : '') +
           (licText ? '<div class="cover-lic">' + _esc(licText) + '</div>' : '') +
         '</div>' +
       '</section>' +
       '<div class="wrap"><table class="sheet"><thead><tr><td><div></div></td></tr></thead><tfoot><tr><td><div></div></td></tr></tfoot><tbody><tr><td>' +
-      '<div class="eyebrow">Grupo Ubique · Raio-X do desempenho</div>' +
+      o.corpo +
+      '</td></tr></tbody></table></div></body></html>';
+  }
+
+  function documentoHtml(report, opts){
+    opts = opts || {};
+    const V = _voz(opts.voz);
+    const lic = opts.lic || null;     // licença dos compiladores (app do aluno); o painel do mentor não usa
+    const f = report.findings || {};
+    const nome = opts.nome || '';
+    const agD = report.aggregates || {};
+    const perLabD = (agD.periodo && agD.periodo.label && agD.periodo.label !== 'todo o histórico') ? agD.periodo.label : '';
+    const matLabD = (agD.materia_filtro && agD.materia_filtro.nome) ? agD.materia_filtro.nome : '';
+    const rcLabD = (agD.recorte && agD.recorte.label) ? agD.recorte.label : '';
+    const coverSub = [nome, _fmtData(report.created_at), perLabD, matLabD, rcLabD].filter(Boolean).join(' · ');
+    const ch = _chartsFromAgg(agD, V);
+    const nomeAlvo = opts.nome || (agD.alvo && (agD.alvo.nome || agD.alvo.turma)) || '';
+    const sec = function(t, x){ return x ? '<h2>' + _esc(t) + '</h2><p>' + _esc(x).replace(/\n/g, '<br>') + '</p>' : ''; };
+    const list = function(t, arr, fmt){ return (Array.isArray(arr) && arr.length) ? '<h2>' + _esc(t) + '</h2><ul>' + arr.map(fmt).join('') + '</ul>' : ''; };
+    const evDoc = function(arr){
+      if(!Array.isArray(arr) || !arr.length) return '';
+      return arr.map(function(e){
+        const met = [e.aluno, e.materia || e.origem].filter(Boolean).join(' · ');
+        return '<div class="ev"><i>&ldquo;' + _hlTrecho(e.trecho, e.destaque) + '&rdquo;</i>' +
+          (met ? ' <span class="ev-m">— ' + _esc(met) + '</span>' : '') +
+          (e.o_que_houve ? '<div class="ev-c">' + _esc(e.o_que_houve) + '</div>' : '') + '</div>';
+      }).join('');
+    };
+    const secB = function(t, b){
+      if(!b) return '';
+      if(typeof b === 'string') return sec(t, b);
+      if(!b.diagnostico) return '';
+      return '<h2>' + _esc(t) + '</h2><p>' + _esc(b.diagnostico).replace(/\n/g, '<br>') + '</p>' + evDoc(b.evidencias);
+    };
+    return _docShell({ titulo: 'Raio-X do desempenho — ' + _fmtData(report.created_at), lic: lic,
+      capaEyebrow: 'Diagnóstico do perfil de erro', capaTitulo: 'Raio-X do desempenho', capaSub: coverSub,
+      corpo: '<div class="eyebrow">Grupo Ubique · Raio-X do desempenho</div>' +
       '<h1>' + V.titulo(nomeAlvo) + '</h1>' +
       '<p style="color:#6a604c;font-size:12px;margin:.1rem 0 0">' + _esc(nome) + (nome ? ' · ' : '') + _esc(_fmtData(report.created_at)) + '</p>' +
       _boardFromReport(f, agD) +
@@ -588,14 +605,192 @@
           list('Próximos passos', d.proximos_passos, function(x){ return '<li>' + _esc(x) + '</li>'; }) +
           '</div>';
       })() : '') +
-      '<div class="meta">' + V.docMeta + _esc((report.aggregates && report.aggregates.escopo) || 'Questões anuladas e simulados não entram na conta.') + '</div>' +
-      '</td></tr></tbody></table></div></body></html>';
-    return html;
+      '<div class="meta">' + V.docMeta + _esc((report.aggregates && report.aggregates.escopo) || 'Questões anuladas e simulados não entram na conta.') + '</div>' });
   }
 
 
+  // ── Pauta do encontro (mentoria, parte 3) ──
+  // O texto vem da IA (report.findings, já conferido no servidor); os números vêm de report.aggregates
+  // (aluno.mentoria_pauta). Um gerador só para a tela e para o documento: muda o "kit" de marcação.
+  const PA_META = 'Gerado pelo Grupo Ubique a partir dos números da turma: unidades vistas, respostas, dúvidas marcadas e os porquês escritos pelos alunos. Só o mentor vê esta pauta. Questões anuladas e simulados não entram na conta.';
+  const PA_KIT_TELA = {
+    sec: function(t, x){ return '<div class="rx-sec"><div class="rx-sec-h">' + t + '</div>' + x + '</div>'; },
+    caixa: function(cab, dir, x){ return '<div class="rx-mat"><div class="rx-mat-h"><span>' + cab + '</span>' + (dir ? '<span class="rx-mat-pct">' + dir + '</span>' : '') + '</div>' + x + '</div>'; },
+    texto: function(t){ return '<div class="rx-sec-b">' + _esc(t) + '</div>'; },
+    textoMenor: function(t){ return '<div class="rx-sec-b" style="font-size:.9rem">' + _esc(t) + '</div>'; },
+    numeros: function(t){ return '<div class="rx-pa-num">' + t + '</div>'; },
+    dica: function(t){ return '<div class="rx-dica">' + t + '</div>'; },
+    lista: function(arr){ return '<ul>' + arr.map(function(x){ return '<li>' + x + '</li>'; }).join('') + '</ul>'; },
+    citacao: function(t, meta, extras){ return '<div class="rx-ev"><div class="rx-ev-t">' + t + '</div>' + (meta ? '<div class="rx-ev-m">' + meta + '</div>' : '') + extras + '</div>'; },
+    extra: function(t){ return '<div class="rx-ev-c">' + t + '</div>'; },
+    privado: function(t){ return '<div class="rx-pa-priv">' + t + '</div>'; },
+    link: function(href, rot){ return '<a class="rx-pa-link" href="' + _esc(href) + '" target="_blank" rel="noopener">' + rot + '</a>'; },
+    tabela: function(cols, linhas, cls){ return '<div class="rx-tab-rolo"><table class="rx-table ' + (cls || 'rx-prova') + '"><thead><tr>' + cols.map(function(c){ return '<th>' + c + '</th>'; }).join('') + '</tr></thead><tbody>' +
+      linhas.map(function(l){ return '<tr>' + l.map(function(c){ return '<td>' + c + '</td>'; }).join('') + '</tr>'; }).join('') + '</tbody></table></div>'; },
+  };
+  const PA_KIT_DOC = {
+    sec: function(t, x){ return '<h2>' + t + '</h2>' + x; },
+    caixa: function(cab, dir, x){ return '<div class="mat"><b>' + cab + '</b>' + (dir ? ' <span class="ev-m">— ' + dir + '</span>' : '') + x + '</div>'; },
+    texto: function(t){ return '<p>' + _esc(t).replace(/\n/g, '<br>') + '</p>'; },
+    textoMenor: function(t){ return '<p style="margin:.2rem 0 0">' + _esc(t).replace(/\n/g, '<br>') + '</p>'; },
+    numeros: function(t){ return '<div class="ev-m" style="margin:.15rem 0 .3rem">' + t + '</div>'; },
+    dica: function(t){ return '<div class="dica">' + t + '</div>'; },
+    lista: function(arr){ return '<ul>' + arr.map(function(x){ return '<li>' + x + '</li>'; }).join('') + '</ul>'; },
+    citacao: function(t, meta, extras){ return '<div class="ev"><i>' + t + '</i>' + (meta ? ' <span class="ev-m">— ' + meta + '</span>' : '') + extras + '</div>'; },
+    extra: function(t){ return '<div class="ev-c">' + t + '</div>'; },
+    privado: function(t){ return '<div class="ev-c" style="color:#8a7e68">' + t + '</div>'; },
+    link: function(href, rot){ return '<div><a class="lk" href="' + _esc(href) + '">' + rot + '</a></div>'; },
+    tabela: function(cols, linhas){ return '<table style="width:100%;border-collapse:collapse;font:12px Arial;margin:.4rem 0"><tr>' +
+      cols.map(function(c){ return '<th style="text-align:left;border-bottom:1px solid #d8c4a8;padding:4px">' + c + '</th>'; }).join('') + '</tr>' +
+      linhas.map(function(l){ return '<tr>' + l.map(function(c){ return '<td style="padding:4px;vertical-align:top;border-bottom:1px solid #f0e8d8">' + c + '</td>'; }).join('') + '</tr>'; }).join('') + '</table>'; },
+  };
+  function _paRotulo(u){ return [u && u.numero, u && u.titulo].filter(function(x){ return x != null && String(x).trim() !== ''; }).join(' · '); }
+  function _paPct(a, n){ return Number(n) > 0 ? Math.round(100 * Number(a) / Number(n)) : null; }
+  function _paQuando(iso){
+    try{ const d = new Date(iso); if(isNaN(d.getTime())) return '';
+      return d.toLocaleString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }); }catch(_){ return ''; }
+  }
+  function _paDia(iso){ try{ const d = new Date(iso); return isNaN(d.getTime()) ? '' : d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }); }catch(_){ return ''; } }
+  // O link do Banco busca a frase exata do começo do item (o Banco ignora acento e maiúscula).
+  function _paLinkBanco(item, base){
+    if(!item || item.tipo === 'bloco') return '';
+    const t = String(item.assertiva || '').replace(/<[^>]*>/g, ' ').replace(/["“”]/g, ' ').replace(/\s+/g, ' ').trim();
+    if(!t) return '';
+    return (base || '') + 'index.html#/banco/questions?k=' + encodeURIComponent('"' + t.split(' ').slice(0, 12).join(' ') + '"') + '&applied=1';
+  }
+  // A linha de números de uma unidade (todos do servidor).
+  function _paNumUnidade(u, total){
+    const p = [];
+    p.push('concluíram ' + (u.concluiram || 0) + ' de ' + total);
+    if(u.comecaram) p.push(u.comecaram + (u.comecaram === 1 ? ' começou' : ' começaram'));
+    if((u.nao_abriram || []).length) p.push('nem abriram: ' + _esc(u.nao_abriram.join(', ')));
+    p.push(u.respostas ? _paPct(u.acertos, u.respostas) + '% de acerto em ' + u.respostas + (u.respostas === 1 ? ' resposta' : ' respostas') : 'nenhuma resposta ainda');
+    if(u.marcaram_duvida) p.push(u.marcaram_duvida + ' com dúvida marcada');
+    return p.join(' · ');
+  }
+  function _paItem(item, c, K, base){
+    const meta = [item.gabarito ? 'Gabarito ' + item.gabarito : (item.tipo === 'me' ? 'Múltipla escolha' : ''), item.origem || '',
+      'erraram ' + (item.erros || 0) + ' de ' + (item.respostas || 0), item.duvidas ? item.duvidas + ' com dúvida' : ''].filter(Boolean).map(_esc).join(' · ');
+    let ex = '';
+    if(c.por_que) ex += K.extra('<b>Por que corrigir juntos:</b> ' + _esc(c.por_que));
+    if(c.como_conduzir) ex += K.extra('<b>Como conduzir:</b> ' + _esc(c.como_conduzir));
+    const quem = item.quem_errou || [], pq = item.porques || [];
+    if(quem.length || pq.length) ex += K.privado('Só para você: ' + (quem.length ? 'erraram ' + _esc(quem.join(', ')) + '. ' : '') + pq.map(function(x){ return '&ldquo;' + _esc(x) + '&rdquo;'; }).join(' '));
+    const href = _paLinkBanco(item, base);
+    if(href) ex += K.link(href, 'Abrir no Banco');
+    const txt = item.assertiva ? '&ldquo;' + _esc(item.assertiva) + '&rdquo;' : 'Questão própria do bloco da unidade (o texto fica na unidade).';
+    return K.citacao(txt, meta, ex);
+  }
+  function _paQuadro(ag){
+    const per = ag.periodo || {}, total = Number(ag.turma && ag.turma.alunos) || 0;
+    const lib = ag.liberadas_no_periodo || [], prox = ag.proximo_encontro;
+    const atencao = (ag.atividades || []).filter(function(a){ return a.dias_sem_atividade == null || a.dias_sem_atividade >= 7 || (a.nao_abriu || []).length; });
+    const card = function(cls, t, v){ return '<div class="rx-card' + (cls ? ' ' + cls : '') + '"><div class="rx-card-t">' + t + '</div><div class="rx-card-v">' + v + '</div></div>'; };
+    return '<div class="rx-board"><div class="rx-cards">' +
+      card('', 'Desde o último encontro', per.respostas ? per.respostas + ' respostas, ' + _paPct(per.acertos, per.respostas) + '% de acerto; ' + (per.alunos_ativos || 0) + ' de ' + total + ' alunos responderam' : 'Nenhuma resposta no período') +
+      card('', 'Liberadas no período', lib.length ? lib.length + (lib.length === 1 ? ' unidade: ' : ' unidades: ') + _esc(lib.slice(0, 3).map(_paRotulo).join('; ')) + (lib.length > 3 ? '…' : '') : 'Nenhuma unidade') +
+      card('', 'Próximo encontro', prox ? _esc([prox.titulo, _paQuando(prox.quando)].filter(Boolean).join(' · ')) : 'Nenhum encontro marcado') +
+      card(atencao.length ? 'warn' : 'good', 'Sem abrir ou parados há 7 dias ou mais', atencao.length ? _esc(atencao.map(function(a){ return a.aluno; }).join(', ')) : 'Ninguém') +
+      '</div></div>';
+  }
+  function _pautaCorpo(report, opts, K){
+    const f = report.findings || {}, ag = report.aggregates || {};
+    const total = Number(ag.turma && ag.turma.alunos) || 0;
+    const base = opts.base || '';
+    const linkU = typeof opts.linkUnidade === 'function' ? opts.linkUnidade : function(){ return ''; };
+    const fichas = {};
+    (ag.liberadas_no_periodo || []).concat(ag.anteriores_com_dificuldade || []).forEach(function(u){ fichas[String(u.unit_id)] = u; });
+    const nomeMat = function(id){ return _esc((ag.materias && ag.materias[String(id)]) || ''); };
+    const abrirU = function(id){ const h = linkU(id); return h ? K.link(h, 'Abrir a unidade') : ''; };
+    let h = '';
+    if(f.resumo) h += K.sec('Resumo', K.texto(f.resumo));
+    if(ag.notas) h += K.sec('O que você pediu', K.texto(ag.notas));
+    const rot = Array.isArray(f.roteiro) ? f.roteiro : [];
+    if(rot.length){
+      const tot = rot.reduce(function(s, e){ return s + (Number(e.minutos) || 0); }, 0);
+      h += K.sec('Roteiro do encontro' + (tot ? ' · ' + tot + ' minutos' : ''), K.tabela(['Etapa', 'O que fazer', 'Tempo'],
+        rot.map(function(e){ return ['<b>' + _esc(e.etapa) + '</b>', _esc(e.o_que_fazer), (Number(e.minutos) || 0) + ' min']; }), 'rx-pa-roteiro'));
+    }
+    const unis = (Array.isArray(f.unidades) ? f.unidades : []).filter(function(u){ return fichas[String(u.unit_id)]; });
+    h += K.sec('Dúvidas e correção, na ordem das unidades', unis.length ? unis.map(function(u){
+      const d = fichas[String(u.unit_id)];
+      const duv = (u.duvidas || []).map(function(x){ return '<b>' + _esc(x.ponto) + '</b>' + (x.como_explicar ? ': ' + _esc(x.como_explicar) : ''); });
+      const itens = {}; (d.itens_mais_errados || []).forEach(function(i){ itens[String(i.item_id)] = i; });
+      const corr = (u.corrigir_juntos || []).filter(function(c){ return itens[String(c.item_id)]; });
+      return K.caixa(_esc(_paRotulo(d)), nomeMat(d.materia),
+        K.numeros(_paNumUnidade(d, total)) + (u.situacao ? K.textoMenor(u.situacao) : '') +
+        (duv.length ? K.dica('Dúvidas da turma') + K.lista(duv) : '') +
+        (corr.length ? K.dica('Para corrigir juntos') + corr.map(function(c){ return _paItem(itens[String(c.item_id)], c, K, base); }).join('') : '') +
+        abrirU(d.unit_id));
+    }).join('') : K.texto('Nenhuma unidade foi liberada desde o último encontro.'));
+    const ret = (Array.isArray(f.retomar) ? f.retomar : []).filter(function(r){ return fichas[String(r.unit_id)]; });
+    if(ret.length) h += K.sec('Vale retomar', ret.map(function(r){
+      const d = fichas[String(r.unit_id)];
+      return K.caixa(_esc(_paRotulo(d)), nomeMat(d.materia), K.numeros(_paNumUnidade(d, total)) + (r.motivo ? K.textoMenor(r.motivo) : '') +
+        (r.como ? K.dica('Como retomar: ' + _esc(r.como)) : '') + abrirU(d.unit_id));
+    }).join(''));
+    const av = f.avanco || {}, prox = Array.isArray(ag.proximas) ? ag.proximas : [];
+    if(av.anuncio || prox.length){
+      h += K.sec('O que vem', (av.anuncio ? K.texto(av.anuncio) : '') + prox.map(function(p){
+        const quando = p.como === 'agendada' ? 'agendada para ' + _paDia(p.agendada_para) : 'a seguinte na ordem do curso, sem agendamento';
+        const det = [];
+        if((p.secoes || []).length) det.push('<b>Seções:</b> ' + _esc(p.secoes.join('; ')));
+        if((p.temas_do_edital || []).length) det.push('<b>Temas do edital:</b> ' + _esc(p.temas_do_edital.join('; ')));
+        return K.caixa(_esc(_paRotulo(p)), nomeMat(p.materia), K.numeros(_esc(quando)) + (p.descricao ? K.textoMenor(p.descricao) : '') + (det.length ? K.lista(det) : '') + abrirU(p.unit_id));
+      }).join('') +
+      ((av.ganchos || []).length ? K.dica('Ganchos com o que a turma viu') + K.lista(av.ganchos.map(_esc)) : '') +
+      ((av.preparar || []).length ? K.dica('Para a turma chegar preparada') + K.lista(av.preparar.map(_esc)) : ''));
+    }
+    const at = f.atividades || {}, ativ = Array.isArray(ag.atividades) ? ag.atividades : [];
+    const ind = Array.isArray(at.individuais) ? at.individuais : [];
+    if((at.turma || []).length || ind.length || ativ.length){
+      h += K.sec('Atividades',
+        ((at.turma || []).length ? K.dica('Para a turma, até o próximo encontro') + K.lista(at.turma.map(_esc)) : '') +
+        (ind.length ? K.dica('Recados individuais (só para você)') + K.lista(ind.map(function(x){ return '<b>' + _esc(x.aluno) + '</b>: ' + _esc(x.recado); })) : '') +
+        (ativ.length ? K.dica('Os números de cada aluno no período') + K.tabela(['Aluno', 'Não abriu', 'Abriu sem concluir', 'Questões das unidades do período', 'Questões no período', 'Acerto', 'Dúvidas', 'Parado há'],
+          ativ.map(function(a){
+            const qp = a.questoes_das_unidades_do_periodo || {};
+            const pc = _paPct(a.acertos_no_periodo, a.questoes_no_periodo);
+            return [_esc(a.aluno), _esc((a.nao_abriu || []).join('; ')) || '—', _esc((a.abriu_sem_concluir || []).join('; ')) || '—',
+              qp.total ? (qp.feitas || 0) + ' de ' + qp.total : '—', String(a.questoes_no_periodo || 0), pc == null ? '—' : pc + '%', String(a.duvidas_no_periodo || 0),
+              a.dias_sem_atividade == null ? 'sem atividade' : a.dias_sem_atividade + (a.dias_sem_atividade === 1 ? ' dia' : ' dias')];
+          })) : ''));
+    }
+    return h;
+  }
+  function _paSub(ag, opts){
+    const total = Number(ag.turma && ag.turma.alunos) || 0;
+    return [opts.nome || (ag.turma && ag.turma.nome) || '', total + (total === 1 ? ' aluno com conta' : ' alunos com conta'), ag.duracao_min ? 'encontro de ' + ag.duracao_min + ' minutos' : ''].filter(Boolean).join(' · ');
+  }
+  function pautaHtml(report, opts){
+    opts = opts || {};
+    const ag = report.aggregates || {};
+    const per = (ag.periodo && ag.periodo.label) ? ' · ' + ag.periodo.label : '';
+    return '<span class="s-label">' + (report.titulo ? _esc(report.titulo) + ' · ' : '') + 'Pauta de ' + _fmtData(report.created_at) + _esc(per) + '</span>' +
+      '<h2 class="rx-title">Pauta do encontro</h2>' +
+      '<p class="rx-sub">' + _esc(_paSub(ag, opts)) + '</p>' +
+      _paQuadro(ag) + _pautaCorpo(report, opts, PA_KIT_TELA) +
+      '<div class="rx-meta">' + PA_META + '</div>';
+  }
+  function pautaDocumentoHtml(report, opts){
+    opts = opts || {};
+    const ag = report.aggregates || {}, prox = ag.proximo_encontro, ant = ag.encontro_anterior;
+    return _docShell({ titulo: 'Pauta do encontro — ' + _fmtData(report.created_at),
+      capaEyebrow: 'Mentoria', capaTitulo: 'Pauta do encontro',
+      capaSub: [opts.nome || (ag.turma && ag.turma.nome) || '', prox ? [prox.titulo, _paQuando(prox.quando)].filter(Boolean).join(', ') : '',
+        ant ? 'desde ' + [ant.titulo, _paDia(ant.quando)].filter(Boolean).join(', ') : (ag.desde ? 'desde ' + _paDia(ag.desde) : '')].filter(Boolean).join(' · '),
+      // o negrito dentro das caixas fica do tamanho do texto (a casca aumenta o <b> do título da caixa)
+      css: '.mat .ev b,.mat li b{font-size:inherit}.lk{font:600 11px Arial;color:#8a6a24}@media print{.lk{display:none}}',
+      corpo: '<div class="eyebrow">Grupo Ubique · Pauta do encontro</div>' +
+        '<h1>Pauta do encontro</h1>' +
+        '<p style="color:#6a604c;font-size:12px;margin:.1rem 0 0">' + _esc(_paSub(ag, opts)) + ' · ' + _esc(_fmtData(report.created_at)) + '</p>' +
+        _paQuadro(ag) + _pautaCorpo(report, opts, PA_KIT_DOC) +
+        '<div class="meta">' + PA_META + '</div>' });
+  }
+
   window.RaioXRender = {
     estilos: estilos, relatorioHtml: relatorioHtml, documentoHtml: documentoHtml,
+    pautaHtml: pautaHtml, pautaDocumentoHtml: pautaDocumentoHtml,
     graficos: function(ag, voz){ return _chartsFromAgg(ag, _voz(voz)); },
     quadro: _boardFromReport, provaHtml: function(f, ag, voz){ return _rxProvaHtml(f, ag, _voz(voz)); },
     esc: _esc, fmtData: _fmtData,
