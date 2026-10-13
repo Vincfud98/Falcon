@@ -109,7 +109,72 @@
       docMeta: 'Gerado pelo Grupo Ubique a partir das respostas reais do aluno nas questões de Certo/Errado. Análise para o mentor. ',
     },
   };
-  function _voz(v){ return VOZ[v === 'mentor' ? 'mentor' : 'aluno']; }
+  VOZ.turma = {
+    titulo: function(nome){ return 'Raio-X da turma' + (nome ? ' ' + _esc(nome) : ''); },
+    marcaCerto: 'A turma marca &ldquo;Certo&rdquo; em',
+    lingH: 'Acerto da turma com × sem cada traço de escrita (calculado sobre as respostas de todos)',
+    prioH: 'Acerto da turma × média da plataforma (±desvio: quanto as notas se espalham — desvio alto = subir ali desloca mais a posição)',
+    discTitulo: 'Discursivas — a escrita da turma',
+    provaH: 'O que cai na prova × a turma',
+    provaCols: ['Tema', 'Na prova (5 últimas)', 'Tendência', 'Acerto da turma', 'Perderia (itens, média)', 'Treino da turma', 'Leitura'],
+    esqH: 'Temas que a turma está esquecendo',
+    gemH: 'Itens que a turma errou e que voltaram em provas recentes',
+    chute: function(c){ return ': com dúvida, a turma acerta ' + c.pct_acerto_com_duvida + '% (' + c.n_com_duvida + ' itens). Vale mostrar a todos que chutar compensa.'; },
+    padroesH: 'Padrões que se repetem nos erros da turma',
+    prioridadesH: 'Prioridades da turma (onde a nota mais cresce)',
+    meta: 'Gerado pelo Grupo Ubique a partir das respostas reais dos alunos da turma. Só o mentor vê esta análise. ',
+    docMeta: 'Gerado pelo Grupo Ubique a partir das respostas reais dos alunos da turma nas questões de Certo/Errado. Análise para o mentor. ',
+    sub: function(n, ag){ const a = ag && ag.turma && ag.turma.alunos; return n + ' respostas de Certo/Errado' + (a ? ' de ' + a + (a === 1 ? ' aluno' : ' alunos') : '') + ' analisadas'; },
+  };
+  VOZ.aluno.sub = VOZ.mentor.sub = function(n){ return n + ' questões de Certo/Errado analisadas'; };
+  function _voz(v){ return VOZ[v === 'mentor' || v === 'turma' ? v : 'aluno']; }
+
+  // ── Raio-X da turma (mentoria): erros que se repetem entre alunos, alunos que pedem atenção e a tabela de
+  // cada aluno (números do sistema). Nos relatórios de um aluno estes campos não existem e nada aparece. ──
+  function _turmaHtml(f, ag){
+    let h = '';
+    const comuns = Array.isArray(f.erros_comuns) ? f.erros_comuns : [];
+    if(comuns.length){
+      h += '<div class="rx-sec" data-rx-sec="comuns"><div class="rx-sec-h">Erros comuns da turma</div>' + comuns.map(function(c){
+        const quem = (Array.isArray(c.alunos) && c.alunos.length) ? '<span class="rx-mat-pct">' + _esc(c.alunos.join(', ')) + '</span>' : '';
+        return '<div class="rx-mat"><div class="rx-mat-h"><span>' + _esc(c.padrao) + '</span>' + quem + '</div>' + _evHtml(c.evidencias) +
+          (c.no_encontro ? '<div class="rx-dica">No encontro: ' + _esc(c.no_encontro) + '</div>' : '') + '</div>';
+      }).join('') + '</div>';
+    }
+    const at = Array.isArray(f.alunos_atencao) ? f.alunos_atencao : [];
+    const pa = (ag && Array.isArray(ag.por_aluno)) ? ag.por_aluno : [];
+    if(at.length || pa.length){
+      const tab = pa.length ? '<div class="rx-tab-rolo"><table class="rx-table rx-prova"><thead><tr><th>Aluno</th><th>Respostas</th><th>Acerto</th><th>Quando é Certo</th><th>Quando é Errado</th><th>Fáceis</th><th>Últimos 7 dias</th><th>Sem responder</th></tr></thead><tbody>' +
+        pa.map(function(a){
+          const p = function(v){ return v == null ? '—' : v + '%'; };
+          return '<tr><td>' + _esc(a.aluno) + '</td><td>' + (a.n || 0) + '</td><td>' + p(a.pct_acerto) + '</td><td>' + p(a.acerto_quando_certo) + '</td><td>' + p(a.acerto_quando_errado) + '</td><td>' + p(a.acerto_faceis) + '</td><td>' + (a.respostas_ultimos_7_dias || 0) + '</td><td>' + (a.dias_sem_responder == null ? (a.n ? '—' : 'sem respostas no período') : a.dias_sem_responder + (a.dias_sem_responder === 1 ? ' dia' : ' dias')) + '</td></tr>';
+        }).join('') + '</tbody></table></div>' : '';
+      h += '<div class="rx-sec" data-rx-sec="atencao"><div class="rx-sec-h">Alunos que pedem atenção</div>' + at.map(function(a){
+        return '<div class="rx-mat"><div class="rx-mat-h"><span>' + _esc(a.aluno) + '</span></div><div class="rx-sec-b" style="font-size:.9rem">' + _esc(a.motivo) + '</div>' +
+          (a.numeros ? '<div class="rx-ev-c">' + _esc(a.numeros) + '</div>' : '') + (a.acao_do_mentor ? '<div class="rx-dica">O que fazer: ' + _esc(a.acao_do_mentor) + '</div>' : '') + '</div>';
+      }).join('') + (tab ? '<div class="rx-sub2">Os números de cada aluno</div>' + tab : '') + '</div>';
+    }
+    return h;
+  }
+  function _turmaDoc(f, ag, evDoc){
+    let h = '';
+    const comuns = Array.isArray(f.erros_comuns) ? f.erros_comuns : [];
+    if(comuns.length) h += '<h2>Erros comuns da turma</h2>' + comuns.map(function(c){
+      return '<div class="mat"><b>' + _esc(c.padrao) + '</b>' + ((c.alunos || []).length ? ' <span class="ev-m">— ' + _esc(c.alunos.join(', ')) + '</span>' : '') + evDoc(c.evidencias) +
+        (c.no_encontro ? '<div class="dica">No encontro: ' + _esc(c.no_encontro) + '</div>' : '') + '</div>';
+    }).join('');
+    const at = Array.isArray(f.alunos_atencao) ? f.alunos_atencao : [];
+    const pa = (ag && Array.isArray(ag.por_aluno)) ? ag.por_aluno : [];
+    if(at.length) h += '<h2>Alunos que pedem atenção</h2>' + at.map(function(a){
+      return '<div class="mat"><b>' + _esc(a.aluno) + '</b><p style="margin:.2rem 0 0">' + _esc(a.motivo) + '</p>' + (a.numeros ? '<div class="ev-c">' + _esc(a.numeros) + '</div>' : '') +
+        (a.acao_do_mentor ? '<div class="dica">O que fazer: ' + _esc(a.acao_do_mentor) + '</div>' : '') + '</div>';
+    }).join('');
+    if(pa.length) h += '<h2>Os números de cada aluno</h2><table style="width:100%;border-collapse:collapse;font:12px Arial"><tr>' +
+      ['Aluno', 'Respostas', 'Acerto', 'Quando é Certo', 'Quando é Errado', 'Últimos 7 dias'].map(function(c){ return '<th style="text-align:left;border-bottom:1px solid #d8c4a8;padding:4px">' + c + '</th>'; }).join('') + '</tr>' +
+      pa.map(function(a){ const p = function(v){ return v == null ? '—' : v + '%'; };
+        return '<tr><td style="padding:4px">' + _esc(a.aluno) + '</td><td>' + (a.n || 0) + '</td><td>' + p(a.pct_acerto) + '</td><td>' + p(a.acerto_quando_certo) + '</td><td>' + p(a.acerto_quando_errado) + '</td><td>' + (a.respostas_ultimos_7_dias || 0) + '</td></tr>'; }).join('') + '</table>';
+    return h;
+  }
   function _prioPadrao(p){ return '<li><strong>' + _esc(p.titulo) + '</strong> — ' + _esc(p.motivo) + '</li>'; }
 
   function _secTxt(t, txt, extra, anchor){ return (txt || extra) ? '<div class="rx-sec"' + (anchor ? ' data-rx-sec="' + anchor + '"' : '') + '><div class="rx-sec-h">' + t + '</div>' + (txt ? '<div class="rx-sec-b">' + _esc(txt) + '</div>' : '') + (extra || '') + '</div>' : ''; }
@@ -133,7 +198,7 @@
   function _evHtml(arr){
     if(!Array.isArray(arr) || !arr.length) return '';
     return arr.map(function(e){
-      const met = e.materia || e.origem;   // objetivas: matéria; discursivas: qual redação
+      const met = [e.aluno, e.materia || e.origem].filter(Boolean).join(' · ');   // objetivas: matéria; discursivas: qual redação; turma: o aluno
       return '<div class="rx-ev"><div class="rx-ev-t">&ldquo;' + _hlTrecho(e.trecho, e.destaque) + '&rdquo;</div>' +
         (met ? '<div class="rx-ev-m">' + _esc(met) + '</div>' : '') +
         (e.o_que_houve ? '<div class="rx-ev-c">' + _esc(e.o_que_houve) + '</div>' : '') + '</div>';
@@ -216,7 +281,13 @@
           return _barRow(_esc(p.materia), p.seu_pct_acerto, extra);
         }).join('') + '</div>';
     }
-    return { vies: vies, dif: dif, ling: ling, evo: evo, disc: disc, prio: prio };
+    let crit = '';
+    const mc = ((ag && ag.discursivas && ag.discursivas.media_por_criterio) || []);
+    if(mc.length){
+      crit = '<div class="rx-chart"><div class="rx-chart-h">Média da turma em cada critério da correção</div>' +
+        mc.map(function(c){ return _barRow(_esc(c.criterio), c.media_pct, c.n + (c.n === 1 ? ' correção' : ' correções')); }).join('') + '</div>';
+    }
+    return { vies: vies, dif: dif, ling: ling, evo: evo, disc: disc, prio: prio, crit: crit };
   }
   // ── Quadro-resumo ──
   // Donut do acerto geral + cartões de achado. Regra do produto: cada cartão
@@ -299,6 +370,7 @@
       '<h2 class="rx-title" style="font-size:1.25rem">' + V.discTitulo + '</h2>' +
       _secTxt('Resumo', d.resumo) +
       _secTxt('Evolução das notas', d.evolucao, ch.disc) +
+      _secTxt('Critério por critério', d.criterios, ch.crit) +
       (padroes ? '<div class="rx-sec"><div class="rx-sec-h">Padrões que se repetem entre as correções</div>' + padroes + '</div>' : '') +
       fortes + bs + passos + '</div>';
   }
@@ -361,16 +433,17 @@
         (p.dica ? '<div class="rx-dica">Dica de prova: ' + _esc(p.dica) + '</div>' : '') + '</div>';
     }).join('');
     const ch = _chartsFromAgg(ag, V);
-    const nomeAlvo = opts.nome || (ag.alvo && ag.alvo.nome) || '';
+    const nomeAlvo = opts.nome || (ag.alvo && (ag.alvo.nome || ag.alvo.turma)) || '';
     const geral = ag.geral || {};
     const perLab = (ag.periodo && ag.periodo.label && ag.periodo.label !== 'todo o histórico') ? ' · ' + ag.periodo.label : '';
     const matLab = (ag.materia_filtro && ag.materia_filtro.nome) ? ' · ' + ag.materia_filtro.nome : '';
     const rcLab = (ag.recorte && ag.recorte.label) ? ' · ' + ag.recorte.label : '';
     return       '<span class="s-label">' + (report.titulo ? _esc(report.titulo) + ' · ' : '') + 'Raio-X de ' + _fmtData(report.created_at) + _esc(perLab) + _esc(matLab) + _esc(rcLab) + (opts.arquivado ? ' (arquivado)' : '') + '</span>' +
       '<h2 class="rx-title">' + V.titulo(nomeAlvo) + '</h2>' +
-      (geral.n ? '<p class="rx-sub">' + geral.n + ' questões de Certo/Errado analisadas · ' + (geral.pct_acerto != null ? geral.pct_acerto + '% de acerto geral' : '') + '</p>' : '') +
+      (geral.n ? '<p class="rx-sub">' + V.sub(geral.n, ag) + ' · ' + (geral.pct_acerto != null ? geral.pct_acerto + '% de acerto geral' : '') + '</p>' : '') +
       _boardFromReport(f, ag) +
       _secTxt('Resumo', f.resumo) +
+      _turmaHtml(f, ag) +
       _secTxt('Evolução', f.evolucao, ch.evo, 'evolucao') +
       _secBloco('Perfil de leitura (extrapolação)', f.perfil_leitura) +
       _secBloco('Atenção e pegadinhas', f.atencao_pegadinhas, ch.dif, 'atencao') +
@@ -400,13 +473,13 @@
     const rcLabD = (agD.recorte && agD.recorte.label) ? agD.recorte.label : '';
     const coverSub = [nome, _fmtData(report.created_at), perLabD, matLabD, rcLabD].filter(Boolean).join(' · ');
     const ch = _chartsFromAgg(agD, V);
-    const nomeAlvo = opts.nome || (agD.alvo && agD.alvo.nome) || '';
+    const nomeAlvo = opts.nome || (agD.alvo && (agD.alvo.nome || agD.alvo.turma)) || '';
     const sec = function(t, x){ return x ? '<h2>' + _esc(t) + '</h2><p>' + _esc(x).replace(/\n/g, '<br>') + '</p>' : ''; };
     const list = function(t, arr, fmt){ return (Array.isArray(arr) && arr.length) ? '<h2>' + _esc(t) + '</h2><ul>' + arr.map(fmt).join('') + '</ul>' : ''; };
     const evDoc = function(arr){
       if(!Array.isArray(arr) || !arr.length) return '';
       return arr.map(function(e){
-        const met = e.materia || e.origem;
+        const met = [e.aluno, e.materia || e.origem].filter(Boolean).join(' · ');
         return '<div class="ev"><i>&ldquo;' + _hlTrecho(e.trecho, e.destaque) + '&rdquo;</i>' +
           (met ? ' <span class="ev-m">— ' + _esc(met) + '</span>' : '') +
           (e.o_que_houve ? '<div class="ev-c">' + _esc(e.o_que_houve) + '</div>' : '') + '</div>';
@@ -484,7 +557,7 @@
       '<h1>' + V.titulo(nomeAlvo) + '</h1>' +
       '<p style="color:#6a604c;font-size:12px;margin:.1rem 0 0">' + _esc(nome) + (nome ? ' · ' : '') + _esc(_fmtData(report.created_at)) + '</p>' +
       _boardFromReport(f, agD) +
-      sec('Resumo', f.resumo) + sec('Evolução', f.evolucao) + ch.evo +
+      sec('Resumo', f.resumo) + _turmaDoc(f, agD, evDoc) + sec('Evolução', f.evolucao) + ch.evo +
       secB('Perfil de leitura (extrapolação)', f.perfil_leitura) +
       secB('Atenção e pegadinhas', f.atencao_pegadinhas) + ch.dif +
       secB('Viés Certo × Errado', f.vies_certo_errado) + ch.vies +
