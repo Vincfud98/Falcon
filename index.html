@@ -15430,6 +15430,8 @@ const Auth = (function(){
     try{ if(window.Store && typeof Store.clearForLogout === 'function') Store.clearForLogout(); }catch(_){}
     // Limpa também os dados de acesso (plano/edital) do usuário anterior.
     try{ clearAccessData(); }catch(_){}
+    // Botão Internet do tutor: ao sair da conta ele desliga (decisão do dono).
+    try{ if(window.TutorWeb) TutorWeb.limpar(); }catch(_){}
   }
   function getUser(){
     // SYNC: retorna o cached `current`. NUNCA chama load() aqui — load
@@ -32410,6 +32412,217 @@ window._signSupportMedia = function(root){
   });
 })();
 
+/* ─────────── TUTOR COM INTERNET (tutor-chat v4, SQL 76) ───────────
+   Peças da internet usadas pela página Tutor e pela gaveta da unidade:
+   - o botão Internet: fica ligado até o aluno desligar e desliga ao sair da conta (Auth.logout chama limpar);
+   - o painel "Pesquisando na internet", com o globo animado e os ícones dos sites; o hover mostra o título e o link;
+   - as marcas [wN] que a tutor-chat põe depois de cada trecho citado viram números clicáveis;
+   - no fim da resposta, o bloco "Fontes da internet". */
+window.TutorWeb = (function(){
+  const PREF = 'falcon_tutor_web:';
+  const GLOBO = '<svg class="tw-globo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><ellipse class="tw-meridiano" cx="12" cy="12" rx="3.4" ry="8"/><line x1="4" y1="12" x2="20" y2="12"/><circle class="tw-orbita" cx="12" cy="12" r="11"/></svg>';
+  const SAIR = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6"/><path d="M10 14L20 4"/><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/></svg>';
+  let _cssFeito = false;
+  function _esc(s){ return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  function _uid(){ const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null; return (u && u.id) ? String(u.id) : ''; }
+  function _dom(u){ try { return new URL(u).hostname.replace(/^www\./, ''); } catch(_){ return ''; } }
+  function _url(u){ try { const x = new URL(u); return (x.protocol === 'https:' || x.protocol === 'http:') ? x.href : ''; } catch(_){ return ''; } }
+  function _data(s){
+    if(!s) return '';
+    const t = Date.parse(s); if(isNaN(t)) return '';
+    return new Date(t).toLocaleDateString('pt-BR', { day:'numeric', month:'short', year:'numeric' });
+  }
+  // Ícone do site (serviço de ícones do DuckDuckGo). Sem ícone, fica a inicial do site.
+  function _ico(url){
+    const d = _dom(url);
+    return '<span class="tw-ico" data-l="' + _esc((d.charAt(0) || '·').toUpperCase()) + '">'
+      + (d ? '<img src="https://icons.duckduckgo.com/ip3/' + encodeURIComponent(d) + '.ico" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">' : '')
+      + '</span>';
+  }
+
+  function ligado(){ const id = _uid(); if(!id) return false; try { return localStorage.getItem(PREF + id) === '1'; } catch(_){ return false; } }
+  function ligar(on){
+    const id = _uid(); if(!id) return;
+    try { if(on) localStorage.setItem(PREF + id, '1'); else localStorage.removeItem(PREF + id); } catch(_){}
+    try { window.dispatchEvent(new CustomEvent('tutorweb:mudou', { detail: { ligado: !!on } })); } catch(_){}
+  }
+  function limpar(){ try { Object.keys(localStorage).filter(function(k){ return k.indexOf(PREF) === 0; }).forEach(function(k){ localStorage.removeItem(k); }); } catch(_){} }
+
+  function botaoHtml(id, classe){
+    return '<button type="button" class="tw-btn' + (classe ? ' ' + classe : '') + '" id="' + id + '" aria-pressed="false"'
+      + ' data-tip="Pesquisar na internet nesta conversa. Fica ligado até você desligar; a pesquisa é cobrada à parte.">'
+      + GLOBO + '<span>Internet</span></button>';
+  }
+  function ligarBotao(btn, aoMudar){
+    if(!btn || btn.__tw) return; btn.__tw = true;
+    _css();
+    const pinta = function(){
+      const on = ligado();
+      btn.classList.toggle('is-on', on); btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      if(aoMudar) aoMudar(on);
+    };
+    const ouvinte = function(){ if(!btn.isConnected){ window.removeEventListener('tutorweb:mudou', ouvinte); return; } pinta(); };
+    btn.addEventListener('click', function(){ ligar(!ligado()); });
+    window.addEventListener('tutorweb:mudou', ouvinte);
+    pinta();
+  }
+
+  function _siteHtml(s){
+    const url = _url(s.url); if(!url) return '';
+    const d = s.site || _dom(url);
+    return '<span class="tw-site" tabindex="0" data-url="' + _esc(url) + '">' + _ico(url)
+      + '<span class="tw-tip"><span class="tw-tip-t">' + _esc(s.title || d) + '</span>'
+      + '<a href="' + _esc(url) + '" target="_blank" rel="noopener noreferrer">' + _esc(d) + SAIR + '</a></span></span>';
+  }
+  // Painel ao vivo, logo acima da bolha da resposta (a bolha é redesenhada a cada pedaço de texto).
+  function painel(bolha){
+    _css();
+    const el = document.createElement('div'); el.className = 'tw-live is-busy';
+    el.innerHTML = '<div class="tw-live-row">' + GLOBO + '<span class="tw-live-txt">Pesquisando na internet</span></div><div class="tw-sites"></div>';
+    bolha.parentNode.insertBefore(el, bolha);
+    const txt = el.querySelector('.tw-live-txt'), sites = el.querySelector('.tw-sites');
+    const vistos = {}; let nSites = 0, nBuscas = 0, extra = null;
+    function addSite(s){
+      const url = s && _url(s.url); if(!url || vistos[url]) return;
+      vistos[url] = 1; nSites++;
+      if(nSites > 14){
+        if(!extra){ extra = document.createElement('span'); extra.className = 'tw-mais'; sites.appendChild(extra); }
+        extra.textContent = '+' + (nSites - 14); return;
+      }
+      sites.insertAdjacentHTML('beforeend', _siteHtml(s));
+    }
+    function ocupado(){ el.classList.add('is-busy'); el.classList.remove('is-writing'); }
+    return {
+      evento: function(ev){
+        if(!ev) return;
+        if(ev.fase === 'busca'){ nBuscas++; ocupado(); txt.innerHTML = 'Pesquisando na internet: <em>' + _esc(ev.q) + '</em>'; }
+        else if(ev.fase === 'sites'){ (ev.sites || []).forEach(addSite); }
+        else if(ev.fase === 'abrindo'){ ocupado(); txt.innerHTML = 'Lendo a página de <em>' + _esc(ev.site || _dom(ev.url)) + '</em>'; addSite({ url: ev.url, site: ev.site }); }
+        else if(ev.fase === 'lida' && ev.url){
+          const chip = sites.querySelector('.tw-site[data-url="' + (window.CSS && CSS.escape ? CSS.escape(_url(ev.url)) : _url(ev.url)) + '"] .tw-tip-t');
+          if(chip && ev.title) chip.textContent = ev.title;
+        }
+      },
+      escrevendo: function(){
+        if(!el.classList.contains('is-busy')) return;
+        el.classList.remove('is-busy'); el.classList.add('is-writing');
+        txt.textContent = 'Escrevendo a resposta com o que encontrou';
+      },
+      fim: function(resumo){
+        el.classList.remove('is-busy', 'is-writing'); el.classList.add('is-done');
+        const b = (resumo && resumo.buscas) || nBuscas, p = (resumo && resumo.paginas) || 0;
+        const partes = [];
+        if(b) partes.push('Pesquisou ' + b + (b === 1 ? ' vez' : ' vezes'));
+        if(p) partes.push('leu ' + p + (p === 1 ? ' página' : ' páginas'));
+        if(nSites) partes.push(nSites + (nSites === 1 ? ' site visto' : ' sites vistos'));
+        txt.textContent = partes.length ? partes.join(' · ') : 'Respondeu sem precisar pesquisar';
+      }
+    };
+  }
+  // Marcas [wN]: enquanto escreve, número sem link; no fim, número que abre a fonte.
+  function marcasVivas(html){ return String(html).replace(/\s?\[w(\d+)\]/g, '<sup class="tw-cite is-wait">$1</sup>'); }
+  function marcasFinais(html, fontes){
+    const mapa = {}; (fontes || []).forEach(function(f){ if(f && f.n && _url(f.url)) mapa[f.n] = f; });
+    return String(html).replace(/\s?\[w(\d+)\]/g, function(_, n){
+      const f = mapa[n]; if(!f) return '';
+      return '<sup><a class="tw-cite" href="' + _esc(_url(f.url)) + '" target="_blank" rel="noopener noreferrer" title="' + _esc((f.title || '') + ' · ' + (f.site || _dom(f.url))) + '">' + n + '</a></sup>';
+    });
+  }
+  function semMarcas(t){ return String(t == null ? '' : t).replace(/\s?\[w\d+\]/g, ''); }
+
+  function fontesEl(fontes){
+    const lista = (fontes || []).filter(function(f){ return f && _url(f.url); });
+    if(!lista.length) return null;
+    _css();
+    const box = document.createElement('div'); box.className = 'tw-fontes';
+    box.innerHTML = '<div class="tw-fontes-h">' + GLOBO + '<span>Fontes da internet</span></div><div class="tw-fontes-grid">'
+      + lista.map(function(f){
+          const url = _url(f.url), site = f.site || _dom(url), data = _data(f.data);
+          return '<a class="tw-fonte" href="' + _esc(url) + '" target="_blank" rel="noopener noreferrer"' + (f.trecho ? ' title="' + _esc('“' + f.trecho + '”') + '"' : '') + '>'
+            + '<span class="tw-fonte-n">' + _esc(f.n) + '</span>'
+            + '<span class="tw-fonte-c"><span class="tw-fonte-site">' + _ico(url) + '<span>' + _esc(site) + '</span>' + (data ? '<span class="tw-fonte-data">' + _esc(data) + '</span>' : '') + '</span>'
+            + '<span class="tw-fonte-t">' + _esc(f.title || site) + '</span></span>'
+            + '<span class="tw-fonte-go">' + SAIR + '</span></a>';
+        }).join('') + '</div>';
+    return box;
+  }
+
+  function _css(){
+    if(_cssFeito) return; _cssFeito = true;
+    const st = document.createElement('style'); st.id = 'tutorWebCss';
+    st.textContent = `
+    .tw-globo{ width:14px; height:14px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; overflow:visible; }
+    .tw-globo .tw-orbita{ stroke-width:1.1; stroke-dasharray:2.4 5.2; opacity:0; transform-origin:12px 12px; }
+    .tw-btn{ display:inline-flex; align-items:center; gap:.35rem; background:transparent; border:1px solid var(--accent-border-soft); border-radius:999px; padding:.28rem .65rem; cursor:pointer; color:var(--text-dim); font-family:var(--sans); font-size:.68rem; white-space:nowrap; transition:color .3s var(--ease), border-color .3s var(--ease), background .3s var(--ease); }
+    .tw-btn:hover{ color:var(--accent); border-color:var(--accent-border); }
+    .tw-btn.is-on{ color:var(--accent); border-color:var(--accent); background:var(--accent-lo); }
+    .tw-btn.is-on .tw-orbita{ opacity:.85; animation:twGira 6s linear infinite; }
+    .tw-btn.tw-btn-g{ font-size:.78rem; padding:.4rem .85rem; border-color:var(--border); background:var(--bg-card); }
+    .tw-btn.tw-btn-g.is-on{ border-color:var(--accent); background:var(--accent-lo); }
+    .tw-live{ display:flex; flex-direction:column; gap:.45rem; margin:0 0 .5rem; padding:.55rem .75rem; border:1px solid var(--accent-border-soft); border-radius:12px; background:var(--accent-xlo); max-width:100%; box-sizing:border-box; animation:twEntra .4s var(--ease) both; }
+    .tw-live-row{ display:flex; align-items:center; gap:.5rem; min-width:0; color:var(--accent); }
+    .tw-live .tw-globo{ width:16px; height:16px; }
+    .tw-live.is-busy .tw-orbita{ opacity:.9; animation:twGira 2.4s linear infinite; }
+    .tw-live.is-busy .tw-meridiano{ animation:twRespira 2.4s ease-in-out infinite; transform-origin:12px 12px; }
+    .tw-live-txt{ font-family:var(--sans); font-size:.76rem; color:var(--text-dim); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tw-live-txt em{ font-style:normal; color:var(--text); }
+    .tw-live.is-busy .tw-live-txt, .tw-live.is-writing .tw-live-txt{ background:linear-gradient(90deg, var(--text-dim) 0%, var(--text-dim) 35%, var(--accent) 50%, var(--text-dim) 65%, var(--text-dim) 100%); background-size:220% 100%; -webkit-background-clip:text; background-clip:text; color:transparent; animation:twBrilho 2.6s linear infinite; }
+    .tw-live.is-busy .tw-live-txt em, .tw-live.is-writing .tw-live-txt em{ color:transparent; }
+    .tw-live.is-done{ background:transparent; border-color:var(--accent-border-soft); padding:.4rem .7rem; }
+    .tw-live.is-done .tw-live-txt{ font-size:.7rem; color:var(--text-mute); }
+    .tw-sites{ display:flex; flex-wrap:wrap; gap:.3rem; }
+    .tw-sites:empty{ display:none; }
+    .tw-site{ position:relative; display:inline-flex; outline:none; animation:twPop .45s var(--ease) both; }
+    .tw-site:nth-child(2){ animation-delay:.05s; } .tw-site:nth-child(3){ animation-delay:.1s; } .tw-site:nth-child(4){ animation-delay:.15s; } .tw-site:nth-child(5){ animation-delay:.2s; }
+    .tw-ico{ position:relative; display:inline-grid; place-items:center; width:22px; height:22px; border-radius:50%; background:var(--bg-card); border:1px solid var(--accent-border-soft); overflow:hidden; flex:none; transition:transform .25s var(--ease), border-color .25s var(--ease); }
+    .tw-ico::before{ content:attr(data-l); font-family:var(--serif); font-size:.72rem; color:var(--accent); }
+    .tw-ico img{ position:absolute; inset:3px; width:calc(100% - 6px); height:calc(100% - 6px); object-fit:contain; border-radius:3px; background:var(--bg-card); }
+    .tw-site:hover .tw-ico, .tw-site:focus-within .tw-ico{ transform:translateY(-2px); border-color:var(--accent); }
+    .tw-tip{ position:absolute; left:50%; bottom:calc(100% + 8px); transform:translate(-50%, 4px); min-width:180px; max-width:260px; padding:.55rem .65rem; border-radius:10px; background:var(--bg-card); border:1px solid var(--accent-border); box-shadow:0 14px 34px -14px rgba(0,0,0,.6); display:flex; flex-direction:column; gap:.3rem; opacity:0; pointer-events:none; transition:opacity .2s var(--ease), transform .2s var(--ease); z-index:20; }
+    .tw-tip::after{ content:""; position:absolute; left:0; right:0; top:100%; height:10px; }
+    .tw-site:hover .tw-tip, .tw-site:focus-within .tw-tip{ opacity:1; pointer-events:auto; transform:translate(-50%, 0); }
+    .tw-tip-t{ font-family:var(--serif); font-size:.86rem; line-height:1.3; color:var(--text); display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+    .tw-tip a{ display:inline-flex; align-items:center; gap:.3rem; font-family:var(--sans); font-size:.7rem; color:var(--accent); text-decoration:none; }
+    .tw-tip a:hover{ text-decoration:underline; text-underline-offset:3px; }
+    .tw-tip svg, .tw-fonte-go svg{ width:11px; height:11px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .tw-mais{ display:inline-grid; place-items:center; height:22px; padding:0 .45rem; border-radius:999px; border:1px solid var(--accent-border-soft); font-family:var(--mono); font-size:.62rem; color:var(--text-mute); }
+    .tw-cite{ display:inline-grid; place-items:center; min-width:15px; height:15px; padding:0 .2rem; margin-left:.15rem; border-radius:999px; background:var(--accent-lo); border:1px solid var(--accent-border); color:var(--accent); font-family:var(--mono); font-size:.58rem; line-height:1; text-decoration:none; vertical-align:super; transition:background .2s var(--ease), color .2s var(--ease); }
+    a.tw-cite:hover{ background:var(--accent); color:var(--bg-card); }
+    .tw-cite.is-wait{ opacity:.6; }
+    .tw-fontes{ margin-top:.8rem; padding-top:.7rem; border-top:1px solid var(--accent-border-soft); display:flex; flex-direction:column; gap:.55rem; animation:twEntra .5s var(--ease) both; }
+    .tw-fontes-h{ display:flex; align-items:center; gap:.4rem; font-family:var(--sans); font-size:.62rem; letter-spacing:.2em; text-transform:uppercase; color:var(--accent); }
+    .tw-fontes-grid{ display:grid; grid-template-columns:repeat(auto-fill, minmax(min(210px, 100%), 1fr)); gap:.45rem; }
+    .tw-fonte{ position:relative; display:flex; align-items:flex-start; gap:.55rem; padding:.55rem .65rem; border-radius:10px; border:1px solid var(--accent-border-soft); background:var(--bg-card); text-decoration:none; color:inherit; transition:border-color .25s var(--ease), transform .25s var(--ease), background .25s var(--ease); }
+    .tw-fonte:hover{ border-color:var(--accent-border); background:var(--accent-xlo); transform:translateY(-1px); }
+    .tw-fonte-n{ flex:none; display:inline-grid; place-items:center; width:18px; height:18px; border-radius:50%; border:1px solid var(--accent-border); font-family:var(--mono); font-size:.6rem; color:var(--accent); margin-top:.05rem; }
+    .tw-fonte-c{ display:flex; flex-direction:column; gap:.2rem; min-width:0; flex:1; }
+    .tw-fonte-site{ display:flex; align-items:center; gap:.35rem; font-family:var(--sans); font-size:.66rem; color:var(--text-mute); min-width:0; }
+    .tw-fonte-site .tw-ico{ width:16px; height:16px; }
+    .tw-fonte-site .tw-ico::before{ font-size:.58rem; }
+    .tw-fonte-site .tw-ico img{ inset:2px; width:calc(100% - 4px); height:calc(100% - 4px); }
+    .tw-fonte-site > span:not(.tw-ico){ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tw-fonte-data::before{ content:"·"; margin-right:.35rem; }
+    .tw-fonte-t{ font-family:var(--serif); font-size:.9rem; line-height:1.3; color:var(--text); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .tw-fonte-go{ flex:none; color:var(--text-mute); opacity:0; transition:opacity .25s var(--ease); margin-top:.1rem; }
+    .tw-fonte:hover .tw-fonte-go{ opacity:1; color:var(--accent); }
+    @keyframes twGira{ to{ transform:rotate(360deg); } }
+    @keyframes twRespira{ 0%,100%{ transform:scaleX(1); } 50%{ transform:scaleX(.35); } }
+    @keyframes twBrilho{ from{ background-position:120% 0; } to{ background-position:-120% 0; } }
+    @keyframes twPop{ from{ opacity:0; transform:translateY(4px) scale(.7); } to{ opacity:1; transform:none; } }
+    @keyframes twEntra{ from{ opacity:0; transform:translateY(4px); } to{ opacity:1; transform:none; } }
+    @media (prefers-reduced-motion: reduce){
+      .tw-live, .tw-site, .tw-fontes, .tw-globo .tw-orbita, .tw-globo .tw-meridiano, .tw-live-txt{ animation:none !important; }
+    }
+    @media (pointer: coarse){ .tw-fonte-go{ opacity:1; } }
+    `;
+    document.head.appendChild(st);
+  }
+
+  return { ligado: ligado, ligar: ligar, limpar: limpar, botaoHtml: botaoHtml, ligarBotao: ligarBotao,
+           painel: painel, marcasVivas: marcasVivas, marcasFinais: marcasFinais,
+           semMarcas: semMarcas, fontesEl: fontesEl };
+})();
+
 /* ─────────── TUTOR GLOBAL (fora da unidade) — página de chat ───────────
    Estilo IA da web (Gemini/Claude): histórico + busca à esquerda, área de
    conversa central com fundo accent em movimento suave (nuvem), seletor de
@@ -32452,6 +32665,7 @@ Renderers.tutor = function(){
     +         '<option value="equilibrado" selected>Equilibrado</option>'
     +         '<option value="avancado">Avançado</option>'
     +       '</select>'
+    +       (window.TutorWeb ? TutorWeb.botaoHtml('tutorWebBtn', 'tw-btn-g') : '')
     +     '</div>'
     +     '<div class="tutor-input-row">'
     +       '<textarea class="tutor-input" id="tutorInput" rows="1" placeholder="Pergunte ao tutor…"></textarea>'
@@ -32480,6 +32694,8 @@ Renderers.tutor.mount = function(stageEl, route){
   const subjEl   = stageEl.querySelector('#tutorSubject');
   const hintEl   = stageEl.querySelector('#tutorHint');
   const histList = stageEl.querySelector('#tutorHistList');
+  // Botão Internet: fica ligado até o aluno desligar e anda junto com o da gaveta da unidade.
+  if(window.TutorWeb) TutorWeb.ligarBotao(stageEl.querySelector('#tutorWebBtn'), function(){ _webHint(); });
 
   function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   // Markdown robusto reusado do chat da unidade (headings/listas/tabelas). Se por
@@ -32569,15 +32785,24 @@ Renderers.tutor.mount = function(stageEl, route){
     page.classList.toggle('mode-ajuda', mode==='ajuda');
     stageEl.querySelectorAll('.tutor-mode-btn').forEach(function(b){ b.classList.toggle('is-active', b.getAttribute('data-mode')===mode); });
     if(subjWrap) subjWrap.style.display = (mode==='materia') ? '' : 'none';
-    // No modo Ajuda não há escolha de modelo (é grátis e usa o modelo rápido).
+    // No modo Ajuda não há escolha de modelo (é grátis e usa o modelo rápido) nem internet.
     const _mdl = stageEl.querySelector('#tutorModel');
     if(_mdl) _mdl.style.display = (mode==='materia') ? '' : 'none';
+    const _web = stageEl.querySelector('#tutorWebBtn');
+    if(_web) _web.style.display = (mode==='materia') ? '' : 'none';
     if(inputEl) inputEl.placeholder = (mode==='materia') ? 'Pergunte ao tutor sobre a matéria…  (use [[ para citar outra)' : 'Pergunte como usar a plataforma…';
     const _sub = stageEl.querySelector('.tutor-sub');
     if(_sub) _sub.textContent = (mode==='materia')
       ? 'Escolha a matéria e pergunte o que quiser — eu busco no conteúdo e cito de onde veio.'
       : 'Pergunte como usar a plataforma — criar sala, enviar questão, usar o tutor, o caderno e mais.';
     if(hintEl) hintEl.textContent = '';
+    _webHint();
+  }
+  // Internet ligada: o aviso do custo fica embaixo do campo (some ao desligar ou no modo Ajuda).
+  function _webHint(){
+    if(!hintEl || hintEl.classList.contains('is-err')) return;
+    const on = _mode === 'materia' && !!(window.TutorWeb && TutorWeb.ligado());
+    hintEl.textContent = on ? 'Internet ligada: cada busca custa ⓤ 0,02 e o texto lido das páginas, ⓤ 0,01 por mil tokens, à parte da resposta.' : '';
   }
 
   // ── Busca no CADERNO do aluno (anotações próprias). As anotações já estão em
@@ -32700,6 +32925,7 @@ Renderers.tutor.mount = function(stageEl, route){
       return;
     }
     if(hintEl){ hintEl.textContent=''; hintEl.classList.remove('is-err'); }
+    _webHint();
     _appendUser(text); inputEl.value=''; _autosize();
     const box = _appendAssistant('<span class="tutor-typing"><span></span><span></span><span></span></span>');
     // Só as matérias ACESSÍVEIS (window.COURSES é escopado) — o RAG não busca em
@@ -32727,7 +32953,8 @@ Renderers.tutor.mount = function(stageEl, route){
           conversa_id: _conversaId, unit_id: null, unit_title: null, unit_text: '',
           mensagem: text, historico: _msgs.slice(-10), modelo: _modelo, apelido: _apelido, modo:'duvida',
           questoes_contexto: _qctx, caderno_contexto: _cadCtx,
-          subject_id: String(subjEl.value), subjects: subjects
+          subject_id: String(subjEl.value), subjects: subjects,
+          internet: !!(window.TutorWeb && TutorWeb.ligado())
         })
       });
       const ct = resp.headers.get('content-type')||'';
@@ -32737,6 +32964,7 @@ Renderers.tutor.mount = function(stageEl, route){
         return;
       }
       const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf='', acc='', sources=[];
+      let _live = null, _fontesWeb = [], _resumoWeb = null;   // internet (tutor-chat v4)
       while(true){
         const { done, value } = await reader.read(); if(done) break;
         buf += dec.decode(value,{stream:true});
@@ -32744,12 +32972,15 @@ Renderers.tutor.mount = function(stageEl, route){
         for(const p of parts){
           const line = p.trim(); if(line.indexOf('data:')!==0) continue;
           let ev; try{ ev=JSON.parse(line.slice(5).trim()); }catch(_){ continue; }
-          if(ev.type==='delta'){ acc+=ev.text; box.innerHTML=_md(_cleanLive(acc)); _scroll(); }
-          else if(ev.type==='done'){ if(ev.conversa_id) _conversaId=ev.conversa_id; sources=ev.sources||[]; if(window.UbtWallet) UbtWallet.load(); }
+          if(ev.type==='delta'){ acc+=ev.text; if(_live) _live.escrevendo(); box.innerHTML=TutorWeb.marcasVivas(_md(_cleanLive(acc))); _scroll(); }
+          else if(ev.type==='web'){ if(!_live) _live = TutorWeb.painel(box); _live.evento(ev); _scroll(); }
+          else if(ev.type==='done'){ if(ev.conversa_id) _conversaId=ev.conversa_id; sources=ev.sources||[]; _fontesWeb=ev.fontes_web||[]; _resumoWeb=ev.web||null; if(window.UbtWallet) UbtWallet.load(); }
         }
       }
+      if(_live) _live.fim(_resumoWeb);
       const _shown = _filterSources(sources, acc);
-      box.innerHTML = _linkCites(_md(_clean(acc)), _srcMap(_shown)) + _sourcesHtml(_shown);
+      box.innerHTML = TutorWeb.marcasFinais(_linkCites(_md(_clean(acc)), _srcMap(_shown)), _fontesWeb) + _sourcesHtml(_shown);
+      const _fw = TutorWeb.fontesEl(_fontesWeb); if(_fw) box.appendChild(_fw);
       _renderFu(box.parentNode, _fu(acc));
       // Card interativo de questões REAIS de prova (igual ao tutor da unidade).
       // Sem unidade (unitId:null) — o comment_mode usa só o enunciado do item.
@@ -32819,14 +33050,15 @@ Renderers.tutor.mount = function(stageEl, route){
     convEl.innerHTML = '<div class="loading">Carregando conversa…</div>';
     try{
       const { data, error } = await window._sb.schema('ia').from('tutor_mensagens')
-        .select('role, conteudo, sources').eq('conversa_id', id).order('criado_em', { ascending:true });
+        .select('role, conteudo, sources, fontes_web').eq('conversa_id', id).order('criado_em', { ascending:true });
       if(error) throw error;
       convEl.innerHTML = '';
       (data||[]).forEach(function(m){
         if(m.role==='user'){ _appendUser(m.conteudo||''); _msgs.push({ role:'user', content:m.conteudo||'' }); }
         else {
           const _sh = _filterSources(m.sources||[], m.conteudo||'');
-          const box = _appendAssistant(_linkCites(_md(_clean(m.conteudo||'')), _srcMap(_sh)) + _sourcesHtml(_sh));
+          const box = _appendAssistant(TutorWeb.marcasFinais(_linkCites(_md(_clean(m.conteudo||'')), _srcMap(_sh)), m.fontes_web||[]) + _sourcesHtml(_sh));
+          const _fw = TutorWeb.fontesEl(m.fontes_web||[]); if(_fw) box.appendChild(_fw);
           _renderFu(box.parentNode, _fu(m.conteudo||''));
           _msgs.push({ role:'assistant', content:_clean(m.conteudo||'') });
         }
@@ -45163,7 +45395,8 @@ window.TutorIA = (function(){
   }
 
   function _updateCostHint(){
-    const el = document.getElementById('tutorCostVal'); if(el) el.textContent = CUSTO_EST[_modelo] || '~';
+    const el = document.getElementById('tutorCostVal');
+    if(el) el.textContent = (CUSTO_EST[_modelo] || '~') + ((window.TutorWeb && TutorWeb.ligado()) ? ' + internet' : '');
   }
 
   // ── 5C: trazer questões REAIS do banco sobre o tema (busca semântica) ──
@@ -50586,7 +50819,7 @@ window.TutorIA = (function(){
       + '<button class="tutor-x" id="tutorClose" aria-label="Fechar" data-tip="Fechar">&#10005;</button></div></header>'
       + '<div class="tutor-tabs"><button type="button" class="tutor-tab is-active" data-ttab="chat">Tutor</button><button type="button" class="tutor-tab" data-ttab="caderno">Caderno</button><button type="button" class="tutor-tab" data-ttab="grafo">Conexões</button></div>'
       + '<div class="tutor-msgs" id="tutorMsgs"></div>'
-      + '<div class="tutor-composer"><div class="tutor-composer-top"><div class="tutor-ct-left"><button type="button" class="tutor-mode-btn" id="tutorModeBtn" data-tip="Alternar modo: Dúvida ou Aprendizado guiado">Dúvida</button><div class="tutor-model" id="tutorModelWrap"></div><button type="button" class="tutor-mode-btn tutor-banco-btn" id="tutorBancoBtn" data-tip="Trazer questões reais do banco sobre o tema (Ubique e provas passadas)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg> Questões</button><button type="button" class="tutor-mode-btn tutor-gerar-btn" id="tutorGerarBtn" data-tip="Gerar questões de Certo/Errado sobre o tema e responder aqui"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Gerar</button><button type="button" class="tutor-mode-btn tutor-voz-btn" id="tutorVozBtn" data-tip="Conversar por voz com o tutor (Manfredo)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> Falar</button></div>'
+      + '<div class="tutor-composer"><div class="tutor-composer-top"><div class="tutor-ct-left"><button type="button" class="tutor-mode-btn" id="tutorModeBtn" data-tip="Alternar modo: Dúvida ou Aprendizado guiado">Dúvida</button><div class="tutor-model" id="tutorModelWrap"></div>' + (window.TutorWeb ? TutorWeb.botaoHtml('tutorWebBtnU') : '') + '<button type="button" class="tutor-mode-btn tutor-banco-btn" id="tutorBancoBtn" data-tip="Trazer questões reais do banco sobre o tema (Ubique e provas passadas)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg> Questões</button><button type="button" class="tutor-mode-btn tutor-gerar-btn" id="tutorGerarBtn" data-tip="Gerar questões de Certo/Errado sobre o tema e responder aqui"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Gerar</button><button type="button" class="tutor-mode-btn tutor-voz-btn" id="tutorVozBtn" data-tip="Conversar por voz com o tutor (Manfredo)"><svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg> Falar</button></div>'
       + '<span class="ubt-cost tutor-cost" id="tutorCost" data-tip="Custo aproximado por resposta, debitado da sua carteira"><span class="ubt-sym">ⓤ</span> <span id="tutorCostVal">~</span></span></div>'
       + '<div class="tutor-input-row"><div id="tutorInput" class="tutor-input is-empty" contenteditable="true" role="textbox" aria-multiline="true" data-ph="Pergunte ao tutor sobre esta unidade…  (use [[ para citar uma unidade)"></div>'
       + '<button class="tutor-send" id="tutorSend" aria-label="Enviar" data-tip="Enviar (Enter)"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button></div></div>'
@@ -50626,6 +50859,8 @@ window.TutorIA = (function(){
     inp.addEventListener('blur', function(){ setTimeout(_hideRefPicker, 150); });
     d.querySelector('#tutorSend').addEventListener('click', function(){ _send(); });
     const _qb = d.querySelector('#tutorBancoBtn'); if(_qb) _qb.addEventListener('click', _buscarQuestoes);
+    // Botão Internet: fica ligado até o aluno desligar; o custo estimado mostra "+ internet".
+    if(window.TutorWeb) TutorWeb.ligarBotao(d.querySelector('#tutorWebBtnU'), function(){ _updateCostHint(); });
     const _gb = d.querySelector('#tutorGerarBtn'); if(_gb) _gb.addEventListener('click', _toggleGerar);
     const _vz = d.querySelector('#tutorVozBtn'); if(_vz) _vz.addEventListener('click', _vozOpen);
     const _mb = d.querySelector('#tutorModeBtn');
@@ -50763,13 +50998,15 @@ window.TutorIA = (function(){
           }
           const ans = _stripFu(raw, true);
           _ctx.msgs.push({ role:'assistant', content: ans });
-          const el = _addMsg('assistant', _md(ans));
+          const fWeb = Array.isArray(m.fontes_web) ? m.fontes_web : [];
+          const el = _addMsg('assistant', TutorWeb.marcasFinais(_md(ans), fWeb));
           const body = el && el.querySelector('.tutor-bubble');
           const srcs = Array.isArray(m.sources) ? m.sources : [];
           if(body) _linkifyCites(body, srcs);
           _renderFontes(el, srcs);
+          const fw = TutorWeb.fontesEl(fWeb); if(el && fw) el.appendChild(fw);
           _renderFollowups(el, _parseFu(raw));
-          if(el) _msgFooter(el, ans);
+          if(el) _msgFooter(el, TutorWeb.semMarcas(ans));
         });
         console.log('[tutor] mensagens carregadas:', _ctx.msgs.length);
       }
@@ -50844,7 +51081,7 @@ window.TutorIA = (function(){
       const resp = await fetch((window._sbUrl || '') + '/functions/v1/tutor-chat', {
         method:'POST',
         headers:{ 'Authorization':'Bearer ' + token, 'apikey': window._sbKey || '', 'content-type':'application/json' },
-        body: JSON.stringify({ conversa_id:_ctx.conversaId, unit_id:_ctx.unitId, unit_title:_ctx.unitTitle, unit_text:unitTextToSend, mensagem:text, historico:historico, modelo:_modelo, apelido:apelido, modo:_modo, questoes_contexto: extra.questoes_contexto || '', gerar_ce: extra.gerar_ce || false, subject_id: (window.COURSE && window.COURSE._subjectId != null) ? String(window.COURSE._subjectId) : '', subjects: (window.COURSES || []).map(function(c){ return (c && c._subjectId != null) ? String(c._subjectId) : ''; }).filter(Boolean) })
+        body: JSON.stringify({ conversa_id:_ctx.conversaId, unit_id:_ctx.unitId, unit_title:_ctx.unitTitle, unit_text:unitTextToSend, mensagem:text, historico:historico, modelo:_modelo, apelido:apelido, modo:_modo, questoes_contexto: extra.questoes_contexto || '', gerar_ce: extra.gerar_ce || false, internet: !!(window.TutorWeb && TutorWeb.ligado()) && !extra.gerar_ce, subject_id: (window.COURSE && window.COURSE._subjectId != null) ? String(window.COURSE._subjectId) : '', subjects: (window.COURSES || []).map(function(c){ return (c && c._subjectId != null) ? String(c._subjectId) : ''; }).filter(Boolean) })
       });
       const ct = resp.headers.get('content-type') || '';
       if(ct.indexOf('application/json') >= 0){
@@ -50860,6 +51097,7 @@ window.TutorIA = (function(){
       }
       const reader = resp.body.getReader(); const dec = new TextDecoder();
       let buf = ''; botBody.innerHTML = '';
+      let live = null, fontesWeb = [], resumoWeb = null;   // internet (tutor-chat v4)
       while(true){
         const { done, value } = await reader.read(); if(done) break;
         buf += dec.decode(value, { stream:true });
@@ -50867,14 +51105,18 @@ window.TutorIA = (function(){
         for(const p of parts){
           const line = p.trim(); if(line.indexOf('data:') !== 0) continue;
           let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch(_){ continue; }
-          if(ev.type === 'delta'){ acc += ev.text; botBody.innerHTML = _md(_stripFu(acc, false)); _scroll(); }
+          if(ev.type === 'delta'){ acc += ev.text; if(live) live.escrevendo(); botBody.innerHTML = TutorWeb.marcasVivas(_md(_stripFu(acc, false))); _scroll(); }
+          else if(ev.type === 'web'){ if(!live) live = TutorWeb.painel(botBody); live.evento(ev); _scroll(); }
           else if(ev.type === 'done'){
             _ctx.conversaId = ev.conversa_id || _ctx.conversaId;
             if(Array.isArray(ev.sources)) ragSources = ev.sources;
+            if(Array.isArray(ev.fontes_web)) fontesWeb = ev.fontes_web;
+            resumoWeb = ev.web || null;
             if(window.UbtWallet) UbtWallet.load();
           }
         }
       }
+      if(live) live.fim(resumoWeb);
       if(acc){
         const ans = _stripFu(acc, true);
         const ce = _parseCE(ans);
@@ -50884,12 +51126,13 @@ window.TutorIA = (function(){
           botBody.innerHTML = _md(intro || 'Responda Certo ou Errado:');
           _renderCE(botEl, ce);
         } else {
-          botBody.innerHTML = _md(ans);
+          botBody.innerHTML = TutorWeb.marcasFinais(_md(ans), fontesWeb);
           _linkifyCites(botBody, ragSources);
           _renderFontes(botEl, ragSources);
+          const fw = TutorWeb.fontesEl(fontesWeb); if(fw) botEl.appendChild(fw);
           if(autoQids.length) _renderBankQuestions(botEl, autoQids, 2);   // "já caiu" → cards
           _renderFollowups(botEl, _parseFu(acc));
-          _msgFooter(botEl, ans);
+          _msgFooter(botEl, TutorWeb.semMarcas(ans));
         }
         _ctx.msgs.push({ role:'assistant', content: ans });
         _scroll();
