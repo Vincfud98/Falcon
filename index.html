@@ -32165,6 +32165,16 @@ function _notifRenderItem(n){
       const href = '#/m/' + encodeURIComponent(p.module_id) + (p.chapter_id ? '/c/' + encodeURIComponent(p.chapter_id) : '') + '/u/' + encodeURIComponent(p.unit_id);
       actions = `<div class="notif-actions"><a class="btn-ghost" href="${href}" data-notif-id="${Util.attr(n.id)}">Abrir unidade →</a></div>`;
     }
+  } else if(n.type === 'pesquisa_pronta'){
+    // Pesquisa aprofundada concluída (ou que não terminou, com a reserva devolvida)
+    line = p.erro
+      ? `Sua pesquisa <strong>${Util.esc(p.tema || '')}</strong> não terminou. O valor reservado voltou para a sua carteira.`
+      : `Sua pesquisa aprofundada <strong>${Util.esc(p.tema || '')}</strong> ficou pronta.`;
+    actions = `<div class="notif-actions"><a class="btn-ghost" href="#/tutor?pesquisa=${encodeURIComponent(p.pesquisa_id || '')}" data-notif-id="${Util.attr(n.id)}">${p.erro ? 'Ver a pesquisa' : 'Abrir o relatório'} →</a></div>`;
+  } else if(n.type === 'pesquisa_expira'){
+    const _dExp = p.expira_em ? new Date(p.expira_em).toLocaleDateString('pt-BR') : 'breve';
+    line = `O relatório <strong>${Util.esc(p.tema || '')}</strong> será apagado em ${Util.esc(_dExp)} se você não salvar.`;
+    actions = `<div class="notif-actions"><a class="btn-ghost" href="#/tutor?pesquisa=${encodeURIComponent(p.pesquisa_id || '')}" data-notif-id="${Util.attr(n.id)}">Abrir e salvar →</a></div>`;
   } else if(n.type === 'cortesia_ubitokens'){
     // SQL 75 — cortesia mensal de quem tem matrícula ativa (servidor insere ao creditar)
     line = `Seus <strong>ⓤ ${Util.esc(Number(p.ubitokens || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 }))}</strong> UbiTokens de cortesia do mês chegaram. Use no tutor, na busca e nas outras funções de IA.`;
@@ -32619,8 +32629,676 @@ window.TutorWeb = (function(){
   }
 
   return { ligado: ligado, ligar: ligar, limpar: limpar, botaoHtml: botaoHtml, ligarBotao: ligarBotao,
-           painel: painel, marcasVivas: marcasVivas, marcasFinais: marcasFinais,
+           painel: painel, siteHtml: _siteHtml, css: _css, marcasVivas: marcasVivas, marcasFinais: marcasFinais,
            semMarcas: semMarcas, fontesEl: fontesEl };
+})();
+
+/* ─────────── PESQUISA APROFUNDADA (função pesquisa, SQL 77) ───────────
+   Terceiro modo da página Tutor. Telas: novo pedido (tema + sugestões de frases + modo), plano editável (seções,
+   recursos, instruções, custo estimado e o saldo que sobra), andamento ao vivo (cada seção com o que está fazendo e os
+   sites vistos) e relatório (fontes da internet, material da plataforma, salvar em Relatórios, perguntar ao tutor,
+   gerar questões, copiar, PDF, apagar). Questões, discursivas, edital e desempenho só entram se o aluno pedir. */
+window.PesquisaUI = (function(){
+  const SUGESTOES = [
+    { k: 'desempenho', rot: 'Meu desempenho', frase: 'Considere meu desempenho no assunto ao fazer a pesquisa.' },
+    { k: 'edital', rot: 'Itens do edital', frase: 'Siga os itens do edital do CACD sobre o tema.' },
+    { k: 'questoes', rot: 'Questões que já caíram', frase: 'Traga as questões do CACD que já caíram sobre o tema.' },
+    { k: 'discursivas', rot: 'Discursivas', frase: 'Inclua as discursivas do CACD sobre o tema, com roteiro de resposta.' },
+  ];
+  const RECURSOS = [ ['questoes', 'Questões que já caíram'], ['discursivas', 'Discursivas'], ['edital', 'Itens do edital'], ['desempenho', 'Meu desempenho'] ];
+  const ROT_STATUS = { plano: 'Plano', pesquisando: 'Pesquisando', escrevendo: 'Escrevendo', pronta: 'Pronta', erro: 'Não terminou' };
+  const MODOS = { padrao: { rot: 'Padrão', desc: 'Pesquisadoras Sonnet 5.5 e redação no Opus 5.5.' },
+                  maxima: { rot: 'Máxima', desc: 'Tudo no Opus 5.5, o modelo mais forte.' } };
+  const MAX_SECOES = 8;
+  let _cssFeito = false;
+  const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const fmtU = n => Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const dataBr = iso => { try { return new Date(iso).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric' }); } catch(_){ return ''; } };
+  const IA = () => window._sb.schema('ia');
+  const subjectsDoAluno = () => (window.COURSES || []).map(c => (c && c._subjectId != null) ? String(c._subjectId) : '').filter(Boolean);
+  const md = t => (window.TutorFmt && TutorFmt.md) ? TutorFmt.md(String(t || '')) : '<p>' + esc(t).replace(/\n{2,}/g, '</p><p>').replace(/\n/g, '<br>') + '</p>';
+  const semMarcas = t => String(t || '').replace(/\s?\[[wm]\d+\]/g, '');
+  const globo = () => '<svg class="tw-globo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><ellipse class="tw-meridiano" cx="12" cy="12" rx="3.4" ry="8"/><line x1="4" y1="12" x2="20" y2="12"/><circle class="tw-orbita" cx="12" cy="12" r="11"/></svg>';
+  const sinal = (ok) => ok
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="5 12 10 17 19 7"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
+
+  async function chamar(corpo){
+    const { data: sess } = await window._sb.auth.getSession();
+    const token = sess && sess.session && sess.session.access_token;
+    const r = await fetch((window._sbUrl || '') + '/functions/v1/pesquisa', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token, apikey: window._sbKey || '', 'content-type': 'application/json' },
+      body: JSON.stringify(corpo),
+    });
+    let j = null; try { j = await r.json(); } catch(_){}
+    return { ok: r.ok, status: r.status, j: j || {} };
+  }
+  async function saldoAtual(){
+    try {
+      const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+      const { data } = await window._sb.schema('carteira').from('contas').select('saldo, ilimitado').eq('user_id', u && u.id).maybeSingle();
+      return { saldo: Number((data && data.saldo) || 0), ilimitado: !!(data && data.ilimitado) };
+    } catch(_){ return { saldo: 0, ilimitado: false }; }
+  }
+
+  // Contexto opcional, só do que o aluno pediu. Vem do que o app já tem: busca do banco, edital e respostas dele.
+  function _limpa(s){ return String(s == null ? '' : s).replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ').trim(); }
+  function _palavras(t){
+    return String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/).filter(w => w.length >= 4 && ['sobre', 'entre', 'como', 'para', 'hoje', 'quais', 'qual', 'pesquisa', 'tema'].indexOf(w) < 0);
+  }
+  async function coletarContexto(tema, rec){
+    const ctx = { questoes: '', discursivas: '', edital: '', desempenho: '' };
+    let ids = [];
+    if(rec.questoes || rec.discursivas || rec.desempenho){
+      try {
+        const { data } = await window._sb.functions.invoke('bank-search', { body: { q: tema, limit: 40 } });
+        ids = ((data && data.ids) || []).map(x => String((x && x.id) || x)).filter(Boolean);
+      } catch(_){}
+    }
+    const grupos = ids.map(id => {
+      let g = null; try { g = (typeof window.resolveBankGroup === 'function') ? window.resolveBankGroup(id) : null; } catch(_){}
+      return { id, g };
+    }).filter(x => x.g && Array.isArray(x.g.items) && x.g.items.length);
+    const passadas = grupos.filter(x => x.g.items[0].source_type !== 'ubique');
+    if(rec.questoes && passadas.length && window.TutorQuestions && TutorQuestions.fmtQuestoes){
+      try { ctx.questoes = TutorQuestions.fmtQuestoes(passadas.slice(0, 14).map(x => x.id)); } catch(_){}
+    }
+    if(rec.desempenho && window.Store && Store.getQuizAnswerByItemId){
+      let resp = 0, certo = 0; const errou = [];
+      grupos.forEach(x => x.g.items.forEach(it => {
+        const a = Store.getQuizAnswerByItemId(it.id);
+        if(!a || !a.verified) return;
+        resp++;
+        if(a.correct) certo++; else if(errou.length < 12) errou.push('"' + _limpa(it.assertion).slice(0, 260) + '"');
+      }));
+      ctx.desempenho = resp
+        ? 'Itens do banco sobre o tema que o aluno já respondeu: ' + resp + '. Acertou ' + certo + ' e errou ' + (resp - certo) + '.' + (errou.length ? '\nAfirmativas em que ele errou:\n' + errou.join('\n') : '')
+        : 'O aluno ainda não respondeu itens do banco sobre este tema.';
+    }
+    if(rec.discursivas){
+      const banco = window._QBank || {};
+      const linhas = [];
+      ids.forEach(id => {
+        const q = (banco.questions || []).find(x => String(x.id) === id && String(x.type || '').toLowerCase() === 'essay');
+        if(q && linhas.length < 6) linhas.push('- ' + (q.origin || 'Discursiva') + (q.year ? ' (' + q.year + ')' : '') + ': ' + _limpa(q.enunciado || q.statement || '').slice(0, 900));
+      });
+      ctx.discursivas = linhas.join('\n');
+    }
+    if(rec.edital && window.UbiqueStore && UbiqueStore.edital_topics){
+      try {
+        const chaves = _palavras(tema);
+        const topicos = (UbiqueStore.edital_topics.list() || []).map(t => {
+          const txt = _limpa((t.code || '') + ' ' + (t.title || '') + ' ' + (t.description || ''));
+          const norm = txt.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+          const pontos = chaves.filter(k => norm.indexOf(k) >= 0).length;
+          return { txt, pontos };
+        }).filter(x => x.pontos > 0).sort((a, b) => b.pontos - a.pontos).slice(0, 12);
+        ctx.edital = topicos.map(x => '- ' + x.txt.slice(0, 400)).join('\n');
+      } catch(_){}
+    }
+    return ctx;
+  }
+
+  function montar(o){
+    _css();
+    const area = o.area;
+    let atual = null;          // pesquisa aberta
+    let timer = null, ultimoRetomar = 0;
+    let lista = [];
+    const parar = () => { if(timer){ clearTimeout(timer); timer = null; } };
+    const vivo = () => area.isConnected;
+
+    async function carregarLista(){
+      try {
+        const { data } = await IA().from('pesquisas').select('id, tema, plano, status, salva, criado_em, expira_em')
+          .order('criado_em', { ascending: false }).limit(60);
+        lista = data || [];
+      } catch(_){ lista = []; }
+      if(o.aoMudarLista) o.aoMudarLista();
+    }
+    function historicoHtml(filtro){
+      const f = String(filtro || '').trim().toLowerCase();
+      const itens = lista.filter(p => !f || String((p.plano && p.plano.titulo) || p.tema || '').toLowerCase().indexOf(f) >= 0);
+      if(!itens.length) return '<div class="tutor-hist-empty">' + (f ? 'Nada encontrado.' : 'Suas pesquisas aparecem aqui.') + '</div>';
+      return itens.map(p => {
+        const titulo = (p.plano && p.plano.titulo) || p.tema || 'Pesquisa';
+        const rodando = p.status === 'pesquisando' || p.status === 'escrevendo';
+        return '<div class="tutor-hist-row pq-hist-row' + (atual && atual.id === p.id ? ' is-active' : '') + '">'
+          + '<button class="tutor-hist-item" data-pesq="' + esc(p.id) + '" type="button">'
+          + '<span class="pq-hist-t">' + esc(titulo) + '</span>'
+          + '<span class="pq-hist-s is-' + esc(p.status) + '">' + (p.salva ? 'Salva · ' : '') + esc(ROT_STATUS[p.status] || p.status) + ' · ' + esc(dataBr(p.criado_em)) + '</span></button>'
+          + (rodando ? '' : '<button class="tutor-hist-del" data-pesq-del="' + esc(p.id) + '" type="button" title="Apagar pesquisa" aria-label="Apagar pesquisa">×</button>')
+          + '</div>';
+      }).join('');
+    }
+
+    // ── 1. Novo pedido ──
+    function nova(temaInicial){
+      parar(); atual = null;
+      const sug = SUGESTOES.map(s => '<button type="button" class="pq-chip" data-sug="' + s.k + '">' + esc(s.rot) + '</button>').join('');
+      area.innerHTML = '<div class="pq-wrap">'
+        + '<div class="pq-hero"><span class="s-label">Pesquisa aprofundada</span>'
+        + '<h1 class="pq-title">O que você quer pesquisar?</h1>'
+        + '<p class="pq-sub">Eu monto um plano, você ajusta, e várias pesquisadoras vasculham a internet e o material da plataforma ao mesmo tempo. Leva de 3 a 8 minutos, e o sino avisa quando o relatório ficar pronto.</p></div>'
+        + '<div class="pq-box">'
+        + '<label class="pq-lbl" for="pqTema">Tema e pedido</label>'
+        + '<textarea id="pqTema" class="pq-input" rows="4" placeholder="Ex.: as relações entre Brasil e França hoje">' + esc(temaInicial || '') + '</textarea>'
+        + '<div class="pq-sug"><span class="pq-sug-l">Quer incluir algo da plataforma? Clique para juntar a frase ao pedido:</span><div class="pq-chips">' + sug + '</div></div>'
+        + '<div class="pq-row">' + _modoHtml('padrao') + '<button type="button" class="btn-primary pq-go" id="pqPlanejar">Montar o plano</button></div>'
+        + '<p class="pq-fino">Montar o plano custa uns centavos de UbiToken. O custo da pesquisa aparece antes de você começar.</p>'
+        + '<div class="pq-msg" id="pqMsg" role="status"></div>'
+        + '</div></div>';
+      const tema = area.querySelector('#pqTema');
+      area.querySelectorAll('[data-sug]').forEach(b => b.addEventListener('click', function(){
+        const s = SUGESTOES.find(x => x.k === b.getAttribute('data-sug'));
+        const t = tema.value;
+        if(t.indexOf(s.frase) >= 0){ tema.value = t.replace(s.frase, '').replace(/\n{2,}/g, '\n').trim(); b.classList.remove('is-on'); }
+        else { tema.value = (t.trim() ? t.trim() + '\n' : '') + s.frase; b.classList.add('is-on'); }
+        tema.focus();
+      }));
+      _ligaModo(area);
+      area.querySelector('#pqPlanejar').addEventListener('click', async function(){
+        const pedido = tema.value.trim();
+        const msg = area.querySelector('#pqMsg');
+        if(pedido.length < 3){ msg.textContent = 'Escreva o tema da pesquisa.'; msg.className = 'pq-msg is-err'; tema.focus(); return; }
+        const temaCurto = semFrases(pedido).slice(0, 600) || pedido.slice(0, 600);
+        const btn = this; btn.disabled = true;
+        msg.className = 'pq-msg is-busy'; msg.innerHTML = globo() + '<span>Montando o plano…</span>';
+        const r = await chamar({ acao: 'planejar', tema: temaCurto, pedido, modo: _modoDe(area), subjects: subjectsDoAluno() }).catch(() => ({ ok: false, j: {} }));
+        btn.disabled = false;
+        if(r.j && r.j.ubt_error){ msg.className = 'pq-msg is-err'; msg.innerHTML = 'Saldo de UbiTokens insuficiente. <a href="#/conta/carteira">Abrir a Carteira</a>'; return; }
+        if(!r.ok || !r.j.pesquisa_id){ msg.className = 'pq-msg is-err'; msg.textContent = (r.j && r.j.error) || 'Não consegui montar o plano agora. Tente de novo.'; return; }
+        if(window.UbtWallet) UbtWallet.load();
+        await carregarLista();
+        await abrir(r.j.pesquisa_id);
+      });
+      setTimeout(() => tema.focus(), 30);
+    }
+    function semFrases(t){ let s = String(t || ''); SUGESTOES.forEach(x => { s = s.replace(x.frase, ''); }); return s.replace(/\s+/g, ' ').trim(); }
+    function _modoHtml(modo){
+      return '<div class="pq-modo"><div class="seg" role="radiogroup" aria-label="Modo da pesquisa">'
+        + Object.keys(MODOS).map(k => '<button type="button" role="radio" class="seg-btn' + (k === modo ? ' is-active' : '') + '" aria-checked="' + (k === modo) + '" data-modo="' + k + '">' + MODOS[k].rot + '</button>').join('')
+        + '</div><span class="pq-modo-d" data-modo-desc>' + esc(MODOS[modo].desc) + '</span></div>';
+    }
+    function _ligaModo(raiz, aoMudar){
+      raiz.querySelectorAll('[data-modo]').forEach(b => b.addEventListener('click', function(){
+        raiz.querySelectorAll('[data-modo]').forEach(x => { const on = x === b; x.classList.toggle('is-active', on); x.setAttribute('aria-checked', on ? 'true' : 'false'); });
+        const d = raiz.querySelector('[data-modo-desc]'); if(d) d.textContent = MODOS[b.getAttribute('data-modo')].desc;
+        if(aoMudar) aoMudar();
+      }));
+    }
+    const _modoDe = raiz => { const b = raiz.querySelector('[data-modo].is-active'); return b ? b.getAttribute('data-modo') : 'padrao'; };
+
+    // ── 2. Plano editável ──
+    async function telaPlano(p){
+      parar();
+      const plano = p.plano || {}; const est = (p.resumo && p.resumo.estimativa) || null;
+      const conta = await saldoAtual();
+      const secHtml = (s, i) => '<li class="pq-sec"><span class="pq-sec-n">' + (i + 1) + '</span><div class="pq-sec-c">'
+        + '<input class="pq-sec-t" maxlength="140" value="' + esc(s.titulo) + '" aria-label="Título da seção ' + (i + 1) + '">'
+        + '<textarea class="pq-sec-f" rows="2" maxlength="700" aria-label="O que investigar na seção ' + (i + 1) + '">' + esc(s.foco || '') + '</textarea></div>'
+        + '<button type="button" class="pq-sec-x" aria-label="Tirar esta seção" title="Tirar esta seção">' + sinal(false) + '</button></li>';
+      area.innerHTML = '<div class="pq-wrap">'
+        + '<div class="pq-hero"><span class="s-label">Plano da pesquisa</span>'
+        + '<input class="pq-plan-t" id="pqTitulo" maxlength="160" value="' + esc(plano.titulo || p.tema) + '" aria-label="Título da pesquisa">'
+        + '<textarea class="pq-plan-o" id="pqObjetivo" rows="2" maxlength="600" aria-label="Objetivo">' + esc(plano.objetivo || '') + '</textarea></div>'
+        + '<div class="pq-box">'
+        + '<div class="pq-h">Seções <span class="pq-h-d">cada uma ganha uma pesquisadora própria; edite à vontade</span></div>'
+        + '<ol class="pq-secs" id="pqSecs">' + (plano.secoes || []).map(secHtml).join('') + '</ol>'
+        + '<button type="button" class="pq-add" id="pqAdd">+ Adicionar seção</button>'
+        + '<div class="pq-h">Da plataforma <span class="pq-h-d">só entra o que estiver marcado</span></div>'
+        + '<div class="pq-chips" id="pqRec">' + RECURSOS.map(([k, rot]) => '<button type="button" class="pq-chip' + (plano.recursos && plano.recursos[k] ? ' is-on' : '') + '" data-rec="' + k + '" aria-pressed="' + !!(plano.recursos && plano.recursos[k]) + '">' + esc(rot) + '</button>').join('') + '</div>'
+        + '<div class="pq-h">Orientações para as pesquisadoras <span class="pq-h-d">opcional</span></div>'
+        + '<textarea class="pq-input" id="pqInstr" rows="2" maxlength="1200" placeholder="Ex.: foque no século XXI e em documentos oficiais."></textarea>'
+        + '<div class="pq-h">Modo</div>' + _modoHtml(p.modo || 'padrao')
+        + '<div class="pq-custo" id="pqCusto"></div>'
+        + '<div class="pq-acoes"><button type="button" class="btn-ghost" id="pqCancelar">Descartar o plano</button>'
+        + '<button type="button" class="btn-primary pq-go" id="pqComecar">Começar a pesquisa</button></div>'
+        + '<div class="pq-msg" id="pqMsg" role="status"></div>'
+        + '</div></div>';
+      const lista = area.querySelector('#pqSecs');
+      const renumera = () => { lista.querySelectorAll('.pq-sec-n').forEach((n, i) => { n.textContent = i + 1; }); area.querySelector('#pqAdd').disabled = lista.children.length >= MAX_SECOES; custo(); };
+      const ligaX = li => li.querySelector('.pq-sec-x').addEventListener('click', function(){ if(lista.children.length > 1){ li.remove(); renumera(); } });
+      lista.querySelectorAll('.pq-sec').forEach(ligaX);
+      area.querySelector('#pqAdd').addEventListener('click', function(){
+        if(lista.children.length >= MAX_SECOES) return;
+        const tmp = document.createElement('ol'); tmp.innerHTML = secHtml({ titulo: '', foco: '' }, lista.children.length);
+        const li = tmp.firstChild; lista.appendChild(li); ligaX(li); renumera(); li.querySelector('.pq-sec-t').focus();
+      });
+      area.querySelectorAll('[data-rec]').forEach(b => b.addEventListener('click', function(){ const on = !b.classList.contains('is-on'); b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', on); }));
+      function custo(){
+        const el = area.querySelector('#pqCusto'); if(!el) return;
+        const modo = _modoDe(area), n = lista.children.length;
+        if(conta.ilimitado){ el.innerHTML = '<span class="pq-custo-l">Custo</span><span>Sua conta não paga pesquisas.</span>'; area.querySelector('#pqComecar').disabled = false; return; }
+        const porSec = est && est.por_secao ? Number(est.por_secao[modo]) : (modo === 'maxima' ? 0.92 : 0.59);
+        const red = est && est.redacao != null ? Number(est.redacao) : 0.75;
+        const max = Math.round((n * porSec + red) * 100) / 100, min = Math.round(max * 0.6 * 100) / 100;
+        const sobra = conta.saldo - max;
+        el.innerHTML = '<span class="pq-custo-l">Custo estimado</span>'
+          + '<span class="pq-custo-v">entre <strong>ⓤ ' + fmtU(min) + '</strong> e <strong>ⓤ ' + fmtU(max) + '</strong></span>'
+          + '<span class="pq-custo-s">Seu saldo: ⓤ ' + fmtU(conta.saldo) + (sobra >= 0
+              ? ' · você vai ficar com pelo menos <strong>ⓤ ' + fmtU(sobra) + '</strong>'
+              : ' · <span class="pq-falta">faltam ⓤ ' + fmtU(-sobra) + '. <a href="#/conta/carteira">Abrir a Carteira</a></span>') + '</span>'
+          + '<span class="pq-fino">O valor máximo fica reservado na sua carteira; no fim, o que sobrar volta para você.</span>';
+        area.querySelector('#pqComecar').disabled = sobra < 0;
+      }
+      _ligaModo(area, custo);
+      lista.addEventListener('input', custo);
+      custo();
+      area.querySelector('#pqCancelar').addEventListener('click', async function(){
+        try { await IA().rpc('pesquisa_apagar', { p_id: p.id }); } catch(_){}
+        await carregarLista(); nova(semFrases(p.pedido || p.tema));
+      });
+      area.querySelector('#pqComecar').addEventListener('click', async function(){
+        const msg = area.querySelector('#pqMsg');
+        const secoes = Array.from(lista.querySelectorAll('.pq-sec')).map(li => ({ titulo: li.querySelector('.pq-sec-t').value.trim(), foco: li.querySelector('.pq-sec-f').value.trim() })).filter(s => s.titulo);
+        if(!secoes.length){ msg.className = 'pq-msg is-err'; msg.textContent = 'Deixe pelo menos uma seção com título.'; return; }
+        const recursos = {}; area.querySelectorAll('[data-rec]').forEach(b => { recursos[b.getAttribute('data-rec')] = b.classList.contains('is-on'); });
+        const btn = this; btn.disabled = true;
+        msg.className = 'pq-msg is-busy';
+        let contexto = {};
+        if(Object.values(recursos).some(Boolean)){
+          msg.innerHTML = globo() + '<span>Reunindo o que você pediu da plataforma…</span>';
+          try { contexto = await coletarContexto(semFrases(p.pedido || p.tema) || p.tema, recursos); } catch(_){}
+        }
+        msg.innerHTML = globo() + '<span>Começando a pesquisa…</span>';
+        const r = await chamar({ acao: 'iniciar', pesquisa_id: p.id, modo: _modoDe(area), instrucoes: area.querySelector('#pqInstr').value.trim(),
+          plano: { titulo: area.querySelector('#pqTitulo').value.trim(), objetivo: area.querySelector('#pqObjetivo').value.trim(), secoes, recursos }, contexto }).catch(() => ({ ok: false, j: {} }));
+        btn.disabled = false;
+        if(r.j && r.j.ubt_error){ msg.className = 'pq-msg is-err'; msg.innerHTML = 'Saldo de UbiTokens insuficiente para a reserva. <a href="#/conta/carteira">Abrir a Carteira</a>'; return; }
+        if(!r.ok){ msg.className = 'pq-msg is-err'; msg.textContent = (r.j && r.j.error) || 'Não consegui começar agora. Tente de novo.'; return; }
+        if(window.UbtWallet) UbtWallet.load();
+        await carregarLista();
+        await abrir(p.id);
+      });
+    }
+
+    // ── 3. Andamento ao vivo ──
+    function telaAndamento(p, secs){
+      const plano = p.plano || {};
+      area.innerHTML = '<div class="pq-wrap">'
+        + '<div class="pq-run-head is-busy">' + globo() + '<div><span class="s-label">Pesquisa em andamento</span>'
+        + '<h1 class="pq-title">' + esc(plano.titulo || p.tema) + '</h1><p class="pq-sub" id="pqEtapa"></p></div></div>'
+        + '<div class="pq-bar"><div class="pq-bar-in" id="pqBar"></div></div>'
+        + '<ol class="pq-run" id="pqRun">' + secs.map(s => '<li class="pq-run-sec" data-sec="' + esc(s.id) + '">'
+            + '<span class="pq-run-n">' + s.ordem + '</span>'
+            + '<div class="pq-run-c"><div class="pq-run-t">' + esc(s.titulo) + '</div><div class="pq-run-a"></div><div class="tw-sites"></div></div>'
+            + '<span class="pq-run-m"></span></li>').join('') + '</ol>'
+        + '<div class="pq-run-final" id="pqFinal"><span class="pq-run-n">' + globo() + '</span><div class="pq-run-c"><div class="pq-run-t">Relatório final</div><div class="pq-run-a" id="pqFinalA"></div></div></div>'
+        + '<p class="pq-fino pq-centro">Pode fechar esta página. O sino avisa quando o relatório ficar pronto.</p>'
+        + '</div>';
+      atualizaAndamento(p, secs);
+    }
+    function atualizaAndamento(p, secs){
+      const prontas = secs.filter(s => s.status === 'pronta' || s.status === 'erro').length;
+      const etapa = area.querySelector('#pqEtapa'); if(!etapa) return;
+      const total = secs.length || 1;
+      etapa.textContent = p.status === 'escrevendo' ? 'As pesquisadoras terminaram. Agora a redação junta tudo no relatório.'
+        : (function(){ const b = secs.reduce((t, s) => t + Number(s.buscas || 0), 0);
+            return prontas + ' de ' + total + (total === 1 ? ' seção pronta' : ' seções prontas') + ' · ' + b + (b === 1 ? ' busca' : ' buscas') + ' até agora'; })();
+      area.querySelector('#pqBar').style.width = Math.round(((p.status === 'escrevendo' ? total + 0.5 : prontas) / (total + 1)) * 100) + '%';
+      secs.forEach(s => {
+        const li = area.querySelector('[data-sec="' + s.id + '"]'); if(!li) return;
+        li.className = 'pq-run-sec is-' + s.status;
+        li.querySelector('.pq-run-n').innerHTML = s.status === 'pronta' ? sinal(true) : (s.status === 'erro' ? sinal(false) : String(s.ordem));
+        const a = li.querySelector('.pq-run-a');
+        a.textContent = s.status === 'fila' ? 'Na fila' : s.status === 'pronta' ? 'Pronta · ' + (s.buscas || 0) + ((s.buscas || 0) === 1 ? ' busca, ' : ' buscas, ') + (s.paginas || 0) + ((s.paginas || 0) === 1 ? ' página lida' : ' páginas lidas')
+          : s.status === 'erro' ? 'Não conseguiu pesquisar esta seção' : (s.atividade || 'Pesquisando');
+        const box = li.querySelector('.tw-sites');
+        const tem = new Set(Array.from(box.querySelectorAll('[data-url]')).map(x => x.getAttribute('data-url')));
+        (s.sites || []).slice(0, 14).forEach(x => { if(x && x.url && !tem.has(x.url) && window.TutorWeb && TutorWeb.siteHtml) box.insertAdjacentHTML('beforeend', TutorWeb.siteHtml(x)); });
+      });
+      const fa = area.querySelector('#pqFinalA'), fin = area.querySelector('#pqFinal');
+      fin.className = 'pq-run-final' + (p.status === 'escrevendo' ? ' is-pesquisando' : '');
+      fa.textContent = p.status === 'escrevendo' ? 'Escrevendo o relatório com as fontes' : 'Começa quando as seções terminarem';
+    }
+    async function acompanhar(id){
+      parar();
+      const passo = async () => {
+        if(!vivo() || !atual || atual.id !== id) return;
+        let p = null, secs = [];
+        try {
+          const a = await IA().from('pesquisas').select('*').eq('id', id).maybeSingle(); p = a.data;
+          const b = await IA().from('pesquisa_secoes').select('id, ordem, titulo, status, atividade, sites, buscas, paginas, atualizado_em').eq('pesquisa_id', id).order('ordem'); secs = b.data || [];
+        } catch(_){}
+        if(!vivo() || !atual || atual.id !== id) return;
+        if(p && (p.status === 'pronta' || p.status === 'erro')){ await carregarLista(); return abrir(id); }
+        if(p){
+          atualizaAndamento(p, secs);
+          // travou? a própria tela pede para retomar (no máximo a cada 2 minutos)
+          const agora = Date.now();
+          const ultimaAtividade = Math.max(new Date(p.atualizado_em).getTime(), ...secs.map(s => new Date(s.atualizado_em).getTime()));
+          const limite = p.status === 'escrevendo' ? 500000 : 300000;
+          if(agora - ultimaAtividade > limite && agora - ultimoRetomar > 120000){ ultimoRetomar = agora; chamar({ acao: 'retomar', pesquisa_id: id }).catch(() => {}); }
+        }
+        timer = setTimeout(passo, 3000);
+      };
+      timer = setTimeout(passo, 2500);
+    }
+
+    // ── 4. Relatório ──
+    function _citasMaterial(html, material){
+      const mapa = {}; (material || []).forEach(m => { if(m && m.n) mapa[m.n] = m; });
+      return String(html).replace(/\s?\[m(\d+)\]/g, function(_, n){
+        const m = mapa[n]; if(!m) return '';
+        const href = (m.unit_id && window._unitHashById) ? window._unitHashById(m.unit_id) : '';
+        return href ? '<sup><a class="pq-mcite" href="' + esc(href) + '" title="' + esc(m.label) + '">' + n + '</a></sup>'
+                    : '<sup class="pq-mcite is-off" title="' + esc(m.label) + '">' + n + '</sup>';
+      });
+    }
+    function _materialHtml(material){
+      if(!material || !material.length) return '';
+      return '<div class="pq-mat"><div class="tw-fontes-h"><svg viewBox="0 0 24 24" aria-hidden="true" class="tw-globo"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span>Material da plataforma</span></div><div class="pq-mat-l">'
+        + material.map(m => {
+            const href = (m.unit_id && window._unitHashById) ? window._unitHashById(m.unit_id) : '';
+            const corpo = '<span class="tw-fonte-n">' + esc(m.n) + '</span><span class="pq-mat-t">' + esc(m.label) + '</span>';
+            return href ? '<a class="pq-mat-i" href="' + esc(href) + '">' + corpo + '</a>' : '<span class="pq-mat-i is-off" title="A unidade abre com a matéria completa">' + corpo + '</span>';
+          }).join('') + '</div></div>';
+    }
+    function telaRelatorio(p){
+      parar();
+      const plano = p.plano || {}; const r = p.resumo || {};
+      const titulo = plano.titulo || p.tema;
+      const meta = [dataBr(p.concluida_em || p.criado_em), (r.secoes || 0) + ' seções', (r.buscas || 0) + ' buscas', (r.fontes || (p.fontes || []).length) + ' fontes'];
+      if(p.custo != null) meta.push('ⓤ ' + fmtU(Number(p.custo) + Number(p.custo_plano || 0)));
+      area.innerHTML = '<div class="pq-wrap pq-rel">'
+        + '<div class="pq-rel-top"><span class="s-label">Relatório</span><div class="pq-rel-meta">' + esc(meta.join(' · ')) + '</div>'
+        + '<div class="pq-salva" id="pqSalva"></div>'
+        + '<div class="pq-rel-acoes">'
+        + '<button type="button" class="pq-acao" data-a="tutor">Perguntar ao tutor</button>'
+        + '<button type="button" class="pq-acao" data-a="ce">Gerar questões de Certo ou Errado</button>'
+        + '<button type="button" class="pq-acao" data-a="copiar">Copiar</button>'
+        + '<button type="button" class="pq-acao" data-a="pdf">Imprimir ou PDF</button>'
+        + '<button type="button" class="pq-acao is-perigo" data-a="apagar">Apagar</button></div></div>'
+        + '<article class="pq-doc" id="pqDoc"></article>'
+        + '<div id="pqFontes"></div>'
+        + '<div class="pq-ce" id="pqCe"></div>'
+        + '</div>';
+      const doc = area.querySelector('#pqDoc');
+      let html = md(p.relatorio || '');
+      html = (window.TutorWeb ? TutorWeb.marcasFinais(html, p.fontes || []) : html);
+      doc.innerHTML = _citasMaterial(html, p.fontes_material || []);
+      const fbox = area.querySelector('#pqFontes');
+      const fw = window.TutorWeb ? TutorWeb.fontesEl(p.fontes || []) : null; if(fw) fbox.appendChild(fw);
+      fbox.insertAdjacentHTML('beforeend', _materialHtml(p.fontes_material || []));
+      _pintaSalva(p);
+      area.querySelectorAll('[data-a]').forEach(b => b.addEventListener('click', () => _acao(b.getAttribute('data-a'), p, b)));
+    }
+    function _pintaSalva(p){
+      const el = area.querySelector('#pqSalva'); if(!el) return;
+      if(p.salva){
+        el.className = 'pq-salva is-salva';
+        el.innerHTML = '<span>' + sinal(true) + ' Salvo em Relatórios, nas Notas.</span><button type="button" class="pq-link" id="pqTirar">Tirar dos Relatórios</button>';
+      } else {
+        el.className = 'pq-salva';
+        el.innerHTML = '<span>Este relatório será apagado em <strong>' + esc(dataBr(p.expira_em)) + '</strong> se você não salvar.</span><button type="button" class="btn-primary pq-go" id="pqSalvar">Salvar em Relatórios</button>';
+      }
+      const alterna = async (salvar) => {
+        try { const { error } = await IA().rpc('pesquisa_salvar', { p_id: p.id, p_salvar: salvar }); if(error) throw error; }
+        catch(e){ if(window.ueToast) ueToast((e && e.message) || 'Não consegui salvar agora.', 'error'); return; }
+        p.salva = salvar; p.expira_em = salvar ? null : new Date(Date.now() + 30 * 86400000).toISOString();
+        _pintaSalva(p); carregarLista();
+        if(window.ueToast) ueToast(salvar ? 'Salvo em Relatórios.' : 'Tirado dos Relatórios. Ele vence em 30 dias.', 'success');
+      };
+      const s = el.querySelector('#pqSalvar'); if(s) s.addEventListener('click', () => alterna(true));
+      const t = el.querySelector('#pqTirar'); if(t) t.addEventListener('click', () => alterna(false));
+    }
+    async function _acao(a, p, btn){
+      const titulo = (p.plano && p.plano.titulo) || p.tema;
+      const texto = semMarcas(p.relatorio || '');
+      if(a === 'tutor'){
+        if(window.TutorIA && TutorIA.open) TutorIA.open({ unitId: null, unitTitle: titulo, unitText: texto.slice(0, 120000) });
+      } else if(a === 'copiar'){
+        const fontes = (p.fontes || []).map(f => f.n + '. ' + f.title + ' · ' + f.url).join('\n');
+        try { await navigator.clipboard.writeText(texto + (fontes ? '\n\nFontes da internet\n' + fontes : '')); if(window.ueToast) ueToast('Relatório copiado.', 'success'); } catch(_){}
+      } else if(a === 'pdf'){
+        const doc = area.querySelector('#pqDoc');
+        const fontes = (p.fontes || []).map(f => '<li><strong>' + esc(f.n) + '.</strong> ' + esc(f.title) + ' · ' + esc(f.site || '') + (f.data ? ' · ' + esc(f.data) : '') + '<br><span>' + esc(f.url) + '</span></li>').join('');
+        const corpo = doc.innerHTML + (fontes ? '<h2>Fontes da internet</h2><ol>' + fontes + '</ol>' : '');
+        if(window.CadernosPage && CadernosPage.expor) CadernosPage.expor('pdf', titulo, corpo, null, null);
+        else window.print();
+      } else if(a === 'apagar'){
+        if(!confirm('Apagar esta pesquisa? Não dá para desfazer.')) return;
+        try { const { error } = await IA().rpc('pesquisa_apagar', { p_id: p.id }); if(error) throw error; }
+        catch(e){ if(window.ueToast) ueToast((e && e.message) || 'Não consegui apagar agora.', 'error'); return; }
+        await carregarLista(); nova();
+      } else if(a === 'ce'){
+        await _gerarCE(p, texto, btn);
+      }
+    }
+    // Questões de Certo ou Errado sobre o relatório: o mesmo gerador do tutor, com o relatório como texto-base.
+    async function _gerarCE(p, texto, btn){
+      const box = area.querySelector('#pqCe'); if(!box) return;
+      btn.disabled = true;
+      box.innerHTML = '<div class="pq-msg is-busy">' + globo() + '<span>Gerando 3 questões sobre o relatório…</span></div>';
+      let acc = '';
+      try {
+        const { data: sess } = await window._sb.auth.getSession();
+        const token = sess && sess.session && sess.session.access_token;
+        const resp = await fetch((window._sbUrl || '') + '/functions/v1/tutor-chat', {
+          method: 'POST', headers: { Authorization: 'Bearer ' + token, apikey: window._sbKey || '', 'content-type': 'application/json' },
+          body: JSON.stringify({ unit_id: null, unit_title: (p.plano && p.plano.titulo) || p.tema, unit_text: texto.slice(0, 120000), ephemeral: true, gerar_ce: true,
+            mensagem: 'Gere questões Ubique (Certo/Errado) sobre: os pontos mais importantes do relatório', modelo: 'equilibrado', historico: [] }),
+        });
+        const ct = resp.headers.get('content-type') || '';
+        if(ct.indexOf('application/json') >= 0){
+          const j = await resp.json().catch(() => ({}));
+          box.innerHTML = '<div class="pq-msg is-err">' + (j && j.ubt_error ? 'Saldo de UbiTokens insuficiente. <a href="#/conta/carteira">Abrir a Carteira</a>' : 'Não consegui gerar agora. Tente de novo.') + '</div>';
+          btn.disabled = false; return;
+        }
+        const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf = '';
+        while(true){
+          const { done, value } = await reader.read(); if(done) break;
+          buf += dec.decode(value, { stream: true });
+          const partes = buf.split('\n\n'); buf = partes.pop() || '';
+          for(const pt of partes){ const l = pt.trim(); if(l.indexOf('data:') !== 0) continue; let ev; try { ev = JSON.parse(l.slice(5).trim()); } catch(_){ continue; } if(ev.type === 'delta') acc += ev.text; }
+        }
+      } catch(_){}
+      btn.disabled = false;
+      if(window.UbtWallet) UbtWallet.load();
+      const itens = acc.split('\n').map(l => l.trim()).filter(l => /^\[CE\]/i.test(l)).map(l => {
+        const pp = l.replace(/^\[CE\]\s*/i, '').split('|||').map(x => x.trim());
+        return { stmt: pp[0] || '', gab: /^c/i.test(pp[1] || '') ? 'C' : 'E', just: pp[2] || '' };
+      }).filter(x => x.stmt);
+      if(!itens.length){ box.innerHTML = '<div class="pq-msg is-err">Não consegui gerar agora. Tente de novo.</div>'; return; }
+      box.innerHTML = '<div class="tw-fontes-h"><span>Questões sobre o relatório</span></div>' + itens.map((it, i) =>
+        '<div class="pq-q" data-gab="' + it.gab + '"><div class="pq-q-s"><span class="pq-q-n">' + (i + 1) + '</span>' + esc(it.stmt) + '</div>'
+        + '<div class="pq-q-b"><button type="button" class="pq-q-btn" data-r="C">Certo</button><button type="button" class="pq-q-btn" data-r="E">Errado</button></div>'
+        + '<div class="pq-q-j" hidden></div></div>').join('');
+      box.querySelectorAll('.pq-q').forEach((q, i) => {
+        q.querySelectorAll('[data-r]').forEach(b => b.addEventListener('click', function(){
+          if(q.classList.contains('is-feita')) return;
+          const certo = b.getAttribute('data-r') === q.getAttribute('data-gab');
+          q.classList.add('is-feita', certo ? 'is-certo' : 'is-errado'); b.classList.add('is-escolha');
+          const j = q.querySelector('.pq-q-j'); j.hidden = false;
+          j.innerHTML = '<strong>' + (certo ? 'Você acertou.' : 'Não foi dessa vez.') + '</strong> Gabarito: ' + (q.getAttribute('data-gab') === 'C' ? 'Certo' : 'Errado') + '. ' + esc(itens[i].just);
+        }));
+      });
+    }
+    function telaErro(p){
+      parar();
+      area.innerHTML = '<div class="pq-wrap"><div class="pq-hero"><span class="s-label">Pesquisa</span><h1 class="pq-title">' + esc((p.plano && p.plano.titulo) || p.tema) + '</h1>'
+        + '<p class="pq-sub">' + esc(p.erro || 'A pesquisa não terminou.') + '</p></div>'
+        + '<div class="pq-acoes"><button type="button" class="btn-primary pq-go" id="pqDeNovo">Tentar de novo</button></div></div>';
+      area.querySelector('#pqDeNovo').addEventListener('click', () => nova(semFrases(p.pedido || p.tema)));
+    }
+
+    async function abrir(id){
+      parar();
+      area.innerHTML = '<div class="pq-wrap"><div class="pq-msg is-busy">' + globo() + '<span>Abrindo a pesquisa…</span></div></div>';
+      const { data: p } = await IA().from('pesquisas').select('*').eq('id', id).maybeSingle();
+      if(!vivo()) return;
+      if(!p){ area.innerHTML = '<div class="pq-wrap"><div class="tutor-hist-empty">Esta pesquisa não existe mais.</div></div>'; return; }
+      atual = p;
+      if(o.aoMudarLista) o.aoMudarLista();
+      if(p.status === 'plano') return telaPlano(p);
+      if(p.status === 'pronta') return telaRelatorio(p);
+      if(p.status === 'erro') return telaErro(p);
+      const { data: secs } = await IA().from('pesquisa_secoes').select('id, ordem, titulo, status, atividade, sites, buscas, paginas, atualizado_em').eq('pesquisa_id', id).order('ordem');
+      telaAndamento(p, secs || []);
+      acompanhar(id);
+    }
+    async function apagar(id){
+      if(!confirm('Apagar esta pesquisa? Não dá para desfazer.')) return;
+      try { const { error } = await IA().rpc('pesquisa_apagar', { p_id: id }); if(error) throw error; }
+      catch(e){ if(window.ueToast) ueToast((e && e.message) || 'Não consegui apagar agora.', 'error'); return; }
+      await carregarLista();
+      if(atual && atual.id === id) nova();
+    }
+    return { nova, abrir, apagar, parar, carregarLista, historicoHtml };
+  }
+
+  // Lista dos relatórios salvos (aba Relatórios das Notas).
+  async function relatoriosHtml(){
+    let data = [];
+    try { const r = await IA().from('pesquisas').select('id, tema, plano, resumo, salva_em, concluida_em').eq('salva', true).order('salva_em', { ascending: false }); data = r.data || []; } catch(_){}
+    _css();
+    if(!data.length) return '<div class="empty" style="margin-top:1rem"><div class="empty-title">Nenhum relatório salvo</div><div class="empty-body">Faça uma pesquisa aprofundada na página Tutor e clique em Salvar em Relatórios.</div><a class="btn-primary" href="#/tutor?pesquisa=nova" style="margin-top:.8rem">Fazer uma pesquisa</a></div>';
+    return '<div class="pq-rels">' + data.map(p => {
+      const r = p.resumo || {};
+      return '<a class="pq-rel-card" href="#/tutor?pesquisa=' + encodeURIComponent(p.id) + '"><span class="card-label">Relatório · ' + esc(dataBr(p.concluida_em || p.salva_em)) + '</span>'
+        + '<span class="pq-rel-card-t">' + esc((p.plano && p.plano.titulo) || p.tema) + '</span>'
+        + '<span class="pq-rel-card-m">' + (r.secoes || 0) + ' seções · ' + (r.fontes || 0) + ' fontes</span></a>';
+    }).join('') + '</div>';
+  }
+
+  function _css(){
+    if(_cssFeito) return; _cssFeito = true;
+    if(window.TutorWeb && TutorWeb.css) TutorWeb.css();
+    const st = document.createElement('style'); st.id = 'pesquisaCss';
+    st.textContent = `
+    .pq-area{ flex:1; min-height:0; overflow-y:auto; padding:1.2rem clamp(1rem,5vw,3rem) 2.4rem; }
+    .pq-area[hidden]{ display:none; }
+    .pq-wrap{ max-width:860px; margin:0 auto; display:flex; flex-direction:column; gap:1.1rem; }
+    .pq-hero{ display:flex; flex-direction:column; gap:.55rem; }
+    .pq-title{ font-family:var(--serif); font-weight:300; font-size:clamp(1.6rem,3vw,2.4rem); line-height:1.15; color:var(--text); margin:0; }
+    .pq-sub{ font-family:var(--sans); font-weight:200; font-size:.95rem; line-height:1.75; color:var(--text-dim); margin:0; max-width:640px; }
+    .pq-box{ background:var(--bg-card); border:1px solid var(--accent-border-soft); border-radius:14px; padding:1.2rem 1.3rem; display:flex; flex-direction:column; gap:.85rem; }
+    .pq-lbl, .pq-h{ font-family:var(--sans); font-weight:300; font-size:.62rem; letter-spacing:.2em; text-transform:uppercase; color:var(--accent); }
+    .pq-h{ margin-top:.3rem; display:flex; align-items:baseline; gap:.6rem; flex-wrap:wrap; }
+    .pq-h-d{ letter-spacing:.02em; text-transform:none; color:var(--text-mute); font-size:.74rem; }
+    .pq-input{ width:100%; box-sizing:border-box; background:transparent; border:1px solid var(--accent-border-soft); border-radius:10px; padding:.8rem 1rem; font-family:var(--sans); font-weight:300; font-size:.95rem; line-height:1.6; color:var(--text); resize:vertical; transition:border-color .3s var(--ease), background .3s var(--ease); }
+    .pq-input:focus{ outline:none; border-color:var(--accent); background:var(--accent-xlo); }
+    .pq-sug{ display:flex; flex-direction:column; gap:.45rem; }
+    .pq-sug-l{ font-family:var(--sans); font-size:.74rem; color:var(--text-dim); }
+    .pq-chips{ display:flex; flex-wrap:wrap; gap:.4rem; }
+    .pq-chip{ display:inline-flex; align-items:center; gap:.4rem; padding:.42rem .8rem; border-radius:999px; border:1px solid var(--accent-border-soft); background:var(--accent-xlo); color:var(--text-dim); font-family:var(--sans); font-size:.76rem; cursor:pointer; transition:all .25s var(--ease); }
+    .pq-chip:hover{ color:var(--accent); border-color:var(--accent-border); }
+    .pq-chip.is-on{ color:var(--accent); border-color:var(--accent); background:var(--accent-lo); }
+    .pq-chip.is-on::before{ content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+    .pq-row{ display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.8rem; }
+    .pq-modo{ display:flex; flex-wrap:wrap; align-items:center; gap:.6rem; }
+    .pq-modo .seg{ display:inline-flex; padding:3px; gap:2px; border:1px solid var(--accent-border-soft); border-radius:999px; background:transparent; }
+    .pq-modo .seg-btn{ padding:.42rem .95rem; background:transparent; border:none; cursor:pointer; font-family:var(--sans); font-size:.66rem; letter-spacing:.16em; text-transform:uppercase; color:var(--text-dim); border-radius:999px; transition:all .25s var(--ease); }
+    .pq-modo .seg-btn.is-active{ background:var(--accent); color:var(--bg-card); }
+    .pq-modo-d{ font-family:var(--sans); font-size:.74rem; color:var(--text-mute); }
+    .pq-go{ align-self:flex-end; }
+    .pq-fino{ font-family:var(--sans); font-weight:300; font-size:.72rem; line-height:1.5; color:var(--text-mute); margin:0; }
+    .pq-centro{ text-align:center; }
+    .pq-msg{ display:flex; align-items:center; gap:.5rem; font-family:var(--sans); font-size:.84rem; color:var(--text-dim); min-height:1em; }
+    .pq-msg:empty{ display:none; }
+    .pq-msg.is-err{ color:var(--red, #e87878); }
+    .pq-msg a{ color:var(--accent); }
+    .pq-msg.is-busy{ color:var(--accent); }
+    .pq-msg.is-busy .tw-orbita, .pq-run-head.is-busy .tw-orbita, .pq-run-sec.is-pesquisando .tw-orbita, .pq-run-final.is-pesquisando .tw-orbita{ opacity:.9; animation:twGira 2.4s linear infinite; }
+    .pq-msg .tw-globo{ width:16px; height:16px; }
+    .pq-plan-t{ font-family:var(--serif); font-weight:300; font-size:clamp(1.5rem,2.8vw,2.2rem); color:var(--text); background:transparent; border:none; border-bottom:1px solid transparent; padding:.1rem 0; width:100%; }
+    .pq-plan-t:hover, .pq-plan-t:focus{ outline:none; border-bottom-color:var(--accent-border); }
+    .pq-plan-o{ font-family:var(--sans); font-weight:200; font-size:.95rem; line-height:1.7; color:var(--text-dim); background:transparent; border:none; border-bottom:1px solid transparent; resize:vertical; padding:.1rem 0; width:100%; }
+    .pq-plan-o:focus{ outline:none; border-bottom-color:var(--accent-border); }
+    .pq-secs{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.5rem; counter-reset:pq; }
+    .pq-sec{ display:flex; gap:.7rem; align-items:flex-start; padding:.7rem .8rem; border:1px solid var(--accent-border-soft); border-radius:12px; background:var(--accent-xlo); animation:twEntra .35s var(--ease) both; }
+    .pq-sec-n, .pq-run-n{ flex:none; display:inline-grid; place-items:center; width:24px; height:24px; border-radius:50%; border:1px solid var(--accent-border); font-family:var(--mono); font-size:.68rem; color:var(--accent); margin-top:.15rem; }
+    .pq-run-n svg{ width:12px; height:12px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+    .pq-run-n .tw-globo{ width:14px; height:14px; stroke-width:1.5; }
+    .pq-sec-c{ flex:1; min-width:0; display:flex; flex-direction:column; gap:.3rem; }
+    .pq-sec-t{ font-family:var(--serif); font-size:1.08rem; color:var(--text); background:transparent; border:none; border-bottom:1px solid transparent; padding:.1rem 0; }
+    .pq-sec-f{ font-family:var(--sans); font-weight:300; font-size:.84rem; line-height:1.6; color:var(--text-dim); background:transparent; border:none; border-bottom:1px solid transparent; resize:vertical; padding:.1rem 0; }
+    .pq-sec-t:focus, .pq-sec-f:focus{ outline:none; border-bottom-color:var(--accent-border); }
+    .pq-sec-x{ flex:none; display:inline-grid; place-items:center; width:28px; height:28px; border-radius:50%; border:1px solid transparent; background:transparent; color:var(--text-mute); cursor:pointer; transition:all .2s var(--ease); }
+    .pq-sec-x:hover{ color:var(--red, #e87878); border-color:var(--accent-border-soft); }
+    .pq-sec-x svg{ width:12px; height:12px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; }
+    .pq-add{ align-self:flex-start; background:transparent; border:1px dashed var(--accent-border); color:var(--accent); border-radius:999px; padding:.4rem .9rem; font-family:var(--sans); font-size:.76rem; cursor:pointer; }
+    .pq-add:disabled{ opacity:.4; cursor:not-allowed; }
+    .pq-custo{ display:flex; flex-direction:column; gap:.3rem; padding:.9rem 1rem; border-radius:12px; border:1px solid var(--accent-border); background:var(--accent-xlo); font-family:var(--sans); font-size:.86rem; color:var(--text); }
+    .pq-custo-l{ font-size:.62rem; letter-spacing:.2em; text-transform:uppercase; color:var(--accent); }
+    .pq-custo-v strong{ font-family:var(--serif); font-weight:400; font-size:1.15rem; color:var(--accent); }
+    .pq-custo-s{ color:var(--text-dim); font-size:.8rem; }
+    .pq-custo-s strong{ color:var(--text); font-weight:400; }
+    .pq-falta, .pq-falta a{ color:var(--red, #e87878); }
+    .pq-acoes{ display:flex; flex-wrap:wrap; justify-content:space-between; gap:.6rem; }
+    .pq-run-head{ display:flex; gap:.9rem; align-items:flex-start; }
+    .pq-run-head > .tw-globo{ width:34px; height:34px; color:var(--accent); flex:none; margin-top:.4rem; stroke-width:1.2; }
+    .pq-bar{ height:3px; border-radius:999px; background:var(--accent-border-soft); overflow:hidden; }
+    .pq-bar-in{ height:100%; width:0; background:var(--accent); border-radius:999px; transition:width .8s var(--ease); }
+    .pq-run{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.5rem; }
+    .pq-run-sec, .pq-run-final{ display:flex; gap:.7rem; align-items:flex-start; padding:.75rem .85rem; border:1px solid var(--accent-border-soft); border-radius:12px; background:var(--bg-card); transition:border-color .3s var(--ease), background .3s var(--ease); }
+    .pq-run-sec.is-pesquisando, .pq-run-final.is-pesquisando{ border-color:var(--accent-border); background:var(--accent-xlo); }
+    .pq-run-sec.is-pronta .pq-run-n{ background:var(--accent); color:var(--bg-card); border-color:var(--accent); }
+    .pq-run-sec.is-erro .pq-run-n{ color:var(--red, #e87878); border-color:var(--red, #e87878); }
+    .pq-run-sec.is-fila{ opacity:.7; }
+    .pq-run-c{ flex:1; min-width:0; display:flex; flex-direction:column; gap:.3rem; }
+    .pq-run-t{ font-family:var(--serif); font-size:1.05rem; color:var(--text); }
+    .pq-run-a{ font-family:var(--sans); font-size:.76rem; color:var(--text-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .pq-run-sec.is-pesquisando .pq-run-a, .pq-run-final.is-pesquisando .pq-run-a{ background:linear-gradient(90deg, var(--text-dim) 0%, var(--text-dim) 35%, var(--accent) 50%, var(--text-dim) 65%, var(--text-dim) 100%); background-size:220% 100%; -webkit-background-clip:text; background-clip:text; color:transparent; animation:twBrilho 2.6s linear infinite; }
+    .pq-run-m{ flex:none; font-family:var(--mono); font-size:.62rem; color:var(--text-mute); }
+    .pq-rel-top{ display:flex; flex-direction:column; gap:.6rem; padding-bottom:1rem; border-bottom:1px solid var(--accent-border-soft); }
+    .pq-rel-meta{ font-family:var(--mono); font-size:.68rem; color:var(--text-mute); letter-spacing:.04em; }
+    .pq-salva{ display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.7rem; padding:.75rem .9rem; border-radius:12px; border:1px solid var(--amber-border, rgba(233,182,90,.35)); background:var(--amber-lo, rgba(233,182,90,.12)); font-family:var(--sans); font-size:.84rem; color:var(--text); }
+    .pq-salva strong{ font-weight:500; }
+    .pq-salva.is-salva{ border-color:var(--accent-border-soft); background:transparent; color:var(--text-dim); }
+    .pq-salva.is-salva span{ display:inline-flex; align-items:center; gap:.4rem; }
+    .pq-salva svg{ width:13px; height:13px; fill:none; stroke:var(--accent); stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+    .pq-link{ background:none; border:none; color:var(--accent); font-family:var(--sans); font-size:.78rem; cursor:pointer; text-decoration:underline; text-underline-offset:3px; }
+    .pq-rel-acoes{ display:flex; flex-wrap:wrap; gap:.4rem; }
+    .pq-acao{ padding:.42rem .85rem; border-radius:999px; border:1px solid var(--accent-border-soft); background:transparent; color:var(--text-dim); font-family:var(--sans); font-size:.74rem; cursor:pointer; transition:all .25s var(--ease); }
+    .pq-acao:hover{ color:var(--accent); border-color:var(--accent-border); }
+    .pq-acao:disabled{ opacity:.5; cursor:wait; }
+    .pq-acao.is-perigo:hover{ color:var(--red, #e87878); border-color:var(--red, #e87878); }
+    .pq-doc{ font-family:var(--serif); font-size:1.13rem; line-height:1.75; color:var(--text); }
+    .pq-doc h1, .pq-doc .tutor-h1{ font-family:var(--serif); font-weight:300; font-size:clamp(1.7rem,3vw,2.4rem); line-height:1.15; color:var(--text); margin:.2rem 0 1rem; }
+    .pq-doc h2, .pq-doc .tutor-h2{ font-family:var(--serif); font-weight:400; font-size:1.5rem; line-height:1.25; color:var(--text); margin:1.8rem 0 .6rem; padding-top:.9rem; border-top:1px solid var(--accent-border-soft); }
+    .pq-doc h3, .pq-doc .tutor-h3{ font-family:var(--serif); font-weight:500; font-size:1.18rem; color:var(--text); margin:1.2rem 0 .4rem; }
+    .pq-doc .tutor-h1 + .tutor-h2{ border-top:none; padding-top:0; margin-top:.4rem; }
+    .pq-doc p, .pq-doc .tutor-p{ margin:0 0 .9rem; }
+    .pq-doc ul, .pq-doc ol{ margin:0 0 .9rem 1.2rem; padding:0; }
+    .pq-doc li{ margin:.25rem 0; }
+    .pq-mcite{ display:inline-grid; place-items:center; min-width:15px; height:15px; padding:0 .2rem; margin-left:.15rem; border-radius:3px; border:1px solid var(--accent-border); color:var(--accent); font-family:var(--mono); font-size:.56rem; line-height:1; text-decoration:none; vertical-align:super; }
+    a.pq-mcite:hover{ background:var(--accent); color:var(--bg-card); }
+    .pq-mcite.is-off{ opacity:.6; }
+    .pq-mat{ margin-top:.8rem; display:flex; flex-direction:column; gap:.5rem; }
+    .pq-mat-l{ display:flex; flex-direction:column; gap:.35rem; }
+    .pq-mat-i{ display:flex; align-items:center; gap:.55rem; padding:.5rem .65rem; border-radius:10px; border:1px solid var(--accent-border-soft); text-decoration:none; color:var(--text); font-family:var(--sans); font-size:.84rem; transition:border-color .25s var(--ease), background .25s var(--ease); }
+    a.pq-mat-i:hover{ border-color:var(--accent-border); background:var(--accent-xlo); }
+    .pq-mat-i.is-off{ color:var(--text-dim); }
+    .pq-ce{ display:flex; flex-direction:column; gap:.6rem; margin-top:.4rem; }
+    .pq-ce:empty{ display:none; }
+    .pq-q{ padding:.8rem .9rem; border-radius:12px; border:1px solid var(--accent-border-soft); background:var(--bg-card); display:flex; flex-direction:column; gap:.55rem; }
+    .pq-q-s{ display:flex; gap:.6rem; font-family:var(--serif); font-size:1.02rem; line-height:1.55; color:var(--text); }
+    .pq-q-n{ flex:none; font-family:var(--mono); font-size:.7rem; color:var(--accent); margin-top:.25rem; }
+    .pq-q-b{ display:flex; gap:.4rem; }
+    .pq-q-btn{ padding:.38rem .9rem; border-radius:999px; border:1px solid var(--accent-border-soft); background:transparent; color:var(--text-dim); font-family:var(--sans); font-size:.74rem; cursor:pointer; }
+    .pq-q-btn:hover{ color:var(--accent); border-color:var(--accent-border); }
+    .pq-q.is-certo .pq-q-btn.is-escolha{ background:var(--green-lo, rgba(93,212,159,.1)); color:var(--green, #5dd49f); border-color:var(--green-border, rgba(93,212,159,.35)); }
+    .pq-q.is-errado .pq-q-btn.is-escolha{ background:var(--red-lo, rgba(232,120,120,.1)); color:var(--red, #e87878); border-color:var(--red-border, rgba(232,120,120,.35)); }
+    .pq-q-j{ font-family:var(--sans); font-size:.84rem; line-height:1.6; color:var(--text-dim); }
+    .pq-q-j strong{ color:var(--text); font-weight:500; }
+    .pq-hist-row .tutor-hist-item{ display:flex; flex-direction:column; align-items:flex-start; gap:.15rem; }
+    .pq-hist-t{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+    .pq-hist-s{ font-size:.66rem; color:var(--text-mute); }
+    .pq-hist-s.is-pesquisando, .pq-hist-s.is-escrevendo{ color:var(--accent); }
+    .pq-rels{ display:grid; grid-template-columns:repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap:.8rem; margin-top:1rem; }
+    .pq-rel-card{ display:flex; flex-direction:column; gap:.4rem; padding:1.1rem 1.2rem; border-radius:var(--radius-lg, 4px); border:1px solid var(--accent-border-soft); background:var(--bg-card); text-decoration:none; color:inherit; transition:transform .4s var(--ease), border-color .3s var(--ease); }
+    .pq-rel-card:hover{ transform:translateY(-2px); border-color:var(--accent-border); }
+    .pq-rel-card .card-label{ font-family:var(--sans); font-size:.62rem; letter-spacing:.22em; text-transform:uppercase; color:var(--accent); }
+    .pq-rel-card-t{ font-family:var(--serif); font-size:1.2rem; line-height:1.25; color:var(--text); }
+    .pq-rel-card-m{ font-family:var(--sans); font-size:.76rem; color:var(--text-dim); }
+    @media (prefers-reduced-motion: reduce){ .pq-sec, .pq-run-a, .pq-bar-in{ animation:none !important; transition:none !important; } }
+    `;
+    document.head.appendChild(st);
+  }
+  return { montar: montar, relatoriosHtml: relatoriosHtml };
 })();
 
 /* ─────────── TUTOR GLOBAL (fora da unidade) — página de chat ───────────
@@ -32653,7 +33331,9 @@ Renderers.tutor = function(){
     +   '<div class="tutor-modes" id="tutorModes">'
     +     '<button class="tutor-mode-btn is-active" data-mode="materia" type="button">Tutor de matéria</button>'
     +     '<button class="tutor-mode-btn" data-mode="ajuda" type="button">Ajuda com a plataforma</button>'
+    +     '<button class="tutor-mode-btn" data-mode="pesquisa" type="button">Pesquisa aprofundada</button>'
     +   '</div>'
+    +   '<div class="pq-area" id="pesqArea" style="display:none"></div>'
     +   '<div class="tutor-conv" id="tutorConv">'
     +     '<div class="tutor-empty" id="tutorEmpty"><div class="tutor-logo">'+_UBQ_LOGO_SVG+'</div><h1 class="tutor-greet">Sua vez'+(nick?', '+Util.esc(nick):'')+'!</h1><p class="tutor-sub">Escolha a matéria e pergunte o que quiser — eu busco no conteúdo e cito de onde veio.</p></div>'
     +   '</div>'
@@ -32696,6 +33376,11 @@ Renderers.tutor.mount = function(stageEl, route){
   const histList = stageEl.querySelector('#tutorHistList');
   // Botão Internet: fica ligado até o aluno desligar e anda junto com o da gaveta da unidade.
   if(window.TutorWeb) TutorWeb.ligarBotao(stageEl.querySelector('#tutorWebBtn'), function(){ _webHint(); });
+  // Pesquisa aprofundada (terceiro modo): ocupa o lugar da conversa e do campo; o histórico mostra as pesquisas.
+  const pqArea = stageEl.querySelector('#pesqArea');
+  const _pq = (window.PesquisaUI && pqArea) ? PesquisaUI.montar({ area: pqArea, aoMudarLista: function(){
+    if(_mode === 'pesquisa') _renderHistory((stageEl.querySelector('#tutorHistSearch') || {}).value || '');
+  } }) : null;
 
   function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   // Markdown robusto reusado do chat da unidade (headings/listas/tabelas). Se por
@@ -32783,6 +33468,13 @@ Renderers.tutor.mount = function(stageEl, route){
     _mode = mode;
     page.classList.toggle('mode-materia', mode==='materia');
     page.classList.toggle('mode-ajuda', mode==='ajuda');
+    page.classList.toggle('mode-pesquisa', mode==='pesquisa');
+    const _conv = stageEl.querySelector('#tutorConv'), _comp = stageEl.querySelector('#tutorComposer');
+    if(_conv) _conv.style.display = (mode==='pesquisa') ? 'none' : '';
+    if(_comp) _comp.style.display = (mode==='pesquisa') ? 'none' : '';
+    if(pqArea) pqArea.style.display = (mode==='pesquisa') ? '' : 'none';
+    const _nb = stageEl.querySelector('#tutorNew'); if(_nb) _nb.textContent = (mode==='pesquisa') ? '+ Nova pesquisa' : '+ Nova conversa';
+    if(mode !== 'pesquisa' && _pq) _pq.parar();
     stageEl.querySelectorAll('.tutor-mode-btn').forEach(function(b){ b.classList.toggle('is-active', b.getAttribute('data-mode')===mode); });
     if(subjWrap) subjWrap.style.display = (mode==='materia') ? '' : 'none';
     // No modo Ajuda não há escolha de modelo (é grátis e usa o modelo rápido) nem internet.
@@ -33020,6 +33712,7 @@ Renderers.tutor.mount = function(stageEl, route){
   }
   function _renderHistory(filter){
     if(!histList) return;
+    if(_mode === 'pesquisa' && _pq){ histList.innerHTML = _pq.historicoHtml(filter); return; }
     const f = String(filter||'').trim().toLowerCase();
     const list = f ? _allConversas.filter(function(c){ return String(c.titulo||'').toLowerCase().indexOf(f)>=0; }) : _allConversas;
     if(!list.length){ histList.innerHTML = '<div class="tutor-hist-empty">'+(f?'Nada encontrado.':'Suas conversas aparecem aqui.')+'</div>'; return; }
@@ -33082,6 +33775,8 @@ Renderers.tutor.mount = function(stageEl, route){
     if(m === _mode) return;          // já está nessa aba
     _newConversa();                  // são abas bem diferentes: some o chat e começa uma nova conversa
     _setMode(m);
+    if(m === 'pesquisa' && _pq){ _pq.carregarLista(); _pq.nova(); }
+    else _renderHistory((stageEl.querySelector('#tutorHistSearch') || {}).value || '');
   }); });
   if(sendBtn) sendBtn.addEventListener('click', _send);
   if(inputEl){
@@ -33094,15 +33789,24 @@ Renderers.tutor.mount = function(stageEl, route){
   const histSearch = stageEl.querySelector('#tutorHistSearch');
   if(histSearch) histSearch.addEventListener('input', function(){ _renderHistory(histSearch.value); });
   if(histList) histList.addEventListener('click', function(e){
+    const pDel = e.target.closest('[data-pesq-del]');
+    if(pDel && _pq){ e.stopPropagation(); _pq.apagar(pDel.getAttribute('data-pesq-del')); return; }
+    const pAbre = e.target.closest('[data-pesq]');
+    if(pAbre && _pq){ _pq.abrir(pAbre.getAttribute('data-pesq')); return; }
     const del = e.target.closest('[data-del]');
     if(del){ e.stopPropagation(); _deleteConversa(del.getAttribute('data-del')); return; }
     const b = e.target.closest('[data-conv]');
     if(b) _openConversa(b.getAttribute('data-conv'));
   });
-  const newBtn = stageEl.querySelector('#tutorNew'); if(newBtn) newBtn.addEventListener('click', _newConversa);
+  const newBtn = stageEl.querySelector('#tutorNew'); if(newBtn) newBtn.addEventListener('click', function(){
+    if(_mode === 'pesquisa' && _pq) _pq.nova(); else _newConversa();
+  });
 
   _loadHistory();
-  if(_conversaId) _openConversa(_conversaId);
+  // #/tutor?pesquisa=<id> (aviso do sino, aba Relatórios) ou ?pesquisa=nova
+  const _qPesq = route && route.query && route.query.pesquisa;
+  if(_qPesq && _pq){ _setMode('pesquisa'); _pq.carregarLista(); if(_qPesq === 'nova') _pq.nova(); else _pq.abrir(String(_qPesq)); }
+  else if(_conversaId) _openConversa(_conversaId);
 };
 
 Renderers.support = function(){
@@ -33571,7 +34275,7 @@ Renderers.notifications = function(route){
   const all = Notifications.listFor(user.id);
   const filter = window._notifFilter || 'all';
   // Avisos do sistema: correção, matrícula e UbiTokens (cortesia do mês e pedido pago)
-  const _sistema = n => ['essay_corrected', 'matricula_liberada', 'matricula_vencendo', 'cortesia_ubitokens', 'ubitokens_creditados'].includes(n.type);
+  const _sistema = n => ['essay_corrected', 'matricula_liberada', 'matricula_vencendo', 'cortesia_ubitokens', 'ubitokens_creditados', 'pesquisa_pronta', 'pesquisa_expira'].includes(n.type);
   const filtered = all.filter(n => {
     if(filter === 'all') return true;
     if(filter === 'unread') return !n.read;
@@ -60127,6 +60831,8 @@ Renderers.notes = function(route){
     <button class="ntb-btn" data-view="highlights">Destaques</button>
     <span class="ntb-sep"></span>
     <button class="ntb-btn" data-view="cadernos">Cadernos</button>
+    <span class="ntb-sep"></span>
+    <button class="ntb-btn" data-view="relatorios">Relatórios</button>
     ${window.Vocabulario ? Vocabulario.abaBotao() : ''}
   </div>
   <div class="notes-view-content" data-view="notes">
@@ -60184,6 +60890,9 @@ Renderers.notes = function(route){
     </div>
     ${cadCardsHtml}
   </div>
+  <div class="notes-view-content" data-view="relatorios" style="display:none">
+    <div id="notesRelatorios"><div class="loading">Carregando…</div></div>
+  </div>
   ${window.Vocabulario ? Vocabulario.abaHtml() : ''}`;
 };
 Renderers.notes.mount = function(stageEl, route){
@@ -60197,6 +60906,10 @@ Renderers.notes.mount = function(stageEl, route){
       });
     });
   });
+  // Relatórios: as pesquisas aprofundadas salvas (abrem na página Tutor)
+  const _relBox = stageEl.querySelector('#notesRelatorios');
+  if(_relBox && window.PesquisaUI) PesquisaUI.relatoriosHtml().then(function(h){ if(_relBox.isConnected) _relBox.innerHTML = h; });
+  if(route && route.query && route.query.aba === 'relatorios'){ const _rb = stageEl.querySelector('.ntb-btn[data-view="relatorios"]'); if(_rb) _rb.click(); }
   // User flashcard interactions
   stageEl.querySelectorAll('.ufc-card').forEach(card => {
     card.addEventListener('click', e => {
