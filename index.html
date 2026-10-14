@@ -1256,6 +1256,15 @@ html[data-theme="light"] .sim-exam-topbar{
 .catalog-card-footer-buy{justify-content:space-between;align-items:center;gap:.8rem}
 .catalog-card-buyleft{display:flex;align-items:center;gap:.7rem;margin-right:auto}
 .catalog-card-pricebox{display:flex;flex-direction:column;gap:.15rem}
+.loja-banco{margin-top:2.6rem}
+.loja-banco-txt{font-family:var(--serif);font-size:.95rem;line-height:1.6;color:var(--text-dim);margin:.2rem 0 1rem;max-width:760px}
+.loja-banco-lista{display:flex;flex-direction:column;gap:.6rem}
+.loja-banco-item{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;padding:.9rem 1.1rem;border:1px solid var(--border);border-radius:var(--radius,6px);background:var(--bg-card)}
+.loja-banco-nome{display:flex;flex-direction:column;gap:.2rem;min-width:0}
+.loja-banco-nome strong{font-family:var(--serif);font-weight:500;font-size:1.02rem;color:var(--text)}
+.loja-banco-nome span{font-family:var(--sans);font-weight:300;font-size:.72rem;color:var(--text-dim)}
+.loja-banco-item .catalog-card-buyleft{margin-right:0}
+.loja-banco-tem{font-family:var(--sans);font-size:.62rem;letter-spacing:.16em;text-transform:uppercase;color:var(--accent)}
 .catalog-card-price{font-family:var(--mono);font-size:.92rem;color:var(--text)}
 .catalog-card-inst{font-family:var(--sans);font-weight:300;font-size:.55rem;color:var(--text-mute);letter-spacing:.05em}
 .catalog-cartbtn{
@@ -15517,7 +15526,7 @@ const Auth = (function(){
     if(!window.COURSE) return true; // sem matéria ativa conhecida → não bloqueia
     // Dono da matéria (compra ou cortesia) ou aluno de turma da mentoria com ela:
     // entra em todos os módulos; cada unidade decide o próprio cadeado.
-    if(window.Commerce && Commerce.temAcesso && Commerce.temAcesso(window.COURSE.id)) return true;
+    if(window.Commerce && Commerce.temMateria && Commerce.temMateria(window.COURSE.id)) return true;
     // Degustação (freemium A3): módulo que CONTÉM unidade grátis abre pra
     // qualquer conta — dentro dele, as demais unidades ficam com cadeado.
     if(_moduleHasGratisUnit(moduleId)) return true;
@@ -15884,6 +15893,19 @@ const Commerce = (function(){
   function temAcesso(courseId){
     return isOwned(courseId) || _materiaNaMentoria(courseId);
   }
+  // Só o banco (SQL 71): a pessoa tem o banco de questões da matéria, sem o curso.
+  function temBanco(courseId){
+    const a = (window.Auth && Auth.loadAccessData) ? Auth.loadAccessData() : null;
+    if(!a || !a.allowed) return false;
+    const course = (window.COURSES || []).concat(window.COURSES_ALL || []).find(item => item && item.id === courseId);
+    if(!course || course._subjectId == null) return false;
+    return (a.banco_ids || []).map(String).includes(String(course._subjectId));
+  }
+  // A matéria é da pessoa em TUDO menos ler as unidades (lista de matérias, módulos, Desempenho):
+  // curso, turma da mentoria ou só o banco. Nas unidades vale unitUnlocked.
+  function temMateria(courseId){
+    return temAcesso(courseId) || temBanco(courseId);
+  }
   // Situação da unidade para quem a vê SÓ pela mentoria (null = a mentoria não
   // decide: dono da matéria, unidade grátis ou matéria fora da turma).
   //   { estado:'liberada' } · { estado:'agendada', quando } · { estado:'fechada' }
@@ -15914,7 +15936,7 @@ const Commerce = (function(){
     return !!(sit && sit.estado === 'liberada');
   }
   load();
-  return { isOwned, temAcesso, unitMentoria, unitUnlocked, purchase, load };
+  return { isOwned, temAcesso, temBanco, temMateria, unitMentoria, unitUnlocked, purchase, load };
 })();
 window.Commerce = Commerce;
 
@@ -15958,8 +15980,7 @@ const Shop = (function(){
         return null;
       }
       const byProduct = {};
-      // O banco de questões (SQL 71) não é a matéria: fora dos cartões de matéria (a Loja dele vem na fase 3).
-      (pr.data || []).filter(p => p.kind !== 'question_bank').forEach(p => { byProduct[p.id] = p; });
+      (pr.data || []).forEach(p => { byProduct[p.id] = p; });
       const prodsOfOffer = {};
       (op.data || []).forEach(x => {
         (prodsOfOffer[x.offer_id] = prodsOfOffer[x.offer_id] || []).push(x.product_id);
@@ -15978,12 +15999,17 @@ const Shop = (function(){
           combos.push({ offer: o, pids });
         }
       });
-      const bySubject = {}; // subjectId → {product, offer}
+      // subjectId → {product, offer}: a matéria (curso) e, à parte, o banco de questões dela (SQL 71)
+      const bySubject = {}, bancoBySubject = {};
       Object.values(byProduct).forEach(p => {
         const o = singles[p.id];
-        if(o) bySubject[String(p.subject_id)] = { product: p, offer: o };
+        if(!o) return;
+        if(p.kind === 'question_bank') bancoBySubject[String(p.subject_id)] = { product: p, offer: o };
+        else bySubject[String(p.subject_id)] = { product: p, offer: o };
       });
-      _data = { byProduct, singles, combos, bySubject };
+      // pacotes só de bancos (ex.: "Banco completo"): aparecem na seção do banco da Loja
+      const bancoCombos = combos.filter(cb => cb.pids.every(pid => byProduct[pid] && byProduct[pid].kind === 'question_bank'));
+      _data = { byProduct, singles, combos, bySubject, bancoBySubject, bancoCombos };
       return _data;
     }).catch(e => { console.warn('[shop ex]', e); _promise = null; return null; });
     return _promise;
@@ -15993,6 +16019,11 @@ const Shop = (function(){
   function offerForSubject(subjectId){
     return (_data && _data.bySubject[String(subjectId)]) || null;
   }
+  function offerForBanco(subjectId){
+    return (_data && _data.bancoBySubject && _data.bancoBySubject[String(subjectId)]) || null;
+  }
+  function bancoCombos(){ return (_data && _data.bancoCombos) || []; }
+  function produto(pid){ return (_data && _data.byProduct[pid]) || null; }
   function fmt(v){
     const n = Number(v) || 0;
     return 'R$ ' + n.toLocaleString('pt-BR', { minimumFractionDigits: (n % 1) ? 2 : 0, maximumFractionDigits: 2 });
@@ -16091,7 +16122,7 @@ const Shop = (function(){
     return r;
   }
 
-  return { load, ready, offerForSubject, coverForProduct, nameForProduct, priceCart, fmt, installmentsLabel };
+  return { load, ready, offerForSubject, offerForBanco, bancoCombos, produto, coverForProduct, nameForProduct, priceCart, fmt, installmentsLabel };
 })();
 window.Shop = Shop;
 
@@ -16173,6 +16204,15 @@ const Cart = (function(){
     if(!list.includes(hit.product.id)){
       list.push(hit.product.id);
       _save(list);
+      if(window.App && App._showAccessToast) App._showAccessToast('Adicionado ao carrinho.', 'success');
+    }
+  }
+  function hasProducts(pids){ const l = items(); return !!(pids && pids.length) && pids.every(p => l.includes(Number(p))); }
+  function addProducts(pids){
+    const l = items(); let novo = false;
+    (pids || []).forEach(p => { p = Number(p); if(p && !l.includes(p)){ l.push(p); novo = true; } });
+    if(novo){
+      _save(l);
       if(window.App && App._showAccessToast) App._showAccessToast('Adicionado ao carrinho.', 'success');
     }
   }
@@ -16399,6 +16439,11 @@ const Cart = (function(){
         lbl.textContent = inCart ? 'No carrinho' : (hit ? Shop.fmt(hit.offer.price) : '');
       }
     });
+    document.querySelectorAll('[data-cart-produtos]').forEach(btn => {
+      const inCart = hasProducts(String(btn.getAttribute('data-cart-produtos') || '').split(',').filter(Boolean));
+      btn.classList.toggle('in-cart', inCart);
+      btn.title = inCart ? 'Ver carrinho' : 'Adicionar ao carrinho';
+    });
     const dw = document.getElementById('cartDrawer');
     if(dw && !dw.hidden) render();
   }
@@ -16415,6 +16460,13 @@ const Cart = (function(){
     if(!document._cartDelegBound){
       document._cartDelegBound = true;
       document.addEventListener('click', e => {
+        const bp = e.target.closest('[data-cart-produtos]');
+        if(bp){
+          e.preventDefault();
+          const pids = String(bp.getAttribute('data-cart-produtos') || '').split(',').filter(Boolean);
+          if(hasProducts(pids)) open(); else addProducts(pids);
+          return;
+        }
         const b = e.target.closest('[data-cart-subject]');
         if(!b) return;
         e.preventDefault();
@@ -16426,7 +16478,7 @@ const Cart = (function(){
     refreshBadge();
   }
 
-  return { init, open, close, items, count, hasProduct, hasSubject, addBySubject, remove, clear, refreshBadge, sync };
+  return { init, open, close, items, count, hasProduct, hasProducts, hasSubject, addBySubject, addProducts, remove, clear, refreshBadge, sync };
 })();
 window.Cart = Cart;
 try{ Cart.init(); }catch(e){ console.warn('[cart init]', e); }
@@ -39874,7 +39926,8 @@ function _simAccessState(sim){
   if(access.access_type === 'full') return { locked:false, kind:null };
   const sims = (sim.subjectIds || []).map(String);
   if(!sims.length) return { locked:false, kind:null };       // simulado sem matéria → libera
-  const allowed = new Set((access.subject_ids || []).map(String));
+  // a matéria vale pelo curso, pelo banco (SQL 71) ou pela turma da mentoria
+  const allowed = new Set((access.subject_ids || []).concat(access.banco_ids || [], (access.mentoria && access.mentoria.materias) || []).map(String));
   if(sims.some(s => allowed.has(s))) return { locked:false, kind:null };
   return { locked:true, kind:'included' };
 }
@@ -42897,7 +42950,7 @@ Renderers.catalog = function(route){
     _examName = _ex ? (_ex.name || _ex.id) : '';
   }
   if(!_isStore){
-    courses = courses.filter(c => Commerce.temAcesso(c.id));
+    courses = courses.filter(c => Commerce.temMateria(c.id));   // curso, turma ou só o banco
   }
   if(!_isStore && !courses.length){
     return `<div class="hero">
@@ -42950,6 +43003,7 @@ Renderers.catalog = function(route){
     // "OBTER": matéria que o aluno NÃO tem, mas está disponível (degustação
     // aberta). Por ora badge; o add-to-cart chega na Fase C.
     const canBuy = !owned && hasContent && !isLockedByRelease;
+    const soBanco = !owned && !!(Commerce.temBanco && Commerce.temBanco(c.id));   // tem só o banco de questões
     // "Em breve": nem abre nem dá pra obter. Se o admin desligou "mostrar para o
     // aluno", esconde o card (exceto para admin, que vê tudo).
     const emBreve = !canOpen && !canBuy;
@@ -42977,7 +43031,7 @@ Renderers.catalog = function(route){
       : canBuy
         ? `${_shopHit
             ? `<div class="catalog-card-buyleft"><button type="button" class="catalog-cartbtn${_inCart ? ' in-cart' : ''}" data-cart-subject="${Util.attr(c._subjectId)}" title="${_inCart ? 'Ver carrinho' : 'Adicionar ao carrinho'}" aria-label="Carrinho">${CART_IC}</button><div class="catalog-card-pricebox"><span class="catalog-card-price">${Shop.fmt(_shopHit.offer.price)}</span>${_instal ? `<span class="catalog-card-inst">${Util.esc(_instal)}</span>` : ''}</div></div>`
-            : ''}<span class="catalog-card-cta catalog-card-buy">Conhecer</span>`
+            : ''}<span class="catalog-card-cta${soBanco ? '' : ' catalog-card-buy'}">${soBanco ? 'Acessar' : 'Conhecer'}</span>`
         : `<span class="catalog-card-cta">Em breve</span>`;
     return `<${canOpen?'a':'div'} class="catalog-card${canOpen?'':' catalog-card-locked'}${isScheduled?' catalog-card-scheduled':''}" ${canOpen?`href="${href}"`:''} ${isScheduled?`data-release-at="${Util.attr(c.releaseAt)}"`:''} data-course-id="${Util.attr(c.id)}" data-subject-id="${Util.attr(c._subjectId||'')}" data-a="${i+2}">
       <div class="catalog-card-cover" style="background-image:url('${Util.attr(c.cover||'')}')">
@@ -42987,7 +43041,7 @@ Renderers.catalog = function(route){
           : (!hasContent
             ? `<div class="catalog-card-soon-badge">Em breve</div>`
             : (canBuy
-              ? `<div class="catalog-card-soon-badge">Degustação · 1ª unidade grátis</div>`
+              ? `<div class="catalog-card-soon-badge">${soBanco ? 'Banco de questões' : 'Degustação · 1ª unidade grátis'}</div>`
               : `<div class="catalog-card-tier ${tierClass[tier]||''}">${Util.esc(tierLabel[tier]||tier)}</div>`))}
         ${c.coordinatorPhoto ? `<button class="catalog-card-avatar catalog-card-avatar-btn" type="button" data-course-bio="${Util.attr(c.id)}"><img src="${Util.attr(c.coordinatorPhoto)}" alt="${Util.attr(c.coordinator||'')}" loading="lazy"></button>` : ''}
         <div class="catalog-card-cover-title">
@@ -43013,6 +43067,7 @@ Renderers.catalog = function(route){
       </div>
     </${canOpen?'a':'div'}>`;
   }).join('');
+  const bancoHtml = _isStore ? _lojaBancoHtml(courses) : '';
   return `<div class="hero">
     <span class="s-label" data-a="1">${_isStore && _examName ? `<a href="#/concursos" class="catalog-back">← Loja</a>` : 'Ubique Course Platform'}</span>
     <h1 class="s-title hero" data-a="2">${_isStore && _examName ? Util.esc(_examName) : 'Suas matérias'}</h1>
@@ -43021,8 +43076,49 @@ Renderers.catalog = function(route){
       ? 'As matérias do concurso: as que você já tem, as disponíveis para compra e as que estão a caminho.'
       : 'Escolha uma matéria para continuar seus estudos. Cada disciplina contém módulos, unidades e materiais organizados por tópicos.'}</p>
   </div>
-  <div class="catalog-grid" data-a="5">${cards}</div>`;
+  <div class="catalog-grid" data-a="5">${cards}</div>${bancoHtml}`;
 };
+// LOJA · SÓ O BANCO DE QUESTÕES (fase 3): tudo menos ler as unidades. Primeiro os pacotes de bancos (oferta com
+// vários bancos, ex.: "Banco completo"), depois o banco de cada matéria. Some quem já tem a matéria completa
+// (o curso já inclui o banco). Só aparece quando o Comercial criou a oferta.
+function _lojaBancoHtml(courses){
+  if(!window.Shop || !Shop.ready() || !Shop.offerForBanco) return '';
+  const CART_IC = '<svg class="cartbtn-ic-cart" viewBox="0 0 24 24"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg><svg class="cartbtn-ic-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></svg>';
+  const doConcurso = {};
+  (courses || []).forEach(c => { if(c && c._subjectId != null) doConcurso[String(c._subjectId)] = c; });
+  const tem = sid => { const c = doConcurso[String(sid)]; return !!(c && window.Commerce && (Commerce.temAcesso(c.id) || Commerce.temBanco(c.id))); };
+  const linha = (titulo, detalhe, offer, pids, jaTem) => {
+    const inCart = window.Cart && Cart.hasProducts && Cart.hasProducts(pids);
+    const inst = Shop.installmentsLabel(offer);
+    return `<div class="loja-banco-item">
+      <div class="loja-banco-nome"><strong>${Util.esc(titulo)}</strong>${detalhe ? `<span>${Util.esc(detalhe)}</span>` : ''}</div>
+      ${jaTem ? `<span class="loja-banco-tem">Você já tem</span>` : `<div class="catalog-card-buyleft">
+        <div class="catalog-card-pricebox"><span class="catalog-card-price">${Shop.fmt(offer.price)}</span>${inst ? `<span class="catalog-card-inst">${Util.esc(inst)}</span>` : ''}</div>
+        <button type="button" class="catalog-cartbtn${inCart ? ' in-cart' : ''}" data-cart-produtos="${Util.attr(pids.join(','))}" title="${inCart ? 'Ver carrinho' : 'Adicionar ao carrinho'}" aria-label="Carrinho">${CART_IC}</button>
+      </div>`}
+    </div>`;
+  };
+  const itens = [];
+  (Shop.bancoCombos() || []).forEach(cb => {
+    const sids = cb.pids.map(pid => String(Shop.produto(pid).subject_id));
+    if(!sids.every(sid => doConcurso[sid])) return;                         // pacote de outro concurso
+    if(sids.some(tem)) return;                                              // já tem uma delas: o pedido não passaria
+    const nomes = sids.map(sid => doConcurso[sid].title).join(', ');
+    itens.push(linha(cb.offer.name, cb.pids.length + ' matérias: ' + nomes, cb.offer, cb.pids, false));
+  });
+  Object.keys(doConcurso).forEach(sid => {
+    const hit = Shop.offerForBanco(sid); if(!hit) return;
+    const c = doConcurso[sid];
+    if(window.Commerce && Commerce.temAcesso(c.id)) return;                 // a matéria completa já inclui o banco
+    itens.push(linha('Banco de questões · ' + c.title, 'Questões, discursivas, provas e desempenho, sem as unidades', hit.offer, [hit.product.id], Commerce.temBanco(c.id)));
+  });
+  if(!itens.length) return '';
+  return `<section class="loja-banco" data-a="6">
+    <div class="bf-msection"><span class="bf-msection-label">Só o banco de questões</span><span class="bf-msection-rule"></span></div>
+    <p class="loja-banco-txt">Tudo da matéria menos ler as unidades: banco de questões, discursivas, provas passadas, desempenho, tutor e salas. Para quem já estudou o conteúdo e quer treinar.</p>
+    <div class="loja-banco-lista">${itens.join('')}</div>
+  </section>`;
+}
 
 Renderers.catalog.mount = function(stageEl){
   // FASE C: se o catálogo de venda ainda não desceu, carrega e re-renderiza
@@ -53494,6 +53590,13 @@ Renderers.unit = function(route){
         'Esta unidade faz parte da sua mentoria e ainda não foi liberada. <strong>Seu mentor libera em breve.</strong> '
         + 'Se quiser estudar no seu ritmo, você pode ter a matéria completa, com todas as unidades e os vídeos do professor.',
         { rotuloCompra: 'Ter a matéria completa', rotulo: 'Mentoria' });
+    }
+    // SÓ O BANCO (SQL 71): a pessoa tem as questões, o desempenho e o resto; as unidades vêm com a matéria completa
+    if(Commerce.temBanco && Commerce.temBanco(window.COURSE && window.COURSE.id)){
+      return _unitLockedView(found.unit, m, chapter,
+        'Você tem o <strong>banco de questões</strong> desta matéria: questões, discursivas, provas, desempenho e tutor. '
+        + 'As unidades, com o texto e os vídeos do professor, vêm com a matéria completa.',
+        { rotuloCompra: 'Ter a matéria completa', rotulo: 'Banco de questões' });
     }
     return _unitLockedView(found.unit, m, chapter);
   }
@@ -64802,8 +64905,8 @@ Renderers.performance = function(route){
   const _courses = ((window.Banco && Banco.scopeCourses) ? Banco.scopeCourses() : [window.COURSE].filter(Boolean))
     .slice()
     // No Desempenho mostramos só as matérias que o aluno TEM (não o concurso
-    // inteiro): compra, cortesia ou turma da mentoria (Commerce.temAcesso).
-    .filter(c => (window.Commerce && Commerce.temAcesso) ? Commerce.temAcesso(c.id) : true)
+    // inteiro): compra, cortesia, turma da mentoria ou só o banco (Commerce.temMateria).
+    .filter(c => (window.Commerce && Commerce.temMateria) ? Commerce.temMateria(c.id) : true)
     .sort((a, b) => {
       const ia = _SUBJ_ORDER.indexOf(_sigOf(a)); const ib = _SUBJ_ORDER.indexOf(_sigOf(b));
       return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
