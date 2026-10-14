@@ -3962,6 +3962,10 @@ html[data-theme="light"] .bf-select{color-scheme:light}
 .bf-submit-ai:hover{background:var(--accent-glow)}
 .bf-submit-ai svg{width:14px;height:14px}
 .bf-compile{margin-left:auto;font-size:.7rem;letter-spacing:.1em;display:inline-flex;align-items:center;gap:.4rem}
+.bf-cota{flex-basis:100%;font-family:var(--sans);font-weight:300;font-size:.74rem;color:var(--text-dim)}
+.bf-limite{margin:1rem 0;padding:.9rem 1.1rem;background:var(--accent-glow);border:1px solid var(--accent-lo);border-radius:var(--radius,6px);font-family:var(--serif);font-size:.92rem;line-height:1.55;color:var(--text)}
+.bf-limite strong{font-weight:600;color:var(--accent)}
+.bf-limite a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
 .bf-compile svg{width:14px;height:14px}
 .bf-more-row{display:flex;justify-content:center;margin:2rem 0 1rem}
 .bf-more{padding:.6rem 1.2rem;font-size:.7rem;letter-spacing:.12em}
@@ -15556,12 +15560,8 @@ const Auth = (function(){
       if(['module','chapter','unit'].includes(route.view) && route.moduleId){
         if(!canAccessModule(route.moduleId)) return false;
       }
-      // Banco (banco de questões/materiais) exige a matéria (compra, cortesia ou
-      // turma da mentoria) — a degustação do freemium é só a 1ª unidade.
-      if(['banco','bancoDetail'].includes(route.view)){
-        const _ownedP = !!(window.COURSE && window.Commerce && Commerce.temAcesso && Commerce.temAcesso(window.COURSE.id));
-        if(!_ownedP) return false;
-      }
+      // Banco: aberto para todos (decisão do dono, 13/10/2026). Quem não tem a matéria
+      // vê as questões e corrige até o limite do dia (aluno.banco_resolver, SQL 70).
     }
     return true;
   }
@@ -15604,6 +15604,7 @@ const Auth = (function(){
           if(acc && acc.allowed){
             const remembered = !!localStorage.getItem(ACCESS_KEY);
             storeAccessData(acc, remembered);
+            if(window._bankCota) window._bankCota.carregar();   // quanto do limite do Banco já foi usado hoje
             if(typeof window.rebuildCourses === 'function') window.rebuildCourses();
             _renderSoon();
             // Conta criada via Google (A4): garante a linha em crm.app_users —
@@ -23147,8 +23148,44 @@ Blocks.quiz = {
         // É a MESMA lógica de antes, só parametrizada pela lista — o botão global
         // passa allItems (comportamento idêntico ao de hoje), o de grupo passa
         // os itens do grupo.
+        // Banco (SQL 70): a questão de matéria que a pessoa não tem passa pela cota do dia ANTES
+        // de corrigir; o servidor conta e diz o que pode. Nas unidades nada muda.
+        function _verifyOcupado(on){
+          [verifyBtn].concat(groupBars.map(gb => gb.btn)).forEach(b => {
+            if(!b) return;
+            b.disabled = on;
+            if(on){ b.dataset.txtAntes = b.textContent; b.textContent = 'Conferindo…'; }
+            else if(b.dataset.txtAntes){ b.textContent = b.dataset.txtAntes; delete b.dataset.txtAntes; }
+          });
+        }
         function runVerify(items, mode){
+          if(mode !== 'retry' && ctx.unitId === '__bank_q' && window._bankCota){
+            const perguntar = items.filter(it => {
+              const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
+              return p && p.selected != null && !p.verified && !window._bankCota.livre(it.id);
+            }).map(it => String(it.id));
+            if(perguntar.length){
+              _verifyOcupado(true);
+              window._bankCota.resolver(perguntar).then(r => {
+                _verifyOcupado(false);
+                const barrados = new Set((r && r.bloqueados) || []);
+                corrigir(items, mode, barrados);
+                if(barrados.size) window._bankCota.avisarLimite(stageEl, verifyBar, barrados.size);
+                else window._bankCota.limparAviso(stageEl);
+              }, err => {
+                console.warn('[banco] cota:', err && err.message);
+                _verifyOcupado(false);
+                corrigir(items, mode, new Set(perguntar));
+                window._bankCota.avisarErro(stageEl, verifyBar);
+              });
+              return;
+            }
+          }
+          corrigir(items, mode, null);
+        }
+        function corrigir(items, mode, barrados){
           if(mode === 'retry'){
+            if(window._bankCota && ctx.unitId === '__bank_q') window._bankCota.limparAviso(stageEl);
             // "Tentar novamente" LIMPA as marcações (local + Supabase), pra não
             // voltar após reload nem continuar contando na estatística global.
             items.forEach(it => {
@@ -23164,7 +23201,7 @@ Blocks.quiz = {
             const _whyBatch = [];
             items.forEach(it => {
               const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
-              if(p && p.selected != null && !p.verified){
+              if(p && p.selected != null && !p.verified && !(barrados && barrados.has(String(it.id)))){
                 const norm = normalizeOptions(it.options);
                 const keyIdx = quizItemKeyIndex(it, norm);
                 const selIdx = norm.values.findIndex(v => String(v) === String(p.selected));
@@ -54308,12 +54345,7 @@ Renderers.banco = function(route){
 /* ═══════════ COURSE-WIDE PORTAL ═══════════ */
 Renderers.courseBanco = function(route){
   const subj = activeSubject();           // matéria ativa (ou null = global)
-  // FREEMIUM (A3): o Banco reúne o ACERVO da matéria (questões, materiais) —
-  // exige posse; a degustação é só a 1ª unidade. Sem posse → tela de bloqueio.
-  if(subj && window.Commerce && Commerce.temAcesso && !Commerce.temAcesso(subj.id)){
-    return _unitLockedView({ number: '', title: 'Banco · ' + (subj.title || '') }, null, null,
-      `O Banco reúne todas as questões, discursivas e materiais de <strong>${Util.esc(subj.title || 'cada matéria')}</strong> — disponível para alunos do curso completo. Conheça a primeira unidade gratuita ou adquira o curso.`);
-  }
+  // O Banco é aberto para todos (13/10/2026): quem não tem a matéria corrige até o limite do dia.
   const courses = Banco.scopeCourses();  // matéria ativa OU todas
   const enabled = Object.keys(Banco.cards);
   const counts = Banco.countsAll();
@@ -56227,20 +56259,134 @@ function _bankScopeFilter(items){
     return ap.some(function(a){ return a && scope.has(String(a.unit_id)); });
   });
 }
-// Matérias cujas questões só do banco o aluno pode ver: a matéria ativa, quando
-// está dentro de uma; senão, as matérias do escopo do Banco (o concurso ativo)
-// que ele POSSUI. Admin vê todas (Commerce.isOwned já diz sim para ele).
+// Matérias cujas questões só do banco aparecem: a matéria ativa, quando está dentro
+// de uma; senão, todas as matérias do escopo do Banco (o concurso ativo). O banco é
+// visível para todos (13/10/2026); o que a posse muda é a CORREÇÃO (_bankCota).
 function _bankSubjectsVisiveis(){
   const out = new Set();
   const subj = (typeof activeSubject === 'function') ? activeSubject() : null;
   const cursos = subj ? [subj] : ((window.Banco && Banco.scopeCourses) ? (Banco.scopeCourses() || []) : []);
-  cursos.forEach(function(c){
-    if(!c || c._subjectId == null) return;
-    const dono = !(window.Commerce && Commerce.temAcesso) || Commerce.temAcesso(c.id);
-    if(dono) out.add(String(c._subjectId));
-  });
+  cursos.forEach(function(c){ if(c && c._subjectId != null) out.add(String(c._subjectId)); });
   return out;
 }
+// Matéria em que a pessoa corrige sem limite: admin, acesso total, matéria comprada ou
+// de cortesia, matéria da turma da mentoria (a mesma conta de aluno.banco_materias_livres).
+function _bankMateriaLivre(sid){
+  if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return true;
+  const a = (window.Auth && Auth.loadAccessData) ? Auth.loadAccessData() : null;
+  if(!a || !a.allowed) return false;
+  if(a.access_type === 'full') return true;
+  const s = String(sid);
+  return (a.subject_ids || []).map(String).indexOf(s) >= 0
+      || ((a.mentoria && a.mentoria.materias) || []).map(String).indexOf(s) >= 0;
+}
+// Questão que não passa pela cota: está numa unidade que a pessoa abre, ou é de matéria livre.
+function _bankItemLivre(q){
+  if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return true;
+  if(!q) return false;
+  if(!q._soBanco && Array.isArray(q.appears_in) && q.appears_in.length) return true;
+  return _bankItemSubjectIds(q).some(_bankMateriaLivre);
+}
+/* COTA DO BANCO (SQL 70) — quem não tem a matéria corrige até N questões por dia.
+   O servidor conta (aluno.banco_resolver); aqui só se pergunta ANTES de corrigir as
+   questões que não são livres, mostra quanto já foi usado e avisa quando acaba. */
+window._bankCota = (function(){
+  let cota = null, idx = new Map(), ultimos = [];
+  const sb = function(){ return window._sb ? window._sb.schema('aluno') : null; };
+  function carregar(){
+    const c = sb(); if(!c) return Promise.resolve(null);
+    return c.rpc('banco_minha_cota').then(function(r){ if(!r.error) cota = r.data || null; return cota; }, function(){ return null; });
+  }
+  function nomeMateria(sid){
+    const s = ((window.UbiqueStore && UbiqueStore.subjects && UbiqueStore.subjects.list && UbiqueStore.subjects.list()) || [])
+      .find(function(x){ return x && String(x.id) === String(sid); });
+    return s ? (s.sigla || s.subject || s.name || ('Matéria ' + sid)) : ('Matéria ' + sid);
+  }
+  // As matérias limitadas de uma lista (a de menor número de cada questão, como o servidor conta).
+  function limitadas(lista){
+    const out = {};
+    (lista || []).forEach(function(q){
+      if(_bankItemLivre(q)) return;
+      const ss = _bankItemSubjectIds(q); if(ss.length) out[ss.slice().sort(function(a, b){ return Number(a) - Number(b); })[0]] = 1;
+    });
+    return Object.keys(out);
+  }
+  // A linha do topo dos resultados: só quando há questão de matéria que a pessoa não tem.
+  function linhaTexto(lista){
+    if(!cota || cota.admin) return '';
+    const mats = limitadas(lista);
+    if(!mats.length) return '';
+    const lim = Number(cota.limite) || 0;
+    const gratuita = !(cota.materias_livres || []).length;
+    if(cota.modo === 'por_materia'){
+      return 'Hoje, nas matérias que você não tem: ' + mats.map(function(m){
+        return nomeMateria(m) + ' ' + Math.min(lim, Number((cota.por_materia || {})[m]) || 0) + ' de ' + lim;
+      }).join(' · ') + ' questões corrigidas';
+    }
+    return (gratuita ? 'Conta gratuita: ' : 'Nas matérias que você não tem: ') + Math.min(lim, Number(cota.usadas) || 0) + ' de ' + lim + ' questões corrigidas hoje';
+  }
+  // Limite do dia acabou para alguma matéria da lista: aviso fixo no topo (sobrevive a o Banco ser redesenhado).
+  function esgotadoHtml(lista){
+    if(!cota || cota.admin) return '';
+    const mats = limitadas(lista); if(!mats.length) return '';
+    const lim = Number(cota.limite) || 0;
+    let onde = '';
+    if(cota.modo === 'por_materia'){
+      const acabou = mats.filter(function(m){ return (Number((cota.por_materia || {})[m]) || 0) >= lim; });
+      if(!acabou.length) return '';
+      onde = ' em ' + acabou.map(nomeMateria).join(', ');
+    } else if((Number(cota.usadas) || 0) < lim) return '';
+    return '<strong>Limite de hoje atingido.</strong> Você já corrigiu as ' + lim + ' questões grátis de hoje' + Util.esc(onde) +
+      '. Pode marcar as respostas à vontade: a correção volta amanhã. Para corrigir sem limite, tenha a matéria. <a href="#/concursos">Ver a Loja</a>';
+  }
+  function pintar(){
+    const el = document.getElementById('bfCota');
+    if(el){ const t = linhaTexto(ultimos); el.textContent = t; el.hidden = !t; }
+    const av = document.getElementById('bfLimiteTopo');
+    if(av){ const h = esgotadoHtml(ultimos); av.innerHTML = h; av.hidden = !h; }
+  }
+  function limparAviso(stageEl){ const v = stageEl && stageEl.querySelector('.bf-limite'); if(v) v.remove(); }
+  function aviso(stageEl, antesDe, html){
+    if(!stageEl) return;
+    limparAviso(stageEl);
+    const d = document.createElement('div');
+    d.className = 'bf-limite';
+    d.innerHTML = html;
+    if(antesDe && antesDe.parentNode) antesDe.parentNode.insertBefore(d, antesDe); else stageEl.appendChild(d);
+  }
+  return {
+    carregar: carregar,
+    dados: function(){ return cota; },
+    indexar: function(lista){ ultimos = lista || []; idx = new Map(ultimos.map(function(q){ return [String(q && q.id), q]; })); },
+    livre: function(id){ if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return true; const q = idx.get(String(id)); return !!q && _bankItemLivre(q); },
+    livreItem: _bankItemLivre,
+    linhaTexto: linhaTexto,
+    esgotadoHtml: esgotadoHtml,
+    resolver: function(ids){
+      const c = sb(); if(!c) return Promise.reject(new Error('sem conexão'));
+      return c.rpc('banco_resolver', { p_itens: ids }).then(function(r){
+        if(r.error) throw r.error;
+        const d = r.data || {};
+        if(d.cota) cota = d.cota;
+        pintar();
+        return d;
+      });
+    },
+    limparAviso: limparAviso,
+    avisarLimite: function(stageEl, antesDe, n){
+      pintar();
+      const lim = cota ? Number(cota.limite) || 0 : 0;
+      const porMateria = cota && cota.modo === 'por_materia';
+      aviso(stageEl, antesDe, '<strong>Limite de hoje atingido.</strong> ' +
+        (n === 1 ? 'Uma questão ficou sem corrigir' : n + ' questões ficaram sem corrigir') + ': você já corrigiu as ' + lim +
+        ' questões grátis de hoje' + (porMateria ? ' nessa matéria' : '') + '. Suas marcações continuam aqui; amanhã você corrige mais ' + lim + '. ' +
+        'Para corrigir sem limite, tenha a matéria. <a href="#/concursos">Ver a Loja</a>');
+    },
+    avisarErro: function(stageEl, antesDe){
+      aviso(stageEl, antesDe, '<strong>Não consegui conferir seu limite agora.</strong> As questões das matérias que você tem foram corrigidas. Tente de novo em instantes para as outras.');
+    },
+  };
+})();
 // Helper unificado: une QuestionBank.list() (legacy) com derivação dos
 // blocks (fonte de verdade hoje). Dedup por id pra evitar duplicatas.
 function _bankItemsForQuestions(){
@@ -57081,6 +57227,8 @@ Renderers.questionBank = function(route){
   // Igual à unidade (09/10/2026): marca e depois "Verificar respostas" (deferFeedback), com a barra da questão.
   // suppressActions só tira as ações de BLOCO, que o bloco sintético do Banco não tem.
   const synthCtx = { unitId:'__bank_q', store: Store, suppressActions: true, deferFeedback: true };
+  const _cotaTxt = window._bankCota ? window._bankCota.linhaTexto(results) : '';
+  const _cotaFim = window._bankCota ? window._bankCota.esgotadoHtml(results) : '';
 
   let resultsHtml = '';
   const _ai = window._bankAiCache;
@@ -57115,7 +57263,9 @@ Renderers.questionBank = function(route){
         '<span class="bf-results-meta">Mostrando '+shown.length+' de '+results.length+' · página '+page+'</span>'+
         (results.length && !f.sel ? '<button type="button" class="btn-ghost bf-save-sel" id="bfSalvarSel" title="Guardar esta seleção com um nome, para reabrir depois">'+Icons.bookmark+' Salvar seleção</button>' : '')+
         (results.length ? '<button type="button" class="btn-ghost bf-compile" id="bfCompile" title="Gerar um arquivo de prova imprimível (questões + folha de respostas + gabarito e comentários)">'+Icons.download+' Compilar prova</button>' : '')+
+        '<span class="bf-cota" id="bfCota"'+(_cotaTxt ? '' : ' hidden')+'>'+Util.esc(_cotaTxt)+'</span>'+
       '</div>'+
+      '<div class="bf-limite" id="bfLimiteTopo"'+(_cotaFim ? '' : ' hidden')+'>'+_cotaFim+'</div>'+
       resultsHtml +
     '</div>';
 };
@@ -58045,8 +58195,13 @@ async function _bankCompileProva(route){
   if(!CompileLicenca.exigeCpf()) return;
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
   const bankItems = _bankItemsForQuestions();
-  const results = _bankApplyFilters(bankItems, f, { isEssay:false });
-  if(!results.length){ alert('Nenhuma questão para compilar. Ajuste os filtros e busque primeiro.'); return; }
+  const achadas = _bankApplyFilters(bankItems, f, { isEssay:false });
+  if(!achadas.length){ alert('Nenhuma questão para compilar. Ajuste os filtros e busque primeiro.'); return; }
+  // A prova compilada traz gabarito e comentários sem limite: só entram as questões das matérias
+  // que a pessoa tem (ou das unidades que ela abre). As outras ficam de fora, com aviso.
+  const results = achadas.filter(function(it){ return _bankItemLivre(it); });
+  const deFora = achadas.length - results.length;
+  if(!results.length){ alert('A prova compilada traz gabarito e comentários, então é para as matérias que você tem. Na Loja você encontra as matérias.'); return; }
   const itemById = {};
   results.forEach(function(it){ if(it && it.id != null) itemById[String(it.id)] = it; });
   const sections = _bankBuildResultSections(results, f.org || 'secao');
@@ -58079,6 +58234,8 @@ async function _bankCompileProva(route){
     anos:         anos,
     dateStr:      dateStr
   });
+  if(deFora) alert('A prova saiu com ' + results.length + (results.length === 1 ? ' questão' : ' questões') + '. ' + deFora +
+    (deFora === 1 ? ' ficou de fora porque é' : ' ficaram de fora porque são') + ' de matéria que você não tem.');
 }
 
 /* ───────── EssaysCompiler — "Prova Discursiva" imprimível ─────────
@@ -58379,6 +58536,7 @@ Renderers.questionBank.mount = function(stageEl, route){
   // Igual à unidade (09/10/2026): marca e depois "Verificar respostas" (deferFeedback), com a barra da questão.
   // suppressActions só tira as ações de BLOCO, que o bloco sintético do Banco não tem.
   const synthCtx = { unitId:'__bank_q', store: Store, suppressActions: true, deferFeedback: true };
+  if(window._bankCota) window._bankCota.indexar(results);   // a correção sabe a matéria de cada questão
   if(typeof Blocks !== 'undefined' && Blocks.quiz && Blocks.quiz.mount){
     stageEl.querySelectorAll('[data-bf-results]').forEach(function(el){
       const idx = parseInt(el.getAttribute('data-sec-idx'), 10) || 0;
