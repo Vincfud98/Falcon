@@ -7466,10 +7466,6 @@ html[data-theme="light"] .fs-modal-counter{background:rgba(255,255,255,.82)}
 .wallet-buy-price strong{color:var(--accent);font-weight:500}
 .wallet-auto-toggle{display:flex;align-items:center;gap:.55rem;font-family:var(--sans);font-weight:300;font-size:.84rem;color:var(--text);cursor:pointer;margin-top:.2rem}
 .wallet-auto-toggle input{accent-color:var(--accent);cursor:pointer;width:15px;height:15px}
-.wallet-auto-fields{display:flex;flex-direction:column;gap:.6rem;font-family:var(--sans);font-weight:300;font-size:.82rem;color:var(--text-dim)}
-.wallet-auto-fields label{display:flex;align-items:center;gap:.45rem;flex-wrap:wrap}
-.wallet-auto-fields input{width:70px;background:transparent;border:1px solid var(--accent-border-soft);border-radius:var(--radius);color:var(--text);font-family:var(--sans);font-weight:300;font-size:.88rem;padding:.45rem .6rem;transition:border-color .3s var(--ease),background .3s var(--ease)}
-.wallet-auto-fields input:focus{outline:none;border-color:var(--accent);background:var(--accent-xlo)}
 .wallet-card .btn-primary,.wallet-card .btn-ghost{align-self:flex-start;margin-top:.3rem}
 /* pílula de custo ao lado dos botões de IA */
 .ubt-cost{display:inline-flex;align-items:center;gap:.25rem;font-size:.72rem;color:var(--accent);background:var(--accent-lo);border:1px solid var(--accent-border);border-radius:999px;padding:.12rem .55rem;font-variant-numeric:tabular-nums;white-space:nowrap;vertical-align:middle}
@@ -29929,6 +29925,8 @@ async function initUserSession(user){
       if(typeof Notifications.unsubscribeRealtime === 'function') Notifications.unsubscribeRealtime();
       Notifications.subscribeRealtime(user.id, () => {
         console.log('%c[notif] chegou notificação ao vivo →', 'color:#7bbf7b');
+        // Todo crédito de UbiTokens (cortesia do mês ou pedido pago) chega com um aviso: relê o saldo do topo.
+        if(window.UbtWallet && UbtWallet.load) UbtWallet.load();
         // Re-hidrata notificações E follows: toda ação de seguir (pedido/aceite)
         // gera uma notificação, então a tabela follows precisa vir junto pra os
         // botões de aceitar/seguir e o modal do colega ficarem em dia SEM F5.
@@ -30352,9 +30350,20 @@ window._accountState = window._accountState || { tab: 'perfil' };
 
 // Formata UBT com 2 casas (símbolo ⓤ é aplicado no HTML).
 function _ubtFmt(n){ const v = Number(n); return (isFinite(v) ? v : 0).toFixed(2); }
-// 1 ⓤ = R$ 6,20 (paridade com o Ubique Languages). Usado p/ mostrar o ≈ R$ e, depois, na compra.
-const UBT_TO_BRL = 6.20;
-function _ubtBrl(n){ const v = Number(n) * UBT_TO_BRL; return 'R$ ' + (isFinite(v) ? v : 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+// Preço de 1 ⓤ em reais. Mora no servidor (conteudo.platform_config.ubt_preco_brl, SQL 75) e só o
+// Comercial muda; o app apenas mostra. Até a leitura chegar vale o preço de sempre, R$ 6,20.
+let _ubtPrecoBrl = 6.20;
+let _ubtPrecoPromise = null;
+function _ubtCarregarPreco(){
+  if(_ubtPrecoPromise) return _ubtPrecoPromise;
+  if(!window._sb) return Promise.resolve(_ubtPrecoBrl);
+  _ubtPrecoPromise = window._sb.schema('conteudo').from('platform_config')
+    .select('ubt_preco_brl').eq('id', 'default').maybeSingle()
+    .then(r => { const v = Number(r && r.data && r.data.ubt_preco_brl); if(v > 0) _ubtPrecoBrl = v; return _ubtPrecoBrl; })
+    .catch(() => { _ubtPrecoPromise = null; return _ubtPrecoBrl; });
+  return _ubtPrecoPromise;
+}
+function _ubtBrl(n){ const v = Number(n) * _ubtPrecoBrl; return 'R$ ' + (isFinite(v) ? v : 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 // Relê a conta e atualiza saldo + ≈R$ na aba Carteira. Devolve a conta.
 async function _refreshWalletSaldo(stageEl, user){
@@ -30369,121 +30378,51 @@ async function _refreshWalletSaldo(stageEl, user){
   return data;
 }
 
-// Comprar créditos (beta credita na hora via carteira.comprar_ubitokens).
+// Comprar UbiTokens: vira um pedido (vendas.criar_pedido_ubitokens, SQL 75). Quem calcula o preço é o
+// servidor; os UbiTokens entram na carteira quando o Comercial dá baixa no pedido (no futuro, o webhook
+// do meio de pagamento chama a mesma baixa) e o aluno recebe o aviso no sino.
 function _wireWalletBuy(stageEl, user){
   const qtyEl = stageEl.querySelector('#walletBuyQty');
   const priceEl = stageEl.querySelector('#walletBuyPrice');
+  const unitEl = stageEl.querySelector('#walletBuyUnit');
   const minus = stageEl.querySelector('#walletBuyMinus');
   const plus = stageEl.querySelector('#walletBuyPlus');
   const btn = stageEl.querySelector('#walletBuyBtn');
   const fb = stageEl.querySelector('#walletBuyFb');
   if(!qtyEl || !btn) return;
   let qty = 10;
-  function render(){ qtyEl.textContent = qty; if(priceEl) priceEl.textContent = _ubtBrl(qty); }
+  function render(){
+    qtyEl.textContent = qty;
+    if(priceEl) priceEl.textContent = _ubtBrl(qty);
+    if(unitEl) unitEl.textContent = '· ' + _ubtBrl(1) + ' cada';
+  }
   render();
+  _ubtCarregarPreco().then(render);
   if(minus) minus.addEventListener('click', function(){ qty = Math.max(5, qty - 5); render(); });
   if(plus) plus.addEventListener('click', function(){ qty = Math.min(1000, qty + 5); render(); });
   btn.addEventListener('click', async function(){
-    btn.disabled = true; if(fb) fb.textContent = 'Processando…';
+    btn.disabled = true; if(fb) fb.textContent = 'Registrando o pedido…';
     try {
-      const { data, error } = await window._sb.schema('carteira').rpc('comprar_ubitokens', { p_qtd: qty });
-      if(error || !data || data.ok === false){ if(fb) fb.textContent = '✗ Não consegui adicionar' + (data && data.error ? ' (' + data.error + ')' : ''); }
-      else { if(fb) fb.textContent = '✓ Adicionado! Novo saldo: ⓤ ' + _ubtFmt(data.saldo); await _refreshWalletSaldo(stageEl, user); if(window.UbtWallet) UbtWallet.load(); }
-    } catch(e){ if(fb) fb.textContent = '✗ Erro ao processar.'; }
+      const { data, error } = await window._sb.schema('vendas').rpc('criar_pedido_ubitokens', { p_qtd: qty });
+      if(error){
+        if(fb) fb.textContent = error.message || 'Não deu para registrar o pedido agora. Tente de novo.';
+      } else {
+        const d = data || {};
+        const total = 'R$ ' + Number(d.total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        if(fb) fb.textContent = 'Pedido ' + (d.order_number || '') + ' registrado: ⓤ ' + qty + ' por ' + total
+          + '. Nossa equipe entra em contato pelo seu e-mail para concluir o pagamento. Ele já aparece em Minhas compras.';
+        await _loadWalletCompras(stageEl);
+      }
+    } catch(e){ if(fb) fb.textContent = 'Não deu para registrar o pedido agora. Tente de novo.'; }
     btn.disabled = false;
   });
 }
 
-// Adição automática: salva a preferência (carteira.set_auto_recarga).
-function _wireWalletAuto(stageEl, user, conta){
-  const onEl = stageEl.querySelector('#walletAutoOn');
-  const limEl = stageEl.querySelector('#walletAutoLimite');
-  const valEl = stageEl.querySelector('#walletAutoValor');
-  const saveBtn = stageEl.querySelector('#walletAutoSave');
-  const fb = stageEl.querySelector('#walletAutoFb');
-  if(!onEl || !saveBtn) return;
-  if(conta){
-    onEl.checked = !!conta.auto_recarga;
-    if(conta.auto_limite != null && limEl) limEl.value = String(Number(conta.auto_limite));
-    if(conta.auto_valor != null && valEl) valEl.value = String(Number(conta.auto_valor));
-  }
-  saveBtn.addEventListener('click', async function(){
-    saveBtn.disabled = true; if(fb) fb.textContent = 'Salvando…';
-    try {
-      const { data, error } = await window._sb.schema('carteira').rpc('set_auto_recarga', {
-        p_on: !!onEl.checked, p_limite: Number(limEl.value) || 0, p_valor: Math.max(1, Number(valEl.value) || 10),
-      });
-      if(error || !data || data.ok === false){ if(fb) fb.textContent = '✗ Não consegui salvar.'; }
-      else { if(fb) fb.textContent = '✓ Salvo'; setTimeout(function(){ if(fb) fb.textContent = ''; }, 2000); }
-    } catch(e){ if(fb) fb.textContent = '✗ Erro ao salvar.'; }
-    saveBtn.disabled = false;
-  });
-}
-
-// Carrega saldo + extrato + tabela de custos na aba Carteira e liga as sub-abas.
-// Lê direto do schema carteira (RLS garante que o aluno só vê a própria conta).
-async function _loadWalletPane(stageEl, user){
-  if(!stageEl || !user || !window._sb) return;
-  // Checkbox "mostrar saldo na topbar" (preferência local)
-  const ovCb = stageEl.querySelector('#walletOvOn');
-  if(ovCb) ovCb.addEventListener('change', function(){ if(window.BuscaOverview) BuscaOverview.ligar(ovCb.checked); });
-  const showCb = stageEl.querySelector('#walletShowTopbar');
-  if(showCb) showCb.addEventListener('change', function(){ if(window.UbtWallet && UbtWallet.setShowPref) UbtWallet.setShowPref(showCb.checked); });
-  const C = window._sb.schema('carteira');
-  const fmtDt = function(s){ try { return new Date(s).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }); } catch(_){ return s || ''; } };
-  // Saldo + dados da conta, e liga Comprar créditos / Adição automática (beta).
-  let _conta = null;
-  try { _conta = await _refreshWalletSaldo(stageEl, user); } catch(e){ console.warn('[carteira saldo]', e); }
-  _wireWalletBuy(stageEl, user);
-  _wireWalletAuto(stageEl, user, _conta);
-  // Beta: se a auto-recarga está ligada e o saldo caiu abaixo do limite, recarrega agora.
-  try {
-    if(_conta && !_conta.ilimitado && _conta.auto_recarga && Number(_conta.saldo) < Number(_conta.auto_limite)){
-      const { data: rc } = await window._sb.schema('carteira').rpc('comprar_ubitokens', { p_qtd: Number(_conta.auto_valor) || 10 });
-      if(rc && rc.ok){ await _refreshWalletSaldo(stageEl, user); if(window.UbtWallet) UbtWallet.load(); }
-    }
-  } catch(_){}
-  // Extrato
-  try {
-    const { data } = await C.from('lancamentos')
-      .select('criado_em,delta,saldo_apos,descricao,origem,acao')
-      .eq('user_id', user.id).order('criado_em', { ascending:false }).limit(200);
-    const box = stageEl.querySelector('#walletExtrato');
-    if(box){
-      if(!data || !data.length){
-        box.innerHTML = '<div class="empty" style="margin-top:1rem"><div class="empty-body">Nenhuma movimentação ainda.</div></div>';
-      } else {
-        box.innerHTML = '<div class="wallet-row wallet-row-head"><span>Data</span><span>Descrição</span><span class="wallet-num">UBT</span><span class="wallet-num">Saldo</span></div>' +
-          data.map(function(r){
-            const delta = Number(r.delta);
-            const cls = delta < 0 ? 'wallet-neg' : 'wallet-pos';
-            const desc = Util.esc(r.descricao || r.acao || r.origem || '—');
-            return '<div class="wallet-row"><span>'+Util.esc(fmtDt(r.criado_em))+'</span><span>'+desc+'</span>'+
-              '<span class="wallet-num '+cls+'">'+(delta>0?'+':'')+_ubtFmt(delta)+'</span>'+
-              '<span class="wallet-num">'+_ubtFmt(r.saldo_apos)+'</span></div>';
-          }).join('');
-      }
-    }
-  } catch(e){ console.warn('[carteira extrato]', e); }
-  // Tabela de custos
-  try {
-    const { data } = await C.from('tabela_custos').select('rotulo,categoria,unidade,valor,descricao').eq('ativo', true);
-    const box = stageEl.querySelector('#walletCustos');
-    if(box){
-      if(!data || !data.length){
-        box.innerHTML = '<div class="empty" style="margin-top:1rem"><div class="empty-body">Sem custos cadastrados.</div></div>';
-      } else {
-        const sufx = function(u){ return u==='por_min' ? '/min' : (u==='por_char' ? '/caractere' : (u==='por_1k_chars' ? ' por 1k caracteres' : (u==='por_1k_tokens' ? ' por uso' : (u==='por_item' ? ' por item' : '')))); };
-        box.innerHTML = data.map(function(r){
-          const d = r.descricao ? '<div class="wallet-cost-desc">'+Util.esc(r.descricao)+'</div>' : '';
-          return '<div class="wallet-row wallet-cost"><span><strong>'+Util.esc(r.rotulo)+'</strong>'+d+'</span>'+
-            '<span class="wallet-num"><span class="ubt-sym">ⓤ</span> '+_ubtFmt(r.valor)+Util.esc(sufx(r.unidade))+'</span></div>';
-        }).join('');
-      }
-    }
-  } catch(e){ console.warn('[carteira custos]', e); }
-  // Minhas compras (Fase E): acessos ativos com dias restantes + balancete de
-  // pedidos. O RLS de vendas devolve só o que é do próprio aluno.
+// Minhas compras (Fase E): acessos ativos com dias restantes + balancete de
+// pedidos. O RLS de vendas devolve só o que é do próprio aluno. Relida depois
+// de um pedido de UbiTokens para o pedido novo aparecer na hora.
+async function _loadWalletCompras(stageEl){
+  if(!stageEl || !window._sb) return;
   try {
     const V = window._sb.schema('vendas');
     const fmtD = function(s){ try { return new Date(s).toLocaleDateString('pt-BR'); } catch(_){ return ''; } };
@@ -30560,6 +30499,65 @@ async function _loadWalletPane(stageEl, user){
       }
     }
   } catch(e){ console.warn('[carteira compras]', e); }
+}
+
+// Carrega saldo + extrato + tabela de custos na aba Carteira e liga as sub-abas.
+// Lê direto do schema carteira (RLS garante que o aluno só vê a própria conta).
+async function _loadWalletPane(stageEl, user){
+  if(!stageEl || !user || !window._sb) return;
+  // Checkbox "mostrar saldo na topbar" (preferência local)
+  const ovCb = stageEl.querySelector('#walletOvOn');
+  if(ovCb) ovCb.addEventListener('change', function(){ if(window.BuscaOverview) BuscaOverview.ligar(ovCb.checked); });
+  const showCb = stageEl.querySelector('#walletShowTopbar');
+  if(showCb) showCb.addEventListener('change', function(){ if(window.UbtWallet && UbtWallet.setShowPref) UbtWallet.setShowPref(showCb.checked); });
+  const C = window._sb.schema('carteira');
+  const fmtDt = function(s){ try { return new Date(s).toLocaleString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }); } catch(_){ return s || ''; } };
+  // Saldo e o pedido de UbiTokens. A adição automática volta quando houver pagamento automático:
+  // recarregar sozinho exige cartão salvo no meio de pagamento.
+  await _ubtCarregarPreco();
+  try { await _refreshWalletSaldo(stageEl, user); } catch(e){ console.warn('[carteira saldo]', e); }
+  _wireWalletBuy(stageEl, user);
+  // Extrato
+  try {
+    const { data } = await C.from('lancamentos')
+      .select('criado_em,delta,saldo_apos,descricao,origem,acao')
+      .eq('user_id', user.id).order('criado_em', { ascending:false }).limit(200);
+    const box = stageEl.querySelector('#walletExtrato');
+    if(box){
+      if(!data || !data.length){
+        box.innerHTML = '<div class="empty" style="margin-top:1rem"><div class="empty-body">Nenhuma movimentação ainda.</div></div>';
+      } else {
+        box.innerHTML = '<div class="wallet-row wallet-row-head"><span>Data</span><span>Descrição</span><span class="wallet-num">UBT</span><span class="wallet-num">Saldo</span></div>' +
+          data.map(function(r){
+            const delta = Number(r.delta);
+            const cls = delta < 0 ? 'wallet-neg' : 'wallet-pos';
+            const desc = Util.esc(r.descricao || r.acao || r.origem || '—');
+            return '<div class="wallet-row"><span>'+Util.esc(fmtDt(r.criado_em))+'</span><span>'+desc+'</span>'+
+              '<span class="wallet-num '+cls+'">'+(delta>0?'+':'')+_ubtFmt(delta)+'</span>'+
+              '<span class="wallet-num">'+_ubtFmt(r.saldo_apos)+'</span></div>';
+          }).join('');
+      }
+    }
+  } catch(e){ console.warn('[carteira extrato]', e); }
+  // Tabela de custos
+  try {
+    const { data } = await C.from('tabela_custos').select('rotulo,categoria,unidade,valor,descricao').eq('ativo', true);
+    const box = stageEl.querySelector('#walletCustos');
+    if(box){
+      if(!data || !data.length){
+        box.innerHTML = '<div class="empty" style="margin-top:1rem"><div class="empty-body">Sem custos cadastrados.</div></div>';
+      } else {
+        const sufx = function(u){ return u==='por_min' ? '/min' : (u==='por_char' ? '/caractere' : (u==='por_1k_chars' ? ' por 1k caracteres' : (u==='por_1k_tokens' ? ' por uso' : (u==='por_item' ? ' por item' : '')))); };
+        box.innerHTML = data.map(function(r){
+          const d = r.descricao ? '<div class="wallet-cost-desc">'+Util.esc(r.descricao)+'</div>' : '';
+          return '<div class="wallet-row wallet-cost"><span><strong>'+Util.esc(r.rotulo)+'</strong>'+d+'</span>'+
+            '<span class="wallet-num"><span class="ubt-sym">ⓤ</span> '+_ubtFmt(r.valor)+Util.esc(sufx(r.unidade))+'</span></div>';
+        }).join('');
+      }
+    }
+  } catch(e){ console.warn('[carteira custos]', e); }
+  // Minhas compras
+  await _loadWalletCompras(stageEl);
   // Sub-abas (Extrato / Minhas compras / Tabela de custos)
   const subtabs = Array.from(stageEl.querySelectorAll('[data-wallet-sub]'));
   const subpanes = Array.from(stageEl.querySelectorAll('[data-wallet-pane]'));
@@ -30867,30 +30865,16 @@ Renderers.account = function(route){
       </label>
       <div class="wallet-cards">
         <section class="wallet-card">
-          <h3 class="wallet-card-title">Comprar créditos</h3>
-          <p class="wallet-card-sub">UbiTokens avulsos que não expiram. <strong>Durante o beta, entram na hora.</strong></p>
+          <h3 class="wallet-card-title">Comprar UbiTokens</h3>
+          <p class="wallet-card-sub">UbiTokens avulsos que não expiram. Você faz o pedido, nossa equipe combina o pagamento pelo seu e-mail e os UbiTokens entram na carteira assim que ele for confirmado.</p>
           <div class="wallet-buy-row">
             <button class="wallet-step" id="walletBuyMinus" type="button" aria-label="Menos">−</button>
             <span class="wallet-buy-qty"><span class="ubt-sym">ⓤ</span> <strong id="walletBuyQty">10</strong></span>
             <button class="wallet-step" id="walletBuyPlus" type="button" aria-label="Mais">+</button>
           </div>
-          <div class="wallet-buy-price">≈ <strong id="walletBuyPrice">—</strong></div>
-          <button class="btn-primary" id="walletBuyBtn" type="button">Comprar</button>
-          <span class="wallet-card-fb" id="walletBuyFb"></span>
-        </section>
-        <section class="wallet-card">
-          <h3 class="wallet-card-title">Adição automática</h3>
-          <p class="wallet-card-sub">Quando o saldo cair abaixo do limite, adicionamos UbiTokens automaticamente.</p>
-          <label class="wallet-auto-toggle">
-            <input type="checkbox" id="walletAutoOn">
-            <span>Ativar adição automática</span>
-          </label>
-          <div class="wallet-auto-fields">
-            <label>Quando cair abaixo de <span class="ubt-sym">ⓤ</span> <input type="number" id="walletAutoLimite" min="0" step="1" value="2"></label>
-            <label>Adicionar <span class="ubt-sym">ⓤ</span> <input type="number" id="walletAutoValor" min="1" step="1" value="10"></label>
-          </div>
-          <button class="btn-ghost" id="walletAutoSave" type="button">Salvar</button>
-          <span class="wallet-card-fb" id="walletAutoFb"></span>
+          <div class="wallet-buy-price"><strong id="walletBuyPrice">—</strong> <span id="walletBuyUnit"></span></div>
+          <button class="btn-primary" id="walletBuyBtn" type="button">Fazer pedido</button>
+          <span class="wallet-card-fb" id="walletBuyFb" role="status"></span>
         </section>
         <section class="wallet-card">
           <h3 class="wallet-card-title">Overview do tutor na busca</h3>
@@ -32179,6 +32163,14 @@ function _notifRenderItem(n){
       const href = '#/m/' + encodeURIComponent(p.module_id) + (p.chapter_id ? '/c/' + encodeURIComponent(p.chapter_id) : '') + '/u/' + encodeURIComponent(p.unit_id);
       actions = `<div class="notif-actions"><a class="btn-ghost" href="${href}" data-notif-id="${Util.attr(n.id)}">Abrir unidade →</a></div>`;
     }
+  } else if(n.type === 'cortesia_ubitokens'){
+    // SQL 75 — cortesia mensal de quem tem matrícula ativa (servidor insere ao creditar)
+    line = `Seus <strong>ⓤ ${Util.esc(Number(p.ubitokens || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 }))}</strong> UbiTokens de cortesia do mês chegaram. Use no tutor, na busca e nas outras funções de IA.`;
+    actions = `<div class="notif-actions"><a class="btn-ghost" href="#/conta/carteira" data-notif-id="${Util.attr(n.id)}">Abrir a Carteira →</a></div>`;
+  } else if(n.type === 'ubitokens_creditados'){
+    // SQL 75 — pedido de UbiTokens pago (baixa do Comercial ou, no futuro, webhook)
+    line = `Pagamento confirmado: <strong>ⓤ ${Util.esc(Number(p.ubitokens || 0).toLocaleString('pt-BR', { maximumFractionDigits: 2 }))}</strong> UbiTokens entraram na sua carteira${p.pedido ? ' · pedido ' + Util.esc(p.pedido) : ''}.`;
+    actions = `<div class="notif-actions"><a class="btn-ghost" href="#/conta/carteira" data-notif-id="${Util.attr(n.id)}">Abrir a Carteira →</a></div>`;
   } else if(n.type === 'matricula_liberada'){
     // FASE D — matrícula criada/renovada na baixa do pedido (servidor insere)
     line = p.renovacao
@@ -33346,12 +33338,14 @@ Renderers.notifications = function(route){
   if(!user) return '<div class="empty"><div class="empty-title">Acesso restrito</div></div>';
   const all = Notifications.listFor(user.id);
   const filter = window._notifFilter || 'all';
+  // Avisos do sistema: correção, matrícula e UbiTokens (cortesia do mês e pedido pago)
+  const _sistema = n => ['essay_corrected', 'matricula_liberada', 'matricula_vencendo', 'cortesia_ubitokens', 'ubitokens_creditados'].includes(n.type);
   const filtered = all.filter(n => {
     if(filter === 'all') return true;
     if(filter === 'unread') return !n.read;
     if(filter === 'mentions') return n.type === 'mention' || n.type === 'reply';
     if(filter === 'follows') return n.type === 'follow_request' || n.type === 'follow_accepted';
-    if(filter === 'system') return n.type === 'essay_corrected' || n.type === 'matricula_liberada' || n.type === 'matricula_vencendo';
+    if(filter === 'system') return _sistema(n);
     return true;
   });
   const unreadCount = all.filter(n => !n.read).length;
@@ -33360,7 +33354,7 @@ Renderers.notifications = function(route){
     ['unread', 'Não lidas', unreadCount],
     ['mentions', 'Comentários', all.filter(n => n.type === 'mention' || n.type === 'reply').length],
     ['follows', 'Pedidos', all.filter(n => n.type === 'follow_request' || n.type === 'follow_accepted').length],
-    ['system', 'Sistema', all.filter(n => n.type === 'essay_corrected' || n.type === 'matricula_liberada' || n.type === 'matricula_vencendo').length]
+    ['system', 'Sistema', all.filter(_sistema).length]
   ];
   const tabsHtml = `<div class="notif-tabs" role="tablist">
     ${filters.map(([k, lbl, count]) => `
