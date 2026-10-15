@@ -40,7 +40,7 @@
     recusado: { rotulo: 'Recusado', classe: '' }
   };
   var EM_CURSO = { fila: 1, lendo: 1, conferindo: 1 };
-  var CUSTO_USD = [0.6, 1.6];                         // análise manual no Opus, por unidade
+  var CUSTO_USD = [0.3, 4.5];                         // análise manual no Opus, por unidade (medido em 15/10: teoria US$ 0,26; média 2,39; longa 4,19)
   var MSG_PERMISSAO = 'Só o admin do Pedagógico de todas as matérias muda isto.';
   var COLS_AN = 'id, unit_id, subject_id, origem, modelo, status, etapa, atividade, alertas_novos, custo_usd, erro, conferidos, uso, pedido_por, criado_em, terminado_em';
   var NOVO_TXT = 'Novo, da análise agora';
@@ -133,7 +133,7 @@
   function usdEmReais(usd){ var c = cambio(); return c == null ? '' : brl(Number(usd || 0) * c); }
   function estimativa(){
     var c = cambio(); if(c == null) return '';
-    return 'Custo estimado: ' + brl(CUSTO_USD[0] * c) + ' a ' + brl(CUSTO_USD[1] * c) + '.';
+    return 'Custo estimado: ' + brl(CUSTO_USD[0] * c) + ' a ' + brl(CUSTO_USD[1] * c) + ', conforme o tamanho da unidade e quantos pontos precisam ser conferidos.';
   }
   function plural(n, um, varios){ return n === 1 ? '1 ' + um : n + ' ' + varios; }
   function linkSeguro(url){ var s = String(url || '').trim(); return /^https?:\/\//i.test(s) ? s : ''; }
