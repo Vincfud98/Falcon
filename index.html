@@ -10021,7 +10021,7 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 /* linhas (todos os editores): bullet e número em dourado discreto; chip [[ ]] como link fino */
 .tutor-caderno-ed [data-li]::after{background:radial-gradient(circle,var(--accent) 0 2px,transparent 2.5px) no-repeat center;opacity:.75}
 .tutor-caderno-ed [data-li="n"]::after{opacity:1;color:var(--accent);font-size:.68rem;background:none}
-.tutor-caderno-ed .tutor-ref{background:transparent;border:none;border-radius:0;padding:0 0 1px;border-bottom:1px dotted var(--accent-border);font-weight:400}
+.tutor-caderno-ed .tutor-ref{background:transparent;border:none;border-radius:0;padding:0 0 1px;border-bottom:1px dotted var(--accent-border);font-weight:inherit}
 .tutor-caderno-ed .tutor-ref:hover{background:transparent;border-bottom:1px solid var(--accent);text-decoration:none}
 /* grifo como FAIXA (8%–92% da altura): não estoura a linha nem a lacuna */
 .hl-mark[data-hl-color="yellow"]{--hl:rgba(232,212,77,.3)}
@@ -47050,7 +47050,56 @@ window.TutorIA = (function(){
     const before = node.textContent.slice(0, r.startOffset);
     const m = before.match(/\[\[([^\[\]\n]*)$/);
     if(!m) return null;
-    return { node: node, start: r.startOffset - m[0].length, offset: r.startOffset, query: m[1] };
+    const ci = { node: node, start: r.startOffset - m[0].length, offset: r.startOffset, query: m[1] };
+    // a mesma posição como linha + deslocamentos de texto (ver _refAlvo)
+    const raiz = _inpEl();
+    if(raiz && raiz.contains(node)){
+      const l = _cadLinhaDoNo(node, raiz);
+      ci.linha = (l && l !== raiz && raiz.contains(l)) ? l : raiz;
+      ci.offA = _fcVistaCaretOff(ci.linha, node, ci.start);
+      ci.offB = _fcVistaCaretOff(ci.linha, node, ci.offset);
+    }
+    return ci;
+  }
+  /* O trecho "[[busca" na hora do clique. O nó de texto guardado ao abrir a
+     lista pode ter morrido: o salvar (1 s depois da última tecla) des-renderiza
+     os cards e funde nós de texto (normalize). Clicar então dava erro no meio
+     do caminho: nada aparecia na linha, a lista ficava aberta e cada clique em
+     "Criar caderno" criava mais um. Agora a posição também vale como linha +
+     deslocamentos, e o trecho só é usado se o texto dele for mesmo "[[busca". */
+  function _refAlvo(){
+    const ci = _refPickerCI; if(!ci) return null;
+    const esperado = '[[' + ci.query;
+    const faixa = function(n0, o0, n1, o1){
+      try{ const r = document.createRange(); r.setStart(n0, o0); r.setEnd(n1, o1); return r.toString() === esperado ? r : null; }catch(_){ return null; }
+    };
+    let r = null;
+    if(ci.node && ci.node.isConnected) r = faixa(ci.node, ci.start, ci.node, ci.offset);
+    if(!r && ci.linha && ci.linha.isConnected && ci.offA != null && ci.offB != null){
+      const pa = _fcVistaPos(ci.linha, ci.offA), pb = _fcVistaPos(ci.linha, ci.offB, true);
+      if(pa && pb) r = faixa(pa.node, pa.off, pb.node, pb.off);
+    }
+    if(!r){ const ci2 = _caretInfo(); if(ci2 && ci2.query === ci.query) r = faixa(ci2.node, ci2.start, ci2.node, ci2.offset); }
+    return r;
+  }
+  function _refPerdido(){
+    _hideRefPicker();
+    if(window.ueToast) ueToast('O “[[” saiu do lugar. Escreva [[ de novo para escolher.', 'warn');
+  }
+  // Troca o "[[busca" pelo chip, com um espaço depois e o cursor após o espaço.
+  function _refPorChip(chip, espaco){
+    const range = _refAlvo();
+    if(!range){ _refPerdido(); return false; }
+    try{
+      range.deleteContents();
+      range.insertNode(chip);
+      const space = document.createTextNode(espaco); chip.after(space);
+      const nr = document.createRange(); nr.setStartAfter(space); nr.collapse(true);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(nr);
+    }catch(e){ console.warn('[ref chip]', e); _refPerdido(); return false; }
+    _inpEl().focus(); _inpEmptyToggle(); _hideRefPicker();
+    if(_activeEd && _activeEd.classList && _activeEd.classList.contains('tutor-caderno-ed')) _cadSchedule();
+    return true;
   }
   function _hideRefPicker(){ if(_refPickerEl) _refPickerEl.hidden = true; _refPickerCI = null; }
   function _showRefPicker(ci){
@@ -47225,8 +47274,11 @@ window.TutorIA = (function(){
     const elCad = _cadEl();
     // O trecho "[[busca" vira OFFSETS na linha ANTES de qualquer cirurgia: o
     // ciclo abaixo des-renderiza a linha e funde nós de texto — o nó do
-    // caret pode morrer, o texto não.
-    const offA = _fcVistaCaretOff(ref.linha, ci.node, ci.start), offB = _fcVistaCaretOff(ref.linha, ci.node, ci.offset);
+    // caret pode morrer, o texto não. O trecho de agora vem de _refAlvo
+    // (o nó guardado ao abrir a lista pode já ter morrido no salvar).
+    const alvo = _refAlvo();
+    if(!alvo || !ref.linha.contains(alvo.startContainer)){ _refPerdido(); return; }
+    const offA = _fcVistaCaretOff(ref.linha, alvo.startContainer, alvo.startOffset), offB = _fcVistaCaretOff(ref.linha, alvo.endContainer, alvo.endOffset);
     let meuId = ref.id, rodouCiclo = false;
     if(!meuId){
       // linha com sintaxe mas ainda sem carimbo: o card nasce AGORA
@@ -47240,6 +47292,16 @@ window.TutorIA = (function(){
       }
       meuId = String(meuId);
     }
+    // o trecho de novo, depois do ciclo (que troca os nós), e conferido pelo texto
+    let range = rodouCiclo ? null : alvo;
+    if(!range && offA != null && offB != null){
+      const pa = _fcVistaPos(ref.linha, offA), pb = _fcVistaPos(ref.linha, offB, true);
+      if(pa && pb){ try{ range = document.createRange(); range.setStart(pa.node, pa.off); range.setEnd(pb.node, pb.off); if(range.toString() !== '[[' + ci.query) range = null; }catch(_){ range = null; } }
+    }
+    if(!range){
+      if(rodouCiclo && elCad){ try{ _fcVistaAplicar(elCad); }catch(_){ } }
+      _refPerdido(); return;
+    }
     const r = rel === 'requer' ? Store.linkAdd(meuId, outroId, 'requisito')
       : rel === 'consequencia' ? Store.linkAdd(outroId, meuId, 'requisito')
       : Store.linkAdd(meuId, outroId, 'associacao');
@@ -47248,15 +47310,6 @@ window.TutorIA = (function(){
       if(rodouCiclo && elCad){ try{ _fcVistaAplicar(elCad); }catch(_){ } }
       _hideRefPicker(); return;
     }
-    let range = null;
-    try{
-      if(!rodouCiclo && ci.node.isConnected){ range = document.createRange(); range.setStart(ci.node, ci.start); range.setEnd(ci.node, ci.offset); }
-    }catch(_){ range = null; }
-    if(!range && offA != null && offB != null){
-      const pa = _fcVistaPos(ref.linha, offA), pb = _fcVistaPos(ref.linha, offB, true);
-      if(pa && pb){ try{ range = document.createRange(); range.setStart(pa.node, pa.off); range.setEnd(pb.node, pb.off); }catch(_){ range = null; } }
-    }
-    if(!range){ _hideRefPicker(); return; }
     try{ range.deleteContents(); }catch(_){ _hideRefPicker(); return; }
     // SEM chip no texto: a conexão vive no card e aparece no selo ⇆ da linha
     // (o clique lista os cards ligados). O chip azul poluía a linha e ainda
@@ -47271,13 +47324,18 @@ window.TutorIA = (function(){
   }
   // Enter/clique na 1ª opção: despacha pro insersor certo (unidade, doc, card).
   function _pickRefEl(btn){
-    if(!btn) return;
+    if(!btn || !_refPickerCI) return;
     if(btn.hasAttribute && btn.hasAttribute('data-novo')){
       const nome = btn.getAttribute('data-novo');
+      // o trecho é conferido ANTES de criar: clique que não acha o "[[" não deixa caderno solto
+      if(!_refAlvo()){ _refPerdido(); return; }
+      // já existe um caderno com esse nome (outro clique, outra aba)? cita esse em vez de criar outro
+      const lista = (window.Store && Store.cadAvulsosLista) ? (Store.cadAvulsosLista() || []) : [];
+      const igual = lista.find(function(d2){ return String(d2.id) !== String(_cadDocId || '') && _nomeNormRef(d2.titulo) === _nomeNormRef(nome); });
+      if(igual){ _pickRefDoc(String(igual.id), igual.titulo || nome); return; }
       const doc = (window.Store && Store.cadAvulsoCriar) ? Store.cadAvulsoCriar({ titulo: nome }) : null;
       if(doc){
-        _pickRefDoc(String(doc.id), nome);
-        if(window.ueToast) ueToast('Caderno \u201C' + nome + '\u201D criado — o que você escrever aqui já aparece lá.', 'ok');
+        if(_pickRefDoc(String(doc.id), nome) && window.ueToast) ueToast('Caderno \u201C' + nome + '\u201D criado — o que você escrever aqui já aparece lá.', 'ok');
       } else _hideRefPicker();
       return;
     }
@@ -47287,38 +47345,24 @@ window.TutorIA = (function(){
   }
   // D2d: chip de caderno PRÓPRIO — mesma cara, identidade data-doc-id.
   function _pickRefDoc(did, titulo){
-    if(!_refPickerCI){ _hideRefPicker(); return; }
-    const ci = _refPickerCI;
-    const range = document.createRange();
-    try { range.setStart(ci.node, ci.start); range.setEnd(ci.node, ci.offset); range.deleteContents(); } catch(_){ _hideRefPicker(); return; }
+    if(!_refPickerCI){ _hideRefPicker(); return false; }
     const chip = document.createElement('span');
     chip.className = 'tutor-ref tutor-ref-doc'; chip.contentEditable = 'false';
     chip.setAttribute('data-doc-id', did); chip.setAttribute('data-unit-title', titulo);
     chip.textContent = titulo;
-    range.insertNode(chip);
+    if(!_refPorChip(chip, ' ')) return false;
     _refRecenteAdd({ t: 'd', id: did, label: titulo });
-    const space = document.createTextNode(' '); chip.after(space);
-    const nr = document.createRange(); nr.setStartAfter(space); nr.collapse(true);
-    const s = window.getSelection(); s.removeAllRanges(); s.addRange(nr);
-    _inpEl().focus(); _inpEmptyToggle(); _hideRefPicker();
-    if(_activeEd && _activeEd.classList && _activeEd.classList.contains('tutor-caderno-ed')) _cadSchedule();
+    return true;
   }
   function _pickRef(uid, utitle){
-    if(!_refPickerCI){ _hideRefPicker(); return; }
-    const ci = _refPickerCI;
-    const range = document.createRange();
-    try { range.setStart(ci.node, ci.start); range.setEnd(ci.node, ci.offset); range.deleteContents(); } catch(_){ _hideRefPicker(); return; }
+    if(!_refPickerCI){ _hideRefPicker(); return false; }
     const chip = document.createElement('span');
     chip.className = 'tutor-ref'; chip.contentEditable = 'false';
     chip.setAttribute('data-unit-id', uid); chip.setAttribute('data-unit-title', utitle);
     chip.textContent = utitle;
-    range.insertNode(chip);
+    if(!_refPorChip(chip, '\u00a0')) return false;
     _refRecenteAdd({ t: 'u', id: uid, label: utitle });
-    const space = document.createTextNode(' '); chip.after(space);
-    const nr = document.createRange(); nr.setStartAfter(space); nr.collapse(true);
-    const s = window.getSelection(); s.removeAllRanges(); s.addRange(nr);
-    _inpEl().focus(); _inpEmptyToggle(); _hideRefPicker();
-    if(_activeEd && _activeEd.classList && _activeEd.classList.contains('tutor-caderno-ed')) _cadSchedule();
+    return true;
   }
   function _onInpInput(){ _inpEmptyToggle(); const ci = _caretInfo(); if(ci) _showRefPicker(ci); else _hideRefPicker(); }
   function _onInpKey(e){
@@ -47790,6 +47834,64 @@ window.TutorIA = (function(){
     if(oa == null || ob == null) return null;
     return { la: la, oa: oa, lb: lb, ob: ob, colapsada: sel.isCollapsed };
   }
+  /* Cursor só onde se digita. Um deslocamento de texto pode cair DENTRO de
+     uma peça fechada: o separador " :: " e o chip [[ ]] (contenteditable=false)
+     ou um marcador escondido { } (.fc-oc). Ali a tecla não entra: o Chrome
+     manda o cursor para o começo do caderno e a letra vai parar lá (bug do
+     testador: "digito uma letra e o cursor me tira do campo", com o card
+     "frente :: " ainda sem verso no momento do salvar). Sai da peça: no
+     começo dela, fica antes; no resto, depois (no texto vizinho, se houver). */
+  function _cadPecaFechada(e, linha){
+    let peca = null;
+    for(let x = e && e.nodeType === 3 ? e.parentElement : e; x && x !== linha; x = x.parentElement){
+      if(x.getAttribute('contenteditable') === 'false' || (x.classList && x.classList.contains('fc-oc'))) peca = x;
+    }
+    return peca;
+  }
+  /* Depois de uma peça, pula também as decorações vazias não editáveis do fim
+     da linha (etiqueta de agendamento, selo ⇆). Parado ANTES delas, o Chrome
+     leva a letra para trás: depois de um "}" escondido, ela caía dentro da
+     lacuna. Nós de texto vazios no caminho são tirados. */
+  function _cadPosDepois(r, el){
+    let x = el;
+    for(let y = x.nextSibling; y; y = x.nextSibling){
+      if(y.nodeType === 3 && !y.nodeValue.length){ y.remove(); continue; }   // texto vazio: ver _fcVistaTiraVazios
+      const decoVazia = y.nodeType === 1 && y.getAttribute('contenteditable') === 'false' && y.hasAttribute('data-deco') && !y.textContent;
+      if(!decoVazia) break;
+      x = y;
+    }
+    r.setStartAfter(x);
+  }
+  function _cadCaretLivre(linha, node, off){
+    const r = document.createRange();
+    const peca = _cadPecaFechada(node, linha);
+    if(!peca){ r.setStart(node, off); r.collapse(true); return r; }
+    const w = document.createTreeWalker(peca, NodeFilter.SHOW_TEXT);
+    const t0 = w.nextNode();
+    const noComeco = !t0 || (off === 0 && (node === t0 || node === peca));
+    // o texto vizinho (fora de qualquer peça) do lado escolhido; vazio não conta
+    const lista = []; const wl = document.createTreeWalker(linha, NodeFilter.SHOW_TEXT); let t;
+    while((t = wl.nextNode())) lista.push(t);
+    const dentro = function(x){ return peca.contains(x); };
+    let viz = null;
+    if(noComeco){
+      for(let i = lista.length - 1; i >= 0; i--){
+        const x = lista[i];
+        if(dentro(x) || !(x.compareDocumentPosition(peca) & Node.DOCUMENT_POSITION_FOLLOWING) || !x.nodeValue.length) continue;
+        viz = _cadPecaFechada(x, linha) ? null : x; break;
+      }
+      if(viz) r.setStart(viz, viz.nodeValue.length); else r.setStartBefore(peca);
+    } else {
+      for(let i = 0; i < lista.length; i++){
+        const x = lista[i];
+        if(dentro(x) || !(x.compareDocumentPosition(peca) & Node.DOCUMENT_POSITION_PRECEDING) || !x.nodeValue.length) continue;
+        viz = _cadPecaFechada(x, linha) ? null : x; break;
+      }
+      if(viz) r.setStart(viz, 0); else _cadPosDepois(r, peca);
+    }
+    r.collapse(true);
+    return r;
+  }
   // Devolve o Range restaurado (e o põe na seleção) ou null.
   function _cadSelRestaura(ed, snap){
     if(!snap || !snap.la.isConnected || !snap.lb.isConnected) return null;
@@ -47797,12 +47899,21 @@ window.TutorIA = (function(){
     const pa = snap.colapsada ? pb : _fcVistaPos(snap.la, snap.oa);
     if(!pa || !pb) return null;
     try{
-      const r = document.createRange();
-      if(snap.colapsada){ r.setStart(pb.node, pb.off); r.collapse(true); }
+      let r = document.createRange();
+      if(snap.colapsada) r = _cadCaretLivre(snap.lb, pb.node, pb.off);
       else { r.setStart(pa.node, pa.off); r.setEnd(pb.node, pb.off); }
       const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
       return r;
     }catch(_){ return null; }
+  }
+  /* Os embrulhos deixam nós de texto VAZIOS nas pontas (extractContents e
+     insertNode no fim de um nó). Com o cursor depois de um deles, colado na
+     etiqueta não editável do fim da linha, o Chrome manda a letra para fora do
+     caderno (para o "salvo" do rodapé). Texto vazio não é texto: sai. */
+  function _fcVistaTiraVazios(linha){
+    const w = document.createTreeWalker(linha, NodeFilter.SHOW_TEXT), vazios = []; let t;
+    while((t = w.nextNode())) if(!t.nodeValue.length) vazios.push(t);
+    vazios.forEach(function(x){ x.remove(); });
   }
   function _fcVistaWrap(linha, a, b, cls, atrs){
     if(a === b){
@@ -48020,8 +48131,13 @@ window.TutorIA = (function(){
     // etiqueta de agendamento (aparece ao passar o mouse): idem, comprimento zero; a classe carrega o texto para redesenhar quando muda
     const due = fcIdSelo ? String(linha.getAttribute('data-fc-due') || '') : '';
     if(due){ const fim2 = texto.replace(/\n+$/, '').length; plano.push({ a: fim2, b: fim2, cls: 'fc-due fc-due-' + due.replace(/[^a-z0-9]+/gi, '-'), due: due }); }
+    // compara sem depender da ordem: o selo e a etiqueta de agendamento têm
+    // comprimento zero no MESMO ponto e entram na tela em ordem trocada; antes,
+    // isso redesenhava a linha inteira a cada tecla num card com conexões
     const atual = _fcVistaAtual(linha);
-    if(plano.length === atual.length && plano.every(function(pl, i){ return pl.a === atual[i].a && pl.b === atual[i].b && pl.cls === atual[i].cls; })) return false;
+    const _ordF = function(x, y){ return x.a - y.a || x.b - y.b || (x.cls < y.cls ? -1 : x.cls > y.cls ? 1 : 0); };
+    const pOrd = plano.slice().sort(_ordF), aOrd = atual.slice().sort(_ordF);
+    if(pOrd.length === aOrd.length && pOrd.every(function(pl, i){ return pl.a === aOrd[i].a && pl.b === aOrd[i].b && pl.cls === aOrd[i].cls; })) return false;
     const sel = window.getSelection();
     let off = null;
     const _ae = document.activeElement;
@@ -48037,6 +48153,7 @@ window.TutorIA = (function(){
         if(pl.due != null){ atrs['data-due'] = pl.due; atrs['contenteditable'] = 'false'; }
         criados[i] = _fcVistaWrap(linha, pl.a, pl.b, pl.cls, atrs);
       });
+      _fcVistaTiraVazios(linha);
       if(off != null){
         const pp = _fcVistaPos(linha, off);
         if(pp && pp.node){
@@ -48046,10 +48163,11 @@ window.TutorIA = (function(){
           const hit = plano.find(function(pl){ return off > pl.a && off <= pl.b; });
           if(hit && (hit.cls === 'fc-oc' || off === hit.b)){
             const alvoSp = criados[plano.indexOf(hit)];
-            if(alvoSp){ try{ r.setStartAfter(alvoSp); r.collapse(true); posto = true; }catch(_){} }
+            if(alvoSp){ try{ _cadPosDepois(r, alvoSp); r.collapse(true); posto = true; }catch(_){} }
           }
-          if(!posto){ try{ r.setStart(pp.node, pp.off); r.collapse(true); posto = true; }catch(_){} }
-          if(posto){ sel.removeAllRanges(); sel.addRange(r); }
+          let rr = r;
+          if(!posto){ try{ rr = _cadCaretLivre(linha, pp.node, pp.off); posto = true; }catch(_){} }
+          if(posto){ sel.removeAllRanges(); sel.addRange(rr); }
         }
       }
     } finally { _fcVistaMudando = false; }
@@ -50134,6 +50252,10 @@ window.TutorIA = (function(){
         const el2 = _activeEd && _activeEd.classList && _activeEd.classList.contains('tutor-caderno-ed') ? _activeEd : _cadEl();
         if(!el2) return;
         const linha = _cadLinhaDe(ci2.node, el2);
+        // tirar o "//" de uma linha vazia deixa a linha SEM CORPO (só um texto vazio):
+        // altura zero, o cursor não fica nela e o que se digita cai na linha de cima
+        // (era o "[[ não funciona em lista": a lista nascia assim pelo menu)
+        if(linha && !linha.textContent.length && !linha.querySelector('br')) linha.appendChild(document.createElement('br'));
         if(linha) _blocoTransformar(el2, linha, tipo);
       });
       document.addEventListener('keydown', function(e){ if(e.key === 'Escape' && _slashEl) _slashFechar(); }, true);
@@ -53142,7 +53264,8 @@ window.TutorIA = (function(){
       if(era) alvo.removeAttribute('data-fc-item');
       const head = era ? null : _fcCadMultiHead(alvo);
       if(head) _fcCadItensDe(head).forEach(function(it){ _cadLiSet(it, t); });
-      ed.focus(); _cadCaretEm(alvo, true); _onCadInput();
+      // linha vazia: cursor ANTES do <br> (depois dele o Chrome não segura a digitação na linha)
+      ed.focus(); _cadCaretEm(alvo, !!alvo.textContent.length); _onCadInput();
       return alvo;
     }
     if(linha.hasAttribute('data-fc-id') || linha.hasAttribute('data-fc-item')){
@@ -53481,6 +53604,7 @@ window.TutorIA = (function(){
           const cmd = b.getAttribute('data-cmd');
           if(cmd === 'insertUnorderedList' || cmd === 'insertOrderedList'){ _cadListaToggle(el2, cmd === 'insertOrderedList' ? 'n' : 'b'); return; }
           if(cmd === 'removeFormat') _cadLimparFormatacao(el2);
+          else if(_CAD_FMT_CMD[cmd] && _cadFmtSoChips(el2, _CAD_FMT_CMD[cmd])){ /* só chip na seleção: feito ali */ }
           else { try { document.execCommand(cmd, false, b.getAttribute('data-arg') || null); } catch(_){} }
           _emptyToggle(el2); _cadSchedule();
         });
@@ -53965,11 +54089,133 @@ window.TutorIA = (function(){
       const sel = _histSel(ed2); if(sel) h.base.sel = sel;
     });
   }
+  /* ═══ Formato do texto vale para o chip [[ ]] (pedido do dono, 15/10) ═══
+     "Convenção de Montevidéu" no meio de uma frase em negrito ficava magro. O
+     comando do navegador PULA peças não editáveis: sai "<b>A </b>[chip]<b> define</b>";
+     ao tirar o negrito de um pedaço, ele põe style="font-weight: bold" no chip, que o
+     salvar descarta (_cadSanitize). Depois do comando, os chips da seleção seguem o
+     texto selecionado, sempre com a MESMA marca do texto (b, i, u, strike) por fora
+     do chip. Seleção só com chip(s): o navegador não faz nada, a troca é feita aqui. */
+  const _CAD_FMT = {
+    formatBold: { tag: 'b', tags: ['B', 'STRONG'], estilo: function(st){ return st.fontWeight === 'bold' || parseInt(st.fontWeight, 10) >= 600; }, tira: function(st){ st.fontWeight = ''; } },
+    formatItalic: { tag: 'i', tags: ['I', 'EM'], estilo: function(st){ return st.fontStyle === 'italic'; }, tira: function(st){ st.fontStyle = ''; } },
+    formatUnderline: { tag: 'u', tags: ['U'], estilo: function(st){ return /underline/.test(st.textDecorationLine || st.textDecoration || ''); }, tira: function(st){ const v = String(st.textDecorationLine || '').replace('underline', '').trim(); if(v) st.textDecorationLine = v; else st.textDecoration = ''; } },
+    formatStrikeThrough: { tag: 'strike', tags: ['S', 'STRIKE', 'DEL'], estilo: function(st){ return /line-through/.test(st.textDecorationLine || st.textDecoration || ''); }, tira: function(st){ const v = String(st.textDecorationLine || '').replace('line-through', '').trim(); if(v) st.textDecorationLine = v; else st.textDecoration = ''; } }
+  };
+  const _CAD_FMT_CMD = { bold: 'formatBold', italic: 'formatItalic', underline: 'formatUnderline', strikeThrough: 'formatStrikeThrough' };
+  // o elemento que dá esse formato ao nó (marca ou estilo), sem sair da linha
+  function _cadFmtDono(no, f, ed){
+    for(let x = no.nodeType === 3 ? no.parentElement : no; x && x !== ed; x = x.parentElement){
+      if(f.tags.indexOf(x.tagName) >= 0 || (x.style && f.estilo(x.style))) return x;
+      if(x.parentElement === ed) break;
+    }
+    return null;
+  }
+  // nós de texto com letra DENTRO da seleção, fora dos chips
+  function _cadFmtTextos(range, ed){
+    const out = [];
+    const anc = range.commonAncestorContainer;
+    const raiz = anc.nodeType === 1 ? anc : anc.parentNode;
+    if(!raiz) return out;
+    const w = document.createTreeWalker(raiz, NodeFilter.SHOW_TEXT); let t;
+    while((t = w.nextNode())){
+      let toca = false; try{ toca = range.intersectsNode(t); }catch(_){ }
+      if(!toca) continue;
+      const ini = t === range.startContainer ? range.startOffset : 0, fim = t === range.endContainer ? range.endOffset : t.nodeValue.length;
+      if(!/\S/.test(t.nodeValue.slice(ini, fim))) continue;
+      const pai = t.parentElement;
+      if(pai && pai.closest && pai.closest('.tutor-ref') && ed.contains(pai.closest('.tutor-ref'))) continue;
+      out.push(t);
+    }
+    return out;
+  }
+  function _cadFmtEmbrulha(chip, f){
+    let w = document.createElement(f.tag);
+    chip.parentNode.insertBefore(w, chip); w.appendChild(chip);
+    const ant = w.previousSibling, prox = w.nextSibling;
+    if(ant && ant.nodeType === 1 && ant.tagName === w.tagName && !ant.attributes.length){ while(w.firstChild) ant.appendChild(w.firstChild); w.remove(); w = ant; }
+    if(prox && prox.nodeType === 1 && prox.tagName === w.tagName && !prox.attributes.length){ while(prox.firstChild) w.appendChild(prox.firstChild); prox.remove(); }
+  }
+  // tira o chip de dentro da marca: a marca fica no texto antes e depois dele
+  function _cadFmtTiraDe(chip, dono, f, ed){
+    if(dono === chip){ f.tira(chip.style); if(!(chip.getAttribute('style') || '').trim()) chip.removeAttribute('style'); return; }
+    if(!dono.parentNode || dono.parentElement === ed || _cadLinhaDoNo(dono, ed) === dono) return;   // nunca parte a linha
+    const pai = dono.parentNode;
+    const ra = document.createRange(); ra.setStart(dono, 0); ra.setEndBefore(chip);
+    const rb = document.createRange(); rb.setStartAfter(chip); rb.setEnd(dono, dono.childNodes.length);
+    const fa = ra.extractContents(), fb = rb.extractContents();
+    const poe = function(fr, ref){
+      if(!fr.textContent && !(fr.querySelector && fr.querySelector('img,br'))) return;
+      if(/\S/.test(fr.textContent) || (fr.querySelector && fr.querySelector('img,br,.tutor-ref'))){ const c = dono.cloneNode(false); c.appendChild(fr); pai.insertBefore(c, ref); }
+      else pai.insertBefore(document.createTextNode(fr.textContent), ref);
+    };
+    poe(fa, dono); poe(fb, dono.nextSibling);
+    while(dono.firstChild) pai.insertBefore(dono.firstChild, dono);
+    pai.removeChild(dono);
+  }
+  // estilo que o navegador pôs DIRETO no chip vira marca por fora (o salvar descarta esse estilo)
+  function _cadFmtChipsLimpa(ed){
+    let mexeu = false;
+    Array.prototype.slice.call(ed.querySelectorAll('.tutor-ref[style]')).forEach(function(chip){
+      Object.keys(_CAD_FMT).forEach(function(k){
+        const f = _CAD_FMT[k];
+        if(!f.estilo(chip.style)) return;
+        f.tira(chip.style); mexeu = true;
+        if(!_cadFmtDono(chip, f, ed)) _cadFmtEmbrulha(chip, f);
+      });
+      if(!(chip.getAttribute('style') || '').trim()){ chip.removeAttribute('style'); mexeu = true; }
+    });
+    return mexeu;
+  }
+  // depois do comando (input): os chips da seleção seguem o texto selecionado
+  function _cadFmtDepois(ed, tipo){
+    const f = _CAD_FMT[tipo]; if(!f) return;
+    const sel = window.getSelection();
+    const range = (sel && sel.rangeCount) ? sel.getRangeAt(0) : null;
+    const snap = _cadSelSnap(ed);
+    let mexeu = false;
+    if(range && !range.collapsed && ed.contains(range.commonAncestorContainer)){
+      const chips = _cadChipsNaSelecao(range, ed), textos = chips.length ? _cadFmtTextos(range, ed) : [];
+      if(chips.length && textos.length){
+        const liga = textos.every(function(t){ return !!_cadFmtDono(t, f, ed); });
+        chips.forEach(function(chip){
+          const d = _cadFmtDono(chip, f, ed);
+          if(liga && !d){ _cadFmtEmbrulha(chip, f); mexeu = true; }
+          else if(!liga && d){ _cadFmtTiraDe(chip, d, f, ed); mexeu = true; }
+        });
+      }
+    }
+    if(_cadFmtChipsLimpa(ed)) mexeu = true;
+    if(mexeu && snap) _cadSelRestaura(ed, snap);
+  }
+  // seleção só com chip(s), sem letra fora deles: a troca é feita aqui (o navegador não faz nada)
+  function _cadFmtSoChips(ed, tipo){
+    const f = _CAD_FMT[tipo]; if(!f) return false;
+    const sel = window.getSelection(); if(!sel || !sel.rangeCount || sel.isCollapsed) return false;
+    const range = sel.getRangeAt(0); if(!ed.contains(range.commonAncestorContainer)) return false;
+    const chips = _cadChipsNaSelecao(range, ed);
+    if(!chips.length || _cadFmtTextos(range, ed).length) return false;
+    const liga = !chips.every(function(chip){ return !!_cadFmtDono(chip, f, ed); });
+    chips.forEach(function(chip){
+      const d = _cadFmtDono(chip, f, ed);
+      if(liga && !d) _cadFmtEmbrulha(chip, f);
+      else if(!liga && d) _cadFmtTiraDe(chip, d, f, ed);
+    });
+    try{ const r = document.createRange(); r.setStartBefore(chips[0]); r.setEndAfter(chips[chips.length - 1]); sel.removeAllRanges(); sel.addRange(r); }catch(_){ }
+    _cadSchedule();
+    return true;
+  }
+  function _cadFmtLigar(ed){
+    ed.addEventListener('beforeinput', function(e){ if(_CAD_FMT[e.inputType] && _cadFmtSoChips(ed, e.inputType)) e.preventDefault(); });
+    // captura: roda antes do _onCadInput, e o passo do desfazer já leva o chip junto
+    ed.addEventListener('input', function(e){ if(_CAD_FMT[e.inputType]){ try{ _cadFmtDepois(ed, e.inputType); }catch(err){ console.warn('[chip formato]', err); } } }, true);
+  }
   function ligarEditorCaderno(ed, opts){
     opts = opts || {};
     if(!ed || ed.__cadLigado) return ed;
     ed.__cadLigado = true;
     _histLigar(ed);
+    _cadFmtLigar(ed);
     _ensureStyles();
     _flutArmar();
     ed.classList.add('tutor-caderno-ed');
@@ -54126,6 +54372,7 @@ window.TutorIA = (function(){
         const cmd = b.getAttribute('data-cmd');
         if(cmd === 'insertUnorderedList' || cmd === 'insertOrderedList'){ _cadListaToggle(ed, cmd === 'insertOrderedList' ? 'n' : 'b'); return; }
         if(cmd === 'removeFormat') _cadLimparFormatacao(ed);
+        else if(_CAD_FMT_CMD[cmd] && _cadFmtSoChips(ed, _CAD_FMT_CMD[cmd])){ /* só chip na seleção: feito ali */ }
         else { try { document.execCommand(cmd, false, b.getAttribute('data-arg') || null); } catch(_){} }
         _emptyToggle(ed); _cadSchedule();
       });
