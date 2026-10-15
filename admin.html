@@ -38427,6 +38427,43 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     renderClientsList();
   }
 
+  // ── Tags → ação (público Meta / ver clientes) e segmentos comportamentais ──
+  function _clientsOfTag(tagId){
+    const ids = new Set(clientTagLinksCache.filter(l => l.tag_id === tagId).map(l => l.client_id));
+    return clientsCache.filter(c => ids.has(c.id));
+  }
+  function _metaCsv(clients, filename){
+    if(!clients || clients.length === 0){ showMsg('globalMessage4', 'Nenhum cliente nesse segmento.'); return; }
+    const rows = [['email', 'phone', 'fn', 'country']].concat(clients.map(c => [(c.email || '').toLowerCase().trim(), (c.phone || '').replace(/\D/g, ''), (c.full_name || '').toLowerCase().trim(), 'BR']));
+    _ofDownload(filename, _ofCsv(rows));
+    showMsg('globalMessage4', `Público Meta exportado (${clients.length} contato${clients.length === 1 ? '' : 's'}).`, 'success');
+  }
+  function verClientesDaTag(tagId){
+    clientsFilters.tag_id = [String(tagId)];
+    try { if(clientsMsInstances.tag_id) clientsMsInstances.tag_id.update(clientTagsCache.map(t => ({ value: String(t.id), label: t.name })), [String(tagId)]); } catch(_){}
+    clientsPage = 1;
+    const tab = document.querySelector('#group-crm .tab[data-tab="clients"]'); if(tab) tab.click();
+    renderClientsList();
+  }
+  // Segmentos comportamentais a partir do rastreamento (web_events)
+  function _segClientes(kind){
+    const byClient = {}; webEventsCache.forEach(e => { if(e.client_id) (byClient[e.client_id] = byClient[e.client_id] || []).push(e); });
+    return clientsCache.filter(c => {
+      const evs = byClient[c.id] || [];
+      if(kind === 'quentes') return clientScore(c.id).score >= 15;
+      if(kind === 'visitou') return evs.some(e => e.event_type === 'buy_click');
+      if(kind === 'abandonou') return evs.some(e => e.event_type === 'buy_click') && !c.first_purchase_at && c.status !== 'customer';
+      return false;
+    });
+  }
+  function verClientesQuentes(){
+    clientsFilters.hot = true;
+    const cb = document.getElementById('cf-hot'); if(cb) cb.checked = true;
+    clientsPage = 1;
+    const tab = document.querySelector('#group-crm .tab[data-tab="clients"]'); if(tab) tab.click();
+    renderClientsList();
+  }
+
   /**
    * Renderiza o painel de pedidos do cliente (modal).
    */
@@ -45803,6 +45840,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const box = document.getElementById('clientTagsList');
     if(!box) return;
 
+    if(!webEventsLoaded && !_webEventsKicked){ _webEventsKicked = true; loadWebEvents().then(() => { _scoreMapCache = null; renderClientTagsList(); }); }
+    _scoreMapCache = _buildScoreMap();
+
     const list = getFilteredClientTags();
     document.getElementById('client-tags-count').textContent =
       `${list.length} ${list.length === 1 ? 'registro' : 'registros'}` +
@@ -45848,15 +45888,33 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         <span style="font-size:.85rem;color:var(--text);line-height:1.4">cliente${multiInterest === 1 ? '' : 's'} com <strong>2+ interesses</strong> — candidato${multiInterest === 1 ? '' : 's'} ao <strong>pacote completo</strong> (upsell), não a matéria avulsa.</span>
       </div>` : '';
 
-    box.innerHTML = insight + `<div class="ctag-list">${list.map(t => {
+    // ── SEGMENTOS COMPORTAMENTAIS (web_events): audiências de anúncio por ação ──
+    const _seg = [
+      { key: 'quentes',   label: '🔥 Leads quentes',        desc: 'score alto — intenção forte',     ver: true },
+      { key: 'visitou',   label: 'Visitou página de venda', desc: 'clicou em comprar',               ver: false },
+      { key: 'abandonou', label: 'Abandonou carrinho',      desc: 'clicou comprar e não pagou',      ver: false },
+    ];
+    const segHtml = `
+      <div class="sub-h" style="margin:.4rem 0 .8rem"><span class="sub-h-text">Segmentos por comportamento</span><span class="sub-h-rule"></span><span class="estat-hint">do rastreamento — públicos de anúncio</span></div>
+      <div class="ctag-list" style="margin-bottom:1.4rem">${_seg.map(s => { const n = _segClientes(s.key).length; return `
+        <div class="ctag-card" style="border-left-color:#6b8cae;cursor:default">
+          <div class="ctag-card-head"><span class="ctag-card-name">${s.label}</span><span class="ctag-card-brand" style="color:#6b8cae">comportamento</span></div>
+          <span class="ctag-card-description">${s.desc}</span>
+          <div class="ctag-card-footer"><span class="ctag-card-slug">segmento vivo</span><span class="ctag-card-usage ${n > 0 ? 'active' : 'unused'}">${n} ${n === 1 ? 'cliente' : 'clientes'}</span></div>
+          <div style="margin-top:.6rem;display:flex;gap:.4rem;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" data-seg-meta="${s.key}">Público Meta</button>
+            ${s.ver ? `<button class="btn btn-ghost btn-sm" data-seg-ver="${s.key}">Ver clientes</button>` : ''}
+          </div>
+        </div>`; }).join('')}</div>`;
+
+    box.innerHTML = insight + segHtml + `<div class="ctag-list">${list.map(t => {
       const brand = t.brand_id ? brandsMap[t.brand_id] : null;
       const st = statsByTag[t.id] || { total: new Set(), conv: new Set() };
       const count = st.total.size;
       const conv = st.conv.size;
       const pct = count > 0 ? Math.round((conv / count) * 100) : 0;
+      const ltvTotal = [...st.total].reduce((s, id) => s + clientLTV(id), 0);
       const color = t.color || '#c8a97e';
-      // Verde = isca que converte; dourado = converte pouco; vermelho = isca
-      // que atrai mas não vira aluno (reavaliar a oferta/sequência dessa tag).
       const convColor = count === 0 ? 'var(--text-mute)'
         : pct >= 25 ? '#7ea875'
         : pct > 0  ? 'var(--accent)'
@@ -45877,11 +45935,23 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             </span>
           </div>
           ${convTxt ? `<div style="margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border-soft);font-size:.72rem;font-family:var(--mono);letter-spacing:.03em;color:${convColor}">↳ ${convTxt}</div>` : ''}
+          ${ltvTotal > 0 ? `<div style="margin-top:.25rem;font-size:.72rem;font-family:var(--mono);color:var(--text-mute)">LTV total ${fmtBRL(ltvTotal)}</div>` : ''}
+          ${count > 0 ? `<div style="margin-top:.6rem;display:flex;gap:.4rem;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" data-tag-ver="${t.id}">Ver clientes</button>
+            <button class="btn btn-ghost btn-sm" data-tag-meta="${t.id}">Público Meta</button>
+          </div>` : ''}
         </div>`;
     }).join('')}</div>`;
 
-    box.querySelectorAll('.ctag-card').forEach(card => {
-      card.addEventListener('click', () => openClientTagModal(parseInt(card.dataset.id)));
+    // Ações dos segmentos comportamentais
+    box.querySelectorAll('[data-seg-meta]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); _metaCsv(_segClientes(b.dataset.segMeta), 'publico-' + b.dataset.segMeta + '.csv'); }));
+    box.querySelectorAll('[data-seg-ver]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); if(b.dataset.segVer === 'quentes') verClientesQuentes(); }));
+    // Ações das tags
+    box.querySelectorAll('[data-tag-ver]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); verClientesDaTag(parseInt(b.dataset.tagVer)); }));
+    box.querySelectorAll('[data-tag-meta]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); _metaCsv(_clientsOfTag(parseInt(b.dataset.tagMeta)), 'publico-tag.csv'); }));
+    // Clique no card (fora dos botões) abre edição
+    box.querySelectorAll('.ctag-card[data-id]').forEach(card => {
+      card.addEventListener('click', (e) => { if(e.target.closest('button')) return; openClientTagModal(parseInt(card.dataset.id)); });
     });
   }
 
