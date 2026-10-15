@@ -10420,8 +10420,29 @@ tr.ral-online .ral-pres{ display:inline-flex; }
                   <input type="checkbox" id="cf-active-enrollment">
                   <span>Matrícula ativa</span>
                 </label>
+                <label class="toggle-flag">
+                  <input type="checkbox" id="cf-recovery">
+                  <span>Engajou, não comprou</span>
+                </label>
+                <label class="toggle-flag">
+                  <input type="checkbox" id="cf-hot">
+                  <span>🔥 Leads quentes</span>
+                </label>
               </div>
             </div>
+          </div>
+
+          <!-- Barra de ação em massa (aparece com seleção) -->
+          <div class="clients-bulk-bar" id="clientsBulkBar" style="display:none;align-items:center;gap:.7rem;flex-wrap:wrap;margin:.6rem 0;padding:.6rem .9rem;background:var(--accent-soft, rgba(200,169,126,.08));border:1px solid rgba(200,169,126,.3);border-radius:6px">
+            <span style="font-family:var(--mono);font-size:.82rem;color:var(--accent)" id="clientsBulkCount">0 selecionados</span>
+            <span style="width:1px;height:18px;background:rgba(200,169,126,.25)"></span>
+            <button class="btn btn-ghost btn-sm" id="bulkExportCsv">Exportar CSV</button>
+            <button class="btn btn-ghost btn-sm" id="bulkExportMeta">Exportar público Meta</button>
+            <span style="display:inline-flex;align-items:center;gap:.4rem">
+              <select id="bulkTagSelect" style="padding:.4rem .6rem;background:var(--bg-card);border:1px solid rgba(200,169,126,.15);border-radius:3px;color:var(--text);font-size:.82rem"><option value="">Adicionar tag…</option></select>
+              <button class="btn btn-sm" id="bulkTagApply">Aplicar</button>
+            </span>
+            <button class="btn btn-ghost btn-sm" id="bulkClearSel" style="margin-left:auto">Limpar seleção</button>
           </div>
 
           <!-- Ações secundárias -->
@@ -17474,7 +17495,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     activity_from: '', activity_to: '',
     never_purchased: false,
     active_enrollment: false,
+    recovery: false,     // engajou (tem evento web) e não comprou
+    hot: false,          // leads quentes (score alto)
   };
+  let clientsSelection = new Set();   // ids selecionados p/ ação em massa
   let clientsSearch = '';
   let clientsSort = { field: 'full_name', dir: 'asc' };
   let clientsPage = 1;
@@ -37666,6 +37690,22 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       clientsPage = 1;
       renderClientsList();
     });
+    document.getElementById('cf-recovery')?.addEventListener('change', async (e) => {
+      clientsFilters.recovery = e.target.checked;
+      if(e.target.checked && !webEventsLoaded) await loadWebEvents();
+      clientsPage = 1; renderClientsList();
+    });
+    document.getElementById('cf-hot')?.addEventListener('change', async (e) => {
+      clientsFilters.hot = e.target.checked;
+      if(e.target.checked && !webEventsLoaded) await loadWebEvents();
+      clientsPage = 1; renderClientsList();
+    });
+
+    // Ações em massa
+    document.getElementById('bulkClearSel')?.addEventListener('click', () => { clientsSelection.clear(); renderClientsList(); });
+    document.getElementById('bulkExportCsv')?.addEventListener('click', () => bulkExportClients(false));
+    document.getElementById('bulkExportMeta')?.addEventListener('click', () => bulkExportClients(true));
+    document.getElementById('bulkTagApply')?.addEventListener('click', bulkApplyTag);
 
     // Sort
     document.getElementById('clients-sort').addEventListener('change', (e) => {
@@ -37751,6 +37791,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // Flags
     if(f.never_purchased) arr = arr.filter(c => !c.first_purchase_at);
     // f.active_enrollment exigiria enrollments cache — fase 4. Por enquanto sem efeito.
+    if(f.recovery){
+      const engaged = _clientsComEventos();
+      arr = arr.filter(c => engaged.has(c.id) && !c.first_purchase_at && c.status !== 'customer');
+    }
+    if(f.hot) arr = arr.filter(c => clientScore(c.id).score >= 15);
 
     // Sort
     const { field, dir } = clientsSort;
@@ -37778,6 +37823,14 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   function renderClientsList(){
     const box = document.getElementById('clientsList');
     if(!box) return;
+
+    _scoreMapCache = _buildScoreMap();
+    if(!webEventsLoaded && !_webEventsKicked){ _webEventsKicked = true; loadWebEvents().then(() => { _scoreMapCache = null; renderClientsList(); }); }
+    const _bts = document.getElementById('bulkTagSelect');
+    if(_bts && _bts.options.length <= 1) _bts.innerHTML = '<option value="">Adicionar tag…</option>' + clientTagsCache.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
+    const _bulkBar = document.getElementById('clientsBulkBar');
+    if(_bulkBar){ _bulkBar.style.display = clientsSelection.size > 0 ? 'flex' : 'none';
+      const _bc = document.getElementById('clientsBulkCount'); if(_bc) _bc.textContent = clientsSelection.size + ' selecionado' + (clientsSelection.size === 1 ? '' : 's'); }
 
     const all = getFilteredClients();
     const total = all.length;
@@ -37811,13 +37864,20 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       former_customer: 'Ex-cliente', blocked: 'Bloqueado'
     }[s] || s);
 
+    const _tempStyle = { quente: 'color:#e8a87c;border:1px solid rgba(232,168,124,.4)', morno: 'color:var(--accent);border:1px solid var(--accent-border-soft, rgba(200,169,126,.3))', frio: 'color:var(--text-mute);border:1px solid var(--border-soft)' };
+    const _tempLabel = { quente: '🔥 Quente', morno: 'Morno', frio: 'Frio' };
     const rows = page.map(c => {
       const brand = brandsMap[c.brand_id];
       const tags = clientTagsByClient[c.id] || [];
       const shortId = c.id.slice(0, 8);
       const ltv = clientLTV(c.id);
+      const sc = clientScore(c.id);
+      const tempCell = sc.score > 0
+        ? `<span style="font-size:.72rem;padding:.12rem .55rem;border-radius:10px;${_tempStyle[sc.temp]}" title="score ${sc.score} · ${sc.acessos} acessos · ${sc.compras} cliques de compra · ${sc.fasc} inscrição">${_tempLabel[sc.temp]}</span>`
+        : '<span class="cl-date">—</span>';
       return `
         <tr class="clickable" data-id="${c.id}">
+          <td class="cl-check" style="width:30px"><input type="checkbox" class="cl-row-check" data-cid="${c.id}" ${clientsSelection.has(c.id) ? 'checked' : ''}></td>
           <td>
             <span class="cl-name">${esc(c.full_name)}</span>
             <span class="cl-name-sub">#${shortId}</span>
@@ -37826,6 +37886,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           <td class="cl-phone">${esc(c.phone || '—')}</td>
           <td>${brand ? `<span class="cl-brand-chip">${esc(brand.name)}</span>` : '<span class="cl-date">—</span>'}</td>
           <td><span class="cl-status ${c.status}">${statusLabel(c.status)}</span></td>
+          <td>${tempCell}</td>
           <td>
             ${tags.length === 0 ? '<span class="cl-date">—</span>' :
               `<div class="cl-tags">${tags.slice(0, 3).map(t => `<span class="cl-tag">${esc(t.name)}</span>`).join('')}${tags.length > 3 ? `<span class="cl-tag">+${tags.length - 3}</span>` : ''}</div>`}
@@ -37836,14 +37897,17 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         </tr>`;
     }).join('');
 
+    const _allChecked = page.length > 0 && page.every(c => clientsSelection.has(c.id));
     box.innerHTML = `
       <table>
         <thead><tr>
+          <th style="width:30px"><input type="checkbox" id="cl-check-all" ${_allChecked ? 'checked' : ''}></th>
           <th>Nome</th>
           <th>E-mail</th>
           <th>Telefone</th>
           <th>Marca</th>
           <th>Status</th>
+          <th>Temperatura</th>
           <th>Tags</th>
           <th>Última atividade</th>
           <th style="text-align:right">LTV</th>
@@ -37852,9 +37916,24 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         <tbody>${rows}</tbody>
       </table>`;
 
-    // Click abre modal
+    // Click abre modal (menos quando foi no checkbox)
     box.querySelectorAll('tr[data-id]').forEach(tr => {
-      tr.addEventListener('click', () => openClientModal(tr.dataset.id));
+      tr.addEventListener('click', (e) => { if(e.target.closest('.cl-check')) return; openClientModal(tr.dataset.id); });
+    });
+    // Seleção por checkbox
+    box.querySelectorAll('.cl-row-check').forEach(chk => chk.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const id = chk.dataset.cid;
+      if(chk.checked) clientsSelection.add(id); else clientsSelection.delete(id);
+      const bulkBar = document.getElementById('clientsBulkBar');
+      if(bulkBar){ bulkBar.style.display = clientsSelection.size > 0 ? 'flex' : 'none';
+        const bc = document.getElementById('clientsBulkCount'); if(bc) bc.textContent = clientsSelection.size + ' selecionado' + (clientsSelection.size === 1 ? '' : 's'); }
+      const allChk = document.getElementById('cl-check-all'); if(allChk) allChk.checked = page.every(c => clientsSelection.has(c.id));
+    }));
+    const _checkAll = document.getElementById('cl-check-all');
+    if(_checkAll) _checkAll.addEventListener('change', () => {
+      if(_checkAll.checked) page.forEach(c => clientsSelection.add(c.id)); else page.forEach(c => clientsSelection.delete(c.id));
+      renderClientsList();
     });
 
     // Paginação
@@ -38289,6 +38368,63 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return ordersCache
       .filter(o => o.client_id === clientId && o.status === 'paid')
       .reduce((s, o) => s + parseFloat(o.total || 0), 0);
+  }
+
+  // ── Score / temperatura do lead (a partir de crm.web_events) ──
+  // pageview=1, fascículo=5, clique de compra=10, + bônus de recência (7d).
+  let _scoreMapCache = null;
+  let _webEventsKicked = false;
+  function _buildScoreMap(){
+    const m = {};
+    for(const e of webEventsCache){
+      if(!e.client_id) continue;
+      const s = m[e.client_id] || (m[e.client_id] = { score: 0, acessos: 0, compras: 0, fasc: 0, last: 0 });
+      if(e.event_type === 'pageview'){ s.score += 1; s.acessos++; }
+      else if(e.event_type === 'buy_click'){ s.score += 10; s.compras++; }
+      else if(e.event_type === 'fasciculo' || e.event_type === 'lead'){ s.score += 5; s.fasc++; }
+      const t = new Date(e.created_at).getTime(); if(t > s.last) s.last = t;
+    }
+    const now = Date.now();
+    for(const id in m){ if(now - m[id].last < 7 * 86400 * 1000) m[id].score += 5; }
+    return m;
+  }
+  function _scoreMap(){ if(!_scoreMapCache) _scoreMapCache = _buildScoreMap(); return _scoreMapCache; }
+  function clientScore(id){
+    const s = _scoreMap()[id];
+    if(!s) return { score: 0, temp: 'frio', acessos: 0, compras: 0, fasc: 0 };
+    return Object.assign({}, s, { temp: s.score >= 15 ? 'quente' : (s.score >= 5 ? 'morno' : 'frio') });
+  }
+  function _clientsComEventos(){ return new Set(Object.keys(_scoreMap())); }
+
+  // ── Ações em massa (clientes selecionados) ──
+  function _selectedClients(){ return clientsCache.filter(c => clientsSelection.has(c.id)); }
+  function bulkExportClients(meta){
+    const sel = _selectedClients(); if(sel.length === 0) return;
+    let rows;
+    if(meta){
+      // Formato de Custom Audience da Meta (ela faz o hash no upload).
+      rows = [['email', 'phone', 'fn', 'country']].concat(sel.map(c => [(c.email || '').toLowerCase().trim(), (c.phone || '').replace(/\D/g, ''), (c.full_name || '').toLowerCase().trim(), 'BR']));
+      _ofDownload('publico-meta.csv', _ofCsv(rows));
+    } else {
+      rows = [['Nome', 'Email', 'Telefone', 'Status', 'Origem', 'LTV', 'Score', 'Temperatura']].concat(sel.map(c => { const sc = clientScore(c.id);
+        return [c.full_name || '', c.email || '', c.phone || '', c.status || '', c.source || '', clientLTV(c.id), sc.score, sc.temp]; }));
+      _ofDownload('clientes.csv', _ofCsv(rows));
+    }
+  }
+  async function bulkApplyTag(){
+    const selEl = document.getElementById('bulkTagSelect');
+    const tagId = selEl && selEl.value ? parseInt(selEl.value) : null;
+    if(!tagId){ showMsg('globalMessage', 'Escolha uma tag primeiro.'); return; }
+    const ids = [...clientsSelection];
+    if(ids.length === 0) return;
+    const existing = new Set(clientTagLinksCache.filter(l => l.tag_id === tagId).map(l => l.client_id));
+    const rows = ids.filter(id => !existing.has(id)).map(id => ({ client_id: id, tag_id: tagId }));
+    if(rows.length === 0){ showMsg('globalMessage', 'Todos os selecionados já têm essa tag.', 'success'); return; }
+    const { error } = await crm().from('client_tag_links').insert(rows);
+    if(error){ showMsg('globalMessage', 'Erro ao aplicar tag: ' + error.message); return; }
+    try { await loadClientTagLinks(); } catch(_){}
+    showMsg('globalMessage', `Tag aplicada a ${rows.length} cliente(s).`, 'success');
+    renderClientsList();
   }
 
   /**
