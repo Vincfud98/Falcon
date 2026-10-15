@@ -41,6 +41,16 @@
   }
   var channel = detectChannel();
 
+  // Guarda o canal de aquisição no navegador (first-touch) para o clique de
+  // compra no portal (index.html) poder atribuir a origem certa. Só sobrescreve
+  // um "direct" antigo por um canal real; nunca apaga um canal real já gravado.
+  try {
+    var saved = localStorage.getItem('ubq_channel');
+    if(!saved || (saved === 'direct' && channel && channel !== 'direct')) {
+      localStorage.setItem('ubq_channel', channel || 'direct');
+    }
+  } catch(_){}
+
   function send(type, extra){
     extra = extra || {};
     var body = {
