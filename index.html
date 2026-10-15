@@ -2653,6 +2653,8 @@ html[data-theme="light"] .unit-capa .s-label,html[data-theme="light"] .unit-capa
    ligado, ganha o dourado — é o único marcador da unidade, então precisa se
    distinguir do "Lido", que pode estar em vários blocos ao mesmo tempo. */
 .block-resume-btn{padding-left:.5rem;padding-right:.5rem}
+.block-compile-btn{padding-left:.5rem;padding-right:.5rem}
+.block-compile-btn.is-gerando{opacity:.55;cursor:progress}
 .block-resume-btn svg{fill:none}
 /* Ligado, o ícone fica PREENCHIDO — é o que distingue do "Lido" (só contorno).
    O resto do estado ligado (fundo, cor, borda) já vem do .icon-btn.on; repetir
@@ -20198,6 +20200,7 @@ const Icons = {
   chevron:'<svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>',
   portal:'<svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   download:'<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  printer:'<svg viewBox="0 0 24 24"><path d="M6 9V3h12v6"/><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2"/><rect x="6" y="14" width="12" height="7"/></svg>',
   check:'<svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg>',
   // Cronômetro. Era um MARCADOR — o mesmo desenho do Icons.bookmark, que agora é
   // o "parei aqui" ao lado dele: dois marcadores lado a lado, indistinguíveis.
@@ -28099,6 +28102,9 @@ function blockActions(block, ctx){
       <button class="icon-btn block-action-btn block-fcia-btn" data-action="flashcards-ia" data-block-id="${Util.attr(block.id)}" data-tip="Criar flashcards deste bloco" aria-label="Criar flashcards deste bloco">
         ${Icons.flashcardsIA}
       </button>
+      ${(block.type === 'quiz' || block.type === 'objective_questions' || block.type === 'essay') ? `<button class="icon-btn block-action-btn block-compile-btn" data-action="compilar-bloco" data-block-id="${Util.attr(block.id)}" data-tip="Compilar prova com estas questões, para imprimir" aria-label="Compilar prova com estas questões, para imprimir">
+        ${Icons.printer}
+      </button>` : ''}
     </div>`;
 }
 
@@ -56230,6 +56236,21 @@ Renderers.unit.mount = function(stageEl, route){
       if(window.FlashcardsIA) FlashcardsIA.abrirDoBloco(unit.id, fcBtn.getAttribute('data-block-id'));
       return;
     }
+    const cpBtn = e.target.closest('[data-action="compilar-bloco"]');
+    if(cpBtn){
+      e.preventDefault();
+      if(cpBtn.disabled) return;
+      const bid = cpBtn.getAttribute('data-block-id');
+      // todas as seções da unidade (a rolagem contínua desenha blocos de outras seções)
+      const blk = (unit.groups || []).reduce(function(acc, g){ return acc.concat(g.blocks || []); }, []).find(function(x){ return String(x.id) === String(bid); });
+      if(!blk) return;
+      const dica = cpBtn.getAttribute('data-tip');
+      cpBtn.disabled = true; cpBtn.classList.add('is-gerando'); cpBtn.setAttribute('data-tip', 'Gerando a prova…');
+      _compilarBlocoDaUnidade(unit, blk, m, chapter)
+        .catch(function(err){ console.warn('[compilar bloco]', err); alert('Não foi possível gerar a prova agora. Tente de novo.'); })
+        .finally(function(){ cpBtn.disabled = false; cpBtn.classList.remove('is-gerando'); cpBtn.setAttribute('data-tip', dica); });
+      return;
+    }
     if(rsBtn){
       const bid = rsBtn.getAttribute('data-block-id');
       // A seção ativa vai junto: a unidade só desenha os blocos de uma seção por
@@ -60432,27 +60453,9 @@ async function _bankCompileProva(route){
   const anosSet = {};
   results.forEach(function(it){ const y = _bankQuestionYear(it); if(y) anosSet[y] = 1; });
   const anos = Object.keys(anosSet).map(Number).sort(function(a,b){ return a - b; });
-  let dateStr = '';
-  try { dateStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); } catch(e){}
-  // Identidade VERIFICÁVEL do servidor (registra a compilação e assina o código).
-  // Impressão digital do conteúdo = ids + TEXTO de cada item (assertiva e alternativas). Antes lia um
-  // campo "enunciado" que o item não tem, e só os ids entravam.
-  const _contentText = results.map(function(it){ return String(it && it.id) + ':' + String((it && it.assertion) || '') + (it && Array.isArray(it.options) && it.options.length > 2 ? '|' + it.options.join('|') : ''); }).join('|');
-  const _ident = await _compileIdentity('prova-objetiva', (f.exam || '') + '|' + materias.join(','), _contentText);
-  QuestionsCompiler.download(sections, itemById, {
-    lic:          CompileLicenca.montar(_ident),
-    candidato:    _ident.name,
-    email:        _ident.email,
-    cpf:          _ident.cpf,
-    copiaId:      _ident.code,      // código verificável do servidor (vazio se não verificado)
-    verified:     _ident.ok,
-    issuedAt:     _ident.issuedAt,
-    concursoSigla: concursoSigla,
-    concursoName: examObj ? examObj.name : concursoSigla,
-    materias:     materias,
-    anos:         anos,
-    dateStr:      dateStr
-  });
+  await _provaBaixar('objetiva', sections, results, itemById, {
+    ref: (f.exam || '') + '|' + materias.join(','), concursoSigla: concursoSigla,
+    concursoName: examObj ? examObj.name : concursoSigla, materias: materias, anos: anos });
   if(deFora) alert('A prova saiu com ' + results.length + (results.length === 1 ? ' questão' : ' questões') + '. ' + deFora +
     (deFora === 1 ? ' ficou de fora porque é' : ' ficaram de fora porque são') + ' de matéria que você não tem.');
 }
@@ -60721,24 +60724,80 @@ async function _bankCompileEssayProva(route){
   const anosSet = {};
   results.forEach(function(it){ const y = _bankQuestionYear(it); if(y) anosSet[y] = 1; });
   const anos = Object.keys(anosSet).map(Number).sort(function(a,b){ return a - b; });
+  await _provaBaixar('discursiva', sections, results, null, {
+    ref: (f.exam || '') + '|' + materias.join(','), concursoSigla: concursoSigla,
+    concursoName: examObj ? examObj.name : concursoSigla, materias: materias, anos: anos });
+}
+
+/* Parte comum das provas compiladas (Banco e blocos de questões da unidade):
+   identidade VERIFICÁVEL do servidor (registra a compilação e assina o código),
+   licença com CPF e marca d'água, cabeçalho, e o download. Impressão digital do
+   conteúdo = ids + TEXTO de cada item (objetiva: assertiva e alternativas;
+   discursiva: enunciado ou comando). */
+async function _provaBaixar(tipo, sections, itens, itemById, ctx){
+  const objetiva = tipo === 'objetiva';
   let dateStr = '';
   try { dateStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); } catch(e){}
-  const _contentText = results.map(function(it){ return String(it && it.id) + ':' + String((it && (it.enunciado || it.command)) || ''); }).join('|');
-  const _ident = await _compileIdentity('prova-discursiva', (f.exam || '') + '|' + materias.join(','), _contentText);
-  EssaysCompiler.download(sections, {
+  const _contentText = itens.map(function(it){
+    return objetiva
+      ? String(it && it.id) + ':' + String((it && it.assertion) || '') + (it && Array.isArray(it.options) && it.options.length > 2 ? '|' + it.options.join('|') : '')
+      : String(it && it.id) + ':' + String((it && (it.enunciado || it.command)) || '');
+  }).join('|');
+  const _ident = await _compileIdentity(objetiva ? 'prova-objetiva' : 'prova-discursiva', ctx.ref, _contentText);
+  const meta = {
     lic:          CompileLicenca.montar(_ident),
     candidato:    _ident.name,
     email:        _ident.email,
     cpf:          _ident.cpf,
-    copiaId:      _ident.code,
+    copiaId:      _ident.code,      // código verificável do servidor (vazio se não verificado)
     verified:     _ident.ok,
     issuedAt:     _ident.issuedAt,
-    concursoSigla: concursoSigla,
-    concursoName: examObj ? examObj.name : concursoSigla,
-    materias:     materias,
-    anos:         anos,
+    concursoSigla: ctx.concursoSigla,
+    concursoName: ctx.concursoName,
+    materias:     ctx.materias,
+    anos:         ctx.anos,
     dateStr:      dateStr
-  });
+  };
+  if(objetiva) QuestionsCompiler.download(sections, itemById, meta);
+  else EssaysCompiler.download(sections, meta);
+}
+
+/* Prova de UM bloco de questões da unidade (pedido dos testadores, 15/10/2026): o
+   botão de impressora no cabeçalho do bloco compila só aquelas questões, com o
+   mesmo rastreio do Banco (código verificável, CPF, marca d'água). As questões já
+   estão na tela da unidade, então não passam pelo filtro de matéria do Banco. */
+async function _compilarBlocoDaUnidade(unit, block, mod, chapter){
+  if(!CompileLicenca.exigeCpf()) return;
+  const course = (window.COURSES || []).find(function(c){ return c && mod && String(c._subjectId) === String(mod._subjectId); }) || null;
+  const examId = (typeof activeExamId === 'function') ? activeExamId() : '';
+  const exams = (window.BankFilters && BankFilters.availableExams) ? BankFilters.availableExams() : [];
+  const examObj = exams.find(function(x){ return String(x.id) === String(examId); });
+  const concursoSigla = examId ? String(examId).toUpperCase() : '';
+  const rotUnidade = (unit.number != null && unit.number !== '' ? 'Unidade ' + unit.number + ' · ' : '') + (unit.title || '');
+  const titulo = block.title ? String(block.title) : rotUnidade;
+  const materias = [course ? course.title : '', rotUnidade].filter(Boolean);
+  const anosDe = function(lista){
+    const set = {}; lista.forEach(function(it){ const y = _bankQuestionYear(it); if(y) set[y] = 1; });
+    return Object.keys(set).map(Number).sort(function(a, b){ return a - b; });
+  };
+  const ref = 'unidade:' + unit.id + '|bloco:' + block.id;
+  if(block.type === 'essay'){
+    const brutos = Array.isArray(block.items) ? block.items : [];
+    const itens = brutos.map(function(r){ try{ return _resolveEssayItem(r); }catch(_){ return null; } }).filter(Boolean);
+    if(!itens.length){ alert('Este bloco ainda não tem discursivas para compilar.'); return; }
+    await _provaBaixar('discursiva', [{ title: titulo, block: { items: brutos } }], itens, null,
+      { ref: ref, concursoSigla: concursoSigla, concursoName: examObj ? examObj.name : concursoSigla, materias: materias, anos: anosDe(itens) });
+    return;
+  }
+  const grupos = normalizeQuizBlock(block) || [];
+  const itemById = {}, itens = [];
+  const groups = grupos.map(function(g){
+    return { reference_text: g.reference_text, reference_image: g.reference_image, enunciado: g.enunciado,
+      questions: (g.items || []).filter(function(it){ return it && it.id != null; }).map(function(it){ itemById[String(it.id)] = it; itens.push(it); return { bank_id: it.id }; }) };
+  }).filter(function(g){ return g.questions.length; });
+  if(!itens.length){ alert('Este bloco ainda não tem questões para compilar.'); return; }
+  await _provaBaixar('objetiva', [{ title: titulo, block: { groups: groups } }], itens, itemById,
+    { ref: ref, concursoSigla: concursoSigla, concursoName: examObj ? examObj.name : concursoSigla, materias: materias, anos: anosDe(itens) });
 }
 
 Renderers.questionBank.mount = function(stageEl, route){
