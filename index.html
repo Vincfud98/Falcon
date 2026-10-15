@@ -11584,6 +11584,9 @@ a.fq-row:hover .fq-bar i, .fq-row.is-hi .fq-bar i{ opacity:1; }
 }
 .ntb-btn:hover{color:var(--accent)}
 .ntb-btn.active{background:var(--accent-lo);color:var(--accent);font-weight:500}
+.edital-abas{margin:0 0 1rem}
+.edital-tree[hidden]{display:none}
+.edital-est-vazio{font-family:var(--sans);font-size:.78rem;color:var(--text-mute);font-style:italic}
 .ntb-sep{
   width:1px;align-self:stretch;margin:.5rem 0;
   background:var(--border);flex-shrink:0;
@@ -38880,7 +38883,7 @@ Renderers.salas.mount = function(stageEl){
 };
 
 /* ═══════════ EDITAL — visualização hierárquica do edital + progresso ═══════════ */
-Renderers.edital = function(){
+Renderers.edital = function(route){
   const editais = (window.UbiqueStore && window.UbiqueStore.editais.list()) || [];
   if(!editais.length){
     return `<div class="hero">
@@ -38951,11 +38954,12 @@ Renderers.edital = function(){
   }
   // % de acerto do tópico = corretas/respondidas das unidades distintas (só quiz;
   // simulado já é excluído no motor de desempenho). null = sem resposta ainda.
-  function _perfOfTopic(tid){
+  function _perfOfSet(set){
     let answered = 0, correct = 0;
-    _unitsOfTopic(tid).forEach(uid => { const a = _unitAgg[uid]; if(a && a.quiz){ answered += a.quiz.answered; correct += a.quiz.correct; } });
+    set.forEach(uid => { const a = _unitAgg[uid]; if(a && a.quiz){ answered += a.quiz.answered; correct += a.quiz.correct; } });
     return { answered: answered, pct: answered > 0 ? Math.round(correct / answered * 100) : null };
   }
+  function _perfOfTopic(tid){ return _perfOfSet(_unitsOfTopic(tid)); }
   // Unidades do store por id (pra listar número + título e linkar).
   const _unitsById = {};
   ((window.UbiqueStore && window.UbiqueStore.units.list()) || []).forEach(u => { if(u) _unitsById[String(u.id)] = u; });
@@ -38983,6 +38987,43 @@ Renderers.edital = function(){
   // Cadeado em SVG (proibido emoji).
   const _lockSvg = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" style="vertical-align:-2px;margin-right:.3rem"><rect x="5" y="11" width="14" height="9" rx="1.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
 
+  // Pílula de desempenho (item 3): degradê onde há dado; neutra "—" senão.
+  function _pillHtml(perf, onde){
+    if(perf.pct == null) return `<span class="edital-perf-pill edital-perf-pill--empty" title="Sem questões respondidas ${onde}">—</span>`;
+    const _bg = gradient3(perf.pct / 100);
+    // Texto escuro no fundo claro (o dourado do meio da escala), branco no
+    // escuro — senão o número fica ilegível em ~50% de acerto.
+    const _lum = (0.299 * parseInt(_bg.substr(1,2),16) + 0.587 * parseInt(_bg.substr(3,2),16) + 0.114 * parseInt(_bg.substr(5,2),16)) / 255;
+    const _txt = _lum > 0.62 ? '#1a1a1a' : '#fff';
+    const _sh = _lum > 0.62 ? 'none' : '0 1px 2px rgba(0,0,0,.4)';
+    return `<span class="edital-perf-pill" style="background:${_bg};color:${_txt};text-shadow:${_sh}" title="Seu acerto ${onde}">${perf.pct}%</span>`;
+  }
+  // Lista de unidades do nó (item 2): número + título, cada uma linkando pra
+  // página da unidade via _unitHashById (que resolve a rota certa com String()).
+  // Recursiva = as MESMAS unidades que a contagem representa. `ordena` = por
+  // número (no edital as unidades vêm de matérias diferentes); na estrutura
+  // curricular a ordem do curso já vem certa.
+  function _unitsListHtml(listId, unitSet, ordena){
+    if(!unitSet.size) return '';
+    let us = [...unitSet].map(uid => _unitsById[uid]).filter(Boolean);
+    if(ordena) us = us.sort((a,b) => (parseInt(a.number)||0) - (parseInt(b.number)||0) || String(a.title||'').localeCompare(String(b.title||''),'pt-BR'));
+    return `<div class="edital-units-list" data-units-list="${Util.attr(listId)}">${
+      us.map(u => {
+        // Matéria não comprada: título trancado (a contagem continua cheia).
+        // Mostra só o número (não é o título) pra distinguir as linhas.
+        if(!_subjectOwned(_subjectOfUnit(String(u.id)))){
+          const _n = (u.number != null && u.number !== '') ? Util.esc(String(u.number)) : '';
+          return `<span class="edital-unit-link edital-unit-link--locked" title="Disponível ao adquirir a matéria">${_lockSvg}Unidade${_n ? ' ' + _n : ''} · bloqueada</span>`;
+        }
+        const label = (u.number != null && u.number !== '' ? u.number + ' · ' : '') + (u.title || 'Unidade');
+        const href = (typeof window._unitHashById === 'function') ? window._unitHashById(u.id) : '';
+        return href
+          ? `<a class="edital-unit-link" href="${Util.attr(href)}">${Util.esc(label)}</a>`
+          : `<span class="edital-unit-link edital-unit-link--dead" title="Unidade sem capítulo/módulo — não navegável">${Util.esc(label)}</span>`;
+      }).join('')
+    }</div>`;
+  }
+
   function renderNode(t, level){
     const children = topics.filter(c => c.parent_id === t.id).sort((a,b) => (a.position||0) - (b.position||0));
     const unitSet = _unitsOfTopic(t.id);
@@ -38990,19 +39031,7 @@ Renderers.edital = function(){
     const perf = _perfOfTopic(t.id);
     const isViewed = myProgress.has(t.id);
     const depthClass = 'depth-' + Math.min(level, 5);
-    // Pílula de desempenho (item 3): degradê onde há dado; neutra "—" senão.
-    let pill;
-    if(perf.pct != null){
-      const _bg = gradient3(perf.pct / 100);
-      // Texto escuro no fundo claro (o dourado do meio da escala), branco no
-      // escuro — senão o número fica ilegível em ~50% de acerto.
-      const _lum = (0.299 * parseInt(_bg.substr(1,2),16) + 0.587 * parseInt(_bg.substr(3,2),16) + 0.114 * parseInt(_bg.substr(5,2),16)) / 255;
-      const _txt = _lum > 0.62 ? '#1a1a1a' : '#fff';
-      const _sh = _lum > 0.62 ? 'none' : '0 1px 2px rgba(0,0,0,.4)';
-      pill = `<span class="edital-perf-pill" style="background:${_bg};color:${_txt};text-shadow:${_sh}" title="Seu acerto neste tópico">${perf.pct}%</span>`;
-    } else {
-      pill = `<span class="edital-perf-pill edital-perf-pill--empty" title="Sem questões respondidas neste tópico">—</span>`;
-    }
+    const pill = _pillHtml(perf, 'neste tópico');
 
     const head = `<div class="edital-topic-head" data-toggle="${Util.attr(t.id)}">
       <input type="checkbox" class="edital-topic-cb" data-progress="${Util.attr(t.id)}" ${isViewed ? 'checked' : ''}>
@@ -39021,26 +39050,7 @@ Renderers.edital = function(){
     // Lista de unidades do nó (item 2): número + título, cada uma linkando pra
     // página da unidade via _unitHashById (que resolve a rota certa com String()).
     // Recursiva = as MESMAS unidades que a contagem representa. Ordena por número.
-    const unitsHtml = unitCount > 0
-      ? `<div class="edital-units-list" data-units-list="${Util.attr(t.id)}">${
-          [...unitSet]
-            .map(uid => _unitsById[uid]).filter(Boolean)
-            .sort((a,b) => (parseInt(a.number)||0) - (parseInt(b.number)||0) || String(a.title||'').localeCompare(String(b.title||''),'pt-BR'))
-            .map(u => {
-              // Matéria não comprada: título trancado (a contagem continua cheia).
-              // Mostra só o número (não é o título) pra distinguir as linhas.
-              if(!_subjectOwned(_subjectOfUnit(String(u.id)))){
-                const _n = (u.number != null && u.number !== '') ? Util.esc(String(u.number)) : '';
-                return `<span class="edital-unit-link edital-unit-link--locked" title="Disponível ao adquirir a matéria">${_lockSvg}Unidade${_n ? ' ' + _n : ''} · bloqueada</span>`;
-              }
-              const label = (u.number != null && u.number !== '' ? u.number + ' · ' : '') + (u.title || 'Unidade');
-              const href = (typeof window._unitHashById === 'function') ? window._unitHashById(u.id) : '';
-              return href
-                ? `<a class="edital-unit-link" href="${Util.attr(href)}">${Util.esc(label)}</a>`
-                : `<span class="edital-unit-link edital-unit-link--dead" title="Unidade sem capítulo/módulo — não navegável">${Util.esc(label)}</span>`;
-            }).join('')
-        }</div>`
-      : '';
+    const unitsHtml = _unitsListHtml(t.id, unitSet, true);
 
     const childrenHtml = children.length > 0
       ? `<div class="edital-topic-children" data-children="${Util.attr(t.id)}">${children.map(c => renderNode(c, level + 1)).join('')}</div>`
@@ -39051,6 +39061,48 @@ Renderers.edital = function(){
 
   const roots = topics.filter(t => t.parent_id == null).sort((a,b) => (a.position||0) - (b.position||0));
   const treeHtml = roots.map(t => renderNode(t, 1)).join('');
+
+  /* ── ESTRUTURA CURRICULAR (pedido dos testadores, 15/10/2026): o "mapa da
+     plataforma" ao lado do edital, com o MESMO visual. Matéria → módulo →
+     capítulo, a pílula de acerto e as unidades na lista sanfonada (trancadas
+     nas matérias não compradas, como no edital). Sem caixa de marcar: o
+     progresso marcado é do edital. Ids com prefixo "es-" para não colidir com
+     os tópicos nos mesmos atributos que o mount já liga. */
+  function _estNode(id, level, code, title, unitSet, filhos, onde){
+    const n = unitSet.size;
+    const head = `<div class="edital-topic-head" data-toggle="${Util.attr(id)}">
+      <div class="edital-topic-body">
+        <div class="edital-topic-line">
+          ${code ? `<span class="edital-topic-code">${Util.esc(code)}</span>` : ''}
+          <span class="edital-topic-title">${Util.esc(title || '')}</span>
+        </div>
+      </div>
+      ${_pillHtml(_perfOfSet(unitSet), onde)}
+      ${n > 0 ? `<button type="button" class="edital-topic-aulas" data-show-aulas="${Util.attr(id)}">${n} ${n === 1 ? 'unidade' : 'unidades'} →</button>` : ''}
+      ${filhos.length ? `<span class="edital-topic-chevron" data-chevron="${Util.attr(id)}">▸</span>` : ''}
+    </div>`;
+    const kids = filhos.length ? `<div class="edital-topic-children" data-children="${Util.attr(id)}">${filhos.join('')}</div>` : '';
+    return `<div class="edital-topic depth-${level}">${head}${_unitsListHtml(id, unitSet, false)}${kids}</div>`;
+  }
+  const _sidsDe = function(units){ const set = new Set(); (units || []).forEach(u => { if(u && u._storeId != null) set.add(String(u._storeId)); }); return set; };
+  const _cursosEst = ((typeof window.coursesInExams === 'function' && _examId) ? window.coursesInExams((window.COURSES || []).filter(Boolean), [_examId]) : (window.COURSES || [])).filter(Boolean);
+  const estHtml = _cursosEst.map(c => {
+    const todas = new Set();
+    const mods = (c.modules || []).map(m => {
+      const daMod = new Set();
+      const caps = (m.chapters || []).map(ch => {
+        const set = _sidsDe(ch.units);
+        set.forEach(x => { daMod.add(x); todas.add(x); });
+        if(!set.size) return '';
+        return _estNode('es-c-' + (ch._storeId != null ? ch._storeId : ch.id), 3, ch.number != null && ch.number !== '' ? 'Cap. ' + ch.number : '', ch.title, set, [], 'neste capítulo');
+      }).filter(Boolean);
+      if(!daMod.size) return '';
+      return _estNode('es-m-' + (m._storeId != null ? m._storeId : m.id), 2, m.number != null && m.number !== '' ? 'Mód. ' + m.number : '', m.title, daMod, caps, 'neste módulo');
+    }).filter(Boolean);
+    if(!todas.size) return '';
+    return _estNode('es-s-' + c._subjectId, 1, c.sigla || '', c.title, todas, mods, 'nesta matéria');
+  }).filter(Boolean).join('');
+  const _aba = (route && route.query && route.query.aba === 'estrutura') ? 'estrutura' : 'edital';
   const topicsCount = topics.length;
   const heroSubtitle = `${topicsCount} ${topicsCount === 1 ? 'tópico' : 'tópicos'}${e.year ? ' · ' + Util.esc(String(e.year)) : ''}`;
 
@@ -39062,11 +39114,30 @@ Renderers.edital = function(){
     ${e.description ? `<p class="s-body" data-a="5">${Util.esc(e.description)}</p>` : ''}
   </div>
   <div class="edital-page-wrap">
-    <div class="edital-tree" data-a="6">${treeHtml}</div>
+    <div class="notes-tab-bar edital-abas" data-a="6">
+      <button type="button" class="ntb-btn${_aba === 'edital' ? ' active' : ''}" data-ed-aba="edital">Edital</button>
+      <span class="ntb-sep"></span>
+      <button type="button" class="ntb-btn${_aba === 'estrutura' ? ' active' : ''}" data-ed-aba="estrutura">Estrutura curricular</button>
+    </div>
+    <div class="edital-tree" data-a="6" data-ed-pane="edital"${_aba === 'edital' ? '' : ' hidden'}>${treeHtml}</div>
+    <div class="edital-tree" data-a="6" data-ed-pane="estrutura"${_aba === 'estrutura' ? '' : ' hidden'}>${estHtml || '<p class="edital-est-vazio">Nenhuma matéria com unidades neste concurso ainda.</p>'}</div>
   </div>`;
 };
 
 Renderers.edital.mount = function(stage){
+  // Abas Edital | Estrutura curricular: troca sem redesenhar; o endereço guarda a aba
+  // (?aba=estrutura), para o redesenho por dados não voltar para o edital.
+  stage.querySelectorAll('[data-ed-aba]').forEach(b => {
+    b.addEventListener('click', () => {
+      const aba = b.getAttribute('data-ed-aba');
+      stage.querySelectorAll('[data-ed-aba]').forEach(x => x.classList.toggle('active', x === b));
+      stage.querySelectorAll('[data-ed-pane]').forEach(p => { p.hidden = p.getAttribute('data-ed-pane') !== aba; });
+      const hash = '#/edital' + (aba === 'estrutura' ? '?aba=estrutura' : '');
+      if(location.hash !== hash){
+        try{ history.replaceState(null, '', hash); if(window.App && App.marcarEndereco) App.marcarEndereco(); }catch(_){}
+      }
+    });
+  });
   // Toggle accordion — usa classe .is-open (CSS gerencia display)
   stage.querySelectorAll('[data-toggle]').forEach(h => {
     h.addEventListener('click', e => {
