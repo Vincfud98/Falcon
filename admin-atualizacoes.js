@@ -1807,19 +1807,56 @@
       return;
     }
     PEND = null;
+    if(alvo.bloco) abrirBloco(alvo.bloco.id);
     destacar();
     if(alvo.bloco && alvo.indice != null){
       var ta = document.getElementById('ue-ptext-' + alvo.bloco.id + '-' + alvo.indice);
-      if(ta){
-        var cont = conteinerParagrafo(ta, alvo.bloco.id, alvo.indice);
-        cont.scrollIntoView({ block: 'center', behavior: 'smooth' });
-        cont.classList.remove('atu-para-pisca'); void cont.offsetWidth; cont.classList.add('atu-para-pisca');
-        setTimeout(function(){ cont.classList.remove('atu-para-pisca'); }, 1700);
-        return;
-      }
+      if(ta){ piscar(conteinerParagrafo(ta, alvo.bloco.id, alvo.indice)); return; }
+    }
+    if(alvo.bloco && alvo.indice == null){
+      var campo = campoNoBloco(alvo.bloco.id, a);
+      if(campo){ piscar(campo); return; }
     }
     if(alvo.bloco && typeof window.ueScrollToBlock === 'function'){ window.ueScrollToBlock(alvo.bloco.id); return; }
     toast('Não achei o trecho na unidade. Ele pode ter sido apagado ou reescrito.', 'info');
+  }
+  // Rola só a lista de blocos do editor (scrollIntoView rolava também a janela do editor e cortava o topo).
+  function rolarAte(el){
+    var lista = document.getElementById('ueBlocksList');
+    if(!lista || !lista.contains(el)){ if(el.scrollIntoView) el.scrollIntoView({ block: 'nearest' }); return; }
+    var r = el.getBoundingClientRect(), rl = lista.getBoundingClientRect();
+    var alvo = lista.scrollTop + (r.top - rl.top) - Math.max(0, (rl.height - r.height) / 2);
+    lista.scrollTo({ top: Math.max(0, alvo), behavior: 'smooth' });
+  }
+  // Blocos que não são texto (pontos-chave, tabela, linha do tempo...): o campo do editor com mais palavras do trecho.
+  function campoNoBloco(blocoId, a){
+    var card = document.querySelector('[data-block-card][data-block-id="' + String(blocoId).replace(/"/g, '') + '"]');
+    if(!card) return null;
+    var ref = palavras(a.trecho_atual || ''), nRef = Object.keys(ref).length;
+    if(!nRef) return null;
+    var melhor = null;
+    var campos = card.querySelectorAll('textarea, input[type="text"], input:not([type]), [contenteditable="true"]');
+    for(var i = 0; i < campos.length; i++){
+      var c = campos[i];
+      var v = c.tagName === 'TEXTAREA' || c.tagName === 'INPUT' ? c.value : c.textContent;
+      var sc = emComum(palavras(v || ''), ref);
+      if(!melhor || sc > melhor.sc) melhor = { c: c, sc: sc };
+    }
+    if(!melhor || melhor.sc < Math.min(4, Math.max(2, Math.ceil(nRef * 0.4)))) return null;
+    return melhor.c.closest('.field') || melhor.c.parentElement;
+  }
+  // Bloco recolhido no editor: abre antes de procurar o campo.
+  function abrirBloco(blocoId){
+    var corpo = document.getElementById('ue-block-body-' + blocoId);
+    if(corpo && corpo.style.display === 'none'){
+      var tg = document.querySelector('[data-block-toggle="' + String(blocoId).replace(/"/g, '') + '"]');
+      if(tg) tg.click();
+    }
+  }
+  function piscar(cont){
+    rolarAte(cont);
+    cont.classList.remove('atu-para-pisca'); void cont.offsetWidth; cont.classList.add('atu-para-pisca');
+    setTimeout(function(){ cont.classList.remove('atu-para-pisca'); }, 1700);
   }
   function conteinerParagrafo(ta, blocoId, indice){
     var tag = document.getElementById('ue-ptag-' + blocoId + '-' + indice);
@@ -1844,10 +1881,13 @@
     var porConteiner = [];
     ED.alertas.forEach(function(a){
       var alvo = localizar(a, blocos, true);
-      if(!alvo.bloco || alvo.indice == null || !igual(alvo.secao_id, secAtual)) return;
-      var ta = document.getElementById('ue-ptext-' + alvo.bloco.id + '-' + alvo.indice);
-      if(!ta) return;
-      var cont = conteinerParagrafo(ta, alvo.bloco.id, alvo.indice);
+      if(!alvo.bloco || !igual(alvo.secao_id, secAtual)) return;
+      var cont = null;
+      if(alvo.indice != null){
+        var ta = document.getElementById('ue-ptext-' + alvo.bloco.id + '-' + alvo.indice);
+        if(ta) cont = conteinerParagrafo(ta, alvo.bloco.id, alvo.indice);
+      } else cont = campoNoBloco(alvo.bloco.id, a);   // pontos-chave, tabela, linha do tempo...
+      if(!cont) return;
       var item = porConteiner.filter(function(x){ return x.cont === cont; })[0];
       if(!item){ item = { cont: cont, alertas: [] }; porConteiner.push(item); }
       item.alertas.push(a);
