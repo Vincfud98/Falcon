@@ -562,6 +562,8 @@
     '.atu .atu-link:hover{text-decoration-thickness:2px}',
     /* página */
     '.atu-pagina{display:flex;flex-direction:column;gap:1.6rem;padding-bottom:2rem}',
+    /* endereço de site lê melhor em minúsculas (o chip do sistema de design é em caixa alta) */
+    '.atu .chip.atu-dominio{text-transform:none;letter-spacing:.04em;font-family:var(--mono);font-size:.68rem}',
     '.atu .atu-cab{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:1.2rem;padding-bottom:1.4rem;border-bottom:1px solid var(--accent-border-soft)}',
     '.atu .atu-cab-txt{display:flex;flex-direction:column;align-items:flex-start;max-width:760px;min-width:0}',
     '.atu .atu-cab-acoes,.atu .atu-botoes{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center}',
@@ -1286,7 +1288,7 @@
       var freq = Object.keys(FREQ).map(function(f){ return '<option value="' + f + '"' + (m.frequencia === f ? ' selected' : '') + '>' + FREQ[f] + '</option>'; }).join('');
       var prio = Object.keys(PRIO).map(function(p){ return '<option value="' + p + '"' + (m.prioridade === p ? ' selected' : '') + '>' + PRIO[p] + '</option>'; }).join('');
       var fontes = m.dominios.map(function(d){
-        return '<span class="chip chip-accent">' + esc(d) + '<button type="button" class="atu-chip-x" data-atu="fonte-tirar" data-v="' + esc(s) + '" data-f="' + esc(d) + '" aria-label="Tirar ' + esc(d) + '">' + IC.fechar + '</button></span>';
+        return '<span class="chip chip-accent atu-dominio">' + esc(d) + '<button type="button" class="atu-chip-x" data-atu="fonte-tirar" data-v="' + esc(s) + '" data-f="' + esc(d) + '" aria-label="Tirar ' + esc(d) + '">' + IC.fechar + '</button></span>';
       }).join('');
       if(igual(c.addFonte, s)){
         fontes += '<span class="atu-fonte-add"><label class="sr-only" for="atuNovaFonte">Nova fonte de ' + esc(nome) + '</label>' +
