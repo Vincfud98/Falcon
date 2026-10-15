@@ -48819,6 +48819,22 @@ window.TutorIA = (function(){
     root.normalize();
     return alvos.length;
   }
+  // O X da barra (limpar formatação): o removeFormat do navegador só conhece b, i, u e estilo inline; o grifo e a
+  // cor da letra são <span> com classe, que ele deixa no lugar. Tira os dois (como o "Remover" da paleta) e depois
+  // roda o removeFormat para o resto.
+  function _cadLimparFormatacao(ed){
+    const sel = window.getSelection();
+    const r0 = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+    if(r0 && !r0.collapsed && ed.contains(r0.commonAncestorContainer)){
+      ['hl', 'fc'].forEach(function(kind){
+        const snap = _cadSelSnap(ed);
+        const r = sel.rangeCount ? sel.getRangeAt(0) : null;
+        if(r) _cadDesmarca(r, ed, _cadSpecOf(kind));
+        if(snap) _cadSelRestaura(ed, snap);
+      });
+    }
+    try { document.execCommand('removeFormat', false, null); } catch(_){}
+  }
   function _cadAplicaCor(kind, cor){
     const ed = _cadEl(); if(!ed) return;
     if(kind === 'bl'){
@@ -49039,6 +49055,7 @@ window.TutorIA = (function(){
     try{ _fcCadAdotar(el); }catch(e){ console.warn('[fc caderno adoção]', e); }
     try{ _fcVistaAplicar(el); }catch(e){ console.warn('[fc vista]', e); }
     _emptyToggle(el); _cadStatus('');
+    _histZerar(el);   // caderno novo no editor: o desfazer começa daqui
     _cadLoadBacklinks(unitId, null, blNaCarga);
     _comMontar(el, String(unitId));
   }
@@ -49568,7 +49585,7 @@ window.TutorIA = (function(){
       if(m) m.__poSujo = true;
     }catch(_){ }
   }
-  function _cadSchedule(){ _cadMarcarSujo(_cadEl()); _cadStatus('digitando…'); if(_cadTimer) clearTimeout(_cadTimer); _cadTimer = setTimeout(function(){ _cadTimer = null; _cadSave(); }, 1000); }
+  function _cadSchedule(){ try{ _histMudou(_cadEl()); }catch(e){ console.warn('[desfazer]', e); } _cadMarcarSujo(_cadEl()); _cadStatus('digitando…'); if(_cadTimer) clearTimeout(_cadTimer); _cadTimer = setTimeout(function(){ _cadTimer = null; _cadSave(); }, 1000); }
   function _onCadInput(){
     const el = _cadEl(); _emptyToggle(el);
     try{ _cadNormalizarBlocos(el); }catch(_){ }
@@ -50255,6 +50272,16 @@ window.TutorIA = (function(){
     return false;
   }
   function _onCadKey(e){
+    // Desfazer / refazer do próprio caderno (o do navegador não conhece grifo, blocos nem cards)
+    if((e.metaKey || e.ctrlKey) && !e.altKey){
+      const kz = String(e.key || '').toLowerCase();
+      if(kz === 'z' || (kz === 'y' && e.ctrlKey && !e.metaKey)){
+        const edz = e.currentTarget && e.currentTarget.__hist ? e.currentTarget : _cadEl();
+        e.preventDefault(); e.stopPropagation();
+        if(kz === 'y' || e.shiftKey) _histRefazer(edz); else _histDesfazer(edz);
+        return;
+      }
+    }
     const edK = (e.currentTarget && e.currentTarget.classList && e.currentTarget.classList.contains('tutor-caderno-ed'))
       ? e.currentTarget : _cadEl();
     const nSel = window.getSelection() && window.getSelection().anchorNode;
@@ -52405,6 +52432,7 @@ window.TutorIA = (function(){
     _portaisRender(el, 'doc:' + String(docId)).catch(function(e2){ console.warn('[portal render]', e2); });
     _emptyToggle(el);
     _cadStatus('');
+    _histZerar(el);   // caderno novo no editor: o desfazer começa daqui
     _cadVerBase['doc:' + String(docId)] = (doc && doc.body) || '';
     // D2d: Referências do caderno próprio — quem cita este doc.
     _cadLoadBacklinks(String(docId), 'data-doc-id', blDoc);
@@ -53452,7 +53480,8 @@ window.TutorIA = (function(){
           el2.focus();
           const cmd = b.getAttribute('data-cmd');
           if(cmd === 'insertUnorderedList' || cmd === 'insertOrderedList'){ _cadListaToggle(el2, cmd === 'insertOrderedList' ? 'n' : 'b'); return; }
-          try { document.execCommand(cmd, false, b.getAttribute('data-arg') || null); } catch(_){}
+          if(cmd === 'removeFormat') _cadLimparFormatacao(el2);
+          else { try { document.execCommand(cmd, false, b.getAttribute('data-arg') || null); } catch(_){} }
           _emptyToggle(el2); _cadSchedule();
         });
       });
@@ -53753,10 +53782,194 @@ window.TutorIA = (function(){
      tabela ou toggle. Antes só a página tinha tudo isso (a classe cadpage-ed
      era uma chave de recurso escondida) e o drawer ficava com um editor
      menor. */
+  /* ═══ DESFAZER / REFAZER DO CADERNO (15/10/2026, teste dos testadores) ═══════════════
+     O desfazer do navegador só conhece o que ELE fez (digitar, colar, execCommand). Grifo, cor,
+     Enter estrutural, blocos, árvore e o ciclo dos cards mexem no DOM por script, ficam fora dele
+     e embaralham a pilha nativa: o Cmd+Z pulava o grifo e o Cmd+Shift+Z devolvia o texto sem a
+     formatação. Agora cada editor tem a própria pilha de fotos (texto cru, sem decoração de tela,
+     portais vazios como no salvar) e a seleção em caminho + deslocamento. Digitação seguida vira
+     um passo; uma pausa, um clique em outro lugar ou uma ação de script fecham o passo. Ao trocar
+     de caderno a pilha zera (senão um Cmd+Z traria o corpo do caderno anterior). */
+  const _HIST_MAX = 100, _HIST_PAUSA = 1200;
+  function _histContaFilho(x){ return !(x.tagName === 'FIGURE' && x.classList && x.classList.contains('cad-tree')) && !(x.hasAttribute && x.hasAttribute('data-deco')); }
+  function _histCaminho(ed, L){
+    const p = []; let n = L;
+    while(n && n !== ed){
+      const pai = n.parentElement; if(!pai) return null;
+      p.unshift(Array.prototype.filter.call(pai.children, _histContaFilho).indexOf(n));
+      n = pai;
+    }
+    return n === ed ? p : null;
+  }
+  function _histNo(ed, p){
+    let n = ed;
+    for(let i = 0; i < p.length; i++){ n = Array.prototype.filter.call(n.children, _histContaFilho)[p[i]]; if(!n) return null; }
+    return n;
+  }
+  function _histSel(ed){
+    const sel = window.getSelection();
+    if(!sel || !sel.rangeCount) return null;
+    const r = sel.getRangeAt(0);
+    if(!ed.contains(r.startContainer) || !ed.contains(r.endContainer)) return null;
+    const la = _cadLinhaDoNo(r.startContainer, ed), lb = _cadLinhaDoNo(r.endContainer, ed);
+    if(!la || !lb) return null;
+    const oa = _fcVistaCaretOff(la, r.startContainer, r.startOffset), ob = _fcVistaCaretOff(lb, r.endContainer, r.endOffset);
+    const pa = _histCaminho(ed, la), pb = _histCaminho(ed, lb);
+    if(oa == null || ob == null || !pa || !pb) return null;
+    return { pa: pa, oa: oa, pb: pb, ob: ob, col: sel.isCollapsed };
+  }
+  function _histSelRestaura(ed, s){
+    if(!s) return;
+    const la = _histNo(ed, s.pa), lb = _histNo(ed, s.pb);
+    if(!la || !lb) return;
+    try{ ed.focus({ preventScroll: true }); }catch(_){ }
+    _cadSelRestaura(ed, { la: la, oa: s.oa, lb: lb, ob: s.ob, colapsada: s.col });
+  }
+  // Foto do caderno: a mesma forma crua do salvar (sem classes e decorações de tela, portais vazios).
+  function _histFoto(ed){
+    try{ _cadCelCarimbar(ed); }catch(_){ }
+    const c = ed.cloneNode(true);
+    _cadTirarClassesDeTela(c);
+    Array.prototype.slice.call(c.querySelectorAll('[data-deco]')).forEach(function(sp){
+      while(sp.firstChild) sp.parentNode.insertBefore(sp.firstChild, sp);
+      sp.remove();
+    });
+    Array.prototype.forEach.call(c.querySelectorAll('.cad-portal[data-po-src]'), function(m){ m.innerHTML = ''; });
+    c.normalize();
+    return { html: c.innerHTML, sel: _histSel(ed) };
+  }
+  function _histZerar(ed){
+    if(!ed) return;
+    const h = ed.__hist || (ed.__hist = {});
+    if(h.timer) clearTimeout(h.timer);
+    h.pilha = []; h.refazer = []; h.aberto = false; h.timer = null; h.tipo = null; h.restaurando = false;
+    h.base = _histFoto(ed);
+  }
+  function _histFechar(ed){
+    const h = ed.__hist; if(!h) return;
+    if(h.timer){ clearTimeout(h.timer); h.timer = null; }
+    if(!h.aberto) return;
+    h.aberto = false;
+    h.base = _histFoto(ed);
+  }
+  // Chamado por _cadSchedule depois de toda mudança. Digitação seguida junta num passo só.
+  function _histMudou(ed){
+    const h = ed && ed.__hist;
+    if(!h || h.restaurando || ed.__cadCarregando) return;
+    const tipo = h.tipo || 'acao'; h.tipo = null;
+    if(!h.base){ h.base = _histFoto(ed); return; }
+    const agora = Date.now();
+    if(h.aberto && tipo === 'digitar'){
+      h.ultimo = agora;
+      if(h.timer) clearTimeout(h.timer);
+      h.timer = setTimeout(function(){ _histFechar(ed); }, _HIST_PAUSA);
+      return;
+    }
+    if(h.aberto) _histFechar(ed);
+    const f = _histFoto(ed);
+    if(f.html === h.base.html){ h.base.sel = f.sel; return; }   // nada mudou no texto
+    h.pilha.push(h.base);
+    if(h.pilha.length > _HIST_MAX) h.pilha.shift();
+    h.refazer = [];
+    if(tipo === 'digitar'){
+      // o passo fica aberto: a base (o "antes") já está na pilha; o "depois" só é fotografado ao fechar
+      h.aberto = true; h.ultimo = agora;
+      h.timer = setTimeout(function(){ _histFechar(ed); }, _HIST_PAUSA);
+    } else h.base = f;
+  }
+  function _histRestaurar(ed, foto){
+    const h = ed.__hist;
+    h.restaurando = true;
+    try{
+      // a identidade dos cards (data-fc-*) vem do ciclo de salvar e pode ser mais nova que a foto:
+      // fica com a de agora, pela célula, para o desfazer não criar card repetido no servidor
+      const carimbos = {};
+      ed.querySelectorAll('[data-cel][data-fc-id],[data-cel][data-fc-item]').forEach(function(L){
+        const at = {};
+        Array.prototype.forEach.call(L.attributes, function(a){ if(a.name.indexOf('data-fc-') === 0) at[a.name] = a.value; });
+        carimbos[L.getAttribute('data-cel')] = at;
+      });
+      ed.innerHTML = foto.html;
+      ed.querySelectorAll('[data-cel]').forEach(function(L){
+        const at = carimbos[L.getAttribute('data-cel')];
+        if(at && !L.hasAttribute('data-fc-id') && !L.hasAttribute('data-fc-item')) Object.keys(at).forEach(function(k){ L.setAttribute(k, at[k]); });
+      });
+      // Card que não existe mais (o salvamento o apagou quando a linha sumiu, num desfazer anterior):
+      // a linha devolvida perde a identidade velha e vira card novo no próximo salvamento. Sem isto o
+      // ciclo a trataria como "card apagado por fora" e tiraria a linha (o refazer sumia com o card).
+      // Só com o baralho confiável, a mesma regra do ciclo: sem ele, nada é tirado nem apagado.
+      try{
+        if(window.Store && Store.deckList && (!Store.deckPronto || Store.deckPronto())){
+          const vivos = new Set(Store.deckList().map(function(c){ return String(c.id); }));
+          ['data-fc-id', 'data-fc-cz', 'data-fc-item', 'data-fc-prop'].forEach(function(at){
+            ed.querySelectorAll('[' + at + ']').forEach(function(L){
+              if(vivos.has(String(L.getAttribute(at)))) return;
+              L.removeAttribute(at);
+              if(at === 'data-fc-id') L.removeAttribute('data-fc-due');
+            });
+          });
+        }
+      }catch(e){ console.warn('[desfazer cards]', e); }
+      try{ _cadFixChips(ed); }catch(_){ }
+      try{ _cadNormalizarBlocos(ed); }catch(_){ }
+      try{ _fcCadDedup(ed); }catch(_){ }
+      try{ _fcVistaAplicar(ed); }catch(e){ console.warn('[desfazer vista]', e); }
+      const chave = ed.__tplLivre ? null : _poChaveAtual();
+      if(chave) _portaisRender(ed, chave).catch(function(e2){ console.warn('[desfazer portal]', e2); });
+      _emptyToggle(ed);
+      _histSelRestaura(ed, foto.sel);
+      try{ const ck = _comKeyAtivo(); if(ck) _comPintar(ed, ck); }catch(_){ }
+      _cadSchedule();          // salva o estado restaurado (o registro ignora: restaurando)
+    } finally { h.restaurando = false; }
+    const f = _histFoto(ed);    // a forma normalizada vira a base; a seleção é a da foto
+    f.sel = foto.sel || f.sel;
+    return f;
+  }
+  function _histDesfazer(ed){
+    const h = ed && ed.__hist; if(!h || !h.base) return;
+    if(h.aberto) _histFechar(ed);
+    else { const f = _histFoto(ed); if(f.html !== h.base.html){ h.pilha.push(h.base); h.base = f; h.refazer = []; } }
+    const alvo = h.pilha.pop(); if(!alvo) return;
+    h.refazer.push(h.base);
+    h.base = _histRestaurar(ed, alvo);
+  }
+  function _histRefazer(ed){
+    const h = ed && ed.__hist; if(!h || !h.base) return;
+    if(h.aberto) _histFechar(ed);
+    const alvo = h.refazer.pop(); if(!alvo) return;
+    h.pilha.push(h.base);
+    h.base = _histRestaurar(ed, alvo);
+  }
+  let _histSelLigado = false;
+  function _histLigar(ed){
+    ed.addEventListener('beforeinput', function(e){
+      if(e.inputType === 'historyUndo' || e.inputType === 'historyRedo'){
+        e.preventDefault();
+        if(e.inputType === 'historyUndo') _histDesfazer(ed); else _histRefazer(ed);
+        return;
+      }
+      const h = ed.__hist; if(!h) return;
+      h.tipo = /^(insertText|insertCompositionText|insertReplacementText|deleteContentBackward|deleteContentForward|deleteWordBackward|deleteWordForward)$/.test(e.inputType) ? 'digitar' : 'outro';
+      h.tInput = Date.now();
+    });
+    if(_histSelLigado) return;
+    _histSelLigado = true;
+    // Enquanto nada muda, a base acompanha a seleção (desfazer devolve o trecho que estava selecionado).
+    // Com a digitação aberta, selecionar um trecho ou pular para outro lugar fecha o passo.
+    document.addEventListener('selectionchange', function(){
+      const s = window.getSelection(); if(!s || !s.rangeCount) return;
+      const n = s.anchorNode, el = n && (n.nodeType === 1 ? n : n.parentElement);
+      const ed2 = el && el.closest ? el.closest('.tutor-caderno-ed') : null;
+      const h = ed2 && ed2.__hist; if(!h || h.restaurando || !h.base) return;
+      if(h.aberto){ if(!s.isCollapsed || Date.now() - (h.tInput || 0) > 80) _histFechar(ed2); return; }
+      const sel = _histSel(ed2); if(sel) h.base.sel = sel;
+    });
+  }
   function ligarEditorCaderno(ed, opts){
     opts = opts || {};
     if(!ed || ed.__cadLigado) return ed;
     ed.__cadLigado = true;
+    _histLigar(ed);
     _ensureStyles();
     _flutArmar();
     ed.classList.add('tutor-caderno-ed');
@@ -53833,6 +54046,7 @@ window.TutorIA = (function(){
     ligarEditorCaderno(ed, { ativaAoFocar: true });
     _cadNormalizarBlocos(ed);
     _emptyToggle(ed);
+    _histZerar(ed);
     setTimeout(function(){ ed.focus(); }, 30);
     return ed;
   }
@@ -53911,7 +54125,8 @@ window.TutorIA = (function(){
         ed.focus();
         const cmd = b.getAttribute('data-cmd');
         if(cmd === 'insertUnorderedList' || cmd === 'insertOrderedList'){ _cadListaToggle(ed, cmd === 'insertOrderedList' ? 'n' : 'b'); return; }
-        try { document.execCommand(cmd, false, b.getAttribute('data-arg') || null); } catch(_){}
+        if(cmd === 'removeFormat') _cadLimparFormatacao(ed);
+        else { try { document.execCommand(cmd, false, b.getAttribute('data-arg') || null); } catch(_){} }
         _emptyToggle(ed); _cadSchedule();
       });
     });
