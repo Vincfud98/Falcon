@@ -802,6 +802,8 @@
   .app-sidebar .sb-count{
     margin-left:auto;font-family:var(--mono);font-size:.62rem;color:var(--text-mute);letter-spacing:.04em;
   }
+  .app-sidebar .sb-tab.tem-count{display:flex;align-items:center;gap:.4rem}
+  .app-sidebar .sb-tab.active .sb-count{color:var(--accent)}
   /* Sidebar — switch de painel */
   .sb-switch-footer{
     position:sticky;bottom:0;left:0;right:0;
@@ -7966,6 +7968,7 @@
   }
   .adm-bell-item:hover{background:var(--accent-lo)}
   .adm-bell-item-t{font-family:var(--sans);font-size:.78rem;color:var(--text);font-weight:400}
+  .adm-bell-item.is-lido .adm-bell-item-t{color:var(--text-dim);font-weight:300}
   .adm-bell-item-s{font-family:var(--sans);font-size:.68rem;color:var(--text-mute);font-weight:300;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
   .adm-bell-vazio{
@@ -9132,6 +9135,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       </button>
       <button class="tab" data-tab="professors">Professores <span class="tab-count" id="count-professors"></span></button>
       <button class="tab" data-tab="units">Unidades <span class="tab-count" id="count-units"></span></button>
+      <button class="tab" data-tab="atualizacoes" data-sb-count="count-atualizacoes">Atualizações <span class="tab-count" id="count-atualizacoes"></span></button>
       <button class="tab" data-tab="verbetes">Verbetes <span class="tab-count" id="count-verbetes"></span></button>
       <button class="tab" data-tab="glossario">Glossário <span class="tab-count" id="count-glossario"></span></button>
       <button class="tab" data-tab="tags">Tags <span class="tab-count" id="count-tags"></span></button>
@@ -9175,6 +9179,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           <div id="subjectsTable"></div>
         </div>
       </section>
+
+      <!-- ATUALIZAÇÕES — agente que sinaliza o que pode estar errado ou desatualizado (admin-atualizacoes.js) -->
+      <section class="tab-panel" id="panel-atualizacoes"></section>
 
       <!-- UNITS PANEL — cards de unidades + modal de criação em cascata -->
       <section class="tab-panel" id="panel-units">
@@ -17235,6 +17242,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 </div>
 
 <script src="raiox-render.js?v=3"></script>
+<script src="admin-atualizacoes.js?v=1"></script>
 <script type="module">
   import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
   // marked + DOMPurify carregados via DYNAMIC import dentro do widget de chatbot.
@@ -18726,9 +18734,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         tabBtns.forEach(tab => {
           const tKey = tab.dataset.tab;
           const tLabel = btnLabel(tab);
-          html += `<button class="sb-tab" type="button" data-action="tab"
+          // Contador na barra só para a aba que pede (data-sb-count = id do contador da aba antiga)
+          const cId = tab.dataset.sbCount || '';
+          const cTxt = cId ? (((document.getElementById(cId) || {}).textContent) || '').trim() : '';
+          html += `<button class="sb-tab${cId ? ' tem-count' : ''}" type="button" data-action="tab"
             data-super-key="${esc(sKey)}" data-group-key="${esc(gKey)}" data-tab-key="${esc(tKey)}">
-            ${esc(tLabel)}
+            ${cId ? `<span>${esc(tLabel)}</span><span class="sb-count" data-sb-count-de="${esc(cId)}">${esc(cTxt)}</span>` : esc(tLabel)}
           </button>`;
         });
 
@@ -18805,6 +18816,23 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
     syncSidebarActive();
   }
+
+  // Atualiza o contador de uma aba na aba antiga e na barra lateral (a barra só copia o rótulo ao ser montada).
+  window._sbContagem = function(id, n){
+    const t = n ? String(n) : '';
+    const o = document.getElementById(id); if(o) o.textContent = t;
+    document.querySelectorAll('[data-sb-count-de="' + id + '"]').forEach(function(el){ el.textContent = t; });
+  };
+  // Leva a uma aba do painel (super → grupo → aba), o mesmo caminho que a barra lateral usa.
+  window._admIrParaAba = function(sup, grp, aba){
+    const sBtn = document.querySelector('.super-tab[data-super="' + sup + '"]');
+    if(sBtn && !sBtn.classList.contains('active')) sBtn.click();
+    const gBtn = document.querySelector('#super-' + sup + ' .tab-group[data-group="' + grp + '"]');
+    if(gBtn && !gBtn.classList.contains('active')) gBtn.click();
+    const tBtn = document.querySelector('#group-' + grp + ' .tab[data-tab="' + aba + '"]');
+    if(tBtn) tBtn.click();
+    try{ syncSidebarActive(); }catch(_){}
+  };
 
   function syncSidebarActive(){
     const activeSuperBtn = document.querySelector('.super-tab.active');
@@ -19577,7 +19605,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       loadKnowledgeRecent(), loadKnowledgeIngestions(), loadIngestionAggregates(),
       loadMockExams(), loadMockExamQuestions(), loadMockExamSections(), loadProductMockExams(),
       loadResponseSessions(),
-      loadContatoMencoes(), loadContatoThreads(), loadForumPosts(),
+      loadContatoMencoes(), loadContatoThreads(), loadForumPosts(), _admAtuCarregar(),
       // Comercial
       loadBrands(), loadBrandLogos(), loadImagesLibrary(),
       // AI Prompt Library
@@ -48439,9 +48467,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
 
   // ── Badges (aba + grupo) ──
+  // Avisos do agente de atualizações (ia.atu_avisos): resumo da semana, alerta alto, teto, análise pronta.
+  let _admAtuAvisos = [];
+  async function _admAtuCarregar(){
+    try{
+      if(window.Atualizacoes && typeof Atualizacoes.avisosSino === 'function') _admAtuAvisos = (await Atualizacoes.avisosSino()) || [];
+      if(window.Atualizacoes && typeof Atualizacoes.contar === 'function') window._sbContagem('count-atualizacoes', await Atualizacoes.contar());
+    }catch(e){ console.warn('[atualizacoes] sino', e); }
+    updateContatoBadges();
+  }
+  window._admAtuCarregar = _admAtuCarregar;
+
   function updateContatoBadges(){
     const pend = contatoMentions.filter(m => m.status === 'pendente').length;
     const unreadThreads = Object.keys(_contatoUnreadByThread).length;
+    const atuNaoLidos = _admAtuAvisos.filter(function(a){ return !a.lido; }).length;
     const elM = document.getElementById('count-contato-mencoes');
     const elD = document.getElementById('count-contato-dms');
     const elG = document.getElementById('count-group-contato');
@@ -48451,7 +48491,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // O sino do header bebe da MESMA fonte (nada de conta paralela).
     const badge = document.getElementById('admBellBadge');
     if(badge){
-      const total = pend + unreadThreads;
+      const total = pend + unreadThreads + atuNaoLidos;
       badge.hidden = total === 0;
       badge.textContent = total > 99 ? '99+' : String(total);
     }
@@ -48509,6 +48549,16 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         '</button>';
       }).join('');
     }
+    const atu = _admAtuAvisos.slice().sort(function(a, b){ return (a.lido ? 1 : 0) - (b.lido ? 1 : 0); }).slice(0, 6);
+    if(atu.length){
+      html += '<div class="adm-bell-titulo">Agente de atualizações</div>';
+      html += atu.map(function(a){
+        return '<button type="button" class="adm-bell-item' + (a.lido ? ' is-lido' : '') + '" data-bell-atu="' + esc(String(a.id)) + '">' +
+          '<span class="adm-bell-item-t">' + esc(a.titulo || 'Aviso do agente') + '</span>' +
+          '<span class="adm-bell-item-s">' + esc(a.texto || '') + '</span>' +
+        '</button>';
+      }).join('');
+    }
     if(!html) html = '<div class="adm-bell-vazio">Nenhuma notificação pendente.</div>';
     pop.innerHTML = html;
   }
@@ -48525,6 +48575,13 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     pop.addEventListener('click', function(e){
       const item = e.target.closest('.adm-bell-item');
       if(!item) return;
+      const atuId = item.getAttribute('data-bell-atu');
+      if(atuId){
+        const aviso = _admAtuAvisos.find(function(a){ return String(a.id) === atuId; });
+        _admBellFechar();
+        if(aviso && window.Atualizacoes) Promise.resolve(Atualizacoes.abrirAviso(aviso)).catch(function(err){ console.error('[atualizacoes]', err); }).then(_admAtuCarregar);
+        return;
+      }
       _admIrParaContato(item.getAttribute('data-bell-aba'), item.getAttribute('data-bell-thread'));
     });
     document.addEventListener('click', function(e){
@@ -48537,7 +48594,22 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     setInterval(function(){
       try{ if(typeof loadContatoMencoes === 'function') loadContatoMencoes(); }catch(_){}
       try{ if(typeof loadContatoThreads === 'function') loadContatoThreads(); }catch(_){}
+      _admAtuCarregar();
     }, 60 * 1000);
+  })();
+
+  // Aba Atualizações: a página se monta a cada abertura (o arquivo admin-atualizacoes.js aguenta ser chamado de novo).
+  (function _wireAtualizacoes(){
+    const t = document.querySelector('#group-gerenciar .tab[data-tab="atualizacoes"]');
+    if(!t) return;
+    t.addEventListener('click', function(){
+      try{ if(window.Atualizacoes) Atualizacoes.montarPagina(document.getElementById('panel-atualizacoes')); }
+      catch(e){ console.error('[atualizacoes]', e); }
+    });
+    // a página avisa quando o número de abertos muda (resolver, descartar, análise nova): contador da aba e da barra
+    document.addEventListener('atualizacoes:mudou', function(e){
+      if(e && e.detail && e.detail.abertos != null) window._sbContagem('count-atualizacoes', e.detail.abertos);
+    });
   })();
 
   // ── Wiring (elementos estáticos do painel) ──
@@ -56730,6 +56802,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     ueRenderBlocks();
     ueRenderDownloads();
     ueUpdateCurrentSectionLabel();
+    try{ if(window.Atualizacoes) Atualizacoes.aoAbrirEditor(unitId); }catch(e){ console.error('[atualizacoes]', e); }
   }
 
   function closeUnitEditor(){
@@ -56758,6 +56831,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     ueCurrentUnitId = null;
     _ueCurrentSectionId = null;
     if(typeof _ueSetAutosaveStatus === 'function') _ueSetAutosaveStatus('');
+    try{ if(window.Atualizacoes) Atualizacoes.aoFecharEditor(); }catch(e){ console.error('[atualizacoes]', e); }
   }
 
   // Matérias do CONCURSO da unidade em edição (pra filtrar pickers do banco).
@@ -57583,6 +57657,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       if(toggle){ toggle.textContent = '▸'; }
     });
     el.scrollTop = scrollTop;
+    // Agente de atualizações: marca os parágrafos com alerta aberto nesta seção
+    try{ if(window.Atualizacoes && Atualizacoes.aoDesenharBlocos) Atualizacoes.aoDesenharBlocos(); }catch(e){ console.error('[atualizacoes]', e); }
     // Pacote #10 — popula badges de difficulty nos slots data-diff-slot
     // (renderGroup dos blocos objetivos com bank_question_id). Async
     // pra não bloquear o paint inicial.
@@ -57885,6 +57961,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         if(bt) bt.title = fechada ? 'Expandir esta coluna' : bt.getAttribute('data-tip-fechar') || bt.title;
       }
     });
+    // coluna do agente (à direita): largura e se fica aberta
+    grid.style.setProperty('--ue-r', Math.max(300, Math.min(UE_ASIDE_MAX, parseInt(p.r, 10) || 380)) + 'px');
+    grid.classList.toggle('atu-aberta', !!p.atuAberta);
+    const atuBt = document.getElementById('ueAtuBtn');
+    if(atuBt) atuBt.setAttribute('aria-pressed', p.atuAberta ? 'true' : 'false');
     const list = document.getElementById('ueBlocksList');
     if(list){
       const split = parseFloat(p.split);
@@ -57900,6 +57981,16 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   };
   window.ueTogglePreview = function(){
     _uePrefsGravar({ semPreview: !_uePrefsLer().semPreview }); _ueLayoutAplicar();
+  };
+  // Ponte do editor para o agente de atualizações (admin-atualizacoes.js): estado da unidade e a coluna da direita.
+  window.ueAtuPonte = {
+    unidade: function(){ return ueCurrentUnitId; },
+    secao: function(){ return _ueCurrentSectionId; },
+    secoes: function(){ return (ueSectionsCache || []).map(function(s){ return { id: s.id, title: s.title, position: s.position }; }); },
+    blocos: function(){ return (ueAllBlocksCache || []).map(function(b){ return { id: b.id, section_id: b.section_id, type: b.type, title: b.title, content: b.content }; }); },
+    abrirColuna: function(){ _uePrefsGravar({ atuAberta: true }); _ueLayoutAplicar(); },
+    fecharColuna: function(){ _uePrefsGravar({ atuAberta: false }); _ueLayoutAplicar(); },
+    colunaAberta: function(){ const g = document.getElementById('ueGrid'); return !!(g && g.classList.contains('atu-aberta')); },
   };
   let _ueLayoutPronto = false;
   function _ueLayoutInit(){
@@ -57926,7 +58017,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       const x0 = e.clientX, w0 = aside.getBoundingClientRect().width;
       let w = w0;
       alca.classList.add('is-dragging'); grid.classList.add('is-dragging');
-      const mover = function(ev){ w = Math.max(UE_ASIDE_MIN, Math.min(UE_ASIDE_MAX, w0 + (ev.clientX - x0))); grid.style.setProperty('--ue-' + k, w + 'px'); };
+      // a coluna da direita cresce quando a alça vai para a esquerda
+      const sinal = k === 'r' ? -1 : 1, minimo = k === 'r' ? 300 : UE_ASIDE_MIN;
+      const mover = function(ev){ w = Math.max(minimo, Math.min(UE_ASIDE_MAX, w0 + sinal * (ev.clientX - x0))); grid.style.setProperty('--ue-' + k, w + 'px'); };
       const soltar = function(){
         document.removeEventListener('mousemove', mover); document.removeEventListener('mouseup', soltar);
         alca.classList.remove('is-dragging'); grid.classList.remove('is-dragging');
@@ -68806,6 +68899,19 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 <style id="ue-layout-css">
 /* ── Editor de unidade: colunas redimensionáveis, recolhíveis e preview com rolagem própria ── */
 .ue-grid{display:grid;grid-template-columns:var(--ue-l,260px) 6px var(--ue-i,240px) 6px minmax(0,1fr);flex:1;overflow:hidden}
+/* coluna do agente de atualizações, à direita, só quando aberta */
+.ue-grid.atu-aberta{grid-template-columns:var(--ue-l,260px) 6px var(--ue-i,240px) 6px minmax(0,1fr) 6px var(--ue-r,380px)}
+.ue-grid:not(.atu-aberta) > .ue-resizer-atu,.ue-grid:not(.atu-aberta) > .ue-aside-atu{display:none}
+.ue-resizer-atu{border-right:none;border-left:1px solid var(--accent-border-soft)}
+.ue-aside-atu{overflow-y:auto;background:var(--bg-card)}
+.ue-atu-btn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;
+  border:1px solid var(--accent-border-soft);border-radius:var(--radius);background:transparent;color:var(--accent);cursor:pointer;transition:all .25s ease}
+.ue-atu-btn:hover{background:var(--accent-lo);border-color:var(--accent-border)}
+.ue-atu-btn[aria-pressed="true"]{background:var(--accent-lo);border-color:var(--accent)}
+.ue-atu-btn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.ue-atu-btn .atu-badge{position:absolute;top:-6px;right:-6px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;
+  background:var(--red);color:#fff;font-family:var(--mono);font-size:.55rem;font-weight:500;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg-card)}
+.ue-atu-btn .atu-badge[hidden]{display:none}
 .ue-resizer{cursor:col-resize;background:transparent;border-right:1px solid var(--accent-border-soft);transition:background .15s ease}
 .ue-resizer:hover,.ue-resizer.is-dragging{background:var(--accent-lo)}
 .ue-grid.is-dragging{user-select:none;cursor:col-resize}
@@ -68851,6 +68957,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       <div id="ueBreadcrumb" class="s-subtitle" style="font-family:var(--mono);font-size:.7rem;letter-spacing:.06em;color:var(--text-mute);margin:0">…</div>
       <div style="display:flex;align-items:center;gap:.5rem">
         <span id="ueAutosaveStatus" class="ue-autosave-status" hidden></span>
+        <button type="button" class="ue-atu-btn" id="ueAtuBtn" onclick="window.Atualizacoes && Atualizacoes.alternarColuna()" title="Atualizações desta unidade (agente de atualizações)" aria-label="Atualizações desta unidade" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><line x1="16.5" y1="16.5" x2="21" y2="21"></line><polyline points="8 11 10.3 13.3 14.3 9.2"></polyline></svg>
+          <span class="atu-badge" id="ueAtuBadge" hidden></span>
+        </button>
         <button class="btn btn-ghost btn-sm" id="ueChangelogBtn" onclick="ueChangelogOpen()" title="Registra 'o que mudou' — vira card no feed do Início dos alunos">Registrar atualização</button>
         <button class="btn btn-ghost btn-sm" id="ueDepublishBtn" onclick="ueDepublish()">Despublicar</button>
         <button class="btn btn-ghost btn-sm" id="ueScheduleBtn" onclick="ueScheduleOpen()">Agendar</button>
@@ -68916,6 +69026,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         </div>
         <div id="ueBlocksList" style="flex:1;overflow-y:auto;padding:1rem 1.25rem;display:flex;flex-direction:column;gap:.6rem"></div>
       </main>
+
+      <!-- RIGHT: agente de atualizações desta unidade (desenhado por admin-atualizacoes.js) -->
+      <div class="ue-resizer ue-resizer-atu" data-ue-resize="r" title="Arraste para redimensionar"></div>
+      <aside id="ueAsideAtu" class="ue-aside ue-aside-atu" data-ue-aside="r" aria-label="Atualizações desta unidade"></aside>
 
     </div>
   </div>
