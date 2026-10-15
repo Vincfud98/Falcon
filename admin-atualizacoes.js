@@ -1825,8 +1825,9 @@
     var lista = document.getElementById('ueBlocksList');
     if(!lista || !lista.contains(el)){ if(el.scrollIntoView) el.scrollIntoView({ block: 'nearest' }); return; }
     var r = el.getBoundingClientRect(), rl = lista.getBoundingClientRect();
-    var alvo = lista.scrollTop + (r.top - rl.top) - Math.max(0, (rl.height - r.height) / 2);
-    lista.scrollTo({ top: Math.max(0, alvo), behavior: 'smooth' });
+    var alvo = Math.max(0, lista.scrollTop + (r.top - rl.top) - Math.max(0, (rl.height - r.height) / 2));
+    // rolagem suave só em distância curta: numa longa, qualquer redesenho do editor no meio do caminho a interrompia
+    lista.scrollTo({ top: alvo, behavior: Math.abs(alvo - lista.scrollTop) > 1200 ? 'auto' : 'smooth' });
   }
   // Blocos que não são texto (pontos-chave, tabela, linha do tempo...): o campo do editor com mais palavras do trecho.
   function campoNoBloco(blocoId, a){
