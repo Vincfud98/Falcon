@@ -10559,6 +10559,10 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .tutor-caderno-ed .cad-portal:hover{border-left-color:var(--accent-border)}
 .tutor-caderno-ed .cad-portal.is-dentro{border-left-color:var(--accent);background:var(--accent-lo);animation:cadPortalPulso 2.4s var(--ease) infinite}
 .tutor-caderno-ed .cad-portal::after{content:attr(data-po-rotulo);position:absolute;right:.2rem;top:-.55rem;font-family:var(--sans);font-size:.55rem;letter-spacing:.06em;color:var(--text-mute);opacity:0;pointer-events:none;transition:opacity .2s var(--ease)}
+/* trechos (6.3): o chip de uma linha de outro caderno; riscado quando a linha some na origem */
+.tutor-ref.is-quebrado{text-decoration:line-through;opacity:.55}
+.tutor-refpick .trecho-refopt b,.tutor-refpick .po-refopt b{font-weight:400}
+.tutor-refvazio{padding:.45rem .6rem .55rem;font-family:var(--sans);font-size:.72rem;color:var(--text-mute)}
 /* bloco HTML (pacote 6.2): abas Código e Visualização numa moldura isolada; o desenho é de tela */
 .tutor-caderno-ed figure.cad-html{margin:.6rem 0 .8rem;border:1px solid var(--accent-border-soft);border-radius:6px;background:var(--bg-card);overflow:hidden;cursor:default;user-select:none;-webkit-user-select:none}
 .tutor-caderno-ed figure.cad-html:empty{min-height:2.4rem}
@@ -49146,6 +49150,187 @@ window.TutorIA = (function(){
     _hideRefPicker();
     if(window.ueToast) ueToast('O “[[” saiu do lugar. Escreva [[ de novo para escolher.', 'warn');
   }
+  /* ══ TRECHOS (pacote 6.3) e PORTAL pelo (( (6.4) · 16/10/2026 ═══════════════════════════════════════════════
+     Decisões do dono (15/10): o [[ busca também LINHAS de qualquer caderno (unidade ou próprio; base: o data-cel salvo).
+     O chip mostra o começo do trecho, leva à linha no clique, acompanha o texto da origem e fica riscado se a linha for
+     apagada. É um chip [[ ]] como os outros (o mesmo do "Copiar referência desta linha"): no mapa liga os dois cadernos,
+     e o mesmo caderno não marca nada. (( abre a mesma busca, só com linhas de OUTROS cadernos, e põe o PORTAL do trecho
+     embaixo da linha (o portal que já existe: edita num lugar, muda em todos). */
+  const _TRECHO_CORTE = 56;
+  function _trechoRotulo(t){ t = String(t || '').replace(/\s+/g, ' ').trim(); return '§ ' + (t.length > _TRECHO_CORTE ? t.slice(0, _TRECHO_CORTE - 1).trim() + '…' : t); }
+  function _trechoNorm(x){ return String(x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+  const _trechoCache = {};   // chave → { carimbo, linhas: [{ cel, texto, nt, topo }] }
+  function _trechoLinhasDe(chave, body, carimbo){
+    const c = _trechoCache[chave];
+    if(c && c.carimbo === carimbo) return c.linhas;
+    const tmp = document.implementation.createHTMLDocument('').createElement('div');
+    tmp.innerHTML = _cadSanitize(body || '');
+    Array.prototype.forEach.call(tmp.querySelectorAll('.cad-portal'), function(m){ m.innerHTML = ''; });
+    const linhas = [];
+    const add = function(l, topo){
+      const cel = l.getAttribute('data-cel');
+      if(!cel || (l.classList && (l.classList.contains('cad-portal') || l.classList.contains('cad-html'))) || l.tagName === 'FIGURE') return;
+      const t = String(l.textContent || '').replace(/\u200b/g, '').replace(/\s+/g, ' ').trim();
+      if(t.length < 2) return;
+      linhas.push({ cel: cel, texto: t, nt: _trechoNorm(t), topo: topo });
+    };
+    Array.prototype.forEach.call(tmp.children, function(n){
+      if(n.tagName === 'UL' || n.tagName === 'OL'){ Array.prototype.forEach.call(n.children, function(li){ if(li.tagName === 'LI') add(li, false); }); return; }
+      add(n, true);
+    });
+    _trechoCache[chave] = { carimbo: carimbo, linhas: linhas };
+    return linhas;
+  }
+  function _trechoFontes(){
+    const out = [];
+    try{ ((window.Store && Store.cadAvulsosLista) ? Store.cadAvulsosLista() : []).forEach(function(d){ out.push({ chave: 'doc:' + d.id, titulo: d.titulo || 'Sem título', body: d.body || '', carimbo: String(d.updatedAt || '') + '|' + String(d.body || '').length }); }); }catch(_){ }
+    try{ ((window.Store && Store.listCadernos) ? Store.listCadernos() : []).forEach(function(c){ out.push({ chave: String(c.unitId), titulo: _poRotuloDe(String(c.unitId)), body: c.body || '', carimbo: String(c.updatedAt || '') + '|' + String(c.body || '').length }); }); }catch(_){ }
+    return out;
+  }
+  // linhas que têm TODAS as palavras da busca (sem acento, sem maiúscula); soOutros: só de outros cadernos e só de linhas de 1º nível (o portal fatia a partir delas)
+  function _trechosBusca(q, max, soOutros){
+    const termos = _trechoNorm(q).trim().split(/\s+/).filter(Boolean);
+    if(!termos.length || termos.join(' ').length < 3) return [];
+    const aqui = _cadEscopo(), aquiChave = aqui ? aqui.chave : null;
+    const out = [];
+    _trechoFontes().forEach(function(f){
+      if(out.length >= max || !f.body || (soOutros && f.chave === aquiChave)) return;
+      _trechoLinhasDe(f.chave, f.body, f.carimbo).forEach(function(l){
+        if(out.length >= max || (soOutros && !l.topo)) return;
+        if(termos.every(function(x){ return l.nt.indexOf(x) >= 0; })) out.push({ chave: f.chave, titulo: f.titulo, cel: l.cel, texto: l.texto });
+      });
+    });
+    return out;
+  }
+  function _trechoChip(chave, cel, texto, titulo){
+    const c = document.createElement('span');
+    const doc = /^doc:/.test(chave);
+    c.className = doc ? 'tutor-ref tutor-ref-doc tutor-ref-cel' : 'tutor-ref tutor-ref-cel';
+    c.setAttribute('contenteditable', 'false');
+    if(doc) c.setAttribute('data-doc-id', chave.slice(4)); else c.setAttribute('data-unit-id', chave);
+    c.setAttribute('data-cel-ref', cel);
+    c.setAttribute('data-unit-title', titulo || '');
+    c.textContent = _trechoRotulo(texto);
+    return c;
+  }
+  function _pickTrecho(btn){
+    const chip = _trechoChip(btn.getAttribute('data-tch'), btn.getAttribute('data-tcel'), btn.getAttribute('data-ttxt'), btn.getAttribute('data-ttit'));
+    _refPorChip(chip, ' ');
+  }
+  // O chip acompanha a origem: texto do começo da linha de lá; riscado se a linha sumiu. Origem aberta neste editor vale o texto vivo.
+  function _trechoMapaFontes(){ const m = {}; _trechoFontes().forEach(function(f){ m[f.chave] = f; }); return m; }
+  function _trechoAtualizar(c, el, fontes){
+    const cel = c.getAttribute('data-cel-ref'); if(!cel) return false;
+    const did = c.getAttribute('data-doc-id'), uid = c.getAttribute('data-unit-id');
+    const chave = did ? 'doc:' + did : (uid ? String(uid) : ''); if(!chave) return false;
+    let texto = null, conhecido = false, viva = null;
+    const esc = _cadEscopo(), noEditor = !!(el && el.querySelector && _cadEl() === el);
+    const sel = '[data-cel="' + String(cel).replace(/["\\]/g, '') + '"]';
+    if(noEditor && esc && esc.chave === chave){ conhecido = true; viva = el.querySelector(sel); }
+    else if(noEditor){
+      // a linha de origem pode estar viva aqui dentro de um portal daquele caderno (editada agora mesmo)
+      const po = Array.prototype.find.call(el.querySelectorAll('.cad-portal[data-po-src]'), function(m){ return m.getAttribute('data-po-src') === chave && m.querySelector(sel); });
+      if(po){ conhecido = true; viva = po.querySelector(sel); }
+    }
+    if(conhecido){
+      if(viva) texto = String(viva.textContent || '').replace(/\u200b/g, '').replace(/\s+/g, ' ').trim();
+    } else {
+      const f = fontes && fontes[chave];
+      if(f && f.body){
+        conhecido = true;
+        const l = _trechoLinhasDe(chave, f.body, f.carimbo).find(function(x){ return x.cel === cel; });
+        if(l) texto = l.texto;
+      }
+    }
+    if(!conhecido) return false;                       // origem fora do que está carregado: não mexe
+    if(!texto){                                        // linha apagada (ou esvaziada) lá
+      if(!c.classList.contains('is-quebrado')){ c.classList.add('is-quebrado'); c.setAttribute('data-tip', 'Esta linha foi apagada no caderno de origem'); }
+      return false;
+    }
+    if(c.classList.contains('is-quebrado')){ c.classList.remove('is-quebrado'); c.removeAttribute('data-tip'); }
+    const rot = _trechoRotulo(texto);
+    if(String(c.textContent || '').trim() !== rot){ c.textContent = rot; return true; }
+    return false;
+  }
+  // no salvar: os chips que apontam para linhas DESTE caderno pegam o texto de agora (inclusive dentro de um portal, que leva a mudança à
+  // origem dele); os que apontam para outro caderno se acertam quando o caderno carrega
+  function _trechosRefrescar(el){
+    if(!el || !el.querySelector('.tutor-ref[data-cel-ref]')) return;
+    Array.prototype.forEach.call(el.querySelectorAll('.tutor-ref[data-cel-ref]'), function(c){ _trechoAtualizar(c, el, null); });
+  }
+  // clique no chip de trecho: vai direto à linha (no mesmo caderno, rola e pisca; em outro, abre a página na linha)
+  function _trechoAbrir(chip){
+    if(chip.classList.contains('is-quebrado')){ if(window.ueToast) ueToast('Esta linha foi apagada no caderno de origem.', 'info'); return; }
+    const cel = chip.getAttribute('data-cel-ref'), did = chip.getAttribute('data-doc-id'), uid = chip.getAttribute('data-unit-id');
+    const chave = did ? 'doc:' + did : String(uid || '');
+    const esc = _cadEscopo(), ed = _cadEl();
+    if(esc && esc.chave === chave && ed){
+      const l = ed.querySelector('[data-cel="' + String(cel).replace(/["\\]/g, '') + '"]');
+      if(l){ try{ l.scrollIntoView({ block: 'center', behavior: 'smooth' }); }catch(_){ } l.classList.add('cad-ref-flash'); setTimeout(function(){ l.classList.remove('cad-ref-flash'); }, 2600); return; }
+    }
+    location.hash = did ? ('#/cadernos?doc=' + encodeURIComponent(did) + '&cel=' + encodeURIComponent(cel)) : ('#/cadernos?u=' + encodeURIComponent(uid) + '&cel=' + encodeURIComponent(cel));
+  }
+  // (( → portal de um trecho de outro caderno
+  let _poPickCI = null;
+  function _portalCaretInfo(){
+    const sel = window.getSelection(); if(!sel || !sel.rangeCount || !sel.isCollapsed) return null;
+    const r = sel.getRangeAt(0), node = r.startContainer;
+    if(node.nodeType !== 3 || !node.parentElement) return null;
+    const ed = node.parentElement.closest('.tutor-caderno-ed');     // o caderno onde está o cursor
+    if(!ed || node.parentElement.closest('.cad-portal')) return null;
+    const m = node.textContent.slice(0, r.startOffset).match(/\(\(([^()\n]{0,80})$/);
+    if(!m) return null;
+    return { node: node, start: r.startOffset - m[0].length, offset: r.startOffset, query: m[1], ed: ed };
+  }
+  function _showPortalPicker(ci){
+    _poPickCI = ci; _refPickerCI = null;
+    if(!_refPickerEl){ _refPickerEl = document.createElement('div'); _refPickerEl.className = 'tutor-refpick'; document.body.appendChild(_refPickerEl); }
+    const p = _refPickerEl, q = String(ci.query || '').trim();
+    const tr = q.length >= 3 ? _trechosBusca(q, 6, true) : [];
+    p.innerHTML = '<div class="tutor-refsec">Portal de um trecho de outro caderno</div>'
+      + (q.length < 3 ? '<div class="tutor-refvazio">Escreva 3 letras ou mais do trecho.</div>'
+        : (tr.length ? tr.map(function(t){
+            return '<button type="button" class="tutor-refopt po-refopt" data-pch="' + Util.attr(t.chave) + '" data-pcel="' + Util.attr(t.cel) + '"><b>' + _esc(_trechoRotulo(t.texto)) + '</b><span class="tutor-refopt-ctx"> · ' + _esc(t.titulo) + '</span></button>';
+          }).join('') : '<div class="tutor-refvazio">Nenhum trecho com essas palavras nos seus outros cadernos.</div>'));
+    p.querySelectorAll('.po-refopt').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); e.stopPropagation(); _portalEscolher(b); }); });
+    const sel = window.getSelection(); let rect = null;
+    if(sel && sel.rangeCount) rect = sel.getRangeAt(0).getBoundingClientRect();
+    const ir = ci.ed.getBoundingClientRect();
+    p.hidden = false;
+    const baseTop = (rect && rect.top) ? rect.top : ir.top;
+    p.style.left = Math.max(8, Math.min(window.innerWidth - 240, (rect && rect.left) ? rect.left : ir.left)) + 'px';
+    p.style.top = Math.max(8, baseTop - p.offsetHeight - 6) + 'px';
+  }
+  async function _portalEscolher(btn){
+    const ci = _poPickCI; _hideRefPicker();
+    if(!ci || !btn) return;
+    const ed = ci.ed, origem = btn.getAttribute('data-pch'), cel = btn.getAttribute('data-pcel');
+    const destino = _poChaveAtual();
+    if(!ed || !ed.isConnected || !origem || !cel || !destino || origem === destino) return;
+    // tira o "((busca" do texto (conferindo que ainda é ele)
+    let linha = null;
+    try{
+      const r = document.createRange(); r.setStart(ci.node, ci.start); r.setEnd(ci.node, ci.offset);
+      if(r.toString() !== '((' + ci.query){ if(window.ueToast) ueToast('O “((” saiu do lugar. Escreva (( de novo para escolher.', 'warn'); return; }
+      linha = ci.node.parentElement; while(linha && linha.parentElement !== ed) linha = linha.parentElement;
+      r.deleteContents();
+    }catch(e){ console.warn('[portal ((]', e); return; }
+    const marca = document.createElement('div');
+    marca.className = 'cad-portal'; marca.setAttribute('data-po-src', origem); marca.setAttribute('data-po-cel', cel);
+    if(linha && linha.parentElement === ed){
+      const vazia = !String(linha.textContent || '').replace(/\u200b/g, '').trim() && !linha.querySelector('img,figure,.tutor-ref');
+      if(vazia) ed.replaceChild(marca, linha);
+      else { const fim = _cadFimDaSubarvore(linha); ed.insertBefore(marca, fim.nextSibling); }
+    } else ed.appendChild(marca);
+    if(!marca.nextElementSibling){ const nl = document.createElement('div'); nl.innerHTML = '<br>'; ed.insertBefore(nl, marca.nextSibling); }
+    try{ _poDispensar(destino, origem, cel, false); }catch(_){ }    // portal tirado antes e chamado de novo: vale de novo
+    try{ await _portaisRender(ed, destino); }catch(e){ console.warn('[portal render]', e); }
+    _emptyToggle(ed);
+    _cadSchedule();
+    if(!marca.isConnected || !marca.innerHTML){ if(window.ueToast) ueToast('Não achei esse trecho no caderno de origem. Ele pode ter mudado.', 'warn'); return; }
+    try{ marca.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }catch(_){ }
+    marca.classList.add('cad-ref-flash'); setTimeout(function(){ marca.classList.remove('cad-ref-flash'); }, 2600);
+  }
   // Troca o "[[busca" pelo chip, com um espaço depois e o cursor após o espaço.
   function _refPorChip(chip, espaco){
     const range = _refAlvo();
@@ -49161,7 +49346,7 @@ window.TutorIA = (function(){
     if(_activeEd && _activeEd.classList && _activeEd.classList.contains('tutor-caderno-ed')) _cadSchedule();
     return true;
   }
-  function _hideRefPicker(){ if(_refPickerEl) _refPickerEl.hidden = true; _refPickerCI = null; }
+  function _hideRefPicker(){ if(_refPickerEl) _refPickerEl.hidden = true; _refPickerCI = null; _poPickCI = null; }
   function _showRefPicker(ci){
     _refPickerCI = ci;
     if(!_refPickerEl){ _refPickerEl = document.createElement('div'); _refPickerEl.className = 'tutor-refpick'; document.body.appendChild(_refPickerEl); }
@@ -49285,10 +49470,22 @@ window.TutorIA = (function(){
         }).join('');
       }
     }catch(e){ console.warn('[doc refpick]', e); }
-    if(!units.length && !fcHtml && !docsHtml && !novoHtml && !recHtml){ _hideRefPicker(); return; }
+    // Pacote 6.3: TRECHOS — linhas de qualquer caderno (3 letras ou mais na busca), só quando se escreve num caderno
+    let trHtml = '';
+    try{
+      const noCad = ci.node && (ci.node.nodeType === 1 ? ci.node : ci.node.parentElement);
+      if(q.length >= 3 && noCad && noCad.closest && noCad.closest('.tutor-caderno-ed')){
+        const trs = _trechosBusca(q, 5, false);
+        if(trs.length) trHtml = '<div class="tutor-refsec">Trechos</div>' + trs.map(function(t){
+          return '<button type="button" class="tutor-refopt trecho-refopt" data-tch="' + Util.attr(t.chave) + '" data-tcel="' + Util.attr(t.cel) + '" data-ttxt="' + Util.attr(t.texto.slice(0, 300)) + '" data-ttit="' + Util.attr(t.titulo) + '"><b>' + _esc(_trechoRotulo(t.texto)) + '</b><span class="tutor-refopt-ctx"> · ' + _esc(t.titulo) + '</span></button>';
+        }).join('');
+      }
+    }catch(e){ console.warn('[trechos refpick]', e); }
+    if(!units.length && !fcHtml && !docsHtml && !novoHtml && !recHtml && !trHtml){ _hideRefPicker(); return; }
     // o data-ut guarda o rótulo COMPLETO (sigla + número + nome) — vira o chip.
     p.innerHTML = recHtml + ((fcHtml || docsHtml) && units.length ? '<div class="tutor-refsec">Unidades</div>' : '') + units.map(function(u){ return '<button type="button" class="tutor-refopt" data-uid="' + Util.attr(u.id) + '" data-ut="' + Util.attr(u.label) + '">' + _esc(u.label) + '</button>'; }).join('') + docsHtml + novoHtml;
     if(fcHtml) p.innerHTML += fcHtml;
+    if(trHtml) p.innerHTML += trHtml;
     // Fase 6E — com a busca ainda vazia, acrescenta os sugeridos semânticos
     if(_fcRefLinha && _fcRefLinha.id && !q && window.FlashcardsSugestoes){
       const linhaAlvo = _fcRefLinha.id;
@@ -49310,7 +49507,8 @@ window.TutorIA = (function(){
     p.querySelectorAll('.fc-refopt').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); e.stopPropagation(); _fcRefRelacao(b.getAttribute('data-fcid'), b.getAttribute('data-fcfront')); }); });
     p.querySelectorAll('.doc-refopt').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); _pickRefDoc(b.getAttribute('data-did'), b.getAttribute('data-dt')); }); });
     p.querySelectorAll('.novo-refopt').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); e.stopPropagation(); _pickRefEl(b); }); });
-    p.querySelectorAll('.tutor-refopt:not(.fc-refopt):not(.doc-refopt):not(.novo-refopt)').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); _pickRef(b.getAttribute('data-uid'), b.getAttribute('data-ut')); }); });
+    p.querySelectorAll('.trecho-refopt').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); e.stopPropagation(); _pickRefEl(b); }); });
+    p.querySelectorAll('.tutor-refopt:not(.fc-refopt):not(.doc-refopt):not(.novo-refopt):not(.trecho-refopt)').forEach(function(b){ b.addEventListener('mousedown', function(e){ e.preventDefault(); _pickRef(b.getAttribute('data-uid'), b.getAttribute('data-ut')); }); });
     const sel = window.getSelection(); let rect = null;
     if(sel && sel.rangeCount) rect = sel.getRangeAt(0).getBoundingClientRect();
     const ir = _inpEl().getBoundingClientRect();
@@ -49384,7 +49582,9 @@ window.TutorIA = (function(){
   }
   // Enter/clique na 1ª opção: despacha pro insersor certo (unidade, doc, card).
   function _pickRefEl(btn){
+    if(btn && btn.classList && btn.classList.contains('po-refopt')){ _portalEscolher(btn); return; }   // (( (6.4)
     if(!btn || !_refPickerCI) return;
+    if(btn.classList && btn.classList.contains('trecho-refopt')){ _pickTrecho(btn); return; }          // trecho (6.3)
     if(btn.hasAttribute && btn.hasAttribute('data-novo')){
       const nome = btn.getAttribute('data-novo');
       // o trecho é conferido ANTES de criar: clique que não acha o "[[" não deixa caderno solto
@@ -50890,6 +51090,17 @@ window.TutorIA = (function(){
     });
     if(!ehLacuna) _fcCadSelos(head, String(card.id));
     _cadListaNumerar(el);
+    // a linha veio do deck: os chips dela voltam a ser chips (não editáveis por dentro, nome do caderno e texto do trecho em dia);
+    // se o texto mudou, o próximo salvar leva a mudança ao card
+    let chipMudou = false, fontesTr = null;
+    [head].concat(linhas.slice(1)).forEach(function(n){
+      if(!n.querySelectorAll) return;
+      n.querySelectorAll('.tutor-ref').forEach(function(c){
+        if(!fontesTr && c.hasAttribute('data-cel-ref')) fontesTr = _trechoMapaFontes();
+        if(_cadChipAcertar(c, el, fontesTr)) chipMudou = true;
+      });
+    });
+    if(chipMudou && !_fcCicloAtivo){ try{ _cadSchedule(); }catch(_){ } }
   }
   function _fcCadProjetar(el){
     if(!window.FcSintaxe || !window.Store || !Store.deckList) return;
@@ -51024,6 +51235,14 @@ window.TutorIA = (function(){
     if(txt && velho && txt === velho && txt !== nome){ c.textContent = nome; mudou = true; }
     return mudou;
   }
+  // UM chip: não editável por dentro, nome do caderno em dia, texto do trecho em dia (6.3). Devolve se o texto salvo mudou.
+  function _cadChipAcertar(c, el, fontesTr){
+    let mudou = false;
+    c.contentEditable = 'false';
+    try{ if(_cadRotularChip(c)) mudou = true; }catch(_){ }
+    if(fontesTr && c.hasAttribute('data-cel-ref')){ try{ if(_trechoAtualizar(c, el, fontesTr)) mudou = true; }catch(_){ } }
+    return mudou;
+  }
   function _cadFixChips(el){
     let mudou = false;
     // O chip de conexão (.fc-ref) morreu: a conexão vive no card e no selo ⇆.
@@ -51033,10 +51252,8 @@ window.TutorIA = (function(){
       if(prox && prox.nodeType === 3 && /^ /.test(prox.nodeValue) && ant && ant.nodeType === 3 && / $/.test(ant.nodeValue)) prox.nodeValue = prox.nodeValue.slice(1);
       c.remove(); mudou = true;
     });
-    el.querySelectorAll('.tutor-ref').forEach(function(c){
-      c.contentEditable = 'false';
-      try{ if(_cadRotularChip(c)) mudou = true; }catch(_){ }
-    });
+    const fontesTr = el.querySelector('.tutor-ref[data-cel-ref]') ? _trechoMapaFontes() : null;   // chips de trecho (6.3)
+    el.querySelectorAll('.tutor-ref').forEach(function(c){ if(_cadChipAcertar(c, el, fontesTr)) mudou = true; });
     // conserto na tela tem que VIRAR DADO: senão o export e a busca continuam
     // com o nome velho até o aluno por acaso editar aquele caderno.
     if(mudou && !el.__tplLivre && _cadEl() === el){ try{ _cadSchedule(); }catch(_){ } }
@@ -51546,6 +51763,8 @@ window.TutorIA = (function(){
     });
     // vista em árvore: o bloco desenhado e o estado "editando" são de tela, não do corpo
     Array.prototype.forEach.call(raiz.querySelectorAll('figure.cad-tree'), function(f){ f.remove(); });
+    // chip de trecho com a linha apagada na origem (6.3): o riscado é de tela
+    Array.prototype.forEach.call(raiz.querySelectorAll('.tutor-ref.is-quebrado'), function(c){ c.classList.remove('is-quebrado'); c.removeAttribute('data-tip'); });
     // bloco HTML (6.2): no texto salvo só a figura com o código codificado
     Array.prototype.forEach.call(raiz.querySelectorAll('figure.cad-html'), function(f){ f.innerHTML = ''; f.classList.remove('is-codigo'); });
     // Melhore meu caderno: o rascunho do tutor e o sublinhado da linha a corrigir são de tela
@@ -51810,6 +52029,7 @@ window.TutorIA = (function(){
     if(unitAlvo || docAlvo){ try{ _fcCadCiclo(); }catch(e){ console.warn('[fc caderno ciclo]', e); } }
     try{ _cadNormalizarBlocos(el); }catch(_){ }
     try{ _cadCelCarimbar(el); }catch(e){ console.warn('[cad cel]', e); }
+    try{ _trechosRefrescar(el); }catch(e){ console.warn('[trechos]', e); }   // pacote 6.3
     const chavePo = docAlvo ? ('doc:' + docAlvo) : String(unitAlvo);
     /* CORPO CAPTURADO ANTES DE QUALQUER AWAIT. A gravação dos portais abaixo
        espera a rede; se o aluno trocar de caderno nesse meio (blur + clique
@@ -51972,7 +52192,9 @@ window.TutorIA = (function(){
       }catch(e){ console.warn('[fc vista input]', e); }
     }
     try{ if(_atalhoSync()) return; }catch(e){ console.warn('[atalho]', e); }
-    const ci = _caretInfo(); if(ci) _showRefPicker(ci); else _hideRefPicker();
+    const ci = _caretInfo();
+    if(ci) _showRefPicker(ci);
+    else { const pci = _portalCaretInfo(); if(pci) _showPortalPicker(pci); else _hideRefPicker(); }   // (( → portal de um trecho (6.4)
     _slashSync();
     _cadSchedule();
   }
@@ -59259,6 +59481,7 @@ window.TutorIA = (function(){
     ed.addEventListener('blur', function(){ setTimeout(_hideRefPicker, 150); if(_cadTimer){ clearTimeout(_cadTimer); _cadTimer = null; } _cadSave(); });
     ed.addEventListener('click', function(e){
       const chip = e.target && e.target.closest ? e.target.closest('.tutor-ref') : null;
+      if(chip && chip.hasAttribute('data-cel-ref')){ e.preventDefault(); _trechoAbrir(chip); return; }   // trecho (6.3): vai à linha
       if(chip){ e.preventDefault(); _aliasPopover(chip); return; }   // chip [[ ]]: abrir unidade / apelido
       if(_cadToggleClique(e)) return;
       if(_cadCalloutClique(e)) return;
