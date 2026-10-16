@@ -336,7 +336,17 @@ function blocoQuestao(x, app){
   const intro = total
     ? `${total} ite${total > 1 ? 'ns' : 'm'} · marque as respostas e clique em <strong>Verificar respostas</strong> no final.`
     : 'Questão discursiva · a resposta escrita é corrigida na Falcon.';
-  return `<section class="block-wrap quiz-block qz-has-satellite" data-questao="${esc(x.k)}" data-app="${esc(app)}">
+  // discursiva: sem satélite de progresso (não há itens para marcar); a resposta é escrita no Banco
+  const satelite = total ? `<aside class="qz-satellite">
+        <div class="qz-satellite-pin">
+          <div class="qz-sat-header"><span class="qz-sat-label">Progresso</span><span class="qz-sat-counter" data-qz-counter>0 / ${total} respondidas</span></div>
+          <div class="qz-sat-bar"><span class="qz-sat-bar-fill" data-qz-bar style="width:0"></span></div>
+          <div class="qz-sat-remaining" data-qz-remaining>Faltam ${total}</div>
+          <div class="qz-sat-divider"></div>
+          <div class="qz-sat-detail" data-qz-detail><div class="qz-sat-empty">Marque a resposta e clique em Verificar respostas para ver o gabarito e o comentário.</div></div>
+        </div>
+      </aside>` : '';
+  return `<section class="block-wrap quiz-block${total ? ' qz-has-satellite' : ''}" data-questao="${esc(x.k)}" data-app="${esc(app)}">
     <header class="block-header"><div class="block-header-lead"><span class="block-type">${ICONE_QUIZ ? `<span class="block-type-icon">${ICONE_QUIZ}</span>` : ''}${total ? 'Questões objetivas' : 'Questão discursiva'}</span><h3 class="block-title"></h3></div></header>
     <div class="qb-intro">${intro}</div>
     <span class="bf-cota" id="bfCota" hidden></span>
@@ -353,15 +363,7 @@ function blocoQuestao(x, app){
           <div class="qz-verify-summary" data-qz-summary hidden></div>
           <button type="button" class="btn-primary qz-verify-btn" data-qz-verify-btn>Verificar respostas</button>
         </div>` : ''}</div>
-      <aside class="qz-satellite">
-        <div class="qz-satellite-pin">
-          <div class="qz-sat-header"><span class="qz-sat-label">Progresso</span><span class="qz-sat-counter" data-qz-counter>0 / ${total} respondidas</span></div>
-          <div class="qz-sat-bar"><span class="qz-sat-bar-fill" data-qz-bar style="width:0"></span></div>
-          <div class="qz-sat-remaining" data-qz-remaining>Faltam ${total}</div>
-          <div class="qz-sat-divider"></div>
-          <div class="qz-sat-detail" data-qz-detail><div class="qz-sat-empty">Marque a resposta e clique em Verificar respostas para ver o gabarito e o comentário.</div></div>
-        </div>
-      </aside>
+      ${satelite}
     </div>
   </section>`;
 }
