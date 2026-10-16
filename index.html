@@ -4379,6 +4379,9 @@ html[data-theme="light"] .bf-select{color-scheme:light}
 .bf-submit-ai svg{width:14px;height:14px}
 .bf-compile{margin-left:auto;font-size:.7rem;letter-spacing:.1em;display:inline-flex;align-items:center;gap:.4rem}
 .bf-cota{flex-basis:100%;font-family:var(--sans);font-weight:300;font-size:.74rem;color:var(--text-dim)}
+.bf-limite-acoes{display:flex;gap:.8rem;align-items:center;flex-wrap:wrap;margin-top:.7rem}
+.bf-limite-acoes .btn-primary{padding:.45rem .9rem;font-size:.72rem}
+.bf-limite-saldo{font-family:var(--sans);font-size:.78rem;color:var(--text-dim)}
 .bf-limite{margin:1rem 0;padding:.9rem 1.1rem;background:var(--accent-glow);border:1px solid var(--accent-lo);border-radius:var(--radius,6px);font-family:var(--serif);font-size:.92rem;line-height:1.55;color:var(--text)}
 .bf-limite strong{font-weight:600;color:var(--accent)}
 .bf-limite a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
@@ -24070,7 +24073,11 @@ Blocks.quiz = {
                 _verifyOcupado(false);
                 const barrados = new Set((r && r.bloqueados) || []);
                 corrigir(items, mode, barrados);
-                if(barrados.size) window._bankCota.avisarLimite(stageEl, verifyBar, barrados.size);
+                if(barrados.size) window._bankCota.avisarLimite(stageEl, verifyBar, barrados.size, {
+                  ids: Array.from(barrados),
+                  // pagou com UbiTokens (SQL 91): revela só as liberadas; as outras continuam marcadas sem correção
+                  aoLiberar: function(liberados){ const ainda = new Set(Array.from(barrados).filter(function(id){ return liberados.indexOf(String(id)) < 0 && liberados.indexOf(id) < 0; })); corrigir(items, mode, ainda); }
+                });
                 else window._bankCota.limparAviso(stageEl);
               }, err => {
                 console.warn('[banco] cota:', err && err.message);
@@ -64536,8 +64543,10 @@ window._bankCota = (function(){
       if(!acabou.length) return '';
       onde = ' em ' + acabou.map(nomeMateria).join(', ');
     } else if((Number(cota.usadas) || 0) < lim) return '';
+    const av = cota.avulso;
+    const avulso = (av && av.ativo && Number(av.preco) > 0) ? ' Ou corrija por ' + _ubtFmt(Number(av.preco)) + ' ⓤ cada: marque e clique em Verificar.' : '';
     return '<strong>Limite de hoje atingido.</strong> Você já corrigiu as ' + lim + ' questões grátis de hoje' + Util.esc(onde) +
-      '. Pode marcar as respostas à vontade: a correção volta amanhã. Para corrigir sem limite, tenha a matéria. <a href="#/concursos">Ver a Loja</a>';
+      '. Pode marcar as respostas à vontade: a correção volta amanhã. Para corrigir sem limite, tenha a matéria. <a href="#/concursos">Ver a Loja</a>' + avulso;
   }
   function pintar(){
     const el = document.getElementById('bfCota');
@@ -64563,25 +64572,59 @@ window._bankCota = (function(){
     livreItem: _bankItemLivre,
     linhaTexto: linhaTexto,
     esgotadoHtml: esgotadoHtml,
-    resolver: function(ids){
+    resolver: function(ids, pagar){
       const c = sb(); if(!c) return Promise.reject(new Error('sem conexão'));
-      return c.rpc('banco_resolver', { p_itens: ids }).then(function(r){
+      const args = { p_itens: ids }; if(pagar) args.p_pagar = true;   // SQL 91: além do limite, cobra em UbiTokens
+      return c.rpc('banco_resolver', args).then(function(r){
         if(r.error) throw r.error;
         const d = r.data || {};
         if(d.cota) cota = d.cota;
+        if(d.cota && d.cota.avulso && window.UbtWallet && UbtWallet.set && !d.cota.avulso.ilimitado) UbtWallet.set(Number(d.cota.avulso.saldo) || 0);
         pintar();
         return d;
       });
     },
     limparAviso: limparAviso,
-    avisarLimite: function(stageEl, antesDe, n){
+    // opts (SQL 91): { ids: itens bloqueados, aoLiberar(idsLiberados) } — com a correção avulsa ligada, o aviso ganha o
+    // botão "Corrigir N por X ⓤ"; pagou, o chamador revela as questões liberadas.
+    avisarLimite: function(stageEl, antesDe, n, opts){
       pintar();
       const lim = cota ? Number(cota.limite) || 0 : 0;
       const porMateria = cota && cota.modo === 'por_materia';
+      const av = (cota && cota.avulso) || null;
+      const ids = (opts && opts.ids) || [];
+      const podePagar = !!(av && av.ativo && Number(av.preco) > 0 && ids.length && opts && typeof opts.aoLiberar === 'function');
+      const preco = podePagar ? Number(av.preco) : 0, total = podePagar ? preco * ids.length : 0, saldo = av ? Number(av.saldo) || 0 : 0;
+      const temSaldo = !!(av && (av.ilimitado || saldo >= total));
+      const btnHtml = podePagar
+        ? '<div class="bf-limite-acoes">'
+          + (temSaldo
+              ? '<button type="button" class="btn-primary bf-limite-pagar">Corrigir ' + (ids.length === 1 ? 'esta questão' : 'as ' + ids.length) + ' por ' + _ubtFmt(total) + ' ⓤ</button>'
+                + '<span class="bf-limite-saldo">' + _ubtFmt(preco) + ' ⓤ cada · saldo ' + (av.ilimitado ? '∞' : _ubtFmt(saldo)) + ' ⓤ</span>'
+              : '<span class="bf-limite-saldo">Corrigir custa ' + _ubtFmt(preco) + ' ⓤ cada (' + _ubtFmt(total) + ' ⓤ pelas ' + ids.length + '); seu saldo é ' + _ubtFmt(saldo) + ' ⓤ. <a href="#/conta/carteira">Abrir a Carteira</a></span>')
+          + '</div>'
+        : '';
       aviso(stageEl, antesDe, '<strong>Limite de hoje atingido.</strong> ' +
         (n === 1 ? 'Uma questão ficou sem corrigir' : n + ' questões ficaram sem corrigir') + ': você já corrigiu as ' + lim +
         ' questões grátis de hoje' + (porMateria ? ' nessa matéria' : '') + '. Suas marcações continuam aqui; amanhã você corrige mais ' + lim + '. ' +
-        'Para corrigir sem limite, tenha a matéria. <a href="#/concursos">Ver a Loja</a>');
+        'Para corrigir sem limite, tenha a matéria. <a href="#/concursos">Ver a Loja</a>' + btnHtml);
+      const btn = stageEl && stageEl.querySelector('.bf-limite-pagar');
+      if(btn){
+        btn.addEventListener('click', function(){
+          btn.disabled = true; btn.textContent = 'Cobrando…';
+          window._bankCota.resolver(ids, true).then(function(d){
+            const lib = (d && d.liberados) || [];
+            if(lib.length) opts.aoLiberar(lib);
+            const restam = ids.filter(function(id){ return lib.indexOf(id) < 0; });
+            if(!restam.length){ limparAviso(stageEl); if(window.ueToast) ueToast(lib.length === 1 ? 'Questão corrigida: ' + _ubtFmt(preco) + ' ⓤ debitados.' : lib.length + ' questões corrigidas: ' + _ubtFmt(preco * lib.length) + ' ⓤ debitados.', 'success'); }
+            else if(d && d.saldo_insuficiente){ aviso(stageEl, antesDe, '<strong>Saldo de UbiTokens insuficiente.</strong> ' + (lib.length ? lib.length + ' corrigida(s); ' : '') + restam.length + ' ficaram sem corrigir. <a href="#/conta/carteira">Abrir a Carteira</a>'); }
+            else { aviso(stageEl, antesDe, '<strong>Não consegui cobrar agora.</strong> ' + restam.length + ' ficaram sem corrigir. Tente de novo em instantes.'); }
+          }, function(err){
+            btn.disabled = false; btn.textContent = 'Tentar de novo';
+            if(window.ueToast) ueToast('Não consegui cobrar: ' + ((err && err.message) || 'erro'), 'error');
+          });
+        });
+      }
     },
     avisarErro: function(stageEl, antesDe){
       aviso(stageEl, antesDe, '<strong>Não consegui conferir seu limite agora.</strong> As questões das matérias que você tem foram corrigidas. Tente de novo em instantes para as outras.');
