@@ -30162,8 +30162,8 @@ function _cadAlvosDaLinha(el){
   return out;
 }
 /* rows: [{ chave: 'doc:<id>' | '<unitId>', body }]; san: sanitizador do HTML.
-   Devolve { pares: [{ a, b, direta, frases }], porCaderno: { chave: Set } }.
-   Par direto: a = origem, b = citado. Par "juntos": a < b (sem direção). */
+   Devolve { pares: [{ a, b, direta, parte?, frases }], porCaderno: { chave: Set } }.
+   Par direto: a = origem, b = citado. Par "juntos": a < b (sem direção). Par "parte": a faz parte de b. */
 function _cadRelacoes(rows, san){
   const tmp = document.createElement('div');
   const pares = Object.create(null), porCaderno = Object.create(null);
@@ -30177,6 +30177,15 @@ function _cadRelacoes(rows, san){
     const k = (direta ? 'd' : 'j') + '\x01' + a + '\x01' + b;
     let p = pares[k];
     if(!p){ p = pares[k] = { a: a, b: b, direta: !!direta, frases: [] }; liga(a, b); }
+    if(frase && p.frases.indexOf(frase) < 0 && p.frases.length < 12) p.frases.push(frase);
+  };
+  // Pacote 6.1: FAZ PARTE DE. Linha recuada com [[ ]] debaixo de uma linha (a de cima, a mãe direta) que também tem
+  // [[ ]]: o citado embaixo faz parte do citado em cima (a = parte, b = todo). Decisão do dono: só com chip nas duas.
+  const poeParte = function(parte, todo, frase){
+    if(!parte || !todo || parte === todo) return;
+    const k = 'p\x01' + parte + '\x01' + todo;
+    let p = pares[k];
+    if(!p){ p = pares[k] = { a: parte, b: todo, direta: false, parte: true, frases: [] }; liga(parte, todo); }
     if(frase && p.frases.indexOf(frase) < 0 && p.frases.length < 12) p.frases.push(frase);
   };
   const texto = function(el){ return (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 280); };
@@ -30201,12 +30210,13 @@ function _cadRelacoes(rows, san){
       //     vez, visto da filha; a mãe mais próxima vence quando o mesmo
       //     caderno aparece em duas.
       const vistos = new Set(alvos);
-      _poPaisDaCelula(linha).reverse().forEach(function(mae){          // da mais próxima para a mais distante
+      _poPaisDaCelula(linha).reverse().forEach(function(mae, nivel){   // da mais próxima para a mais distante
         const fraseFio = (texto(mae) + ' › ' + frase).slice(0, 280);
         _cadAlvosDaLinha(mae).forEach(function(u){
           if(vistos.has(u)) return;
           vistos.add(u);
-          alvos.forEach(function(t){ poe(t, u, false, fraseFio); });
+          // a mãe direta (nível 0) com [[ ]]: faz parte de; mais acima, o mesmo fio de sempre
+          alvos.forEach(function(t){ if(nivel === 0) poeParte(t, u, fraseFio); else poe(t, u, false, fraseFio); });
         });
       });
     });
@@ -30228,6 +30238,42 @@ function _cadRelacoesAtual(){
   const modelo = _cadRelacoes(rows, _cadSanitize);
   _cadRelCache = { carimbo: carimbo, modelo: modelo };
   return modelo;
+}
+/* Pacote 6.1 (16/10/2026): o card da LINHA DE CIMA. Card numa linha recuada do caderno → o card mais próximo acima
+   dele, num recuo menor (sobe pelos níveis até achar um card; o item de uma lista-card conta como o card da lista).
+   Lido dos corpos salvos (Store), num documento à parte (imagem não carrega), em cache pelo mesmo carimbo das relações.
+   A prática usa para mostrar o card de cima antes, como contexto. */
+let _fcPaisCache = { carimbo: null, mapa: null };
+function _fcPaisDosCards(){
+  const S = window.Store || {};
+  const rows = [];
+  try{ (S.listCadernos ? S.listCadernos() : []).forEach(function(c){ rows.push({ body: c.body || '', up: c.updatedAt || 0, chave: String(c.unitId) }); }); }catch(_){ }
+  try{ (S.cadAvulsosLista ? S.cadAvulsosLista() : []).forEach(function(d){ rows.push({ body: d.body || '', up: d.updatedAt || 0, chave: 'doc:' + d.id }); }); }catch(_){ }
+  const carimbo = rows.map(function(r){ return r.chave + '|' + r.up + '|' + r.body.length; }).join('\n');
+  if(_fcPaisCache.mapa && _fcPaisCache.carimbo === carimbo) return _fcPaisCache.mapa;
+  const mapa = {};
+  const tmp = document.implementation.createHTMLDocument('').createElement('div');
+  const idDe = function(l){ return l.getAttribute('data-fc-id') || l.getAttribute('data-fc-cz') || l.getAttribute('data-fc-item') || ''; };
+  rows.forEach(function(row){
+    if(!row.body || row.body.indexOf('data-fc-') < 0 || row.body.indexOf('data-ind') < 0) return;
+    tmp.innerHTML = _cadSanitize(row.body);
+    try{ _cadListaMigrar(tmp); }catch(_){ }
+    Array.prototype.forEach.call(tmp.querySelectorAll('.cad-portal'), function(m){ m.innerHTML = ''; });
+    _cadLinhasDoCorpo(tmp).forEach(function(l){
+      const ids = [l.getAttribute('data-fc-id'), l.getAttribute('data-fc-cz')].filter(Boolean);
+      let k = _cadIndDe(l);
+      if(!ids.length || !k) return;
+      let p = _cadAntLinha(l), pai = '';
+      while(p && k > 0){
+        const kp = _cadIndDe(p);
+        if(kp < k){ pai = p.hasAttribute('data-fc-prop') ? '' : idDe(p); if(pai) break; k = kp; }
+        p = _cadAntLinha(p);
+      }
+      if(pai) ids.forEach(function(id){ if(String(id) !== String(pai)) mapa[String(id)] = String(pai); });
+    });
+  });
+  _fcPaisCache = { carimbo: carimbo, mapa: mapa };
+  return mapa;
 }
 /* RELACOES-FIM */
 /* Valor de propriedade: LISTA de itens {t:'txt',v} ou {t:'doc'|'unit',id,v}.
@@ -53459,6 +53505,14 @@ window.TutorIA = (function(){
       }
       else refMap[k] = { source: src, target: tgt, sentences: frase ? [frase] : [], prop: !!dePropriedade };
     };
+    // "Faz parte de" (6.1): recuo com [[ ]] embaixo e na linha de cima; com seta, da parte para o todo.
+    const poeParte = function(a, b, frases){
+      if(!a || !b || a === b) return;
+      linkedUnits.add(a); linkedUnits.add(b);
+      const k = 'p\x01' + a + '\x01' + b;
+      if(!refMap[k]) refMap[k] = { source: a, target: b, sentences: [], prop: false, parte: true };
+      (frases || []).forEach(function(f){ if(f && refMap[k].sentences.indexOf(f) < 0) refMap[k].sentences.push(f); });
+    };
     // "Citados juntos" (mesma linha ou mesmo fio): sem direção, chave própria.
     const poeJuntos = function(a, b, frases){
       if(!a || !b || a === b) return;
@@ -53474,6 +53528,7 @@ window.TutorIA = (function(){
        ligação entre si (grafo de origem, não de relação). */
     const relTexto = _cadRelacoes(rows.map(function(r){ return { chave: r.unit_id, body: r.body }; }), _cadSanitize);
     relTexto.pares.forEach(function(p){
+      if(p.parte){ poeParte(p.a, p.b, p.frases); return; }
       if(!p.direta){ poeJuntos(p.a, p.b, p.frases); return; }
       if(p.frases.length) p.frases.forEach(function(f){ poeRef(p.a, p.b, f); });
       else poeRef(p.a, p.b, '');
@@ -53518,7 +53573,7 @@ window.TutorIA = (function(){
         });
       }
     }catch(e){ console.warn('[grafo fc]', e); }
-    const refs = Object.keys(refMap).map(function(k){ return { source: refMap[k].source, target: refMap[k].target, sentence: refMap[k].sentences.join('  •  '), prop: !!refMap[k].prop, juntos: !!refMap[k].juntos }; })
+    const refs = Object.keys(refMap).map(function(k){ return { source: refMap[k].source, target: refMap[k].target, sentence: refMap[k].sentences.join('  •  '), prop: !!refMap[k].prop, juntos: !!refMap[k].juntos , parte: !!refMap[k].parte}; })
       .concat(Object.keys(fcMap).map(function(k){ return { source: fcMap[k].source, target: fcMap[k].target, fc: true, n: fcMap[k].pares.length, sentence: 'Flashcards conectados: ' + fcMap[k].pares.join('  •  ') }; }));
     const degree = {}; refs.forEach(function(e){ degree[e.source] = (degree[e.source] || 0) + 1; degree[e.target] = (degree[e.target] || 0) + 1; });
     const studentSubj = new Set((window.COURSES || []).map(function(c){ return String(c._subjectId); }));
@@ -53616,6 +53671,7 @@ window.TutorIA = (function(){
       if(e.fc) return d.showFc !== false;
       if(e.prop) return d.showProp === true;      // propriedade: só se pedirem
       if(e.juntos) return d.showCad !== false && d.showJuntos !== false;   // citados juntos: ligado por padrão
+      if(e.parte) return d.showCad !== false && d.showParte !== false;     // faz parte de: ligado por padrão
       return d.showCad !== false;
     });
   }
@@ -53640,7 +53696,7 @@ window.TutorIA = (function(){
     m.units.forEach(function(u){ if(!vis.has(u.id)) return; nodeFor(u.id, { kind: 'unit', doc: !!u.doc, name: u.label, unitId: u.id, subjectId: u.subjectId, corMat: u.corMat || null, color: u.doc ? (u.corMat ? _grafoColor(u.corMat) : '#dfd9cf') : _grafoColor(u.subjectId), val: modoTam === 'grau' ? (2 + u.degree) : (modoTam === 'fixo' ? 3 : _grafoValConteudo(u)) }); });
     const links = [];
     m.units.forEach(function(u){ if(u.subjectId !== '_doc' && vis.has(u.id) && sunSubj.has(u.subjectId)) links.push({ source: 'subj:' + u.subjectId, target: u.id, kind: 'member' }); });
-    _grafoRefsAtivos().forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: e.fc ? 'fcref' : 'ref', n: e.n || 1, sentence: e.sentence, juntos: !!e.juntos }); });
+    _grafoRefsAtivos().forEach(function(e){ if(vis.has(e.source) && vis.has(e.target)) links.push({ source: e.source, target: e.target, kind: e.fc ? 'fcref' : 'ref', n: e.n || 1, sentence: e.sentence, juntos: !!e.juntos, parte: !!e.parte }); });
     // Par RECÍPROCO (A cita B e B cita A): as duas arestas têm os mesmos
     // extremos e, retas (curvatura 0), caem UMA EM CIMA DA OUTRA — some uma
     // seta e o tooltip de uma das frases fica inalcançável. Solução do
@@ -53762,7 +53818,7 @@ window.TutorIA = (function(){
     const row = function(parent){ const r = document.createElement('label'); r.className = 'gp-row'; parent.appendChild(r); return r; };
     // Tipos de conexão (Fase 6C): cadernos [[ ]] × flashcards ⇆
     const sC = sec('Conexões');
-    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showJuntos', 'Citados juntos — sem seta'], ['showFc', 'Flashcards ⇆ — tracejada'], ['showProp', 'Conexões das propriedades'], ['soAtual', 'Só a unidade/caderno atual'], ['semOrfaos', 'Esconder sem conexões']].forEach(function(par){
+    [['showCad', 'Cadernos [[ ]] — linha cheia'], ['showJuntos', 'Citados juntos — sem seta'], ['showParte', 'Faz parte de — recuo com [[ ]]'], ['showFc', 'Flashcards ⇆ — tracejada'], ['showProp', 'Conexões das propriedades'], ['soAtual', 'Só a unidade/caderno atual'], ['semOrfaos', 'Esconder sem conexões']].forEach(function(par){
       const r0 = row(sC);
       const cb0 = document.createElement('input'); cb0.type = 'checkbox';
       // soAtual/semOrfaos nascem DESLIGADOS (grafo inteiro é o padrão da casa)
@@ -53941,7 +53997,7 @@ window.TutorIA = (function(){
       // deriva daqui os pontos de controle e REUSA nos 3: ponta da seta,
       // partículas e hit-test do tooltip — por isso tudo segue a curva sozinho.
       .linkCurvature(function(l){ return l.curvature || 0; })
-      .linkLabel(function(l){ return l.sentence ? ('“' + _esc(l.sentence) + '”') : ''; })
+      .linkLabel(function(l){ return l.parte ? ('Faz parte de' + (l.sentence ? ': “' + _esc(l.sentence) + '”' : '')) : (l.sentence ? ('“' + _esc(l.sentence) + '”') : ''); })
       // "Citados juntos" não tem sentido (nem seta nem partícula correndo).
       .linkDirectionalArrowLength(function(l){ return (_grafoPrefs.display.arrows && l.kind === 'ref' && !l.juntos) ? 3 : 0; })
       .linkDirectionalArrowRelPos(1)
@@ -74102,7 +74158,7 @@ const SrsSettingsModal = (function(){
     { k: 'showIntervals', lab: 'Mostrar o intervalo previsto nos botões', tipo: 'bool', help: 'Desligado por padrão: com o tempo à vista, o julgamento vira "quero ver em 12 h" em vez de "foi bom".' },
     { k: 'aiCheck', lab: 'Campo para digitar a resposta e conferir com a IA', tipo: 'bool' },
     { k: 'aiAutoCheck', lab: 'Conferir com a IA automaticamente ao mostrar a resposta', tipo: 'bool', help: 'Se você digitou uma resposta, a conferência (0,01ⓤ) roda sozinha ao virar o card — antes de o gabarito influenciar sua autoavaliação. Desligado, fica só o botão.' },
-    { k: 'pullLinked', lab: 'Puxar cards conectados para a sessão', tipo: 'bool', help: 'Pré-requisitos aparecem antes, relacionados logo depois. Conectado fora do vencimento entra como CONTEXTO: você lê e aperta "Entendi", sem mexer no agendamento dele. Desligado, cada card só aparece no próprio dia.' },
+    { k: 'pullLinked', lab: 'Puxar cards conectados para a sessão', tipo: 'bool', help: 'Pré-requisitos aparecem antes, relacionados logo depois, e o card da linha de cima no caderno vem antes do card recuado. Conectado fora do vencimento entra como CONTEXTO: você lê e aperta "Entendi", sem mexer no agendamento dele. Desligado, cada card só aparece no próprio dia.' },
   ];
   function getPath(o, k){ return k.split('.').reduce((a, p) => (a == null ? a : a[p]), o); }
   function setPath(o, k, v){ const ps = k.split('.'); let cur = o; ps.slice(0, -1).forEach(p => { if(typeof cur[p] !== 'object' || cur[p] == null) cur[p] = {}; cur = cur[p]; }); cur[ps[ps.length - 1]] = v; }
@@ -74295,7 +74351,29 @@ const PracticeQueue = (function(){
     }
     return resultado.concat(pend);
   }
-  return { montar, espacarIrmaos, reentrar, adiarIrmaos, conectar };
+  /* Pacote 6.1 — o card da LINHA DE CIMA do caderno entra antes do card recuado. Se ele já vai ser praticado mais
+     adiante nesta sessão, sobe para antes (vale como contexto e é avaliado); se não, entra como CONTEXTO (Entendi,
+     sem mexer no agendamento). Sobe pela cadeia (o de cima do de cima...), uma vez por card. paiDe: { filho: pai }. */
+  function comPais(fila, paiDe, infoDe){
+    if(!paiDe) return fila;
+    const out = fila.slice(); const vistos = new Set();
+    let guarda = out.length * 12 + 20;
+    for(let i = 0; i < out.length && guarda-- > 0; i++){
+      const it = out[i];
+      vistos.add(it.cardId);
+      if(it.contexto && !it.pai) continue;
+      const p = paiDe[it.cardId];
+      if(!p || vistos.has(p)) continue;
+      const j = out.findIndex(function(x, k){ return k > i && x.cardId === p && !x.contexto; });
+      if(j > i){ const mv = out.splice(j, 1)[0]; out.splice(i, 0, mv); i--; continue; }
+      const info = infoDe ? infoDe(p) : { existe: true };
+      if(!info || !info.existe || info.suspended) continue;
+      out.splice(i, 0, { cardId: p, ord: 1, contexto: true, via: it.cardId, pai: true });
+      i--;                                   // o card de cima também pode ter um card acima dele
+    }
+    return out;
+  }
+  return { montar, espacarIrmaos, reentrar, adiarIrmaos, conectar, comPais };
 })();
 window.PracticeQueue = PracticeQueue;
 
@@ -74659,6 +74737,10 @@ const Practice = (function(){
     // Fase 6B: conexões — pré-requisitos antes (em cadeia), relacionados
     // depois do âncora; fora do vencimento entra como contexto (Entendi).
     fila = PracticeQueue.conectar(fila, Store.linksList ? Store.linksList() : [], _infoConexao, { puxar: Store.srsSettings().pullLinked !== false });
+    // Pacote 6.1: card de linha recuada no caderno → o card da linha de cima vem antes, como contexto
+    if(Store.srsSettings().pullLinked !== false && typeof _fcPaisDosCards === 'function'){
+      try{ fila = PracticeQueue.comPais(fila, _fcPaisDosCards(), _infoConexao); }catch(e){ console.warn('[prática: card de cima]', e); }
+    }
     if(!fila.length){
       let msg = 'Nenhum card para praticar nesta seleção.';
       if(scope.tipo === 'pendentes'){
@@ -74775,7 +74857,7 @@ const Practice = (function(){
   }
   function _entendi(){
     const a = _s && _s.atual; if(!a || !a.contexto) return;
-    _s.done.push({ cardId: a.cardId, ord: a.ord, contexto: true, via: a.via || null, responseMs: Date.now() - a.shownAt });
+    _s.done.push({ cardId: a.cardId, ord: a.ord, contexto: true, via: a.via || null, pai: !!a.pai, responseMs: Date.now() - a.shownAt });
     _s.queue.shift();
     _s.queue = PracticeQueue.adiarIrmaos(_s.queue, a.cardId);
     _persistir(); _proximo();
@@ -75081,7 +75163,7 @@ const Practice = (function(){
     if(!_s.queue.length){ _finalizar(); return; }
     const it = _s.queue[0]; const card = _cardDe(it.cardId);
     if(!card){ _s.queue.shift(); return _proximo(); }                 // card apagado no meio
-    _s.atual = { cardId: it.cardId, ord: it.ord, shownAt: Date.now(), face: it.contexto ? 'back' : 'front', typed: '', contexto: !!it.contexto, via: it.via || null,
+    _s.atual = { cardId: it.cardId, ord: it.ord, shownAt: Date.now(), face: it.contexto ? 'back' : 'front', typed: '', contexto: !!it.contexto, via: it.via || null, pai: !!it.pai,
       seq: !it.contexto && _seqCabe(card), itemIdx: 0, seqFim: false, seqErrou: false, seqErroEm: -1 };
     _render();
   }
@@ -75155,7 +75237,7 @@ const Practice = (function(){
     const soResp = k === 'cloze' || ehOc;
     const viaCard = a.via ? _cardDe(a.via) : null;
     const viaTxt = viaCard ? (viaCard.front || FcSintaxe.clozeLimpo(viaCard.clozeText).replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '$1')) : '';
-    const viaHtml = a.via ? '<div class="pr-via">' + (a.contexto ? 'Contexto — conectado a: ' : 'Veio pela conexão com: ') + '<b>' + esc(String(viaTxt).slice(0, 90)) + '</b></div>' : '';
+    const viaHtml = a.via ? '<div class="pr-via">' + (a.pai ? 'Contexto — a linha de cima no caderno, antes de: ' : (a.contexto ? 'Contexto — conectado a: ' : 'Veio pela conexão com: ')) + '<b>' + esc(String(viaTxt).slice(0, 90)) + '</b></div>' : '';
     const conexoes = (Store.linksFor ? Store.linksFor(a.cardId) : []).map(l => {
       const outro = _cardDe(l.from === String(a.cardId) ? l.to : l.from);
       return outro ? (outro.front || FcSintaxe.clozeLimpo(outro.clozeText).replace(/\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g, '$1')) : null;
@@ -75425,7 +75507,7 @@ const Practice = (function(){
     const d = _s.done.pop();
     if(d.contexto){
       const i0 = _s.queue.findIndex(x => x.cardId === d.cardId && x.ord === d.ord); if(i0 >= 0) _s.queue.splice(i0, 1);
-      _s.queue.unshift({ cardId: d.cardId, ord: d.ord, contexto: true, via: d.via || null });
+      _s.queue.unshift({ cardId: d.cardId, ord: d.ord, contexto: true, via: d.via || null, pai: !!d.pai });
       _persistir(); _proximo(); return;
     }
     if(d.pulado){                                  // desfaz o Pular: tira o adiamento e traz o card de volta
