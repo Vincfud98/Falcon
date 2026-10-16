@@ -18431,6 +18431,7 @@ const Store = (function(){
   async function _hydrateCadernosFromSupabase(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state) return;
+    const inicio = Date.now();   // gravação feita aqui durante a busca é mais nova que a foto do servidor
     try{
       let { data, error } = await window._sb.schema('aluno').from('caderno')
         .select('unit_id, body, updated_at, meta')
@@ -18450,6 +18451,12 @@ const Store = (function(){
         meta: row.meta || {},
         updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now()
       }));
+      // junta, não troca: o espelho de um caderno salvo aqui durante a busca fica com o texto novo (mesma regra dos avulsos)
+      (Array.isArray(_state.cadernos) ? _state.cadernos : []).forEach(l => {
+        if(!l || (l.updatedAt || 0) < inicio) return;
+        const i = novosCad.findIndex(c => c.unitId === String(l.unitId));
+        if(i >= 0) novosCad[i] = l; else novosCad.push(l);
+      });
       _cadHidrTent = 0;
       // só EMITE quando o dado mudou — emitir sempre criava laço de
       // re-render (mount → rehidratar → emit → mount...) e a tela piscava
@@ -18466,6 +18473,7 @@ const Store = (function(){
   async function _hydrateCadernosAvulsosFromSupabase(){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb || !_state) return;
+    const inicio = Date.now();   // o que for criado ou mexido aqui depois disto é mais novo que a foto do servidor
     try{
       // paginado desde o berço (armadilha nº3: corte silencioso em 1000)
       const [docsR, pastasR] = await Promise.all([
@@ -18474,7 +18482,7 @@ const Store = (function(){
       ]);
       if(docsR.error){ console.warn('[hydrate cad avulsos]', docsR.error); _cadHidrRetry(); }
       else {
-        _state.cadAvulsos = (docsR.data || []).map(r => ({
+        const doServidor = (docsR.data || []).map(r => ({
           id: String(r.id), titulo: r.titulo || 'Sem título', body: r.body || '',
           pastaId: r.pasta_id ? String(r.pasta_id) : null,
           subjectId: r.subject_id ? String(r.subject_id) : null,
@@ -18483,6 +18491,14 @@ const Store = (function(){
           createdAt: r.created_at ? new Date(r.created_at).getTime() : Date.now(),
           updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : Date.now()
         }));
+        /* JUNTA, não troca (16/10/2026): caderno criado ou editado aqui enquanto a busca ia e vinha ("+ Caderno" logo ao
+           abrir a página) não estava na foto do servidor. Trocar a lista o tirava da memória, e o título e o texto
+           digitados depois não tinham mais onde gravar (o caderno ficava "Sem título" e vazio). A versão daqui vale. */
+        const porId = new Map(doServidor.map(c => [c.id, c]));
+        (Array.isArray(_state.cadAvulsos) ? _state.cadAvulsos : []).forEach(l => {
+          if(l && (l.updatedAt || 0) >= inicio) porId.set(String(l.id), l);
+        });
+        _state.cadAvulsos = Array.from(porId.values());
         const limite = Date.now() - 30 * 24 * 60 * 60 * 1000;
         _state.cadAvulsos.filter(c => c.deletedAt && c.deletedAt < limite)
           .forEach(c => { _syncCadAvulsoDelete(c.id).catch(()=>{}); });
