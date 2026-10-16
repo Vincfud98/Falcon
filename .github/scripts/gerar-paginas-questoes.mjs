@@ -279,7 +279,7 @@ function paginaQuestao(x, relacionadas, cotas){
   const corpo = `
 <section class="hero pub-hero">
   ${trilha([{ nome: 'Questões do CACD', href: `${BASE}/q/index.html` }, { nome: x.materia, href: hub }, { nome: `${x.sigla} ${x.ano}` }])}
-  <h1 class="hero-title">Questão <em>${esc(x.numero ?? '')}</em> do ${esc(x.sigla)} ${esc(x.ano)}</h1>
+  <h1 class="hero-title">Questão ${esc(x.numero ?? '')} do ${esc(x.sigla)} ${esc(x.ano)}</h1>
   <p class="hero-lede">${esc(x.materia)}. ${esc(tipo)}. Prova anterior do Concurso de Admissão à Carreira de Diplomata, classificada tópico a tópico pelo edital na Falcon.</p>
   <div class="hero-meta">
     <div class="hero-meta-item"><span class="hero-meta-k">Concurso</span><span class="hero-meta-v">${esc(x.sigla)}</span></div>
@@ -338,7 +338,7 @@ function paginaMateria(subj, lista){
   const corpo = `
 <section class="hero pub-hero">
   ${trilha([{ nome: 'Questões do CACD', href: `${BASE}/q/index.html` }, { nome }])}
-  <h1 class="hero-title">Questões de <em>${esc(nome)}</em> do CACD</h1>
+  <h1 class="hero-title">Questões de ${esc(nome)} do CACD</h1>
   <p class="hero-lede">Todas as questões das provas de ${esc(faixa)}, organizadas pelos tópicos do edital. Escolha um tópico para ir direto às questões dele.</p>
   <div class="hero-meta">
     <div class="hero-meta-item"><span class="hero-meta-k">Questões</span><span class="hero-meta-v">${lista.length}</span></div>
@@ -362,7 +362,7 @@ function paginaIndice(porMateria){
   const corpo = `
 <section class="hero pub-hero">
   <div class="hero-eyebrow">Falcon · Ubique CACD</div>
-  <h1 class="hero-title">Questões do <em>CACD</em> por matéria</h1>
+  <h1 class="hero-title">Questões do CACD por matéria</h1>
   <p class="hero-lede">${total} questões das provas anteriores do Concurso de Admissão à Carreira de Diplomata, classificadas tópico a tópico pelo edital. Escolha a matéria.</p>
   <div class="hero-meta">
     <div class="hero-meta-item"><span class="hero-meta-k">Questões</span><span class="hero-meta-v">${total}</span></div>
