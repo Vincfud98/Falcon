@@ -24,7 +24,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
      Line/Bar) e no RotinaTab. Quem usa a biblioteca é o admin.html, que tem a
      própria tag. NÃO reintroduzir aqui sem antes checar se há uso real. -->
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=134"></script>
+<script src="ubique-shared.js?v=135"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=81"></script>
 <script src="raiox-render.js?v=3"></script>
@@ -14292,6 +14292,7 @@ window.TAG_REGISTRY = {
     reg('conteudo.glossary_terms',  { monta: () => sb.from('glossary_terms').select('*'), ordem: 'id', aplicar: troca('glossary_terms') });
     reg('conteudo.verbetes',        { monta: () => sb.from('verbetes').select('*'), ordem: 'id', aplicar: troca('verbetes') });
     reg('concursos.exams',          { monta: () => csb.from('exams').select('*'), direto: true, aplicar: troca('exams') });
+    reg('catalogo.organizacoes',    { monta: () => window._sb.schema('catalogo').from('organizacoes').select('*').order('position'), direto: true, aplicar: troca('organizacoes') });   // empresas da Loja (SQL 92)
     reg('concursos.exam_subjects',  { monta: () => csb.from('exam_subjects').select('*'), direto: true, aplicar: troca('exam_subjects') });
     reg('concursos.editais',        { monta: () => csb.from('editais').select('*'), direto: true, aplicar: troca('editais') });
     reg('concursos.edital_topics',  { monta: () => csb.from('edital_topics').select('*'), ordem: 'id', aplicar: troca('edital_topics') });
@@ -14485,6 +14486,7 @@ window.TAG_REGISTRY = {
           const csb = window._sb.schema('concursos');
           const [exR, esR, edR, etR, etuR] = await Promise.all([
             _carregarTabela('concursos.exams', () => csb.from('exams').select('*'), 'id', 'exams', { direto: true }),
+            Promise.resolve().then(() => _carregarTabela('catalogo.organizacoes', () => window._sb.schema('catalogo').from('organizacoes').select('*').order('position'), 'id', 'organizacoes', { direto: true })).catch(() => null),   // empresas da Loja (SQL 92); sem a tabela, segue
             _carregarTabela('concursos.exam_subjects', () => csb.from('exam_subjects').select('*'), 'id', 'exam_subjects', { direto: true }),
             _carregarTabela('concursos.editais', () => csb.from('editais').select('*'), 'id', 'editais', { direto: true }),
             _carregarTabela('concursos.edital_topics', () => csb.from('edital_topics').select('*'), 'id', 'edital_topics'),
@@ -46349,6 +46351,17 @@ Renderers.myExams = function(){
     ? (UbiqueStore.exams.list() || []) : [];
   const access = (window.Auth && Auth.loadAccessData) ? Auth.loadAccessData() : null;
   const isAdmin = !!(window.Auth && Auth.isAdmin && Auth.isAdmin());
+  // Loja com um concurso só (dono, 16/10/2026): não faz sentido escolher entre uma opção — a página "Concursos"
+  // só existe com mais de um concurso com matérias; com um, abre direto nas matérias dele. O admin vê a lista sempre.
+  window.__lojaUnico = '';
+  if(!isAdmin){
+    const _rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list) ? (UbiqueStore.exam_subjects.list() || []) : [];
+    const _comMaterias = exams.filter(e => e && _rel.some(es => String(es.exam_id) === String(e.id)));
+    if(_comMaterias.length === 1){
+      window.__lojaUnico = String(_comMaterias[0].id);
+      return Renderers.catalog({ view: 'catalog', params: {}, query: { exam: window.__lojaUnico, loja: '1' } });
+    }
+  }
   const myExamIds = new Set(((access && access.exam_ids) || []).map(String));
   // contagem de matérias por concurso (via exam_subjects)
   const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list)
@@ -46445,6 +46458,9 @@ Renderers.myExams = function(){
   <div class="catalog-grid" data-a="5">${cards || '<p class="s-body">Nenhum concurso disponível no momento.</p>'}</div>`;
 };
 
+Renderers.myExams.mount = function(stage, route){
+  if(window.__lojaUnico && Renderers.catalog.mount) Renderers.catalog.mount(stage, { view: 'catalog', params: {}, query: { exam: window.__lojaUnico, loja: '1' } });
+};
 Renderers.catalog = function(route){
   const _catIsAdmin = !!(window.Auth && Auth.isAdmin && Auth.isAdmin());
   // LOJA (&loja=1) usa a lista COMPLETA de matérias (a vitrine ignora o escopo
@@ -46468,6 +46484,37 @@ Renderers.catalog = function(route){
     const _ex = (window.UbiqueStore && UbiqueStore.exams && UbiqueStore.exams.list)
       ? (UbiqueStore.exams.list() || []).find(x => String(x.id) === String(_examId)) : null;
     _examName = _ex ? (_ex.name || _ex.id) : '';
+  }
+  // EMPRESAS (SQL 92, dono 16/10/2026): quando o concurso tem matérias de mais de uma empresa, a Loja mostra primeiro
+  // as empresas e, dentro de cada uma, as matérias dela. Com uma só (hoje, a Ubique), nada muda na tela.
+  const _orgId = (route && route.query && route.query.org) ? String(route.query.org) : '';
+  let _orgNome = '', _orgCards = '';
+  if(_isStore && _examId){
+    const _subjs = (window.UbiqueStore && UbiqueStore.subjects && UbiqueStore.subjects.list) ? (UbiqueStore.subjects.list() || []) : [];
+    const _orgs = (window.UbiqueStore && UbiqueStore.organizacoes && UbiqueStore.organizacoes.list) ? (UbiqueStore.organizacoes.list() || []).filter(o => o && o.ativo !== false) : [];
+    const _orgDe = c => { const sj = _subjs.find(x => x && String(x.id) === String(c._subjectId)); return (sj && sj.organizacao_id) ? String(sj.organizacao_id) : ''; };
+    const _porOrg = {};
+    courses.forEach(c => { const k = _orgDe(c); (_porOrg[k] = _porOrg[k] || []).push(c); });
+    const _ids = Object.keys(_porOrg).filter(k => k && _orgs.some(o => String(o.id) === k));
+    if(_orgId){
+      courses = courses.filter(c => _orgDe(c) === _orgId);
+      const _o = _orgs.find(o => String(o.id) === _orgId); _orgNome = _o ? (_o.nome || '') : '';
+    } else if(_ids.length >= 2){
+      _orgCards = _orgs.filter(o => _ids.indexOf(String(o.id)) >= 0).map((o, i) => {
+        const n = (_porOrg[String(o.id)] || []).length;
+        const cover = (window.LearningBlocks && LearningBlocks.driveImageUrl) ? LearningBlocks.driveImageUrl(o.logo_url) : o.logo_url;
+        return `<a class="catalog-card" href="#/cursos?exam=${encodeURIComponent(_examId)}&loja=1&org=${encodeURIComponent(o.id)}" data-org-id="${Util.attr(o.id)}" data-a="${i + 2}">
+      <div class="catalog-card-cover" style="background-image:url('${Util.attr(cover || '')}')">
+        <div class="catalog-card-cover-title"><h3>${Util.esc(o.nome || '')}</h3></div>
+      </div>
+      <div class="catalog-card-body">
+        ${o.descricao ? `<p class="catalog-card-desc">${Util.esc(o.descricao)}</p>` : ''}
+        <div class="catalog-card-stats"><span class="catalog-card-stat"><strong>${n}</strong> ${n === 1 ? 'matéria' : 'matérias'}</span></div>
+      </div>
+      <div class="catalog-card-footer"><span class="catalog-card-cta">Ver as matérias</span></div>
+    </a>`;
+      }).join('');
+    }
   }
   if(!_isStore){
     courses = courses.filter(c => Commerce.temMateria(c.id));   // curso, turma ou só o banco
@@ -46587,16 +46634,22 @@ Renderers.catalog = function(route){
       </div>
     </${canOpen?'a':'div'}>`;
   }).join('');
-  const bancoHtml = _isStore ? _lojaBancoHtml(courses) : '';
+  const bancoHtml = (_isStore && !_orgCards) ? _lojaBancoHtml(courses) : '';
+  // caminho de volta: dentro de uma empresa → as empresas do concurso; no concurso → a Loja (só se há mais de um concurso)
+  const _volta = _orgNome
+    ? `<a href="#/cursos?exam=${encodeURIComponent(_examId)}&loja=1" class="catalog-back">← ${Util.esc(_examName || 'Concurso')}</a>`
+    : (window.__lojaUnico ? 'Loja' : `<a href="#/concursos" class="catalog-back">← Loja</a>`);
   return `<div class="hero">
-    <span class="s-label" data-a="1">${_isStore && _examName ? `<a href="#/concursos" class="catalog-back">← Loja</a>` : 'Ubique Course Platform'}</span>
-    <h1 class="s-title hero" data-a="2">${_isStore && _examName ? Util.esc(_examName) : 'Suas matérias'}</h1>
+    <span class="s-label" data-a="1">${_isStore && _examName ? _volta : 'Ubique Course Platform'}</span>
+    <h1 class="s-title hero" data-a="2">${_isStore && _examName ? Util.esc(_orgNome || _examName) : 'Suas matérias'}</h1>
     <div class="s-divider" data-a="3"></div>
     <p class="s-body" data-a="4">${_isStore
-      ? 'As matérias do concurso: as que você já tem, as disponíveis para compra e as que estão a caminho.'
+      ? (_orgCards ? 'Mais de uma empresa oferece cursos para este concurso. Escolha a empresa para ver as matérias dela.'
+                   : (_orgNome ? 'As matérias de ' + Util.esc(_orgNome) + ' para ' + Util.esc(_examName) + ': as que você já tem, as disponíveis para compra e as que estão a caminho.'
+                               : 'As matérias do concurso: as que você já tem, as disponíveis para compra e as que estão a caminho.'))
       : 'Escolha uma matéria para continuar seus estudos. Cada disciplina contém módulos, unidades e materiais organizados por tópicos.'}</p>
   </div>
-  <div class="catalog-grid" data-a="5">${cards}</div>${bancoHtml}`;
+  <div class="catalog-grid" data-a="5">${_orgCards || cards}</div>${bancoHtml}`;
 };
 // LOJA · SÓ O BANCO DE QUESTÕES (fase 3): tudo menos ler as unidades. Primeiro os pacotes de bancos (oferta com
 // vários bancos, ex.: "Banco completo"), depois o banco de cada matéria. Some quem já tem a matéria completa

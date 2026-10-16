@@ -35,6 +35,7 @@
     unit_blocks: [],
     unit_sections: [],
     unit_downloads: [],
+    organizacoes: [],      // empresas que oferecem cursos (catalogo.organizacoes, SQL 92)
     questions: [],
     question_groups: [],
     essays: [],
@@ -191,6 +192,7 @@
     unit_blocks:    makeCRUD('unit_blocks',    'number'),
     unit_sections:  makeCRUD('unit_sections',  'number'),
     unit_downloads: makeCRUD('unit_downloads', 'number'),
+    organizacoes:   makeCRUD('organizacoes',   'string'),
     questions:        makeCRUD('questions',        'number'),
     question_groups:  makeCRUD('question_groups',  'number'),
     essays:           makeCRUD('essays',           'number'),
