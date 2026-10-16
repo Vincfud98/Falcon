@@ -94,6 +94,7 @@ function cssApp(){
 }
 const CSS_PAGINA = `
 /* ── layout das páginas públicas das questões (só medidas; os componentes são os do design system e do app) ── */
+.page a{text-decoration:none}
 .pub-main{max-width:1100px;margin:0 auto;padding:0 clamp(1rem,4vw,2.5rem)}
 .pub-hero{max-width:none;padding:clamp(2.2rem,5vh,3.6rem) 0 clamp(1.2rem,3vh,1.8rem)}
 .pub-hero .hero-title{max-width:30ch;font-size:clamp(1.7rem,3.2vw,2.6rem);line-height:1.15}
