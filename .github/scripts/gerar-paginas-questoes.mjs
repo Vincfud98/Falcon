@@ -3,14 +3,17 @@
 //
 // Roda no deploy (GitHub Actions) antes do `firebase deploy`. Lê as VISTAS DO VISITANTE (papel anônimo,
 // SQL 87: enunciado e itens SEM gabarito e SEM comentário) e escreve:
-//   q/<uuid>.html          uma página por questão de prova anterior (hero, texto de referência, enunciado, itens,
-//                          tópicos do edital, questões relacionadas e "Resolver na Falcon", que abre a questão no Banco)
+//   q/<uuid>.html          uma página por questão de prova anterior: a QUESTÃO RESOLVE-SE NELA (como no
+//                          QConcursos), com o MESMO bloco de questão do Banco (marcação, classes e CSS do app),
+//                          mais tópicos do edital, questões relacionadas e os convites
 //   q/materia-<slug>.html  uma página por matéria, com a nuvem de tópicos e as questões por tópico do edital
 //   q/index.html           a porta de entrada (matérias, anos, contagens)
-//   q/ubique.css           o CSS do design system (ubique-saas-components.html), copiado inteiro a cada deploy
+//   q/ubique.css           CSS: design system (ubique-saas-components.html, sem os componentes de questão do
+//                          catálogo) + as regras do bloco de questão EXTRAÍDAS do index.html (o app) + layout da página
+//   q/resolver.js          o script que resolve na página (de .github/scripts/resolver.js, com a chave anônima)
 //   sitemap.xml            na raiz, com todas as páginas acima (+ landing e app)
-// VISUAL: só componentes do design system (nav, hero, sec-head, ref-text, q-item/ce-list, chip, card, callout, list,
-// btn, ftr). Nada de componente novo: o que é específico da página fica em meia dúzia de regras de LAYOUT no fim do CSS.
+// VISUAL: o cromo (nav, hero, seções, chips, cards, rodapé) é do design system; a questão é a do app, sem
+// componente novo. O que é específico da página são regras de LAYOUT `.pub-*` no fim do CSS.
 // Sem as vistas (SQL 87 ainda não rodou), sem rede ou com qualquer erro: escreve só o sitemap base e sai com 0.
 // O deploy NUNCA para por causa daqui. Rodar localmente: node .github/scripts/gerar-paginas-questoes.mjs
 // (q/ e sitemap.xml estão no .gitignore: nascem no deploy, não no repositório).
@@ -19,6 +22,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RAIZ = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const AQUI = dirname(fileURLToPath(import.meta.url));
 const BASE = 'https://falcon.grupoubique.com.br';
 const SUPABASE = 'https://kluqjqojxzpuiauuidwx.supabase.co';
 const GTM = 'GTM-KPCF42J';
@@ -36,41 +40,87 @@ function chaveAnon(){
 const KEY = chaveAnon();
 // A marca do topo é a mesma do app (SVG do botão .tb-brand).
 const MARCA_SVG = (/<span class="tb-brand-logo">(<svg[\s\S]*?<\/svg>)<\/span>/.exec(INDEX_HTML) || [])[1] || '';
+// Ícones da barra da questão e do bloco, os mesmos do app (Icons.statistics / Icons.comments / Icons.quiz).
+function iconeDoApp(nome){
+  const m = new RegExp(`\\b${nome}:\\s*'(<svg[^']*<\\/svg>)'`).exec(INDEX_HTML);
+  return m ? m[1] : '';
+}
+const ICONE_STATS = iconeDoApp('statistics'), ICONE_COMENT = iconeDoApp('comments'), ICONE_QUIZ = iconeDoApp('quiz');
+const ICONE_COMPARTILHAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>';
 
-// ── CSS: o design system inteiro + o layout destas páginas ───────────────────
+// ── CSS ──────────────────────────────────────────────────────────────────────
+// Divide um CSS em blocos de topo [{sel, corpo}] respeitando chaves aninhadas (@media, @supports, @keyframes).
+function blocosCss(txt){
+  const out = [];
+  txt = txt.replace(/\/\*[\s\S]*?\*\//g, '');
+  let i = 0;
+  while(i < txt.length){
+    const j = txt.indexOf('{', i);
+    if(j < 0) break;
+    const sel = txt.slice(i, j).trim();
+    let depth = 1, k = j + 1;
+    while(k < txt.length && depth){ if(txt[k] === '{') depth++; else if(txt[k] === '}') depth--; k++; }
+    out.push({ sel, corpo: txt.slice(j + 1, k - 1) });
+    i = k;
+  }
+  return out;
+}
+// Mantém só os blocos cujo seletor passa no teste; dentro de @media/@supports filtra os filhos; @keyframes fica.
+function filtrarCss(txt, teste){
+  return blocosCss(txt).map(b => {
+    if(/^@(media|supports|container)/.test(b.sel)){
+      const dentro = filtrarCss(b.corpo, teste);
+      return dentro.trim() ? `${b.sel}{\n${dentro}}` : '';
+    }
+    if(/^@keyframes/.test(b.sel)) return `${b.sel}{${b.corpo}}`;
+    if(/^@/.test(b.sel)) return '';
+    return b.sel.split(',').some(s => teste(s.trim())) ? `${b.sel}{${b.corpo}}` : '';
+  }).filter(Boolean).join('\n');
+}
+// Design system inteiro, menos os componentes de questão do catálogo (a questão é a do app) e os botões (idem).
 function cssDesignSystem(){
   const ds = readFileSync(join(RAIZ, 'ubique-saas-components.html'), 'utf8');
   const m = /<style[^>]*>([\s\S]*?)<\/style>/.exec(ds);
   if(!m) throw new Error('CSS do design system não encontrado em ubique-saas-components.html');
-  return m[1];
+  const fora = /(^|[\s>+~(,])\.(q-[a-z-]+|ce-[a-z-]+|mcq[a-z-]*|exam-[a-z-]+|btn[a-z-]*)(?![a-zA-Z0-9_-])/;
+  return filtrarCss(m[1], s => !fora.test(s));
+}
+// As regras do bloco de questão, do app (index.html): tokens, bloco, grupo, item, opções, satélite, barra de
+// verificar, aviso de cota, folha de convite, aviso "copiado".
+const TOKEN_APP = /(^|[\s>+~(,])(\.(block-wrap|block-header|block-header-lead|block-type|block-type-icon|block-title|block-desc|quiz-block|qb-intro|qz-[a-z-]+|q-[a-z-]+|gabfs-[a-z-]+|tpc[a-z0-9-]*|tg|tg-hash|btn-primary|btn-ghost|bf-limite|bf-cota|vis-[a-z-]+|ue-toast[a-z-]*)|#ueToastHost|body\[data-visitante\]|:root)(?![a-zA-Z0-9_-])/;
+function cssApp(){
+  const estilos = [...INDEX_HTML.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map(m => m[1]);
+  return filtrarCss(estilos.join('\n'), s => TOKEN_APP.test(s));
 }
 const CSS_PAGINA = `
-/* ── layout das páginas públicas das questões (só medidas; os componentes são os do design system) ── */
-.pub-main{max-width:860px;margin:0 auto;padding:0 clamp(1rem,4vw,2.5rem)}
-.pub-main .q-list,.pub-main .ref-text{max-width:none}
-.pub-hero{max-width:none;padding:clamp(2.6rem,6vh,4.2rem) 0 clamp(1.4rem,3vh,2rem)}
-.pub-hero .hero-title{max-width:22ch}
-.pub-hero .hero-meta{margin-top:1.8rem;padding-top:1.4rem}
-.pub-sec{max-width:none;padding:clamp(1.4rem,3.5vh,2.4rem) 0}
-.pub-sec .sec-head{margin-bottom:1.4rem;padding-bottom:.9rem}
-.pub-crumbs{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:1.2rem}
+/* ── layout das páginas públicas das questões (só medidas; os componentes são os do design system e do app) ── */
+.pub-main{max-width:1100px;margin:0 auto;padding:0 clamp(1rem,4vw,2.5rem)}
+.pub-hero{max-width:none;padding:clamp(2.2rem,5vh,3.6rem) 0 clamp(1.2rem,3vh,1.8rem)}
+.pub-hero .hero-title{max-width:30ch;font-size:clamp(1.7rem,3.2vw,2.6rem);line-height:1.15}
+.pub-hero .hero-lede{margin-top:1.2rem}
+.pub-hero .hero-meta{margin-top:1.6rem;padding-top:1.2rem}
+.pub-sec{max-width:none;padding:clamp(1.2rem,3vh,2rem) 0}
+.pub-sec .sec-head{margin-bottom:1.2rem;padding-bottom:.8rem}
+.pub-crumbs{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:1rem}
 .pub-crumbs a{color:var(--text-dim);text-decoration:none}.pub-crumbs a:hover{color:var(--accent)}
 .pub-crumbs .hero-eyebrow{margin:0}.pub-crumbs .hero-eyebrow::before{display:none}
 .nav-brand a{display:flex;align-items:center;gap:.8rem;text-decoration:none}
 .nav-logo-svg{width:26px;height:26px;display:block;color:var(--accent)}.nav-logo-svg svg{width:100%;height:100%;fill:currentColor}
-.nav-tools .btn{white-space:nowrap}
-.q-list .q-item{margin:0}
-.q-stem p+p{margin-top:.7em}
-.ce-toggle a.ce-toggle-btn{text-decoration:none}
+.nav-tools .btn-primary,.nav-tools .btn-ghost{white-space:nowrap}
+.pub-questao .block-wrap{margin-bottom:0}
+.pub-questao .block-header .block-title:empty{display:none}
+.pub-questao .bf-cota{display:block;margin:.2rem 0 1rem}
 .pub-fig{max-width:100%;height:auto;display:block;margin:1rem 0;border-radius:var(--radius)}
 .pub-lista .list-item a{color:var(--text);text-decoration:none}.pub-lista .list-item a:hover{color:var(--accent)}
 .pub-lista .list-item .pub-meta{display:block;font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;color:var(--accent);margin-bottom:.15rem}
 .pub-lista .list-item .pub-trecho{color:var(--text-dim)}
-.cards-grid .card a.btn{align-self:flex-start}
+.pub-acoes{display:flex;gap:.7rem;flex-wrap:wrap;align-items:center;margin-top:1rem}
+.cards-grid .card .pub-acoes{margin-top:auto;padding-top:1rem}
 .pub-nota{font-family:var(--sans);font-weight:200;font-size:var(--fs-small);color:var(--text-mute);line-height:1.6;max-width:680px}
 .pub-nota a{color:var(--accent);text-decoration:none;border-bottom:1px solid var(--accent-border)}.pub-nota a:hover{border-bottom-color:var(--accent)}
 .pub-chip-n{font-family:var(--mono);font-size:.68rem;color:var(--accent);margin-left:.1rem}
-@media(max-width:600px){.nav-tools .btn{padding:.48rem .8rem;font-size:.6rem}.pub-hero .hero-meta{gap:1.4rem}}
+.q-pill-btn.q-share-btn.is-copiado{color:var(--green);border-color:var(--green-border,rgba(93,212,159,.35))}
+@media(max-width:600px){.nav-tools .btn-primary{padding:.45rem .8rem;font-size:.62rem}.pub-hero .hero-meta{gap:1.4rem}}
 `;
 
 async function tabela(schema, nome, select, ordem){
@@ -104,12 +154,18 @@ function texto(s){
   }
   return s.split(/\n{2,}/).map(p => '<p>' + esc(p).replace(/\n/g, '<br>') + '</p>').join('');
 }
-// item C/E: uma linha de texto (sem <p> por fora, que o .ce-text não espera)
-const textoLinha = s => texto(s).replace(/^<p>([\s\S]*)<\/p>$/i, '$1');
 const ptData = d => { try{ return new Date(d).toISOString().slice(0, 10); }catch(_){ return HOJE; } };
+// o texto pelo qual o candidato procura a questão: o enunciado quando diz algo; senão o 1º item
+function textoDeBusca(x){
+  const en = plano(x.q.enunciado), it = plano(x.itens[0] && x.itens[0].assertiva), cm = plano(x.q.command);
+  const generico = /^(julgue|acerca|a respeito|com base|considerando|no que|tendo em vista|em relação|sobre|com relação|a partir)/i;
+  if(en && en.length >= 70 && !(generico.test(en) && en.length < 110)) return en;
+  if(it) return it;
+  return en || cm;
+}
 
 // ── concha comum (nav, hero, footer do design system) ────────────────────────
-function concha({ titulo, descricao, url, corpo, jsonld }){
+function concha({ titulo, descricao, url, corpo, jsonld, scripts }){
   const ld = (jsonld || []).map(o => `<script type="application/ld+json">${JSON.stringify(o)}</script>`).join('\n');
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -124,7 +180,7 @@ function concha({ titulo, descricao, url, corpo, jsonld }){
 <meta property="og:title" content="${esc(titulo)}"><meta property="og:description" content="${esc(descricao)}"><meta property="og:url" content="${esc(url)}">
 <meta name="twitter:card" content="summary">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Outfit:wght@200;300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="${BASE}/q/ubique.css">
 ${ld}
 <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','${GTM}');</script>
@@ -144,7 +200,7 @@ ${ld}
     <a class="nav-link" href="${APP}#/inicio">Explorar sem conta</a>
     <a class="nav-link" href="${APP}#/login">Entrar</a>
   </div>
-  <div class="nav-tools"><a class="btn btn-primary btn-sm" href="${APP}#/login?criar=1">Criar conta grátis</a></div>
+  <div class="nav-tools"><a class="btn-primary" href="${APP}#/login?criar=1">Criar conta grátis</a></div>
 </nav>
 <main class="pub-main">
 ${corpo}
@@ -154,6 +210,7 @@ ${corpo}
   <div class="ftr-r"><a class="nav-link" href="${BASE}/landing.html">Conheça a Falcon</a><a class="nav-link" href="${BASE}/q/index.html">Questões do CACD</a><a class="nav-link" href="${APP}#/login">Entrar</a></div>
 </footer>
 </div>
+${scripts || ''}
 </body>
 </html>`;
 }
@@ -228,59 +285,110 @@ function montar(d){
   return { questoes, subjById };
 }
 
+// ── a questão, com a marcação do Banco (Blocks.quiz do app) ──────────────────
+function blocoQuestao(x, app){
+  const tag = `${x.sigla} ${x.ano}`.trim();
+  const refHtml = x.refs.map(r => {
+    const corpo = texto(r.text);
+    const fonte = [r.author, r.source].filter(Boolean).join('. ');
+    const textoHtml = (r.title || fonte)
+      ? `<div class="q-ref-text">${r.title ? `<div class="q-ref-title">${esc(plano(r.title))}</div>` : ''}<div class="q-ref-text-html">${corpo}</div>${fonte ? `<div class="q-ref-source">${esc(plano(fonte))}</div>` : ''}</div>`
+      : `<div class="q-ref-text q-ref-text-html">${corpo}</div>`;
+    const media = r.image_url ? `<div class="q-ref-media"><img src="${esc(r.image_url)}" alt="" loading="lazy"></div>` : '';
+    return `<div class="q-ref">${textoHtml}${media}</div>`;
+  }).join('');
+  const comando = (x.q.enunciado || (x.q.type === 'essay' && x.q.command))
+    ? `<div class="q-group-command"><div class="q-group-label">${texto(x.q.enunciado)}${x.q.type === 'essay' && x.q.command ? texto(x.q.command) : ''}${x.q.image_url ? `<img class="pub-fig" src="${esc(x.q.image_url)}" alt="">` : ''}</div></div>`
+    : '';
+  const barra = `<div class="q-actions-bar">
+      <button type="button" class="q-pill-btn q-data-btn" data-action="q-data" data-tip="Estatísticas e dificuldade, na Falcon" aria-label="Estatísticas">${ICONE_STATS}</button>
+      <button type="button" class="q-pill-btn q-comments-btn" data-action="q-comments" data-tip="Comentários dos alunos, na Falcon" aria-label="Comentários">${ICONE_COMENT}</button>
+      <button type="button" class="q-pill-btn q-share-btn" data-action="q-share" data-tip="Compartilhar esta questão" aria-label="Compartilhar esta questão">${ICONE_COMPARTILHAR}</button>
+      <button class="q-show-key" data-action="show-key" data-tip="Ver gabarito desta questão no painel lateral" aria-label="Ver gabarito" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></button>
+    </div>`;
+  const itensHtml = x.itens.map((t, i) => `<article class="q-item is-tf" data-item-id="${esc(t.id)}" id="item-${esc(t.id)}">
+      <div class="q-num">${dois(t.numero ?? (i + 1))}</div>
+      <div class="q-body">
+        <div class="q-badges">${t.anulada ? '<span class="q-badge q-badge-anulada" data-tip="Item anulado pela banca">Anulada</span>' : ''}<span class="q-badge q-badge-ref" data-tip="Prova: ${esc(tag)}">${esc(tag)}</span></div>
+        ${t.image_url ? `<div class="q-item-ref"><img src="${esc(t.image_url)}" alt="" loading="lazy" style="max-width:100%;border-radius:var(--radius)"></div>` : ''}
+        <div class="q-assertion">${texto(t.assertiva)} </div>
+      </div>
+      <div class="q-options is-tf">
+        <button class="q-option" data-value="Certo" data-idx="0"><span class="q-option-mark">C</span></button>
+        <button class="q-option" data-value="Errado" data-idx="1"><span class="q-option-mark">E</span></button>
+      </div>
+      <div class="q-actions"></div>
+      ${barra}
+      <div class="qd-panel" data-qd-panel hidden><div class="qd-panel-inner"></div></div>
+    </article>`).join('');
+  const discursiva = x.q.type === 'essay' ? `<article class="q-item" data-discursiva>
+      <div class="q-num">${dois(x.numero ?? 1)}</div>
+      <div class="q-body"><div class="q-badges"><span class="q-badge q-badge-ref">${esc(tag)}</span><span class="q-badge q-badge-tag">Discursiva</span></div>
+        <div class="q-assertion">Resposta escrita${x.q.max_lines ? `, em até ${esc(x.q.max_lines)} linhas` : ''}. Na Falcon, você escreve e recebe a correção com os critérios da banca.</div></div>
+      <div class="q-actions"><a class="btn-primary" href="${esc(app)}">Responder na Falcon</a></div>
+    </article>` : '';
+  const total = x.itens.length;
+  const intro = total
+    ? `${total} ite${total > 1 ? 'ns' : 'm'} · marque as respostas e clique em <strong>Verificar respostas</strong> no final.`
+    : 'Questão discursiva · a resposta escrita é corrigida na Falcon.';
+  return `<section class="block-wrap quiz-block qz-has-satellite" data-questao="${esc(x.k)}" data-app="${esc(app)}">
+    <header class="block-header"><div class="block-header-lead"><span class="block-type">${ICONE_QUIZ ? `<span class="block-type-icon">${ICONE_QUIZ}</span>` : ''}${total ? 'Questões objetivas' : 'Questão discursiva'}</span><h3 class="block-title"></h3></div></header>
+    <div class="qb-intro">${intro}</div>
+    <span class="bf-cota" id="bfCota" hidden></span>
+    <div class="qz-layout">
+      <div class="qz-main"><div class="q-list">
+        <div class="q-group" data-group-idx="0">
+          <div class="q-group-tagrow"><span class="q-group-origin-badge" title="${esc(x.q.origin || tag)}">${esc(tag)}</span></div>
+          ${refHtml}
+          ${comando}
+          <div class="q-group-items">${itensHtml}${discursiva}</div>
+        </div>
+      </div>${total ? `
+        <div class="qz-verify-bar" data-qz-verify hidden>
+          <div class="qz-verify-summary" data-qz-summary hidden></div>
+          <button type="button" class="btn-primary qz-verify-btn" data-qz-verify-btn>Verificar respostas</button>
+        </div>` : ''}</div>
+      <aside class="qz-satellite">
+        <div class="qz-satellite-pin">
+          <div class="qz-sat-header"><span class="qz-sat-label">Progresso</span><span class="qz-sat-counter" data-qz-counter>0 / ${total} respondidas</span></div>
+          <div class="qz-sat-bar"><span class="qz-sat-bar-fill" data-qz-bar style="width:0"></span></div>
+          <div class="qz-sat-remaining" data-qz-remaining>Faltam ${total}</div>
+          <div class="qz-sat-divider"></div>
+          <div class="qz-sat-detail" data-qz-detail><div class="qz-sat-empty">Marque a resposta e clique em Verificar respostas para ver o gabarito e o comentário.</div></div>
+        </div>
+      </aside>
+    </div>
+  </section>`;
+}
+
 // ── páginas ──────────────────────────────────────────────────────────────────
+const siteLd = { '@type': 'WebSite', name: 'Falcon · Ubique CACD', url: BASE };
+const resumo = y => corta(textoDeBusca(y), 110);
 function tituloQ(x){
-  const base = `${x.sigla} ${x.ano} · ${x.materia} · Questão ${x.numero ?? ''}`.replace(/\s+/g, ' ').trim();
-  return (base.length + 9 <= 90) ? base + ' | Falcon' : base.slice(0, 90);
+  const sufixo = ` · ${x.sigla} ${x.ano} | Falcon`;
+  return corta(textoDeBusca(x), 90 - sufixo.length) + sufixo;
 }
 function descricaoQ(x){
-  const fonte = x.q.enunciado || (x.itens[0] && x.itens[0].assertiva) || x.q.command || '';
-  const pre = `Questão ${x.numero ?? ''} do ${x.sigla} ${x.ano}, ${x.materia}: `;
-  return corta(pre + plano(fonte), 158);
+  return corta(`Resolva a questão ${x.numero ?? ''} do ${x.sigla} ${x.ano} (${x.materia}), com gabarito e comentário: ${plano(textoDeBusca(x))}`, 158);
 }
-const siteLd = { '@type': 'WebSite', name: 'Falcon · Ubique CACD', url: BASE };
-const resumo = y => corta(y.q.enunciado || (y.itens[0] && y.itens[0].assertiva) || y.q.command, 110);
 
 function paginaQuestao(x, relacionadas, cotas){
   const url = `${BASE}/q/${x.k}.html`;
   const hub = `${BASE}/q/materia-${x.mslug}.html`;
   const app = `${APP}#/banco/questions?item=${encodeURIComponent(x.k)}&exib=full&applied=1`;
   const tipo = x.q.type === 'essay' ? 'Questão discursiva' : (x.q.type === 'multiple_choice' ? 'Múltipla escolha' : `Certo ou Errado · ${x.itens.length} ${x.itens.length === 1 ? 'item' : 'itens'}`);
-  const selos = [x.q.anulada ? '<span class="chip chip-warn"><span class="dot"></span>Anulada</span>' : '', x.q.desatualizada ? '<span class="chip chip-warn"><span class="dot"></span>Desatualizada</span>' : ''].filter(Boolean).join('');
   let n = 0;
   const sec = (titulo, html, nota) => { n++; return `<section class="sec pub-sec">${secHead(`§ ${dois(n)} · ${titulo}`, titulo, nota)}${html}</section>`; };
-
-  const refsHtml = x.refs.map((r, i) => `<article class="ref-text">
-    <span class="ref-text-label">Texto de referência${x.refs.length > 1 ? ' · ' + ['I', 'II', 'III', 'IV', 'V', 'VI'][i] : ''}</span>
-    ${r.title ? `<h3 class="ref-text-title">${esc(plano(r.title))}</h3>` : ''}
-    ${r.subtitle ? `<p class="ref-text-sub">${esc(plano(r.subtitle))}</p>` : ''}
-    <div class="ref-text-body">${texto(r.text)}</div>
-    ${r.image_url ? `<img class="pub-fig" src="${esc(r.image_url)}" alt="">` : ''}
-    ${(r.author || r.source) ? `<div class="ref-text-cite">${r.author ? `<span class="ref-text-author">${esc(plano(r.author))}</span>` : ''}${(r.author && r.source) ? '<span class="ref-text-cite-sep">·</span>' : ''}${r.source ? `<cite class="ref-text-source">${esc(plano(r.source))}</cite>` : ''}</div>` : ''}
-  </article>`).join('');
-
-  const toggles = `<div class="ce-toggle"><a class="ce-toggle-btn is-c" href="${app}" title="Responder na Falcon"><span class="ce-toggle-letter">C</span></a><a class="ce-toggle-btn is-e" href="${app}" title="Responder na Falcon"><span class="ce-toggle-letter">E</span></a></div>`;
-  const itensHtml = x.itens.length ? `<div class="ce-list">${x.itens.map((t, i) => `<div class="ce-row"><span class="ce-num">${dois(t.numero ?? (i + 1))}</span><span class="ce-text">${textoLinha(t.assertiva)}${t.anulada ? ' <span class="chip chip-warn">Anulado</span>' : ''}${t.image_url ? `<img class="pub-fig" src="${esc(t.image_url)}" alt="">` : ''}</span>${toggles}</div>`).join('')}</div>` : '';
-  const stem = (x.q.enunciado || x.q.image_url) ? `<div class="q-stem">${texto(x.q.enunciado)}${x.q.image_url ? `<img class="pub-fig" src="${esc(x.q.image_url)}" alt="">` : ''}</div>` : '';
-  const comando = x.q.type === 'essay' && x.q.command ? `<div class="q-stem">${texto(x.q.command)}</div>` : '';
-  const discMeta = x.q.type === 'essay' ? `<div class="q-discursive-meta">${x.q.max_lines ? `Até <strong>${esc(x.q.max_lines)} linhas</strong> · ` : ''}Resposta escrita, corrigida na Falcon</div>` : '';
-  const questaoHtml = `<div class="q-list"><div class="q-item ${x.q.type === 'essay' ? 'q-discursive' : 'q-ce'}">
-    <div class="q-head"><div class="q-head-l"><span class="q-num">Questão ${esc(x.numero ?? '')}</span><span class="q-type">${esc(tipo)} · ${esc(x.sigla)} ${esc(x.ano)}</span></div><div class="q-tools">${selos}</div></div>
-    ${stem}${comando}${discMeta}${itensHtml}
-    <div class="q-foot"><div class="q-foot-l">Gabarito e comentário do professor: <strong>na Falcon</strong></div><a class="btn btn-primary btn-sm" href="${app}">Resolver na Falcon</a></div>
-  </div></div>`;
-
-  const chamada = `<div class="callout"><div class="callout-label">Correção na hora</div><p class="callout-body">Como visitante, você corrige ${cotas.visitante} questões por dia. Com a conta gratuita, ${cotas.gratis} por dia, com o comentário do professor e o seu desempenho guardado.</p></div>
-  <div class="btn-row"><a class="btn btn-primary" href="${app}">Resolver na Falcon</a><a class="btn btn-secondary" href="${APP}#/login?criar=1">Criar conta grátis</a><a class="btn btn-tertiary" href="${hub}">Mais questões de ${esc(x.materia)}</a></div>`;
-
+  const h1 = corta(textoDeBusca(x), 120);
   const topsHtml = x.tops.length ? `<div class="chip-row">${x.tops.map(t => `<a class="chip chip-accent" href="${hub}#t-${esc(x.raizPorTop.get(String(t.id)) || t.id)}">${esc(plano((t.code ? t.code + ' ' : '') + t.title))}</a>`).join('')}</div>` : '';
   const relHtml = relacionadas.length ? `<ul class="list pub-lista">${relacionadas.map(y => `<li class="list-item"><span class="list-marker"></span><a href="${BASE}/q/${y.k}.html"><span class="pub-meta">${esc(y.sigla)} ${esc(y.ano)} · Questão ${esc(y.numero ?? '')}</span><span class="pub-trecho">${esc(resumo(y))}</span></a></li>`).join('')}</ul>` : '';
-
+  const chamada = `<div class="callout"><div class="callout-label">Gabarito e comentário do professor</div><p class="callout-body">Como visitante, você corrige ${cotas.visitante} questões por dia aqui mesmo. Com a conta gratuita, ${cotas.gratis} por dia, com o comentário do professor e o seu desempenho guardado. Com o curso, o Banco inteiro.</p></div>
+  <div class="pub-acoes"><a class="btn-primary" href="${APP}#/login?criar=1">Criar conta grátis</a><a class="btn-ghost" href="${app}">Abrir no Banco</a><a class="btn-ghost" href="${hub}">Mais questões de ${esc(x.materia)}</a></div>`;
   const corpo = `
 <section class="hero pub-hero">
-  ${trilha([{ nome: 'Questões do CACD', href: `${BASE}/q/index.html` }, { nome: x.materia, href: hub }, { nome: `${x.sigla} ${x.ano}` }])}
-  <h1 class="hero-title">Questão ${esc(x.numero ?? '')} do ${esc(x.sigla)} ${esc(x.ano)}</h1>
-  <p class="hero-lede">${esc(x.materia)}. ${esc(tipo)}. Prova anterior do Concurso de Admissão à Carreira de Diplomata, classificada tópico a tópico pelo edital na Falcon.</p>
+  ${trilha([{ nome: 'Questões do CACD', href: `${BASE}/q/index.html` }, { nome: x.materia, href: hub }, { nome: `Questão ${x.numero ?? ''} · ${x.sigla} ${x.ano}` }])}
+  <h1 class="hero-title">${esc(h1)}</h1>
+  <p class="hero-lede">Questão ${esc(x.numero ?? '')} do ${esc(x.sigla)} ${esc(x.ano)}, ${esc(x.materia)}. ${esc(tipo)}. Resolva aqui: a correção vem na hora, com gabarito e comentário.</p>
   <div class="hero-meta">
     <div class="hero-meta-item"><span class="hero-meta-k">Concurso</span><span class="hero-meta-v">${esc(x.sigla)}</span></div>
     <div class="hero-meta-item"><span class="hero-meta-k">Ano</span><span class="hero-meta-v">${esc(x.ano || '—')}</span></div>
@@ -288,22 +396,22 @@ function paginaQuestao(x, relacionadas, cotas){
     ${x.itens.length ? `<div class="hero-meta-item"><span class="hero-meta-k">Itens</span><span class="hero-meta-v">${dois(x.itens.length)}</span></div>` : ''}
   </div>
 </section>
-${x.refs.length ? sec('Texto de referência', refsHtml, 'O texto que a prova apresentou antes da questão.') : ''}
-${sec('Questão', questaoHtml, 'Enunciado e itens como saíram na prova. Gabarito e comentário ficam na Falcon.')}
-${sec('Resolver', chamada)}
+<section class="sec pub-sec pub-questao">${blocoQuestao(x, app)}</section>
+${sec('Continuar', chamada)}
 ${x.tops.length ? sec('Tópicos do edital', topsHtml, 'A classificação é da Falcon: cada chip leva às questões do mesmo tópico.') : ''}
 ${relacionadas.length ? sec('Questões relacionadas', relHtml, 'Mesma matéria e mesmos tópicos do edital.') : ''}
 <section class="sec pub-sec"><p class="pub-nota">Enunciado e itens reproduzidos da prova pública do concurso, para estudo. <a href="${hub}">Todas as questões de ${esc(x.materia)}</a> · <a href="${BASE}/q/index.html">Questões por matéria</a>.</p></section>`;
   const titulo = tituloQ(x), descricao = descricaoQ(x);
   const jsonld = [
-    { '@context': 'https://schema.org', '@type': 'WebPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: siteLd,
-      about: x.tops.map(t => plano(t.title)).slice(0, 12), dateModified: ptData(x.q.updated_at) },
+    { '@context': 'https://schema.org', '@type': 'QAPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: siteLd, dateModified: ptData(x.q.updated_at),
+      mainEntity: { '@type': 'Question', name: h1, text: plano(x.q.enunciado || x.q.command || '') || h1, answerCount: 0, about: x.tops.map(t => plano(t.title)).slice(0, 12),
+                    educationalAlignment: { '@type': 'AlignmentObject', alignmentType: 'educationalSubject', targetName: x.materia } } },
     { '@context': 'https://schema.org', '@type': 'BreadcrumbList', itemListElement: [
       { '@type': 'ListItem', position: 1, name: 'Questões do CACD', item: `${BASE}/q/index.html` },
       { '@type': 'ListItem', position: 2, name: x.materia, item: hub },
       { '@type': 'ListItem', position: 3, name: `${x.sigla} ${x.ano} · Questão ${x.numero ?? ''}`, item: url } ] },
   ];
-  return concha({ titulo, descricao, url, corpo, jsonld });
+  return concha({ titulo, descricao, url, corpo, jsonld, scripts: `<script src="${BASE}/q/resolver.js" defer></script>` });
 }
 
 function relacionadasDe(x, todas){
@@ -332,9 +440,9 @@ function paginaMateria(subj, lista){
   });
   const ordem = [...grupos.values()].sort((a, b) => (String(a.r.id) === 'sem') - (String(b.r.id) === 'sem') || (a.r.position ?? 0) - (b.r.position ?? 0) || String(a.r.code || '').localeCompare(String(b.r.code || ''), 'pt', { numeric: true }));
   const nuvem = `<div class="chip-row">${ordem.map(g => `<a class="chip chip-accent" href="#t-${esc(g.r.id)}">${esc(plano((g.r.code ? g.r.code + ' ' : '') + g.r.title))}<span class="pub-chip-n">${g.qs.length}</span></a>`).join('')}</div>`;
-  const secoes = ordem.map((g, i) => `<section class="sec pub-sec" id="t-${esc(g.r.id)}">${secHead(`§ ${dois(i + 1)} · ${g.qs.length} ${g.qs.length === 1 ? 'questão' : 'questões'}`, plano((g.r.code ? g.r.code + '. ' : '') + g.r.title))}<ul class="list pub-lista">${g.qs.slice().sort((a, b) => (Number(b.ano) || 0) - (Number(a.ano) || 0) || (a.numero ?? 0) - (b.numero ?? 0)).map(x => `<li class="list-item"><span class="list-marker"></span><a href="${BASE}/q/${x.k}.html"><span class="pub-meta">${esc(x.sigla)} ${esc(x.ano)} · Questão ${esc(x.numero ?? '')}</span><span class="pub-trecho">${esc(corta(x.q.enunciado || (x.itens[0] && x.itens[0].assertiva) || x.q.command, 120))}</span></a></li>`).join('')}</ul></section>`).join('');
-  const titulo = `Questões de ${nome} do CACD ${faixa} | Falcon`.slice(0, 90);
-  const descricao = corta(`${lista.length} questões de ${nome} das provas anteriores do CACD (${faixa}), classificadas tópico a tópico pelo edital. Enunciado e itens para estudo; gabarito e comentário na Falcon.`, 158);
+  const secoes = ordem.map((g, i) => `<section class="sec pub-sec" id="t-${esc(g.r.id)}">${secHead(`§ ${dois(i + 1)} · ${g.qs.length} ${g.qs.length === 1 ? 'questão' : 'questões'}`, plano((g.r.code ? g.r.code + '. ' : '') + g.r.title))}<ul class="list pub-lista">${g.qs.slice().sort((a, b) => (Number(b.ano) || 0) - (Number(a.ano) || 0) || (a.numero ?? 0) - (b.numero ?? 0)).map(x => `<li class="list-item"><span class="list-marker"></span><a href="${BASE}/q/${x.k}.html"><span class="pub-meta">${esc(x.sigla)} ${esc(x.ano)} · Questão ${esc(x.numero ?? '')}</span><span class="pub-trecho">${esc(corta(textoDeBusca(x), 120))}</span></a></li>`).join('')}</ul></section>`).join('');
+  const titulo = `Questões de ${nome} do CACD ${faixa}: resolva com gabarito | Falcon`.slice(0, 90);
+  const descricao = corta(`${lista.length} questões de ${nome} das provas anteriores do CACD (${faixa}), classificadas tópico a tópico pelo edital. Resolva com gabarito e comentário na Falcon.`, 158);
   const corpo = `
 <section class="hero pub-hero">
   ${trilha([{ nome: 'Questões do CACD', href: `${BASE}/q/index.html` }, { nome }])}
@@ -347,7 +455,7 @@ function paginaMateria(subj, lista){
   </div>
 </section>
 <section class="sec pub-sec">${secHead('Tópicos do edital', 'Por onde começar', 'A contagem é de questões por tópico de primeiro nível do edital.')}${nuvem}
-<div class="btn-row"><a class="btn btn-primary" href="${APP}#/banco/questions">Abrir o Banco de questões</a><a class="btn btn-secondary" href="${APP}#/login?criar=1">Criar conta grátis</a></div></section>
+<div class="pub-acoes"><a class="btn-primary" href="${APP}#/banco/questions">Abrir o Banco de questões</a><a class="btn-ghost" href="${APP}#/login?criar=1">Criar conta grátis</a></div></section>
 ${secoes}`;
   const jsonld = [{ '@context': 'https://schema.org', '@type': 'CollectionPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: siteLd }];
   return { html: concha({ titulo, descricao, url, corpo, jsonld }), url, ms };
@@ -356,14 +464,14 @@ ${secoes}`;
 function paginaIndice(porMateria){
   const url = `${BASE}/q/index.html`;
   const total = porMateria.reduce((n, m) => n + m.lista.length, 0);
-  const cartoes = porMateria.map(m => { const anos = m.lista.map(x => Number(x.ano)).filter(Boolean); return `<div class="card"><span class="card-label">Matéria</span><div class="card-title">${esc(m.nome)}</div><div class="card-body">${m.lista.length} questões${anos.length ? ` · provas de ${Math.min(...anos)} a ${Math.max(...anos)}` : ''}</div><div class="card-foot"><a class="btn btn-tertiary" href="${BASE}/q/materia-${m.ms}.html">Ver as questões</a></div></div>`; }).join('');
-  const titulo = 'Questões do CACD por matéria: provas anteriores classificadas pelo edital | Falcon'.slice(0, 90);
-  const descricao = corta(`${total} questões das provas anteriores do CACD, por matéria e por tópico do edital. Enunciado e itens para estudo; gabarito, comentário do professor e estatísticas na Falcon.`, 158);
+  const cartoes = porMateria.map(m => { const anos = m.lista.map(x => Number(x.ano)).filter(Boolean); return `<div class="card"><span class="card-label">Matéria</span><div class="card-title">${esc(m.nome)}</div><div class="card-body">${m.lista.length} questões${anos.length ? ` · provas de ${Math.min(...anos)} a ${Math.max(...anos)}` : ''}</div><div class="pub-acoes"><a class="btn-ghost" href="${BASE}/q/materia-${m.ms}.html">Ver as questões</a></div></div>`; }).join('');
+  const titulo = 'Questões do CACD por matéria: resolva as provas anteriores com gabarito | Falcon'.slice(0, 90);
+  const descricao = corta(`${total} questões das provas anteriores do CACD, por matéria e por tópico do edital, para resolver com gabarito, comentário do professor e estatísticas na Falcon.`, 158);
   const corpo = `
 <section class="hero pub-hero">
   <div class="hero-eyebrow">Falcon · Ubique CACD</div>
   <h1 class="hero-title">Questões do CACD por matéria</h1>
-  <p class="hero-lede">${total} questões das provas anteriores do Concurso de Admissão à Carreira de Diplomata, classificadas tópico a tópico pelo edital. Escolha a matéria.</p>
+  <p class="hero-lede">${total} questões das provas anteriores do Concurso de Admissão à Carreira de Diplomata, classificadas tópico a tópico pelo edital. Escolha a matéria e resolva.</p>
   <div class="hero-meta">
     <div class="hero-meta-item"><span class="hero-meta-k">Questões</span><span class="hero-meta-v">${total}</span></div>
     <div class="hero-meta-item"><span class="hero-meta-k">Matérias</span><span class="hero-meta-v">${dois(porMateria.length)}</span></div>
@@ -371,8 +479,8 @@ function paginaIndice(porMateria){
 </section>
 <section class="sec pub-sec"><div class="cards-grid">${cartoes}</div></section>
 <section class="sec pub-sec">
-  <div class="callout"><div class="callout-label">Estude com correção na hora</div><p class="callout-body">Na Falcon, cada questão abre com gabarito, comentário do professor, estatísticas e os comentários dos alunos. Como visitante, algumas por dia; com a conta gratuita, mais e com o desempenho guardado.</p></div>
-  <div class="btn-row"><a class="btn btn-primary" href="${APP}#/inicio">Explorar sem conta</a><a class="btn btn-secondary" href="${APP}#/login?criar=1">Criar conta grátis</a></div>
+  <div class="callout"><div class="callout-label">Estude com correção na hora</div><p class="callout-body">Cada questão abre com gabarito, comentário do professor, estatísticas e os comentários dos alunos. Como visitante, algumas por dia; com a conta gratuita, mais e com o desempenho guardado.</p></div>
+  <div class="pub-acoes"><a class="btn-primary" href="${APP}#/inicio">Explorar sem conta</a><a class="btn-ghost" href="${APP}#/login?criar=1">Criar conta grátis</a></div>
 </section>`;
   const jsonld = [{ '@context': 'https://schema.org', '@type': 'CollectionPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: siteLd }];
   return concha({ titulo, descricao, url, corpo, jsonld });
@@ -396,8 +504,9 @@ async function principal(){
   const { questoes, subjById } = montar(dados);
   const cotas = { visitante: dados.cotaVisitante, gratis: dados.cotaGratis };
   mkdirSync(PASTA, { recursive: true });
-  readdirSync(PASTA).filter(f => /\.(html|css)$/.test(f)).forEach(f => unlinkSync(join(PASTA, f)));
-  writeFileSync(join(PASTA, 'ubique.css'), cssDesignSystem() + '\n' + CSS_PAGINA);
+  readdirSync(PASTA).filter(f => /\.(html|css|js)$/.test(f)).forEach(f => unlinkSync(join(PASTA, f)));
+  writeFileSync(join(PASTA, 'ubique.css'), cssDesignSystem() + '\n/* ── bloco de questão: regras do app (index.html) ── */\n' + cssApp() + '\n' + CSS_PAGINA);
+  writeFileSync(join(PASTA, 'resolver.js'), readFileSync(join(AQUI, 'resolver.js'), 'utf8').replaceAll('__SUPABASE_URL__', SUPABASE).replaceAll('__ANON_KEY__', KEY));
   const urls = URLS_BASE.slice();
   questoes.forEach(x => {
     writeFileSync(join(PASTA, x.k + '.html'), paginaQuestao(x, relacionadasDe(x, questoes), cotas));
