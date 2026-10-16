@@ -20,6 +20,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 
 const RAIZ = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const AQUI = dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,9 @@ const GTM = 'GTM-KPCF42J';
 const HOJE = new Date().toISOString().slice(0, 10);
 const PASTA = join(RAIZ, 'q');
 const APP = `${BASE}/index.html`;
+// CSS e script levam a versão (hash do conteúdo) no endereço: o navegador e a CDN não seguram a cópia velha depois do deploy.
+let VERSAO_CSS = '', VERSAO_JS = '';
+const versao = txt => createHash('sha1').update(txt).digest('hex').slice(0, 10);
 
 const INDEX_HTML = readFileSync(join(RAIZ, 'index.html'), 'utf8');
 // A chave anônima é pública (está no index.html); lida de lá para não existir em dois lugares.
@@ -182,7 +186,7 @@ function concha({ titulo, descricao, url, corpo, jsonld, scripts }){
 <meta name="twitter:card" content="summary">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Outfit:wght@200;300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="${BASE}/q/ubique.css">
+<link rel="stylesheet" href="${BASE}/q/ubique.css?v=${VERSAO_CSS}">
 ${ld}
 <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','${GTM}');</script>
 </head>
@@ -412,7 +416,7 @@ ${relacionadas.length ? sec('Questões relacionadas', relHtml, 'Mesma matéria e
       { '@type': 'ListItem', position: 2, name: x.materia, item: hub },
       { '@type': 'ListItem', position: 3, name: `${x.sigla} ${x.ano} · Questão ${x.numero ?? ''}`, item: url } ] },
   ];
-  return concha({ titulo, descricao, url, corpo, jsonld, scripts: `<script src="${BASE}/q/resolver.js" defer></script>` });
+  return concha({ titulo, descricao, url, corpo, jsonld, scripts: `<script src="${BASE}/q/resolver.js?v=${VERSAO_JS}" defer></script>` });
 }
 
 function relacionadasDe(x, todas){
@@ -506,8 +510,11 @@ async function principal(){
   const cotas = { visitante: dados.cotaVisitante, gratis: dados.cotaGratis };
   mkdirSync(PASTA, { recursive: true });
   readdirSync(PASTA).filter(f => /\.(html|css|js)$/.test(f)).forEach(f => unlinkSync(join(PASTA, f)));
-  writeFileSync(join(PASTA, 'ubique.css'), cssDesignSystem() + '\n/* ── bloco de questão: regras do app (index.html) ── */\n' + cssApp() + '\n' + CSS_PAGINA);
-  writeFileSync(join(PASTA, 'resolver.js'), readFileSync(join(AQUI, 'resolver.js'), 'utf8').replaceAll('__SUPABASE_URL__', SUPABASE).replaceAll('__ANON_KEY__', KEY));
+  const css = cssDesignSystem() + '\n/* ── bloco de questão: regras do app (index.html) ── */\n' + cssApp() + '\n' + CSS_PAGINA;
+  const js = readFileSync(join(AQUI, 'resolver.js'), 'utf8').replaceAll('__SUPABASE_URL__', SUPABASE).replaceAll('__ANON_KEY__', KEY);
+  VERSAO_CSS = versao(css); VERSAO_JS = versao(js);
+  writeFileSync(join(PASTA, 'ubique.css'), css);
+  writeFileSync(join(PASTA, 'resolver.js'), js);
   const urls = URLS_BASE.slice();
   questoes.forEach(x => {
     writeFileSync(join(PASTA, x.k + '.html'), paginaQuestao(x, relacionadasDe(x, questoes), cotas));
