@@ -150,7 +150,8 @@ const dois = n => String(n ?? '').padStart(2, '0');
 // enunciados e itens: HTML simples do editor (sem script, sem eventos) ou texto puro em parágrafos
 function desescapa(s){
   s = String(s ?? '');
-  if(/&lt;\/?[a-z][\s\S]*?&gt;/i.test(s) && !/<[a-z][\s\S]*?>/i.test(s)){
+  // gravado escapado (&lt;p&gt;…), às vezes dentro de um <span> do editor: vira HTML de verdade
+  if(/&lt;\/?(p|br|strong|em|b|i|ul|ol|li|h[1-6]|span|div)\b[\s\S]*?&gt;/i.test(s)){
     return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
   }
   return s;
@@ -314,8 +315,9 @@ function blocoQuestao(x, app){
   const refHtml = x.refs.map(r => {
     const corpo = texto(r.text);
     const fonte = [r.author, r.source].filter(Boolean).join('. ');
-    const textoHtml = (r.title || fonte)
-      ? `<div class="q-ref-text">${r.title ? `<div class="q-ref-title">${esc(plano(r.title))}</div>` : ''}<div class="q-ref-text-html">${corpo}</div>${fonte ? `<div class="q-ref-source">${esc(plano(fonte))}</div>` : ''}</div>`
+    const tituloRef = /^texto de refer[eê]ncia|\[#\d/i.test(plano(r.title)) ? '' : plano(r.title);   // rótulo de importação não é título
+    const textoHtml = (tituloRef || fonte)
+      ? `<div class="q-ref-text">${tituloRef ? `<div class="q-ref-title">${esc(tituloRef)}</div>` : ''}<div class="q-ref-text-html">${corpo}</div>${fonte ? `<div class="q-ref-source">${esc(plano(fonte))}</div>` : ''}</div>`
       : `<div class="q-ref-text q-ref-text-html">${corpo}</div>`;
     const media = r.image_url ? `<div class="q-ref-media"><img src="${esc(r.image_url)}" alt="" loading="lazy"></div>` : '';
     return `<div class="q-ref">${textoHtml}${media}</div>`;
