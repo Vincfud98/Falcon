@@ -148,8 +148,15 @@ const corta = (s, n) => { s = plano(s); return s.length <= n ? s : s.slice(0, n 
 const slug = s => plano(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 const dois = n => String(n ?? '').padStart(2, '0');
 // enunciados e itens: HTML simples do editor (sem script, sem eventos) ou texto puro em parágrafos
+function desescapa(s){
+  s = String(s ?? '');
+  if(/&lt;\/?[a-z][\s\S]*?&gt;/i.test(s) && !/<[a-z][\s\S]*?>/i.test(s)){
+    return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+  }
+  return s;
+}
 function texto(s){
-  s = String(s ?? '').trim();
+  s = desescapa(String(s ?? '')).trim();
   if(!s) return '';
   if(/<[a-z][\s\S]*>/i.test(s)){
     return s.replace(/<(script|style|iframe|object|embed|form)[\s\S]*?<\/\1>/gi, '')
@@ -161,12 +168,23 @@ function texto(s){
 }
 const ptData = d => { try{ return new Date(d).toISOString().slice(0, 10); }catch(_){ return HOJE; } };
 // o texto pelo qual o candidato procura a questão: o enunciado quando diz algo; senão o 1º item
+const GENERICO = /^(julgue|acerca|a respeito|com base|considerando|no que (se refere|diz|concerne|tange)|tendo em vista|em relação|com relação|a partir|leia (com atenção )?o texto|no que se refere|quanto a|relativamente|à luz|mark the|judge the|consider(ing)? the|based on the text|according to the text|in the text|regarding|with regard|taking into account|read the text|the text above|concerning)/i;
+const frases = s => plano(s).split(/(?<=[.!?;:])\s+/).map(f => f.trim()).filter(Boolean);
+// a frase pela qual o candidato procura a questão: do enunciado, pulando as frases de comando ("Julgue os itens…",
+// "Considering the text…"); discursiva: o comando; sem frase própria, o 1º item. Repetida entre questões: o 1º item.
 function textoDeBusca(x){
-  const en = plano(x.q.enunciado), it = plano(x.itens[0] && x.itens[0].assertiva), cm = plano(x.q.command);
-  const generico = /^(julgue|acerca|a respeito|com base|considerando|no que|tendo em vista|em relação|sobre|com relação|a partir)/i;
-  if(en && en.length >= 70 && !(generico.test(en) && en.length < 110)) return en;
-  if(it) return it;
-  return en || cm;
+  const it = plano(x.itens[0] && x.itens[0].assertiva);
+  const cands = frases(x.q.enunciado).concat(x.q.type === 'essay' ? frases(x.q.command) : []);
+  const propria = cands.find(f => f.length >= 40 && !GENERICO.test(f));
+  const escolhido = propria || (x.q.type === 'essay' ? (cands.find(f => f.length >= 40) || cands[0]) : '');
+  if(escolhido && !REPETIDOS.has(escolhido)) return escolhido;
+  return it || escolhido || plano(x.q.command) || plano(x.q.enunciado);
+}
+let REPETIDOS = new Set();
+function marcarRepetidos(questoes){
+  const n = new Map();
+  questoes.forEach(x => { const cands = frases(x.q.enunciado); const f = cands.find(f => f.length >= 40 && !GENERICO.test(f)); if(f) n.set(f, (n.get(f) || 0) + 1); });
+  REPETIDOS = new Set([...n.entries()].filter(([, c]) => c > 1).map(([f]) => f));
 }
 
 // ── concha comum (nav, hero, footer do design system) ────────────────────────
@@ -372,7 +390,7 @@ function blocoQuestao(x, app){
 const siteLd = { '@type': 'WebSite', name: 'Falcon · Ubique CACD', url: BASE };
 const resumo = y => corta(textoDeBusca(y), 110);
 function tituloQ(x){
-  const sufixo = ` · ${x.sigla} ${x.ano} | Falcon`;
+  const sufixo = ` · ${[x.sigla, x.ano].filter(Boolean).join(' ')} | Falcon`;
   return corta(textoDeBusca(x), 90 - sufixo.length) + sufixo;
 }
 function descricaoQ(x){
@@ -510,6 +528,7 @@ async function principal(){
   }
   const { questoes, subjById } = montar(dados);
   const cotas = { visitante: dados.cotaVisitante, gratis: dados.cotaGratis };
+  marcarRepetidos(questoes);
   mkdirSync(PASTA, { recursive: true });
   readdirSync(PASTA).filter(f => /\.(html|css|js)$/.test(f)).forEach(f => unlinkSync(join(PASTA, f)));
   const css = cssDesignSystem() + '\n/* ── bloco de questão: regras do app (index.html) ── */\n' + cssApp() + '\n' + CSS_PAGINA;
