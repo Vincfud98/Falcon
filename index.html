@@ -45201,6 +45201,10 @@ async function _iniLoadFeed(examId, elArg){
   // Data de criação da conta: o feed só mostra o que aconteceu DEPOIS disso.
   let acctMs = window.__acctCreatedMs || 0;
   if(!acctMs){
+    // a sessão local já traz created_at (sem ida ao servidor); getUser() só se faltar
+    try{ const _s = await window._sb.auth.getSession(); const _cs = _s && _s.data && _s.data.session && _s.data.session.user && _s.data.session.user.created_at; if(_cs){ acctMs = new Date(_cs).getTime(); window.__acctCreatedMs = acctMs; } }catch(_){ }
+  }
+  if(!acctMs){
     try{ const _u = await window._sb.auth.getUser(); const _ca = _u && _u.data && _u.data.user && _u.data.user.created_at; if(_ca){ acctMs = new Date(_ca).getTime(); window.__acctCreatedMs = acctMs; } }catch(_){}
   }
   // Notificação pessoal → card do feed. Cobre menções (fórum/questão), respostas,
@@ -45238,11 +45242,20 @@ async function _iniLoadFeed(examId, elArg){
       '<a class="ini-fcard" href="' + Util.attr(href) + '"><div class="top"><span class="ini-ftag notif">' + Util.esc(tag) + '</span><span class="when">' + _agoT(ts) + '</span></div>'
       + '<div class="tt">' + txt + '</div></a>' };
   };
+  // Todos os pedidos saem JUNTOS (16/10/2026): a cadeia de 6 passos seguidos levava 1,2 s no computador e 3-5 s
+  // no 4G — era o "Acontecimentos demora para aparecer". Agora são 2 passos (posts → curtidas/comentários).
+  const _p = function(b){ return Promise.resolve(b).catch(function(e){ return { data: null, error: e }; }); };
+  const _me0 = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  const P = {
+    pr: _p(window._sb.schema('aluno').from('forum_posts').select('id, title, created_at, exam_id, subject_id').is('deleted_at', null).order('created_at', { ascending: false }).limit(80)),
+    sr: _p(window._sb.schema('conteudo').from('mock_exams').select('id, title, created_at, is_published').eq('is_published', true).order('created_at', { ascending: false }).limit(3)),
+    cr: _p(window._sb.schema('conteudo').from('unit_changelog').select('id, unit_id, note, criado_em').order('criado_em', { ascending: false }).limit(10)),
+    er: _p(window._sb.schema('vendas').from('enrollments').select('product_id, starts_at, status').eq('status', 'active').order('starts_at', { ascending: false }).limit(5)),
+    nr: (_me0 && _me0.id) ? _p(window._sb.schema('aluno').from('notifications').select('id, type, payload, created_at').eq('user_id', _me0.id).order('created_at', { ascending: false }).limit(40)) : Promise.resolve({ data: [] }),
+    shop: (window.Shop && !Shop.ready()) ? Promise.resolve().then(function(){ return Shop.load(); }).catch(function(){}) : Promise.resolve()
+  };
   try{
-    const pr = await window._sb.schema('aluno').from('forum_posts')
-      .select('id, title, created_at, exam_id, subject_id')
-      .is('deleted_at', null)
-      .order('created_at', { ascending: false }).limit(80);
+    const pr = await P.pr;
     // MESMO critério do Fórum (~24054): post novo carrega exam_id; post ANTIGO
     // (exam_id null) pertence ao concurso da sua MATÉRIA (via exam_subjects).
     // Filtrar só por exam_id no SQL escondia todos os posts antigos.
@@ -45279,10 +45292,7 @@ async function _iniLoadFeed(examId, elArg){
     // A tabela mock_exams NÃO tem coluna exam_id (o vínculo com o concurso é por
     // outra via). Filtrar por exam_id gerava erro 42703 (400) e derrubava o card
     // de simulado do feed. Mostramos os simulados publicados mais recentes.
-    const sr = await window._sb.schema('conteudo').from('mock_exams')
-      .select('id, title, created_at, is_published')
-      .eq('is_published', true)
-      .order('created_at', { ascending: false }).limit(3);
+    const sr = await P.sr;
     (sr.data || []).forEach(function(s){
       if(!s || !s.title) return;
       const ts = new Date(s.created_at).getTime();
@@ -45295,9 +45305,7 @@ async function _iniLoadFeed(examId, elArg){
     // Aulas atualizadas (Fase 2): o admin registra "o que mudou" no editor da
     // unidade (conteudo.unit_changelog) e a atualização vira card no feed —
     // só de unidades do CONCURSO ativo; 1 card por unidade (o mais recente).
-    const cr = await window._sb.schema('conteudo').from('unit_changelog')
-      .select('id, unit_id, note, criado_em')
-      .order('criado_em', { ascending: false }).limit(10);
+    const cr = await P.cr;
     const chg = (cr.data || []).filter(function(g){ return g && g.note; });
     if(chg.length){
       let cursosEx = (window.COURSES || []).filter(Boolean);
@@ -45329,14 +45337,10 @@ async function _iniLoadFeed(examId, elArg){
   try{
     // FASE D — matérias liberadas DESTE aluno (matrículas próprias via RLS):
     // evento pessoal importante, entra no feed junto das novidades do concurso.
-    const er = await window._sb.schema('vendas').from('enrollments')
-      .select('product_id, starts_at, status')
-      .eq('status', 'active')
-      .order('starts_at', { ascending: false })
-      .limit(5);
+    const er = await P.er;
     const ens = (er.data || []).filter(function(e){ return e && e.starts_at; });
     if(ens.length){
-      if(window.Shop && !Shop.ready()){ try{ await Shop.load(); }catch(_){} }
+      await P.shop;
       ens.forEach(function(en){
         const nome = (window.Shop && Shop.nameForProduct) ? Shop.nameForProduct(en.product_id) : '';
         if(!nome) return;
@@ -45352,10 +45356,7 @@ async function _iniLoadFeed(examId, elArg){
   try{
     const _me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
     if(_me && _me.id){
-      const nr = await window._sb.schema('aluno').from('notifications')
-        .select('id, type, payload, created_at')
-        .eq('user_id', _me.id)
-        .order('created_at', { ascending: false }).limit(40);
+      const nr = await P.nr;
       (nr.data || []).forEach(function(n){ const c = _notifFeedCard(n); if(c) cards.push(c); });
     }
   }catch(_){}
@@ -45398,11 +45399,17 @@ async function _iniLoadColegas(rowArg, logArg){
   ids = Array.from(new Set(ids));
   if(!ids.length){ empty('Você ainda não tem colegas mútuos. Siga colegas (e eles a você) para vê-los aqui.'); return; }
   let profs = [];
+  // pedidos independentes saem juntos (16/10/2026): diretório, salas e fórum; os eventos das salas vêm no 2º passo
+  const _pc = function(b){ return Promise.resolve(b).catch(function(e){ return { data: null, error: e }; }); };
+  const PC = {
+    dir: _pc(window._sb.schema('crm').from('user_directory').select('user_id, nickname, handle, display_name, full_name_public, photo_url, photo_transform, last_seen_at, current_activity').in('user_id', ids)),
+    mr: _pc(window._sb.schema('aluno').from('room_members').select('room_id, status').eq('user_id', meId)),
+    fp: _pc(window._sb.schema('aluno').from('forum_posts').select('id, title, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10)),
+    fc: _pc(window._sb.schema('aluno').from('forum_comments').select('id, post_id, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10))
+  };
   try{
     // Colegas mútuos na home (terceiros) → VITRINE.
-    const r = await window._sb.schema('crm').from('user_directory')
-      .select('user_id, nickname, handle, display_name, full_name_public, photo_url, photo_transform, last_seen_at, current_activity')
-      .in('user_id', ids);
+    const r = await PC.dir;
     profs = r.data || [];
   }catch(_){}
   const now = Date.now();
@@ -45427,7 +45434,7 @@ async function _iniLoadColegas(rowArg, logArg){
     const items = [];
     // 1) Eventos das SUAS salas de estudo (aluno.room_events).
     try{
-      const mr = await window._sb.schema('aluno').from('room_members').select('room_id, status').eq('user_id', meId);
+      const mr = await PC.mr;
       const roomIds = (mr.data || []).filter(function(m){ return m && m.status === 'member'; }).map(function(m){ return m.room_id; });
       if(roomIds.length){
         const er = await window._sb.schema('aluno').from('room_events').select('*').in('room_id', roomIds).order('created_at', { ascending: false }).limit(15);
@@ -45439,10 +45446,7 @@ async function _iniLoadColegas(rowArg, logArg){
     // 2) Atividade dos COLEGAS mútuos no fórum (publicou / comentou) — clicável.
     if(ids.length){
       try{
-        const [fp, fc] = await Promise.all([
-          window._sb.schema('aluno').from('forum_posts').select('id, title, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10),
-          window._sb.schema('aluno').from('forum_comments').select('id, post_id, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10)
-        ]);
+        const [fp, fc] = await Promise.all([PC.fp, PC.fc]);
         (fp.data || []).forEach(function(p){ items.push({ ts: p.created_at ? new Date(p.created_at).getTime() : 0, uid: p.user_id, kind: 'post', title: p.title }); });
         (fc.data || []).forEach(function(c){ items.push({ ts: c.created_at ? new Date(c.created_at).getTime() : 0, uid: c.user_id, kind: 'comment' }); });
       }catch(_){}
@@ -46160,9 +46164,20 @@ Renderers.inicio = function(){
     if(_modo === 'mentoria'){
       _iniMentoriaFotos(_mDados);                         // a Mentoria já veio inteira
     } else if(!window._iniPreConsumido){
-      try{ if(typeof _iniLoadFeed === 'function') _iniLoadFeed(exId); }catch(_){}
-      try{ if(typeof _iniLoadColegas === 'function') _iniLoadColegas(); }catch(_){}
-      try{ if(typeof _iniLoadAvisos === 'function') _iniLoadAvisos(exId); }catch(_){}
+      const _u = _iniUltimoFresco(exId);
+      if(_u){
+        _iniEncaixar(document, _u);                         // carregado há menos de 5 min: entra pronto
+      } else {
+        const _g = function(p){ return Promise.resolve(p).catch(function(){}); };
+        Promise.all([
+          _g((typeof _iniLoadFeed === 'function') ? _iniLoadFeed(exId) : null),
+          _g((typeof _iniLoadColegas === 'function') ? _iniLoadColegas() : null),
+          _g((typeof _iniLoadAvisos === 'function') ? _iniLoadAvisos(exId) : null)
+        ]).then(function(){
+          const q = function(id){ return document.getElementById(id); };
+          if(q('iniFeed')) window._iniUltimo = { exId: String(exId), ts: Date.now(), feed: q('iniFeed'), row: q('iniColegasRow'), log: q('iniColegasLog'), avisos: q('iniAvisos') };
+        });
+      }
     }
     window._iniPreConsumido = false;
     // Tooltip (apelido no hover dos círculos): o data-tip só funciona com o
@@ -46270,8 +46285,21 @@ window._iniPreparar = function(){
     g((typeof _iniLoadColegas === 'function') ? _iniLoadColegas(row, log) : null),
     g((typeof _iniLoadAvisos === 'function') ? _iniLoadAvisos(exId, avisos) : null),
     g(_mentMapa() ? _mentIniCarregar() : null)            // a Mentoria também chega pronta
-  ]).then(function(){ pre.pronto = true; });
+  ]).then(function(){ pre.pronto = true; window._iniUltimo = { exId: pre.exId, ts: Date.now(), feed: pre.feed, row: pre.row, log: pre.log, avisos: pre.avisos }; });
 };
+// Guarda os quatro blocos carregados (nós do DOM, com os cliques) por 5 minutos: quem volta ao Início
+// nesse intervalo vê tudo na hora, sem a seção "se completar" depois da pintura.
+const _INI_CACHE_MS = 5 * 60 * 1000;
+function _iniUltimoFresco(exId){
+  const u = window._iniUltimo;
+  return (u && String(u.exId) === String(exId) && (Date.now() - u.ts) < _INI_CACHE_MS) ? u : null;
+}
+function _iniEncaixar(stage, u){
+  [['iniFeed', u.feed], ['iniColegasRow', u.row], ['iniColegasLog', u.log], ['iniAvisos', u.avisos]].forEach(function(par){
+    const alvo = stage.querySelector('#' + par[0]);
+    if(alvo && par[1] && alvo !== par[1]) alvo.replaceWith(par[1]);
+  });
+}
 // Encaixa o que foi preparado no lugar dos espaços do Início — no mount, que
 // roda no MESMO quadro da pintura (nada muda depois na frente do aluno).
 Renderers.inicio.mount = function(stage){
