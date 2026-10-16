@@ -51867,6 +51867,97 @@ window.TutorIA = (function(){
       .map(function(m){ return m.getAttribute('data-po-src') + _PO_SEP + m.getAttribute('data-po-cel'); });
     try{ _cadFixChips(el); }catch(_){ }
   }
+  /* Edição pelo portal numa linha de CARD (dono, 16/10/2026): o portal gravava só o texto na origem; o card no baralho
+     ficava com o texto velho e, ao abrir a origem, a projeção (card → linha) desfazia a edição. Aqui a fatia editada é
+     lida como o ciclo lê o editor, mas no escopo da ORIGEM: card existente atualiza; sintaxe nova cria o card da
+     origem (e carimba a linha); sintaxe tirada manda o card para a lixeira e limpa o carimbo; carimbo de card já
+     apagado segue a regra do ciclo (o card é a fonte: a linha sai). Devolve o corpo, com os carimbos acertados. */
+  const _PO_ATRS_FC = ['data-fc-id', 'data-fc-cz', 'data-fc-item', 'data-fc-prop', 'data-fc-due'];
+  function _poCardsSincronizar(origem, bodyNovo, cel){
+    if(!window.FcSintaxe || !window.Store || !Store.deckList) return bodyNovo;
+    const o = String(origem || '');
+    const esc = o.indexOf('doc:') === 0
+      ? { tipo: 'doc', docId: o.slice(4), unitId: null, chave: o }
+      : { tipo: 'unit', unitId: o, docId: null, chave: o };
+    const d = document.createElement('div');
+    d.innerHTML = bodyNovo || '';
+    const fatia = _poFatiaCelula(d, cel);
+    if(!fatia) return bodyNovo;
+    const nos = fatia.filter(function(n){ return n.matches && n.matches(_FC_BLOCO_SEL) && !n.classList.contains('cad-portal'); });
+    if(!nos.length) return bodyNovo;
+    const cardDe = function(id){ return Store.deckList().find(function(c){ return String(c.id) === String(id); }) || null; };
+    const prevIds = [];
+    nos.forEach(function(n){ ['data-fc-id', 'data-fc-cz'].forEach(function(a){ const id = n.getAttribute(a); if(id && cardDe(id) && prevIds.indexOf(id) < 0) prevIds.push(id); }); });
+    const blocos = _fcCadClassificar(nos);
+    const parse = FcSintaxe.parseBlocos(blocos);
+    if(!prevIds.length && !parse.cards.length && !nos.some(function(n){ return n.hasAttribute('data-fc-id') || n.hasAttribute('data-fc-cz'); })) return bodyNovo;   // linha comum: nada a fazer
+    const rec = FcSintaxe.reconciliar(prevIds, parse, cardDe);
+    const podeApagar = !Store.deckPronto || Store.deckPronto();
+    let mudou = false;
+    if(podeApagar) rec.mortas.forEach(function(entry){
+      if(entry.slot === 'lacuna'){
+        const n = blocos[entry.blocos[0]] && blocos[entry.blocos[0]].node;
+        if(n){ _fcCadTirarChaves(n); n.removeAttribute('data-fc-cz'); mudou = true; }
+        return;
+      }
+      entry.blocos.forEach(function(i){ const n = blocos[i] && blocos[i].node; if(n && n.parentNode){ n.parentNode.removeChild(n); mudou = true; } });
+    });
+    const ctx = rec.criar.length ? _fcCadContexto(esc) : null;
+    rec.criar.forEach(function(entry){
+      const novo = Store.deckAdd(Object.assign({
+        rich: _fcCadRicoDe(entry, blocos),
+        origin: 'caderno', unitId: esc.tipo === 'unit' ? esc.unitId : null, unitTitle: esc.tipo === 'unit' ? (ctx.unitTitle || '') : '',
+        docId: esc.tipo === 'doc' ? esc.docId : null, subjectId: ctx.subjectId || null,
+        moduleId: ctx.moduleId || null, chapterId: ctx.chapterId || null,
+        blockId: null, blockTitle: '', blockType: 'caderno',
+        topics: Array.isArray(ctx.topics) ? ctx.topics.map(String) : [], tags: [], userTags: [],
+        anchor: { start: entry.blocos[0] }
+      }, _fcCadPatch(entry.card)));
+      if(novo && novo.id) entry.fcId = String(novo.id);
+    });
+    rec.atualizar.forEach(function(entry){ Store.deckUpdate(entry.fcId, Object.assign({ rich: _fcCadRicoDe(entry, blocos) }, _fcCadPatch(entry.card))); });
+    const czVivos = new Set(), itemVivos = new Set(), propVivos = new Set();
+    parse.cards.forEach(function(entry){
+      if(!entry.fcId) return;
+      const head = blocos[entry.blocos[0]] && blocos[entry.blocos[0]].node; if(!head) return;
+      if(entry.slot === 'lacuna'){ if(head.getAttribute('data-fc-cz') !== entry.fcId){ head.setAttribute('data-fc-cz', entry.fcId); mudou = true; } czVivos.add(head); }
+      else {
+        if(head.getAttribute('data-fc-id') !== entry.fcId){ head.setAttribute('data-fc-id', entry.fcId); mudou = true; }
+        (entry.itens || []).forEach(function(i){ const n = blocos[i] && blocos[i].node; if(n){ if(n.getAttribute('data-fc-item') !== entry.fcId){ n.setAttribute('data-fc-item', entry.fcId); n.removeAttribute('data-fc-prop'); mudou = true; } itemVivos.add(n); } });
+        (entry.props || []).forEach(function(i){ const n = blocos[i] && blocos[i].node; if(n){ if(n.getAttribute('data-fc-prop') !== entry.fcId){ n.setAttribute('data-fc-prop', entry.fcId); n.removeAttribute('data-fc-item'); mudou = true; } propVivos.add(n); } });
+        _fcCadSelos(head, entry.fcId);
+      }
+      const card = cardDe(entry.fcId);
+      if(card){
+        const richNovo = _fcCadRicoDe(entry, blocos);
+        if(JSON.stringify(richNovo || null) !== JSON.stringify(card.rich || null)) Store.deckUpdate(entry.fcId, { rich: richNovo });
+      }
+    });
+    nos.forEach(function(n){
+      if(n.hasAttribute('data-fc-item') && !itemVivos.has(n)){ n.removeAttribute('data-fc-item'); mudou = true; }
+      if(n.hasAttribute('data-fc-prop') && !propVivos.has(n)){ n.removeAttribute('data-fc-prop'); mudou = true; }
+      if(n.hasAttribute('data-fc-cz') && !czVivos.has(n)){ n.removeAttribute('data-fc-cz'); mudou = true; }
+    });
+    // sintaxe tirada no portal: a linha fica, o card vai para a lixeira (como no ciclo do editor)
+    if(podeApagar) rec.sumiram.forEach(function(id){
+      const card = cardDe(id);
+      Store.deckDelete(id);
+      nos.forEach(function(n){ if(n.getAttribute('data-fc-id') === String(id)){ n.removeAttribute('data-fc-id'); n.removeAttribute('data-fc-due'); mudou = true; } });
+      if(window.ueToast) ueToast((card && card.kind === 'cloze' ? 'Card de lacuna' : 'Card') + ' enviado para a lixeira: a sintaxe dele saiu da linha (pelo portal). 30 dias para restaurar na página Flashcards.', 'info');
+    });
+    return mudou ? d.innerHTML : bodyNovo;
+  }
+  // os carimbos novos (card criado pelo portal) voltam para o buraco na tela, linha a linha, sem mexer no cursor
+  function _poCarimbarBuraco(m, body, cel){
+    const d = document.createElement('div');
+    d.innerHTML = body || '';
+    const fatia = _poFatiaCelula(d, cel); if(!fatia) return;
+    fatia.forEach(function(n){
+      const c = n.getAttribute && n.getAttribute('data-cel'); if(!c) return;
+      const alvo = m.querySelector('[data-cel="' + c.replace(/["\\]/g, '') + '"]'); if(!alvo) return;
+      _PO_ATRS_FC.forEach(function(a){ const v = n.getAttribute(a); if(v == null) alvo.removeAttribute(a); else if(alvo.getAttribute(a) !== v) alvo.setAttribute(a, v); });
+    });
+  }
   /* Ao SALVAR: o que mudou dentro de um buraco vai para a ORIGEM, e o corpo
      do destino guarda o buraco VAZIO (nunca uma cópia do texto). */
   async function _portaisAntesDeSalvar(el, chaveDestino){
@@ -51884,11 +51975,17 @@ window.TutorIA = (function(){
       }
       const corpo = await _cadCorpoLer(org);
       if(corpo == null){ console.warn('[portal] origem não lida', org); if(window.ueToast) ueToast('Não consegui ler o caderno de origem para gravar sua edição do portal.', 'warn'); continue; }
-      const novo = _poTrocarCelula(corpo, cel, agora);
+      let novo = _poTrocarCelula(corpo, cel, agora);
       if(novo == null){ console.warn('[portal] célula não encontrada na origem', org, cel); if(window.ueToast) ueToast('A linha original deste portal não foi encontrada no caderno de origem — a edição não foi gravada lá.', 'warn'); continue; }
+      // linha de card: o baralho acompanha a edição (senão a projeção da origem desfaz tudo)
+      let agoraK = agora;
+      try{
+        const comCards = _poCardsSincronizar(org, novo, cel);
+        if(comCards !== novo){ novo = comCards; _poCarimbarBuraco(m, novo, cel); agoraK = _poEditavelHtml(m); }
+      }catch(e){ console.warn('[portal cards]', e); }
       const ok = await _cadCorpoGravar(org, novo);
       if(ok){
-        snap[k] = agora; m.__poSujo = false;
+        snap[k] = agoraK; m.__poSujo = false;
         console.info('[portal] edição gravada na origem', org, cel);
         if(window.ueToast) ueToast('Edição do portal gravada em: ' + _poRotuloDe(org), 'success');
         try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ }
