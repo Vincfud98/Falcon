@@ -3,11 +3,14 @@
 //
 // Roda no deploy (GitHub Actions) antes do `firebase deploy`. Lê as VISTAS DO VISITANTE (papel anônimo,
 // SQL 87: enunciado e itens SEM gabarito e SEM comentário) e escreve:
-//   q/<uuid>.html          uma página por questão de prova anterior (título, enunciado, itens, tópicos do edital,
-//                          questões relacionadas e o botão "Resolver na Falcon", que abre a questão no Banco)
+//   q/<uuid>.html          uma página por questão de prova anterior (hero, texto de referência, enunciado, itens,
+//                          tópicos do edital, questões relacionadas e "Resolver na Falcon", que abre a questão no Banco)
 //   q/materia-<slug>.html  uma página por matéria, com a nuvem de tópicos e as questões por tópico do edital
 //   q/index.html           a porta de entrada (matérias, anos, contagens)
+//   q/ubique.css           o CSS do design system (ubique-saas-components.html), copiado inteiro a cada deploy
 //   sitemap.xml            na raiz, com todas as páginas acima (+ landing e app)
+// VISUAL: só componentes do design system (nav, hero, sec-head, ref-text, q-item/ce-list, chip, card, callout, list,
+// btn, ftr). Nada de componente novo: o que é específico da página fica em meia dúzia de regras de LAYOUT no fim do CSS.
 // Sem as vistas (SQL 87 ainda não rodou), sem rede ou com qualquer erro: escreve só o sitemap base e sai com 0.
 // O deploy NUNCA para por causa daqui. Rodar localmente: node .github/scripts/gerar-paginas-questoes.mjs
 // (q/ e sitemap.xml estão no .gitignore: nascem no deploy, não no repositório).
@@ -21,14 +24,54 @@ const SUPABASE = 'https://kluqjqojxzpuiauuidwx.supabase.co';
 const GTM = 'GTM-KPCF42J';
 const HOJE = new Date().toISOString().slice(0, 10);
 const PASTA = join(RAIZ, 'q');
+const APP = `${BASE}/index.html`;
 
+const INDEX_HTML = readFileSync(join(RAIZ, 'index.html'), 'utf8');
 // A chave anônima é pública (está no index.html); lida de lá para não existir em dois lugares.
 function chaveAnon(){
-  const m = /const KEY = '(eyJ[^']+)'/.exec(readFileSync(join(RAIZ, 'index.html'), 'utf8'));
+  const m = /const KEY = '(eyJ[^']+)'/.exec(INDEX_HTML);
   if(!m) throw new Error('chave anônima não encontrada no index.html');
   return m[1];
 }
 const KEY = chaveAnon();
+// A marca do topo é a mesma do app (SVG do botão .tb-brand).
+const MARCA_SVG = (/<span class="tb-brand-logo">(<svg[\s\S]*?<\/svg>)<\/span>/.exec(INDEX_HTML) || [])[1] || '';
+
+// ── CSS: o design system inteiro + o layout destas páginas ───────────────────
+function cssDesignSystem(){
+  const ds = readFileSync(join(RAIZ, 'ubique-saas-components.html'), 'utf8');
+  const m = /<style[^>]*>([\s\S]*?)<\/style>/.exec(ds);
+  if(!m) throw new Error('CSS do design system não encontrado em ubique-saas-components.html');
+  return m[1];
+}
+const CSS_PAGINA = `
+/* ── layout das páginas públicas das questões (só medidas; os componentes são os do design system) ── */
+.pub-main{max-width:860px;margin:0 auto;padding:0 clamp(1rem,4vw,2.5rem)}
+.pub-main .q-list,.pub-main .ref-text{max-width:none}
+.pub-hero{max-width:none;padding:clamp(2.6rem,6vh,4.2rem) 0 clamp(1.4rem,3vh,2rem)}
+.pub-hero .hero-title{max-width:22ch}
+.pub-hero .hero-meta{margin-top:1.8rem;padding-top:1.4rem}
+.pub-sec{max-width:none;padding:clamp(1.4rem,3.5vh,2.4rem) 0}
+.pub-sec .sec-head{margin-bottom:1.4rem;padding-bottom:.9rem}
+.pub-crumbs{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin-bottom:1.2rem}
+.pub-crumbs a{color:var(--text-dim);text-decoration:none}.pub-crumbs a:hover{color:var(--accent)}
+.pub-crumbs .hero-eyebrow{margin:0}.pub-crumbs .hero-eyebrow::before{display:none}
+.nav-brand a{display:flex;align-items:center;gap:.8rem;text-decoration:none}
+.nav-logo-svg{width:26px;height:26px;display:block;color:var(--accent)}.nav-logo-svg svg{width:100%;height:100%;fill:currentColor}
+.nav-tools .btn{white-space:nowrap}
+.q-list .q-item{margin:0}
+.q-stem p+p{margin-top:.7em}
+.ce-toggle a.ce-toggle-btn{text-decoration:none}
+.pub-fig{max-width:100%;height:auto;display:block;margin:1rem 0;border-radius:var(--radius)}
+.pub-lista .list-item a{color:var(--text);text-decoration:none}.pub-lista .list-item a:hover{color:var(--accent)}
+.pub-lista .list-item .pub-meta{display:block;font-family:var(--mono);font-size:.7rem;letter-spacing:.12em;color:var(--accent);margin-bottom:.15rem}
+.pub-lista .list-item .pub-trecho{color:var(--text-dim)}
+.cards-grid .card a.btn{align-self:flex-start}
+.pub-nota{font-family:var(--sans);font-weight:200;font-size:var(--fs-small);color:var(--text-mute);line-height:1.6;max-width:680px}
+.pub-nota a{color:var(--accent);text-decoration:none;border-bottom:1px solid var(--accent-border)}.pub-nota a:hover{border-bottom-color:var(--accent)}
+.pub-chip-n{font-family:var(--mono);font-size:.68rem;color:var(--accent);margin-left:.1rem}
+@media(max-width:600px){.nav-tools .btn{padding:.48rem .8rem;font-size:.6rem}.pub-hero .hero-meta{gap:1.4rem}}
+`;
 
 async function tabela(schema, nome, select, ordem){
   const out = [], PASSO = 1000;
@@ -48,6 +91,7 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const plano = s => String(s ?? '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\s+/g, ' ').trim();
 const corta = (s, n) => { s = plano(s); return s.length <= n ? s : s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…'; };
 const slug = s => plano(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+const dois = n => String(n ?? '').padStart(2, '0');
 // enunciados e itens: HTML simples do editor (sem script, sem eventos) ou texto puro em parágrafos
 function texto(s){
   s = String(s ?? '').trim();
@@ -60,50 +104,12 @@ function texto(s){
   }
   return s.split(/\n{2,}/).map(p => '<p>' + esc(p).replace(/\n/g, '<br>') + '</p>').join('');
 }
+// item C/E: uma linha de texto (sem <p> por fora, que o .ce-text não espera)
+const textoLinha = s => texto(s).replace(/^<p>([\s\S]*)<\/p>$/i, '$1');
 const ptData = d => { try{ return new Date(d).toISOString().slice(0, 10); }catch(_){ return HOJE; } };
 
-// ── página (concha comum) ────────────────────────────────────────────────────
-const CSS = `
-:root{--bg:#0b0c0f;--bg-card:#13151a;--bg-elev:#181a20;--text:#f0ece4;--text-dim:rgba(240,236,228,.58);--text-mute:rgba(240,236,228,.36);
---accent:#c8a97e;--accent-lo:rgba(200,169,126,.12);--accent-xlo:rgba(200,169,126,.06);--accent-border:rgba(200,169,126,.22);--accent-border-soft:rgba(200,169,126,.12);
---border:rgba(200,169,126,.12);--green:#5dd49f;--amber:#e9b65a;--amber-lo:rgba(233,182,90,.12);--amber-border:rgba(233,182,90,.35);
---serif:'Cormorant Garamond',Georgia,serif;--sans:'Outfit',system-ui,sans-serif}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-weight:300;line-height:1.6;font-size:16px}
-a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-.topo{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.9rem 16px;border-bottom:1px solid var(--border);max-width:1080px;margin:0 auto}
-.marca{font-family:var(--serif);font-size:1.35rem;font-weight:500;letter-spacing:.02em;color:var(--text)}.marca small{font-family:var(--sans);font-size:.72rem;color:var(--text-dim);margin-left:.5rem;letter-spacing:.08em;text-transform:uppercase}
-.topo nav{display:flex;gap:.4rem;flex-wrap:wrap}
-.btn{display:inline-flex;align-items:center;gap:.4rem;border:1px solid var(--accent-border);border-radius:999px;padding:.5rem 1rem;font-size:.86rem;color:var(--text);background:var(--accent-xlo);white-space:nowrap}
-.btn:hover{text-decoration:none;background:var(--accent-lo)}.btn.forte{background:var(--accent);color:#1a1409;border-color:var(--accent);font-weight:500}
-main{max-width:860px;margin:0 auto;padding:1.4rem 16px 3rem}
-.trilha{font-size:.78rem;color:var(--text-dim);display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem}.trilha a{color:var(--text-dim)}
-.rotulo{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 .4rem}
-h1{font-family:var(--serif);font-weight:500;font-size:2.1rem;line-height:1.15;margin:0 0 .5rem}
-h2{font-family:var(--serif);font-weight:500;font-size:1.45rem;margin:2rem 0 .7rem;padding-bottom:.3rem;border-bottom:1px solid var(--border)}
-.sub{color:var(--text-dim);margin:0 0 1.2rem}
-.cartao{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.1rem 1.2rem;margin:.8rem 0}
-.cartao p:first-child{margin-top:0}.cartao p:last-child{margin-bottom:0}
-.ref{font-family:var(--serif);font-size:1.12rem;line-height:1.55}.ref-fonte{font-size:.8rem;color:var(--text-dim);margin-top:.6rem}
-.item{display:grid;grid-template-columns:auto 1fr;gap:.9rem;padding:.9rem 0;border-top:1px solid var(--border)}.item:first-child{border-top:0}
-.item-n{font-size:.72rem;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);padding-top:.25rem;white-space:nowrap}
-.item-ce{font-size:.74rem;color:var(--text-mute);margin-top:.3rem}
-.selo{display:inline-block;font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;border:1px solid var(--amber-border);background:var(--amber-lo);color:var(--amber);border-radius:999px;padding:.1rem .55rem;margin-left:.5rem;vertical-align:middle}
-.chamada{background:linear-gradient(180deg,var(--accent-lo),var(--accent-xlo));border:1px solid var(--accent-border);border-radius:14px;padding:1.2rem 1.3rem;margin:1.6rem 0}
-.chamada h3{font-family:var(--serif);font-weight:500;font-size:1.3rem;margin:0 0 .3rem}.chamada p{margin:.2rem 0 .9rem;color:var(--text-dim)}
-.acoes{display:flex;gap:.6rem;flex-wrap:wrap}
-.chips{display:flex;flex-wrap:wrap;gap:.4rem}.chip{border:1px solid var(--accent-border-soft);background:var(--accent-xlo);border-radius:999px;padding:.25rem .7rem;font-size:.8rem;color:var(--text)}.chip:hover{text-decoration:none;border-color:var(--accent-border)}.chip b{color:var(--accent);font-weight:500;margin-left:.3rem}
-.lista{list-style:none;padding:0;margin:0}.lista li{padding:.55rem 0;border-top:1px solid var(--border)}.lista li:first-child{border-top:0}
-.lista a{color:var(--text)}.lista .meta{font-size:.74rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);margin-right:.5rem}.lista .trecho{display:block;color:var(--text-dim);font-size:.9rem}
-.grade{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:.8rem}
-.grade a{display:block;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1rem 1.1rem;color:var(--text)}.grade a:hover{text-decoration:none;border-color:var(--accent-border)}
-.grade .n{font-family:var(--serif);font-size:1.3rem}.grade .q{color:var(--text-dim);font-size:.85rem}
-.nota{font-size:.82rem;color:var(--text-dim)}
-footer{border-top:1px solid var(--border);margin-top:2rem;padding:1.4rem 16px;max-width:1080px;margin-left:auto;margin-right:auto;font-size:.8rem;color:var(--text-dim);display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}
-img.fig{max-width:100%;height:auto;border-radius:8px;margin:.6rem 0}
-@media(max-width:600px){h1{font-size:1.65rem}.topo nav .btn{padding:.4rem .75rem;font-size:.8rem}}`;
-
-function concha({ titulo, descricao, url, corpo, jsonld, trilha }){
+// ── concha comum (nav, hero, footer do design system) ────────────────────────
+function concha({ titulo, descricao, url, corpo, jsonld }){
   const ld = (jsonld || []).map(o => `<script type="application/ld+json">${JSON.stringify(o)}</script>`).join('\n');
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -117,34 +123,42 @@ function concha({ titulo, descricao, url, corpo, jsonld, trilha }){
 <meta property="og:type" content="article"><meta property="og:site_name" content="Falcon · Ubique CACD">
 <meta property="og:title" content="${esc(titulo)}"><meta property="og:description" content="${esc(descricao)}"><meta property="og:url" content="${esc(url)}">
 <meta name="twitter:card" content="summary">
-<link rel="icon" href="${BASE}/favicon.ico">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=Outfit:wght@300;400;500&display=swap" rel="stylesheet">
-<style>${CSS}</style>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="${BASE}/q/ubique.css">
 ${ld}
 <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src='https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);})(window,document,'script','dataLayer','${GTM}');</script>
 </head>
 <body>
 <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=${GTM}" height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
-<header class="topo">
-  <a class="marca" href="${BASE}/landing.html">Falcon<small>Ubique CACD</small></a>
-  <nav>
-    <a class="btn" href="${BASE}/q/index.html">Questões</a>
-    <a class="btn" href="${BASE}/index.html#/inicio">Explorar sem conta</a>
-    <a class="btn forte" href="${BASE}/index.html#/login?criar=1">Criar conta grátis</a>
-  </nav>
-</header>
-<main>
-${trilha ? `<div class="trilha">${trilha}</div>` : ''}
+<div class="page">
+<nav class="nav">
+  <div class="nav-brand">
+    <a href="${BASE}/landing.html" aria-label="Falcon · Ubique CACD">
+      <span class="nav-logo-svg">${MARCA_SVG}</span>
+      <span class="nav-lockup"><span class="nav-lockup-main">Ubique</span><span class="nav-lockup-sub">Falcon · CACD</span></span>
+    </a>
+  </div>
+  <div class="nav-links">
+    <a class="nav-link" href="${BASE}/q/index.html">Questões</a>
+    <a class="nav-link" href="${APP}#/inicio">Explorar sem conta</a>
+    <a class="nav-link" href="${APP}#/login">Entrar</a>
+  </div>
+  <div class="nav-tools"><a class="btn btn-primary btn-sm" href="${APP}#/login?criar=1">Criar conta grátis</a></div>
+</nav>
+<main class="pub-main">
 ${corpo}
 </main>
-<footer>
-  <span>Falcon é a plataforma de estudo do Ubique CACD, do Grupo Ubique.</span>
-  <span><a href="${BASE}/landing.html">Conheça a Falcon</a> · <a href="${BASE}/q/index.html">Questões do CACD</a> · <a href="${BASE}/index.html#/login">Entrar</a></span>
+<footer class="ftr">
+  <div class="ftr-l"><span class="ftr-mark">Falcon</span><span class="ftr-sub">Ubique CACD · Grupo Ubique</span></div>
+  <div class="ftr-r"><a class="nav-link" href="${BASE}/landing.html">Conheça a Falcon</a><a class="nav-link" href="${BASE}/q/index.html">Questões do CACD</a><a class="nav-link" href="${APP}#/login">Entrar</a></div>
 </footer>
+</div>
 </body>
 </html>`;
 }
+const secHead = (num, titulo, nota) => `<div class="sec-head"><div class="sec-head-l"><span class="sec-num">${esc(num)}</span><h2 class="sec-title">${esc(titulo)}</h2></div>${nota ? `<p class="sec-note">${esc(nota)}</p>` : ''}</div>`;
+const trilha = (itens) => `<div class="pub-crumbs"><span class="hero-eyebrow">${itens.map((it, i) => (it.href ? `<a href="${esc(it.href)}">${esc(it.nome)}</a>` : `<span>${esc(it.nome)}</span>`) + (i < itens.length - 1 ? ' · ' : '')).join('')}</span></div>`;
 
 // ── dados ────────────────────────────────────────────────────────────────────
 async function carregar(){
@@ -224,48 +238,74 @@ function descricaoQ(x){
   const pre = `Questão ${x.numero ?? ''} do ${x.sigla} ${x.ano}, ${x.materia}: `;
   return corta(pre + plano(fonte), 158);
 }
+const siteLd = { '@type': 'WebSite', name: 'Falcon · Ubique CACD', url: BASE };
+const resumo = y => corta(y.q.enunciado || (y.itens[0] && y.itens[0].assertiva) || y.q.command, 110);
+
 function paginaQuestao(x, relacionadas, cotas){
   const url = `${BASE}/q/${x.k}.html`;
   const hub = `${BASE}/q/materia-${x.mslug}.html`;
-  const app = `${BASE}/index.html#/banco/questions?item=${encodeURIComponent(x.k)}&exib=full&applied=1`;
-  const refsHtml = x.refs.map(r => `<div class="cartao ref">${r.title ? `<p class="rotulo">${esc(plano(r.title))}${r.subtitle ? ' · ' + esc(plano(r.subtitle)) : ''}</p>` : ''}${texto(r.text)}${(r.source || r.author) ? `<div class="ref-fonte">${esc(plano([r.author, r.source].filter(Boolean).join(' · ')))}</div>` : ''}${r.image_url ? `<img class="fig" src="${esc(r.image_url)}" alt="">` : ''}</div>`).join('');
-  const enunciado = x.q.enunciado ? `<div class="cartao">${texto(x.q.enunciado)}${x.q.image_url ? `<img class="fig" src="${esc(x.q.image_url)}" alt="">` : ''}</div>` : (x.q.image_url ? `<div class="cartao"><img class="fig" src="${esc(x.q.image_url)}" alt=""></div>` : '');
-  const comando = x.q.type === 'essay' && x.q.command ? `<div class="cartao">${texto(x.q.command)}</div>` : '';
-  const itens = x.itens.length ? `<h2>Itens</h2><div class="cartao">${x.itens.map((t, i) => `<div class="item"><div class="item-n">Item ${esc(t.numero ?? (i + 1))}${t.anulada ? '<span class="selo">Anulado</span>' : ''}</div><div>${texto(t.assertiva)}${t.image_url ? `<img class="fig" src="${esc(t.image_url)}" alt="">` : ''}<div class="item-ce">Certo ou Errado</div></div></div>`).join('')}</div>` : '';
-  const selos = [x.q.anulada ? '<span class="selo">Anulada</span>' : '', x.q.desatualizada ? '<span class="selo">Desatualizada</span>' : ''].join('');
-  const topsHtml = x.tops.length ? `<h2>Tópicos do edital</h2><div class="chips">${x.tops.map(t => `<a class="chip" href="${hub}#t-${esc(x.raizPorTop.get(String(t.id)) || t.id)}">${esc(plano((t.code ? t.code + ' ' : '') + t.title))}</a>`).join('')}</div>` : '';
-  const relHtml = relacionadas.length ? `<h2>Questões relacionadas</h2><ul class="lista">${relacionadas.map(y => `<li><a href="${BASE}/q/${y.k}.html"><span class="meta">${esc(y.sigla)} ${esc(y.ano)} · Questão ${esc(y.numero ?? '')}</span>${esc(corta(y.q.enunciado || (y.itens[0] && y.itens[0].assertiva) || y.q.command, 110))}</a></li>`).join('')}</ul>` : '';
-  const tipo = x.q.type === 'essay' ? 'Questão discursiva' : (x.q.type === 'multiple_choice' ? 'Questão de múltipla escolha' : `Questão objetiva com ${x.itens.length} ${x.itens.length === 1 ? 'item' : 'itens'} (Certo ou Errado)`);
+  const app = `${APP}#/banco/questions?item=${encodeURIComponent(x.k)}&exib=full&applied=1`;
+  const tipo = x.q.type === 'essay' ? 'Questão discursiva' : (x.q.type === 'multiple_choice' ? 'Múltipla escolha' : `Certo ou Errado · ${x.itens.length} ${x.itens.length === 1 ? 'item' : 'itens'}`);
+  const selos = [x.q.anulada ? '<span class="chip chip-warn"><span class="dot"></span>Anulada</span>' : '', x.q.desatualizada ? '<span class="chip chip-warn"><span class="dot"></span>Desatualizada</span>' : ''].filter(Boolean).join('');
+  let n = 0;
+  const sec = (titulo, html, nota) => { n++; return `<section class="sec pub-sec">${secHead(`§ ${dois(n)} · ${titulo}`, titulo, nota)}${html}</section>`; };
+
+  const refsHtml = x.refs.map((r, i) => `<article class="ref-text">
+    <span class="ref-text-label">Texto de referência${x.refs.length > 1 ? ' · ' + ['I', 'II', 'III', 'IV', 'V', 'VI'][i] : ''}</span>
+    ${r.title ? `<h3 class="ref-text-title">${esc(plano(r.title))}</h3>` : ''}
+    ${r.subtitle ? `<p class="ref-text-sub">${esc(plano(r.subtitle))}</p>` : ''}
+    <div class="ref-text-body">${texto(r.text)}</div>
+    ${r.image_url ? `<img class="pub-fig" src="${esc(r.image_url)}" alt="">` : ''}
+    ${(r.author || r.source) ? `<div class="ref-text-cite">${r.author ? `<span class="ref-text-author">${esc(plano(r.author))}</span>` : ''}${(r.author && r.source) ? '<span class="ref-text-cite-sep">·</span>' : ''}${r.source ? `<cite class="ref-text-source">${esc(plano(r.source))}</cite>` : ''}</div>` : ''}
+  </article>`).join('');
+
+  const toggles = `<div class="ce-toggle"><a class="ce-toggle-btn is-c" href="${app}" title="Responder na Falcon"><span class="ce-toggle-letter">C</span></a><a class="ce-toggle-btn is-e" href="${app}" title="Responder na Falcon"><span class="ce-toggle-letter">E</span></a></div>`;
+  const itensHtml = x.itens.length ? `<div class="ce-list">${x.itens.map((t, i) => `<div class="ce-row"><span class="ce-num">${dois(t.numero ?? (i + 1))}</span><span class="ce-text">${textoLinha(t.assertiva)}${t.anulada ? ' <span class="chip chip-warn">Anulado</span>' : ''}${t.image_url ? `<img class="pub-fig" src="${esc(t.image_url)}" alt="">` : ''}</span>${toggles}</div>`).join('')}</div>` : '';
+  const stem = (x.q.enunciado || x.q.image_url) ? `<div class="q-stem">${texto(x.q.enunciado)}${x.q.image_url ? `<img class="pub-fig" src="${esc(x.q.image_url)}" alt="">` : ''}</div>` : '';
+  const comando = x.q.type === 'essay' && x.q.command ? `<div class="q-stem">${texto(x.q.command)}</div>` : '';
+  const discMeta = x.q.type === 'essay' ? `<div class="q-discursive-meta">${x.q.max_lines ? `Até <strong>${esc(x.q.max_lines)} linhas</strong> · ` : ''}Resposta escrita, corrigida na Falcon</div>` : '';
+  const questaoHtml = `<div class="q-list"><div class="q-item ${x.q.type === 'essay' ? 'q-discursive' : 'q-ce'}">
+    <div class="q-head"><div class="q-head-l"><span class="q-num">Questão ${esc(x.numero ?? '')}</span><span class="q-type">${esc(tipo)} · ${esc(x.sigla)} ${esc(x.ano)}</span></div><div class="q-tools">${selos}</div></div>
+    ${stem}${comando}${discMeta}${itensHtml}
+    <div class="q-foot"><div class="q-foot-l">Gabarito e comentário do professor: <strong>na Falcon</strong></div><a class="btn btn-primary btn-sm" href="${app}">Resolver na Falcon</a></div>
+  </div></div>`;
+
+  const chamada = `<div class="callout"><div class="callout-label">Correção na hora</div><p class="callout-body">Como visitante, você corrige ${cotas.visitante} questões por dia. Com a conta gratuita, ${cotas.gratis} por dia, com o comentário do professor e o seu desempenho guardado.</p></div>
+  <div class="btn-row"><a class="btn btn-primary" href="${app}">Resolver na Falcon</a><a class="btn btn-secondary" href="${APP}#/login?criar=1">Criar conta grátis</a><a class="btn btn-tertiary" href="${hub}">Mais questões de ${esc(x.materia)}</a></div>`;
+
+  const topsHtml = x.tops.length ? `<div class="chip-row">${x.tops.map(t => `<a class="chip chip-accent" href="${hub}#t-${esc(x.raizPorTop.get(String(t.id)) || t.id)}">${esc(plano((t.code ? t.code + ' ' : '') + t.title))}</a>`).join('')}</div>` : '';
+  const relHtml = relacionadas.length ? `<ul class="list pub-lista">${relacionadas.map(y => `<li class="list-item"><span class="list-marker"></span><a href="${BASE}/q/${y.k}.html"><span class="pub-meta">${esc(y.sigla)} ${esc(y.ano)} · Questão ${esc(y.numero ?? '')}</span><span class="pub-trecho">${esc(resumo(y))}</span></a></li>`).join('')}</ul>` : '';
+
   const corpo = `
-<p class="rotulo">${esc(x.sigla)} ${esc(x.ano)} · ${esc(x.materia)}</p>
-<h1>Questão ${esc(x.numero ?? '')} do ${esc(x.sigla)} ${esc(x.ano)}${selos}</h1>
-<p class="sub">${tipo}. Prova anterior do Concurso de Admissão à Carreira de Diplomata, classificada pelo edital na Falcon.</p>
-${x.refs.length ? '<h2>Texto de referência</h2>' + refsHtml : ''}
-${(enunciado || comando) ? '<h2>Enunciado</h2>' + enunciado + comando : ''}
-${itens}
-<div class="chamada">
-  <h3>Gabarito e comentário do professor: na Falcon</h3>
-  <p>Resolva esta questão com correção na hora. Como visitante, ${cotas.visitante} questões por dia; com a conta gratuita, ${cotas.gratis} por dia e o seu desempenho guardado.</p>
-  <div class="acoes"><a class="btn forte" href="${app}">Resolver na Falcon</a><a class="btn" href="${BASE}/index.html#/login?criar=1">Criar conta grátis</a></div>
-</div>
-${topsHtml}
-${relHtml}
-<h2>Mais questões</h2>
-<p><a href="${hub}">Todas as questões de ${esc(x.materia)} do CACD</a> · <a href="${BASE}/q/index.html">Questões por matéria</a></p>
-<p class="nota">Enunciado e itens reproduzidos da prova pública do concurso, para estudo. A classificação por tópico do edital é da Falcon.</p>`;
+<section class="hero pub-hero">
+  ${trilha([{ nome: 'Questões do CACD', href: `${BASE}/q/index.html` }, { nome: x.materia, href: hub }, { nome: `${x.sigla} ${x.ano}` }])}
+  <h1 class="hero-title">Questão <em>${esc(x.numero ?? '')}</em> do ${esc(x.sigla)} ${esc(x.ano)}</h1>
+  <p class="hero-lede">${esc(x.materia)}. ${esc(tipo)}. Prova anterior do Concurso de Admissão à Carreira de Diplomata, classificada tópico a tópico pelo edital na Falcon.</p>
+  <div class="hero-meta">
+    <div class="hero-meta-item"><span class="hero-meta-k">Concurso</span><span class="hero-meta-v">${esc(x.sigla)}</span></div>
+    <div class="hero-meta-item"><span class="hero-meta-k">Ano</span><span class="hero-meta-v">${esc(x.ano || '—')}</span></div>
+    <div class="hero-meta-item"><span class="hero-meta-k">Matéria</span><span class="hero-meta-v">${esc(x.subj && x.subj.sigla ? x.subj.sigla : x.materia)}</span></div>
+    ${x.itens.length ? `<div class="hero-meta-item"><span class="hero-meta-k">Itens</span><span class="hero-meta-v">${dois(x.itens.length)}</span></div>` : ''}
+  </div>
+</section>
+${x.refs.length ? sec('Texto de referência', refsHtml, 'O texto que a prova apresentou antes da questão.') : ''}
+${sec('Questão', questaoHtml, 'Enunciado e itens como saíram na prova. Gabarito e comentário ficam na Falcon.')}
+${sec('Resolver', chamada)}
+${x.tops.length ? sec('Tópicos do edital', topsHtml, 'A classificação é da Falcon: cada chip leva às questões do mesmo tópico.') : ''}
+${relacionadas.length ? sec('Questões relacionadas', relHtml, 'Mesma matéria e mesmos tópicos do edital.') : ''}
+<section class="sec pub-sec"><p class="pub-nota">Enunciado e itens reproduzidos da prova pública do concurso, para estudo. <a href="${hub}">Todas as questões de ${esc(x.materia)}</a> · <a href="${BASE}/q/index.html">Questões por matéria</a>.</p></section>`;
   const titulo = tituloQ(x), descricao = descricaoQ(x);
   const jsonld = [
-    { '@context': 'https://schema.org', '@type': 'WebPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR',
-      isPartOf: { '@type': 'WebSite', name: 'Falcon · Ubique CACD', url: BASE }, about: x.tops.map(t => plano(t.title)).slice(0, 12),
-      dateModified: ptData(x.q.updated_at) },
+    { '@context': 'https://schema.org', '@type': 'WebPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: siteLd,
+      about: x.tops.map(t => plano(t.title)).slice(0, 12), dateModified: ptData(x.q.updated_at) },
     { '@context': 'https://schema.org', '@type': 'BreadcrumbList', itemListElement: [
       { '@type': 'ListItem', position: 1, name: 'Questões do CACD', item: `${BASE}/q/index.html` },
       { '@type': 'ListItem', position: 2, name: x.materia, item: hub },
       { '@type': 'ListItem', position: 3, name: `${x.sigla} ${x.ano} · Questão ${x.numero ?? ''}`, item: url } ] },
   ];
-  const trilha = `<a href="${BASE}/q/index.html">Questões do CACD</a> › <a href="${hub}">${esc(x.materia)}</a> › <span>${esc(x.sigla)} ${esc(x.ano)} · Questão ${esc(x.numero ?? '')}</span>`;
-  return concha({ titulo, descricao, url, corpo, jsonld, trilha });
+  return concha({ titulo, descricao, url, corpo, jsonld });
 }
+
 function relacionadasDe(x, todas){
   const minhas = new Set(x.tops.map(t => String(t.id)));
   const minhasRaizes = new Set(x.raizes.map(r => String(r.id)));
@@ -291,36 +331,51 @@ function paginaMateria(subj, lista){
     chaves.forEach(r => { const k = String(r.id); if(!grupos.has(k)) grupos.set(k, { r, qs: [] }); grupos.get(k).qs.push(x); });
   });
   const ordem = [...grupos.values()].sort((a, b) => (String(a.r.id) === 'sem') - (String(b.r.id) === 'sem') || (a.r.position ?? 0) - (b.r.position ?? 0) || String(a.r.code || '').localeCompare(String(b.r.code || ''), 'pt', { numeric: true }));
-  const nuvem = `<div class="chips">${ordem.map(g => `<a class="chip" href="#t-${esc(g.r.id)}">${esc(plano((g.r.code ? g.r.code + ' ' : '') + g.r.title))}<b>${g.qs.length}</b></a>`).join('')}</div>`;
-  const secoes = ordem.map(g => `<h2 id="t-${esc(g.r.id)}">${esc(plano((g.r.code ? g.r.code + '. ' : '') + g.r.title))}</h2><ul class="lista">${g.qs.slice().sort((a, b) => (Number(b.ano) || 0) - (Number(a.ano) || 0) || (a.numero ?? 0) - (b.numero ?? 0)).map(x => `<li><a href="${BASE}/q/${x.k}.html"><span class="meta">${esc(x.sigla)} ${esc(x.ano)} · Questão ${esc(x.numero ?? '')}</span><span class="trecho">${esc(corta(x.q.enunciado || (x.itens[0] && x.itens[0].assertiva) || x.q.command, 120))}</span></a></li>`).join('')}</ul>`).join('');
+  const nuvem = `<div class="chip-row">${ordem.map(g => `<a class="chip chip-accent" href="#t-${esc(g.r.id)}">${esc(plano((g.r.code ? g.r.code + ' ' : '') + g.r.title))}<span class="pub-chip-n">${g.qs.length}</span></a>`).join('')}</div>`;
+  const secoes = ordem.map((g, i) => `<section class="sec pub-sec" id="t-${esc(g.r.id)}">${secHead(`§ ${dois(i + 1)} · ${g.qs.length} ${g.qs.length === 1 ? 'questão' : 'questões'}`, plano((g.r.code ? g.r.code + '. ' : '') + g.r.title))}<ul class="list pub-lista">${g.qs.slice().sort((a, b) => (Number(b.ano) || 0) - (Number(a.ano) || 0) || (a.numero ?? 0) - (b.numero ?? 0)).map(x => `<li class="list-item"><span class="list-marker"></span><a href="${BASE}/q/${x.k}.html"><span class="pub-meta">${esc(x.sigla)} ${esc(x.ano)} · Questão ${esc(x.numero ?? '')}</span><span class="pub-trecho">${esc(corta(x.q.enunciado || (x.itens[0] && x.itens[0].assertiva) || x.q.command, 120))}</span></a></li>`).join('')}</ul></section>`).join('');
   const titulo = `Questões de ${nome} do CACD ${faixa} | Falcon`.slice(0, 90);
   const descricao = corta(`${lista.length} questões de ${nome} das provas anteriores do CACD (${faixa}), classificadas tópico a tópico pelo edital. Enunciado e itens para estudo; gabarito e comentário na Falcon.`, 158);
   const corpo = `
-<p class="rotulo">Questões por matéria</p>
-<h1>Questões de ${esc(nome)} do CACD</h1>
-<p class="sub">${lista.length} questões das provas de ${esc(faixa)}, organizadas pelos tópicos do edital. Clique num tópico para ir direto às questões dele.</p>
-${nuvem}
-<div class="chamada"><h3>Resolva com gabarito e comentário</h3><p>Na Falcon, cada questão abre com correção na hora, estatísticas e comentários dos alunos.</p><div class="acoes"><a class="btn forte" href="${BASE}/index.html#/banco/questions">Abrir o Banco de questões</a><a class="btn" href="${BASE}/index.html#/login?criar=1">Criar conta grátis</a></div></div>
+<section class="hero pub-hero">
+  ${trilha([{ nome: 'Questões do CACD', href: `${BASE}/q/index.html` }, { nome }])}
+  <h1 class="hero-title">Questões de <em>${esc(nome)}</em> do CACD</h1>
+  <p class="hero-lede">Todas as questões das provas de ${esc(faixa)}, organizadas pelos tópicos do edital. Escolha um tópico para ir direto às questões dele.</p>
+  <div class="hero-meta">
+    <div class="hero-meta-item"><span class="hero-meta-k">Questões</span><span class="hero-meta-v">${lista.length}</span></div>
+    <div class="hero-meta-item"><span class="hero-meta-k">Provas</span><span class="hero-meta-v">${esc(faixa || '—')}</span></div>
+    <div class="hero-meta-item"><span class="hero-meta-k">Tópicos</span><span class="hero-meta-v">${dois(ordem.length)}</span></div>
+  </div>
+</section>
+<section class="sec pub-sec">${secHead('Tópicos do edital', 'Por onde começar', 'A contagem é de questões por tópico de primeiro nível do edital.')}${nuvem}
+<div class="btn-row"><a class="btn btn-primary" href="${APP}#/banco/questions">Abrir o Banco de questões</a><a class="btn btn-secondary" href="${APP}#/login?criar=1">Criar conta grátis</a></div></section>
 ${secoes}`;
-  const jsonld = [{ '@context': 'https://schema.org', '@type': 'CollectionPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: { '@type': 'WebSite', name: 'Falcon · Ubique CACD', url: BASE } }];
-  const trilha = `<a href="${BASE}/q/index.html">Questões do CACD</a> › <span>${esc(nome)}</span>`;
-  return { html: concha({ titulo, descricao, url, corpo, jsonld, trilha }), url, ms };
+  const jsonld = [{ '@context': 'https://schema.org', '@type': 'CollectionPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: siteLd }];
+  return { html: concha({ titulo, descricao, url, corpo, jsonld }), url, ms };
 }
 
 function paginaIndice(porMateria){
   const url = `${BASE}/q/index.html`;
   const total = porMateria.reduce((n, m) => n + m.lista.length, 0);
-  const cartoes = porMateria.map(m => { const anos = m.lista.map(x => Number(x.ano)).filter(Boolean); return `<a href="${BASE}/q/materia-${m.ms}.html"><div class="n">${esc(m.nome)}</div><div class="q">${m.lista.length} questões${anos.length ? ` · ${Math.min(...anos)}–${Math.max(...anos)}` : ''}</div></a>`; }).join('');
+  const cartoes = porMateria.map(m => { const anos = m.lista.map(x => Number(x.ano)).filter(Boolean); return `<div class="card"><span class="card-label">Matéria</span><div class="card-title">${esc(m.nome)}</div><div class="card-body">${m.lista.length} questões${anos.length ? ` · provas de ${Math.min(...anos)} a ${Math.max(...anos)}` : ''}</div><div class="card-foot"><a class="btn btn-tertiary" href="${BASE}/q/materia-${m.ms}.html">Ver as questões</a></div></div>`; }).join('');
   const titulo = 'Questões do CACD por matéria: provas anteriores classificadas pelo edital | Falcon'.slice(0, 90);
   const descricao = corta(`${total} questões das provas anteriores do CACD, por matéria e por tópico do edital. Enunciado e itens para estudo; gabarito, comentário do professor e estatísticas na Falcon.`, 158);
   const corpo = `
-<p class="rotulo">Falcon · Ubique CACD</p>
-<h1>Questões do CACD por matéria</h1>
-<p class="sub">${total} questões das provas anteriores do Concurso de Admissão à Carreira de Diplomata, classificadas tópico a tópico pelo edital. Escolha a matéria.</p>
-<div class="grade">${cartoes}</div>
-<div class="chamada"><h3>Estude com correção na hora</h3><p>Na Falcon, cada questão abre com gabarito, comentário do professor, estatísticas e os comentários dos alunos. Como visitante, algumas por dia; com a conta gratuita, mais e com o desempenho guardado.</p><div class="acoes"><a class="btn forte" href="${BASE}/index.html#/inicio">Explorar sem conta</a><a class="btn" href="${BASE}/index.html#/login?criar=1">Criar conta grátis</a></div></div>`;
-  const jsonld = [{ '@context': 'https://schema.org', '@type': 'CollectionPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: { '@type': 'WebSite', name: 'Falcon · Ubique CACD', url: BASE } }];
-  return concha({ titulo, descricao, url, corpo, jsonld, trilha: '' });
+<section class="hero pub-hero">
+  <div class="hero-eyebrow">Falcon · Ubique CACD</div>
+  <h1 class="hero-title">Questões do <em>CACD</em> por matéria</h1>
+  <p class="hero-lede">${total} questões das provas anteriores do Concurso de Admissão à Carreira de Diplomata, classificadas tópico a tópico pelo edital. Escolha a matéria.</p>
+  <div class="hero-meta">
+    <div class="hero-meta-item"><span class="hero-meta-k">Questões</span><span class="hero-meta-v">${total}</span></div>
+    <div class="hero-meta-item"><span class="hero-meta-k">Matérias</span><span class="hero-meta-v">${dois(porMateria.length)}</span></div>
+  </div>
+</section>
+<section class="sec pub-sec"><div class="cards-grid">${cartoes}</div></section>
+<section class="sec pub-sec">
+  <div class="callout"><div class="callout-label">Estude com correção na hora</div><p class="callout-body">Na Falcon, cada questão abre com gabarito, comentário do professor, estatísticas e os comentários dos alunos. Como visitante, algumas por dia; com a conta gratuita, mais e com o desempenho guardado.</p></div>
+  <div class="btn-row"><a class="btn btn-primary" href="${APP}#/inicio">Explorar sem conta</a><a class="btn btn-secondary" href="${APP}#/login?criar=1">Criar conta grátis</a></div>
+</section>`;
+  const jsonld = [{ '@context': 'https://schema.org', '@type': 'CollectionPage', name: titulo, description: descricao, url, inLanguage: 'pt-BR', isPartOf: siteLd }];
+  return concha({ titulo, descricao, url, corpo, jsonld });
 }
 
 function sitemap(urls){
@@ -341,7 +396,8 @@ async function principal(){
   const { questoes, subjById } = montar(dados);
   const cotas = { visitante: dados.cotaVisitante, gratis: dados.cotaGratis };
   mkdirSync(PASTA, { recursive: true });
-  readdirSync(PASTA).filter(f => /\.html$/.test(f)).forEach(f => unlinkSync(join(PASTA, f)));
+  readdirSync(PASTA).filter(f => /\.(html|css)$/.test(f)).forEach(f => unlinkSync(join(PASTA, f)));
+  writeFileSync(join(PASTA, 'ubique.css'), cssDesignSystem() + '\n' + CSS_PAGINA);
   const urls = URLS_BASE.slice();
   questoes.forEach(x => {
     writeFileSync(join(PASTA, x.k + '.html'), paginaQuestao(x, relacionadasDe(x, questoes), cotas));
