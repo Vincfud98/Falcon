@@ -17200,6 +17200,7 @@ const Store = (function(){
   let _key = null;
   const _subs = new Set();
   let _writeTimer = null;
+  let _rev = 0;                         // sobe a cada mudança do estado: quem memoriza contas caras compara isto
 
   function _load(){
     try{
@@ -17209,13 +17210,14 @@ const Store = (function(){
     return null;
   }
   function _persist(){
+    _rev++;
     clearTimeout(_writeTimer);
     _writeTimer = setTimeout(()=>{
       try{ localStorage.setItem(_key, JSON.stringify(_state)); }
       catch(e){ console.warn('[Store] persist failed', e); }
     }, 200);
   }
-  function _emit(){ _subs.forEach(fn => { try{ fn(_state); }catch(e){ console.error(e); } }); }
+  function _emit(){ _rev++; _subs.forEach(fn => { try{ fn(_state); }catch(e){ console.error(e); } }); }
 
   // ────────────────────────────────────────────────────────────────────
   // Fase 4c — Supabase sync de respostas Quiz/Essay
@@ -19078,6 +19080,7 @@ const Store = (function(){
     // quem chamava de fora (folha da prova) testava `typeof` e nunca hidratava.
     hydrateSimuladoResponses(simId, attemptNumber){ return _hydrateSimuladoResponses(simId, attemptNumber); },
     init(userId, course){
+      _rev++;
       const novaChave = `ubique.coursePlatform.v3.${userId}.${course.id}`;
       // IDEMPOTENTE (armadilha de 23/08): o init roda de novo em vários
       // gatilhos (boot, pós-hidratação, eventos de conteúdo). Re-init do
@@ -19135,6 +19138,7 @@ const Store = (function(){
     // Espera a rajada de hidratações do usuário assentar (nunca rejeita).
     hidratacaoPronta(){ return _hidratacaoP || Promise.resolve(); },
     get(){ return _state; },
+    rev(){ return _rev; },
     // A página Cadernos chama ao abrir: re-busca do servidor (idempotente,
     // 2 selects) — garante sidebar completa mesmo se o boot pegou onda ruim.
     rehidratarCadernos(){
@@ -73737,6 +73741,17 @@ function buildPerformanceReport(){
   const scopeCourses = (window.Banco && Banco.scopeCourses) ? Banco.scopeCourses() : [window.COURSE].filter(Boolean);
   const scopeMods = scopeCourses.reduce((a,c) => a.concat(c.modules||[]), []);
   const state = Store.get();
+  // Memo (16/10/2026): esta conta custava ~1,6 s e rodava inteira a cada abertura do Início e do Edital (2 s de
+  // tela travada). Ela só muda quando o Store (respostas, marcadores, vistas) ou o conteúdo mudam: a chave cobre isso.
+  const _chave = [
+    (window.Store && Store.rev) ? Store.rev() : 0,
+    (typeof _bankBlocksRev !== 'undefined') ? _bankBlocksRev : 0,
+    (typeof _unitCtxRev !== 'undefined') ? _unitCtxRev : 0,
+    scopeCourses.map(c => c && c.id).join(','),
+    ((window.Auth && Auth.getUser && Auth.getUser()) || {}).id || ''
+  ].join('|');
+  const _memo = window.__perfMemo;
+  if(_memo && _memo.chave === _chave && _memo.qb === window._QBank && _memo.courses === window.COURSES && _memo.state === state) return _memo.out;
 
   // Base accumulators
   function emptyAgg(){
@@ -73943,7 +73958,9 @@ function buildPerformanceReport(){
     }, pu.agg);
   }).filter(u => u.flashcards.total||u.quiz.total||u.essay.maxTotal||u.completion.denom);
 
-  return { topics, tags, summary, unitRows, perUnit };
+  const _out = { topics, tags, summary, unitRows, perUnit };
+  window.__perfMemo = { chave: _chave, qb: window._QBank, courses: window.COURSES, state: state, out: _out };
+  return _out;
 }
 
 /* Given a topic/tag and perUnit map, return an ordered breakdown per module → chapter → unit that contain this filter. */
