@@ -33,6 +33,17 @@ create table if not exists crm.automacao_envios (
 create index if not exists automacao_envios_idx
   on crm.automacao_envios (automacao_id, client_id, enviado_em);
 
+-- RLS: só admin lê/edita pelo app (a edge function usa service role e bypassa).
+alter table crm.automacoes enable row level security;
+alter table crm.automacao_envios enable row level security;
+drop policy if exists automacoes_admin on crm.automacoes;
+create policy automacoes_admin on crm.automacoes for all using (public.is_admin()) with check (public.is_admin());
+drop policy if exists automacao_envios_admin on crm.automacao_envios;
+create policy automacao_envios_admin on crm.automacao_envios for all using (public.is_admin()) with check (public.is_admin());
+grant select, insert, update, delete on crm.automacoes to authenticated;
+grant usage, select on sequence crm.automacoes_id_seq to authenticated;
+grant select on crm.automacao_envios to authenticated;
+
 -- 3) Clientes elegíveis de uma regra (segmento + anti-spam + tem e-mail) ──
 create or replace function crm.regua_pendentes(p_automacao_id int)
 returns table (client_id uuid, email text, nome text)
