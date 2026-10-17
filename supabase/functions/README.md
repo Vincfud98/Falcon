@@ -68,3 +68,60 @@ https://kluqjqojxzpuiauuidwx.supabase.co/functions/v1/mp-webhook
 - `mp-webhook` roda sem JWT (é o MP que chama) e **sempre reconsulta** o
   pagamento na API do MP antes de gravar — não confia só na notificação.
 - `mp-criar-pagamento` exige usuário logado (JWT do app).
+- `stripe-webhook` valida a **assinatura** do webhook (STRIPE_WEBHOOK_SECRET)
+  antes de processar qualquer evento.
+
+---
+
+# Fase 2 — Stripe (assinatura recorrente)
+
+Para a mentoria (cobrança recorrente). Fluxo:
+
+```
+Botão "Assinar" → window.UbqSubscribe('price_...') → stripe-checkout
+   → Stripe Checkout (assinatura) → cliente paga
+   → Stripe chama stripe-webhook → vendas.aplicar_assinatura_stripe
+   → registra a assinatura e (regra de vocês) libera/estende o acesso
+```
+
+## Pré-requisitos (feitos pelo time)
+
+1. **Conta Stripe** e, no painel, um **Produto com Price recorrente**
+   (mensal/anual) para a mentoria → anote o `price_id` (`price_...`).
+2. Credenciais: `Secret key` (`sk_...`) e, ao criar o webhook, o
+   `Signing secret` (`whsec_...`).
+
+## Passo a passo
+
+**1) Rodar o SQL** `sql/assinatura_stripe.sql` no SQL Editor (cria a tabela de
+tracking + a função `vendas.aplicar_assinatura_stripe`). **Edite o TODO dessa
+função** com o que cada assinatura libera (matérias/turma) antes de ir pra prod.
+
+**2) Secrets:**
+```bash
+supabase secrets set STRIPE_SECRET_KEY="sk_test_..."
+supabase secrets set STRIPE_WEBHOOK_SECRET="whsec_..."
+```
+
+**3) Deploy:**
+```bash
+supabase functions deploy stripe-checkout
+supabase functions deploy stripe-webhook
+```
+
+**4) Webhook no painel do Stripe** (Developers → Webhooks → Add endpoint), URL:
+```
+https://kluqjqojxzpuiauuidwx.supabase.co/functions/v1/stripe-webhook
+```
+Eventos: `checkout.session.completed`, `invoice.paid`,
+`customer.subscription.updated`, `customer.subscription.deleted`.
+Copie o **Signing secret** gerado pro secret `STRIPE_WEBHOOK_SECRET` e redeploy.
+
+**5) Ligar o botão** no app: `onclick="window.UbqSubscribe('price_...')"` no
+botão de assinar a mentoria (me diga onde fica que eu ligo).
+
+## Testar (modo teste do Stripe)
+
+- Use `sk_test_...` e os cartões de teste do Stripe (ex.: 4242 4242 4242 4242).
+- Assine → o webhook grava em `vendas.stripe_subscriptions` e (com o TODO
+  preenchido) libera o acesso. Renovações estendem o período automaticamente.
