@@ -125,3 +125,53 @@ botão de assinar a mentoria (me diga onde fica que eu ligo).
 - Use `sk_test_...` e os cartões de teste do Stripe (ex.: 4242 4242 4242 4242).
 - Assine → o webhook grava em `vendas.stripe_subscriptions` e (com o TODO
   preenchido) libera o acesso. Renovações estendem o período automaticamente.
+
+---
+
+# Régua automática (follow-up por e-mail)
+
+Dispara e-mails pros segmentos **Abandonou carrinho**, **Em risco** e **Frios**.
+Tudo **desligado por padrão** e com trava anti-spam (cooldown por regra).
+
+## Passo a passo
+
+**1) Rodar o SQL** `sql/regua_automatica.sql` (cria `crm.automacoes`,
+`crm.automacao_envios`, `crm.regua_pendentes` e 3 regras **desligadas**).
+
+**2) Provedor de e-mail (Resend):** criar conta, **verificar o domínio**
+`grupoubique.com.br` (DNS) e gerar a API key.
+
+**3) Secrets:**
+```bash
+supabase secrets set RESEND_API_KEY="re_..."
+supabase secrets set RESEND_FROM="Ubique <contato@grupoubique.com.br>"
+supabase secrets set REGUA_CRON_SECRET="um-segredo-forte-qualquer"
+```
+
+**4) Deploy:**
+```bash
+supabase functions deploy regua-automatica
+```
+
+**5) Testar sem enviar (dry-run):**
+```bash
+curl -X POST https://kluqjqojxzpuiauuidwx.supabase.co/functions/v1/regua-automatica \
+  -H "x-regua-secret: um-segredo-forte-qualquer" -H "Content-Type: application/json" \
+  -d '{"dry_run":true}'
+```
+Retorna quantos clientes são elegíveis por regra (sem disparar nada).
+
+**6) Ligar as regras:** no SQL Editor, revise os textos e marque `ativo=true`
+nas regras que quiser (`update crm.automacoes set ativo=true where id=...;`).
+
+**7) Agendar (diário):** habilite `pg_cron` **e** `pg_net` e rode a PARTE 2 do
+`sql/regua_automatica.sql` (troque `<REGUA_CRON_SECRET>` pelo mesmo segredo).
+
+## Observações
+- Anti-spam: cada regra tem `cooldown_dias` (não reenvia pro mesmo cliente
+  antes disso) e `limite_por_rodada` (teto de segurança por execução).
+- Nunca envia pra cliente `blocked` nem sem e-mail. Todo envio fica em
+  `crm.automacao_envios`.
+- **WhatsApp**: hoje só `email`. Pra WhatsApp, escolher provedor (API oficial
+  da Meta ou Z-API) e estender a função `regua-automatica` (o motor já separa
+  os elegíveis por `canal`).
