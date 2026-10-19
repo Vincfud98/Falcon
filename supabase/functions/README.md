@@ -204,3 +204,44 @@ nas regras que quiser (`update crm.automacoes set ativo=true where id=...;`).
 - **WhatsApp**: hoje só `email`. Pra WhatsApp, escolher provedor (API oficial
   da Meta ou Z-API) e estender a função `regua-automatica` (o motor já separa
   os elegíveis por `canal`).
+
+---
+
+# Meta Conversions API (coleta no servidor)
+
+Manda eventos do servidor pro Meta — imune a adblock/iOS e, principalmente,
+captura o **`Purchase` de TODA venda, inclusive a manual/offline** (hoje a
+maioria fecha na mão). Deduplica com o Pixel do navegador pelo `event_id`.
+
+## Pré-requisitos (time)
+1. **Pixel + Conversions API** no Events Manager da Meta → `Pixel ID` e um
+   `Access Token` da CAPI.
+2. Extensão **pg_net** habilitada (Dashboard › Database › Extensions).
+
+## Passo a passo
+**1) Secrets:**
+```bash
+supabase secrets set META_PIXEL_ID="..." META_CAPI_TOKEN="EAAG..." META_CAPI_PROXY_SECRET="um-segredo-forte"
+# opcional p/ testar no Events Manager (Test Events):
+supabase secrets set META_TEST_EVENT_CODE="TESTxxxxx"
+```
+**2) Deploy:**
+```bash
+supabase functions deploy meta-capi
+```
+**3) SQL do Purchase automático** (`sql/meta_capi.sql`): troque
+`<META_CAPI_PROXY_SECRET>` pelo mesmo valor acima e rode. Cria o trigger em
+`vendas.payments` que dispara o Purchase sempre que um pagamento vira `paid`
+(botão do admin, mp-webhook ou stripe-webhook — um lugar só).
+
+## Testar
+- Com `META_TEST_EVENT_CODE` setado, marque um pagamento como pago (ou rode um
+  teste) e veja o evento chegar em **Events Manager › Test Events**.
+- O e-mail/telefone são **hasheados (SHA-256)** dentro da `meta-capi` — nunca
+  saem em texto puro.
+
+## Próximos eventos pela CAPI (mesma função)
+- **Lead / CompleteRegistration** do servidor (dedupe com o navegador).
+- **Conversion Leads**: sincronizar lead→cliente pra Meta otimizar por lead que
+  compra. **Valor (LTV)** nos eventos pra otimização por valor.
+- **Marcos de engajamento** (1º simulado, Nº questões, voltou no D7).
