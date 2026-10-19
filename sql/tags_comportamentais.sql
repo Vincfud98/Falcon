@@ -74,9 +74,13 @@ begin
   select id into v_conta from crm.tags where slug = 'comp-criou-conta';
   if v_conta is null then
     insert into crm.tags(name, slug, color, description, brand_id)
-    values ('Criou conta', 'comp-criou-conta', '#6aa06a',
-            'Automática: criou conta a partir do app/portal.', null)
+    values ('Tentou criar conta', 'comp-criou-conta', '#6aa06a',
+            'Automática: tentou criar conta grátis (pré-lançamento: pode não virar conta real).', null)
     returning id into v_conta;
+  else
+    update crm.tags set name = 'Tentou criar conta',
+           description = 'Automática: tentou criar conta grátis (pré-lançamento: pode não virar conta real).'
+     where id = v_conta and name <> 'Tentou criar conta';
   end if;
 
   select id into v_respondeu from crm.tags where slug = 'comp-respondeu-questoes';
