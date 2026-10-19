@@ -25170,7 +25170,7 @@ Blocks.keypoints = {
         return { ok: false, mensagem: /timeout/.test(String(race.error.message || '')) ? 'A correção demorou demais. Nada foi cobrado; tente de novo.' : 'Não consegui falar com o servidor agora. Tente de novo.' };
       }
       const d = race.data || {};
-      if(d.ubt_error) return { ok: false, mensagem: 'Saldo insuficiente: você tem ' + fmtU(d.saldo) + ' e a correção custa ' + fmtU(d.needed) + '. Adicione UbiTokens na sua Carteira.' };
+      if(d.ubt_error){ try{ if(window.ubqPaywall) window.ubqPaywall('tokens'); }catch(_){} return { ok: false, mensagem: 'Saldo insuficiente: você tem ' + fmtU(d.saldo) + ' e a correção custa ' + fmtU(d.needed) + '. Adicione UbiTokens na sua Carteira.' }; }
       if(d.ok !== true || !Array.isArray(d.itens)) return { ok: false, mensagem: d.mensagem || 'A correção falhou. Nada foi cobrado; tente de novo.' };
       return d;
     } catch(_) { return { ok: false, mensagem: 'Não consegui falar com o servidor agora. Tente de novo.' }; }
@@ -26091,7 +26091,7 @@ Blocks.keypoints = {
     const r = await chamar(body);
     ocupar(false);
     if(!r || r.ok !== true){
-      if(r && r.ubt_error) mostrarErro('Saldo insuficiente: você tem ' + fmtU(r.saldo) + ' e a atividade custa ' + fmtU(r.needed) + '. Adicione UbiTokens na sua Carteira.');
+      if(r && r.ubt_error){ try{ if(window.ubqPaywall) window.ubqPaywall('tokens'); }catch(_){} mostrarErro('Saldo insuficiente: você tem ' + fmtU(r.saldo) + ' e a atividade custa ' + fmtU(r.needed) + '. Adicione UbiTokens na sua Carteira.'); }
       else mostrarErro((r && r.mensagem) || 'A criação falhou. Nada foi cobrado. Tente de novo.');
       if(r && r.detalhe) console.warn('[idiomas-preencher]', r.error, r.detalhe);
       if(r && r.demorou) setTimeout(() => { if(window.Store && Store.rehidratarBlocosIdioma) Store.rehidratarBlocosIdioma(); }, 45000);
@@ -43416,6 +43416,7 @@ Renderers.simuladoDetail = function(route){
     const cta = (_acc.kind === 'paid' && sim.checkoutUrl)
       ? '<a class="btn-ghost" href="' + Util.attr(sim.checkoutUrl) + '" target="_blank" rel="noopener">Comprar simulado</a>'
       : '';
+    try { if(window.ubqPaywall && _acc.kind === 'paid') window.ubqPaywall('simulado', { materia: sim.name }); } catch(_){}
     return `<div class="sim-await"><div class="sim-await-card">
       <span class="s-label" data-a="1">${_acc.kind === 'paid' ? 'Simulado pago' : 'Acesso restrito'}</span>
       <h1 class="sim-await-title" data-a="2">${Util.esc(sim.name)}</h1>
@@ -64925,6 +64926,7 @@ window.Visitante = (function(){
   // a folha de convite: uma só, com o motivo e 3 benefícios específicos; volta para onde estava depois da conta
   function convite(motivo, extra){
     const M = MOTIVOS[motivo] || MOTIVOS.geral;
+    try { if(window.ubqPaywall) window.ubqPaywall(motivo || 'geral'); } catch(_){}
     fecharConvite(); guardarVolta();
     const bd = document.createElement('div');
     bd.className = 'vis-conv-bd'; bd.id = 'visConvite';
@@ -86009,31 +86011,54 @@ if(document.readyState !== 'loading') _bootOnce();
   var device = /Mobi|Android|iPhone|iPad|iPod|Windows Phone/i.test(navigator.userAgent) ? 'mobile' : 'desktop';
   var _last = 0;
 
-  function buy(materia){
-    var now = Date.now(); if(now - _last < 800) return; _last = now;   // anti duplo-disparo
+  // Grava um evento no nosso crm.web_events (first-party, auditável na aba
+  // Origem de Tráfego). type: buy_click | paywall | ...
+  function send(type, materia, meta){
     try {
       if(!window._sb) return;
       window._sb.schema('crm').rpc('registrar_evento', {
-        p_visitor_id: vid, p_session_id: sid, p_event_type: 'buy_click',
+        p_visitor_id: vid, p_session_id: sid, p_event_type: type,
         p_channel: canal || 'direct', p_device: device,
         p_url: location.pathname, p_referrer: document.referrer || null,
         p_utm_source: null, p_utm_medium: null, p_utm_campaign: null,
-        p_materia: materia || null, p_meta: { origem: 'portal' }
-      }).then(function(r){ if(r && r.error) console.warn('[buy_click]', r.error.message); })
+        p_materia: materia || null,
+        p_meta: Object.assign({ origem: 'portal' }, meta || {})
+      }).then(function(r){ if(r && r.error) console.warn('[ubq ' + type + ']', r.error.message); })
         .catch(function(){});
     } catch(_){}
   }
+
+  function buy(materia){
+    var now = Date.now(); if(now - _last < 800) return; _last = now;   // anti duplo-disparo
+    send('buy_click', materia);
+  }
   window.UbqBuy = buy;   // o fluxo pode chamar direto (ex.: compra 1-clique)
+
+  // Paywall: a pessoa esbarrou no muro (cota de questões, conteúdo bloqueado,
+  // simulado pago, UbiTokens zerados). Grava em crm.web_events (auditável na
+  // Origem de Tráfego) E dispara o Pixel (com consentimento). motivo preserva o
+  // detalhe real; o Pixel agrupa em AtingiuLimiteGratis / AcabaramTokens /
+  // ViuConteudoBloqueado pra montar os públicos.
+  var _pwLast = {};
+  window.ubqPaywall = function(motivo, extra){
+    motivo = motivo || 'geral';
+    var now = Date.now();
+    if(_pwLast[motivo] && now - _pwLast[motivo] < 2000) return;   // anti-spam por motivo
+    _pwLast[motivo] = now;
+    send('paywall', (extra && extra.materia) || null, { motivo: motivo });
+    var EVT = { cota: 'AtingiuLimiteGratis', tokens: 'AcabaramTokens' };
+    try { window.ubqPixel(EVT[motivo] || 'ViuConteudoBloqueado', { content_name: motivo }, true); } catch(_){}
+  };
 
   // Meta Pixel: dispara evento padrão com event_id (pra deduplicar com a CAPI
   // no servidor depois). Usa o fbq já carregado pelo GTM; espelha no dataLayer.
-  window.ubqPixel = function(evt, params){
+  window.ubqPixel = function(evt, params, custom){
     try {
       // LGPD: só envia pra Meta com consentimento (ver consent.js). Undecided/negado → não envia.
       if(window.__ubqConsent !== true) return null;
       var id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
       var p = params || {};
-      if(typeof window.fbq === 'function') window.fbq('track', evt, p, { eventID: id });
+      if(typeof window.fbq === 'function') window.fbq(custom ? 'trackCustom' : 'track', evt, p, { eventID: id });
       if(window.dataLayer && window.dataLayer.push){
         var dl = { event: 'ubq_' + evt, ubq_event_id: id };
         for(var k in p){ if(Object.prototype.hasOwnProperty.call(p, k)) dl[k] = p[k]; }
