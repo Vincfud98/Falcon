@@ -54,25 +54,36 @@
   function injectStyle(){
     if(styleEl) return;
     styleEl = document.createElement('style');
+    // Segue o design system (ubique-saas-components.html): tokens da página com
+    // fallback do tema escuro, raio 3px, Outfit 300, botões btn-primary/btn-secondary.
+    var E = 'var(--ease,cubic-bezier(.22,1,.36,1))';
     styleEl.textContent =
-      '.ubqc{position:fixed;left:1rem;right:1rem;bottom:1rem;z-index:2147483600;max-width:740px;margin:0 auto;' +
-      'background:#15161a;color:#e8e3d9;border:1px solid rgba(200,169,126,.25);border-radius:10px;' +
-      'padding:1rem 1.2rem;box-shadow:0 14px 44px rgba(0,0,0,.55);' +
-      'font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:.86rem;line-height:1.55;' +
-      'display:flex;gap:1.1rem;align-items:center;flex-wrap:wrap;animation:ubqc-in .32s ease}' +
-      '@keyframes ubqc-in{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}' +
-      '.ubqc.ubqc-out{opacity:0;transform:translateY(14px);transition:all .32s ease}' +
-      '.ubqc-txt{flex:1;min-width:230px;color:#cfc7b8}' +
-      '.ubqc-txt strong{color:#e8e3d9;font-weight:600}' +
-      '.ubqc-txt a{color:#c8a97e;text-decoration:underline}' +
-      '.ubqc-btns{display:flex;gap:.5rem;flex-wrap:wrap}' +
-      '.ubqc-btn{cursor:pointer;border-radius:6px;padding:.55rem 1.05rem;font-size:.82rem;font-weight:600;' +
-      'border:1px solid transparent;font-family:inherit;transition:all .13s ease}' +
-      '.ubqc-ok{background:#c8a97e;color:#1a1206;border-color:#c8a97e}' +
-      '.ubqc-ok:hover{filter:brightness(1.08)}' +
-      '.ubqc-no{background:transparent;color:#cfc7b8;border-color:rgba(200,169,126,.3)}' +
-      '.ubqc-no:hover{background:rgba(200,169,126,.1)}' +
-      '@media(max-width:560px){.ubqc{flex-direction:column;align-items:stretch}.ubqc-btns{justify-content:flex-end}}';
+      '.ubqc{position:fixed;left:1rem;right:1rem;bottom:1.5rem;z-index:2147483600;max-width:760px;margin:0 auto;' +
+      'background:var(--bg-elev,#181a20);color:var(--text,#f0ece4);' +
+      'border:1px solid var(--accent-border,rgba(200,169,126,.22));border-radius:var(--radius,3px);' +
+      'padding:1.1rem 1.4rem;box-shadow:0 20px 40px -10px rgba(0,0,0,.5),0 0 0 1px var(--accent-xlo,rgba(200,169,126,.06));' +
+      'font-family:var(--sans,"Outfit",system-ui,sans-serif);font-weight:300;' +
+      'display:flex;gap:1.4rem;align-items:center;flex-wrap:wrap;animation:ubqc-in .35s ' + E + '}' +
+      '@keyframes ubqc-in{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}' +
+      '.ubqc.ubqc-out{opacity:0;transform:translateY(20px);transition:opacity .3s ' + E + ',transform .35s ' + E + '}' +
+      '.ubqc-txt{flex:1;min-width:240px}' +
+      '.ubqc-k{display:block;margin-bottom:.4rem;font-size:var(--fs-chrome,.62rem);letter-spacing:.28em;' +
+      'text-transform:uppercase;color:var(--accent,#c8a97e)}' +
+      '.ubqc-p{font-size:.82rem;line-height:1.7;letter-spacing:.02em;color:var(--text-dim,rgba(240,236,228,.5))}' +
+      '.ubqc-p a{color:var(--accent,#c8a97e);text-decoration:none;border-bottom:1px solid var(--accent-border,rgba(200,169,126,.22));' +
+      'transition:border-color .35s ' + E + '}' +
+      '.ubqc-p a:hover{border-color:var(--accent,#c8a97e)}' +
+      '.ubqc-btns{display:flex;gap:.6rem;flex-wrap:wrap}' +
+      '.ubqc-btn{display:inline-flex;align-items:center;cursor:pointer;white-space:nowrap;' +
+      'padding:.48rem 1rem;border-radius:var(--radius,3px);border:1px solid transparent;background:transparent;' +
+      'font-family:var(--sans,"Outfit",system-ui,sans-serif);font-weight:300;font-size:.65rem;letter-spacing:.16em;' +
+      'text-transform:uppercase;transition:all .35s ' + E + '}' +
+      '.ubqc-btn:focus-visible{outline:1px solid var(--accent,#c8a97e);outline-offset:3px}' +
+      '.ubqc-ok{background:var(--accent,#c8a97e);color:var(--bg,#0b0c0f);border-color:var(--accent,#c8a97e)}' +
+      '.ubqc-ok:hover{background:transparent;color:var(--accent,#c8a97e)}' +
+      '.ubqc-no{color:var(--accent,#c8a97e);border-color:var(--accent-border,rgba(200,169,126,.22))}' +
+      '.ubqc-no:hover{background:var(--accent-lo,rgba(200,169,126,.12));border-color:var(--accent,#c8a97e)}' +
+      '@media(max-width:560px){.ubqc{flex-direction:column;align-items:stretch;gap:1rem}.ubqc-btns{justify-content:flex-end}}';
     document.head.appendChild(styleEl);
   }
 
@@ -84,9 +95,9 @@
     el.setAttribute('role', 'dialog');
     el.setAttribute('aria-label', 'Consentimento de cookies');
     el.innerHTML =
-      '<div class="ubqc-txt"><strong>Sua privacidade.</strong> Usamos cookies para a plataforma funcionar e, ' +
+      '<div class="ubqc-txt"><span class="ubqc-k">Sua privacidade</span><p class="ubqc-p">Usamos cookies para a plataforma funcionar e, ' +
       'com a sua permissão, para medir e melhorar nossos anúncios (Meta/Facebook). ' +
-      'Você escolhe. <a href="https://www.grupoubique.com.br" target="_blank" rel="noopener">Política de privacidade</a>.</div>' +
+      'Você escolhe. <a href="https://www.grupoubique.com.br" target="_blank" rel="noopener">Política de privacidade</a></p></div>' +
       '<div class="ubqc-btns">' +
       '<button type="button" class="ubqc-btn ubqc-no" data-ubqc="no">Só essenciais</button>' +
       '<button type="button" class="ubqc-btn ubqc-ok" data-ubqc="ok">Aceitar</button></div>';
