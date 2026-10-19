@@ -45467,27 +45467,53 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // ── ABA 2: Foram pra venda (cliques de compra) ──
   function renderOfVenda(){
     const q = (document.getElementById('of-venda-search') ? document.getElementById('of-venda-search').value : '').toLowerCase();
-    const buys = ofEvents().filter(e => e.event_type === 'buy_click').sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-    const rows = buys.map(e => { const cli = _ofClient(e.client_id);
-      return { when: e.created_at, nome: cli ? (cli.full_name || '—') : 'visitante anônimo', anon: !cli,
-        contato: cli ? (cli.phone || cli.email || '') : (e.visitor_id || ''),
-        materia: e.materia || '—', device: e.device === 'mobile' ? 'Celular' : 'Computador', canal: _canalLabel(e.channel) };
-    });
-    const vis = rows.filter(r => !q || (r.nome + r.materia + r.canal + r.contato).toLowerCase().indexOf(q) >= 0);
+    const buys = ofEvents().filter(e => e.event_type === 'buy_click');
+    // Agrega por PESSOA (dedupe dos cliques repetidos): quantas vezes tentou,
+    // quais matérias, de onde, e se virou lead/cliente.
+    const byVis = {};
+    buys.forEach(e => { const v = e.visitor_id || (e.client_id ? 'cli:' + e.client_id : 'anon'); (byVis[v] = byVis[v] || []).push(e); });
+    const rows = Object.keys(byVis).map(vid => {
+      const evs = byVis[vid].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      const cid = (evs.find(e => e.client_id) || {}).client_id;
+      const c = cid ? _ofClient(cid) : null;
+      const materias = [...new Set(evs.map(e => e.materia).filter(Boolean))];
+      const origemApp = evs.some(e => e.meta && e.meta.origem === 'portal');
+      const comprou = !!(c && (c.first_purchase_at || c.status === 'customer'));
+      const canalRaw = (evs.find(e => e.channel && e.channel !== 'app') || {}).channel;
+      return {
+        vid, c, anon: !c,
+        nome: c ? (c.full_name || '—') : 'visitante sem conta',
+        phone: c ? (c.phone || '') : '', contato: c ? (c.phone || c.email || '') : String(vid).slice(0, 12),
+        materias, materiasTxt: materias.join(', ') || '—',
+        cliques: evs.length, when: evs[0].created_at,
+        origem: origemApp ? 'App' : 'Página/landing',
+        comprou, ltv: c ? clientLTV(c.id) : 0,
+        virou: comprou ? 'comprou' : (c ? (c.status === 'lead' ? 'virou lead' : 'cadastrado') : 'anônimo'),
+        canal: _canalLabel(canalRaw || (c && c.source))
+      };
+    }).sort((a, b) => new Date(b.when) - new Date(a.when));
+    const vis = rows.filter(r => !q || (r.nome + r.materiasTxt + r.canal + r.contato).toLowerCase().indexOf(q) >= 0);
     const cEl = document.getElementById('of-count-venda'); if(cEl) cEl.textContent = buys.length;
-    const c2 = document.getElementById('of-venda-count2'); if(c2) c2.textContent = buys.length + ' cliques · ' + new Set(buys.map(b => b.visitor_id)).size + ' pessoas';
+    const compraram = rows.filter(r => r.comprou).length;
+    const c2 = document.getElementById('of-venda-count2'); if(c2) c2.textContent = buys.length + ' cliques · ' + rows.length + ' pessoas · ' + compraram + ' compraram';
     const box = document.getElementById('of-venda-table');
     if(!box) return;
+    const vcor = { 'comprou': '#7ea875', 'virou lead': 'var(--accent)', 'cadastrado': 'var(--text-dim)', 'anônimo': 'var(--text-mute)' };
     box.innerHTML = vis.length === 0 ? '<div class="dash-empty-state" style="padding:1.2rem">Nenhum clique de compra ' + (q ? 'encontrado.' : 'ainda.') + '</div>'
       : '<table style="width:100%;border-collapse:collapse;font-size:.85rem">' +
-        '<thead><tr style="color:var(--text-mute);font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase"><th style="text-align:left;padding:.5rem .5rem">Quando</th><th style="text-align:left;padding:.5rem .5rem">Quem</th><th style="text-align:left;padding:.5rem .5rem">Contato</th><th style="text-align:left;padding:.5rem .5rem">Matéria</th><th style="text-align:left;padding:.5rem .5rem">Dispositivo</th><th style="text-align:left;padding:.5rem .5rem">Canal</th></tr></thead><tbody>' +
-        vis.map(r => '<tr style="border-top:1px solid var(--border-soft)">' +
+        '<thead><tr style="color:var(--text-mute);font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase"><th style="text-align:left;padding:.5rem .5rem">Última tentativa</th><th style="text-align:left;padding:.5rem .5rem">Quem</th><th style="text-align:left;padding:.5rem .5rem">Contato</th><th style="text-align:left;padding:.5rem .5rem">Matéria(s)</th><th style="text-align:right;padding:.5rem .5rem" title="Quantas vezes clicou em comprar">Cliques</th><th style="text-align:left;padding:.5rem .5rem">Origem</th><th style="text-align:center;padding:.5rem .5rem">Virou?</th><th style="text-align:left;padding:.5rem .5rem">Canal</th></tr></thead><tbody>' +
+        vis.map(r => '<tr class="' + (r.cliques > 1 && !r.comprou ? 'of-lead-abandon' : '') + '" style="border-top:1px solid var(--border-soft)">' +
           '<td style="padding:.65rem .5rem;color:var(--text-mute);font-family:var(--mono);font-size:.78rem">' + _ofFmtDt(r.when) + '</td>' +
           '<td style="padding:.65rem .5rem;color:' + (r.anon ? 'var(--text-mute)' : 'var(--text)') + ';font-style:' + (r.anon ? 'italic' : 'normal') + '">' + esc(r.nome) + '</td>' +
-          '<td style="padding:.65rem .5rem;font-family:var(--mono);font-size:.78rem;color:' + (r.anon ? 'var(--text-mute)' : 'var(--accent)') + '">' + esc(r.contato) + '</td>' +
-          '<td style="padding:.65rem .5rem">' + esc(r.materia) + '</td>' +
-          '<td style="padding:.65rem .5rem">' + r.device + '</td>' +
+          '<td style="padding:.65rem .5rem">' + (r.phone
+              ? '<span style="font-family:var(--mono);font-size:.76rem;color:var(--accent)">' + esc(r.phone) + '</span> <button class="wa-btn" data-wa="' + esc(r.phone) + '" data-nome="' + esc((r.nome || '').split(' ')[0]) + '">WhatsApp</button>'
+              : '<span style="font-family:var(--mono);font-size:.76rem;color:var(--text-mute)">' + esc(r.contato) + '</span>') + '</td>' +
+          '<td style="padding:.65rem .5rem">' + esc(r.materiasTxt) + '</td>' +
+          '<td style="padding:.65rem .5rem;text-align:right;font-family:var(--mono);color:' + (r.cliques > 1 ? 'var(--accent)' : 'var(--text)') + '">' + r.cliques + '</td>' +
+          '<td style="padding:.65rem .5rem;font-size:.78rem;color:var(--text-dim)">' + r.origem + '</td>' +
+          '<td style="padding:.65rem .5rem;text-align:center;font-size:.7rem;color:' + (vcor[r.virou] || 'var(--text-mute)') + '">' + (r.comprou ? '✓ ' : '') + r.virou + (r.ltv > 0 ? ' · ' + fmtBRL(r.ltv) : '') + '</td>' +
           '<td style="padding:.65rem .5rem">' + esc(r.canal) + '</td></tr>').join('') + '</tbody></table>';
+    box.querySelectorAll('[data-wa]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); _waOpen(b.getAttribute('data-wa'), b.getAttribute('data-nome')); }));
   }
 
   // ── ABA 3: Leads capturados (com linha do tempo) ──
