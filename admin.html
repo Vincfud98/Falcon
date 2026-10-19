@@ -38811,6 +38811,106 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const ids = new Set(clientTagLinksCache.filter(l => l.tag_id === tagId).map(l => l.client_id));
     return clientsCache.filter(c => ids.has(c.id));
   }
+
+  // ── Tags comportamentais POR VISITANTE (anônimo incluso) ────────────────
+  // A tag comp-* gruda em client_id no banco, mas quase toda atividade é
+  // anônima. Aqui agregamos TODO evento por visitor_id (com ou sem conta) e
+  // reproduzimos as mesmas condições da função SQL — para a tag mostrar
+  // também quem não tem conta. (Pedido: "não tem problema se for anônima,
+  // precisa aparecer na tag".)
+  const COMP_COND = {
+    'comp-lead-quente':        r => r.score >= 15,
+    'comp-visitou-venda':      r => r.types.has('buy_click'),
+    'comp-abandonou-carrinho': r => r.types.has('buy_click') && !r.isCustomer,
+    'comp-criou-conta':        r => r.types.has('vis_conta_criada'),
+    'comp-respondeu-questoes': r => r.types.has('vis_corrigiu') || r.types.has('vis_questao'),
+    'comp-bateu-bloqueio':     r => r.types.has('vis_cota') || r.types.has('vis_trancada') || r.types.has('vis_convite') || r.types.has('paywall'),
+    'comp-explorou-portal':    r => r.types.has('vis_inicio') || r.types.has('vis_pagina') || r.types.has('pageview') || r.types.has('fasciculo'),
+  };
+  function _isCompTag(t){ return /^comp[-_]/i.test((t && t.slug) || ''); }
+  function _compVisitorRows(){
+    const byVis = {};
+    webEventsCache.forEach(e => { const v = e.visitor_id || (e.client_id ? 'cli:' + e.client_id : null); if(!v) return; (byVis[v] = byVis[v] || []).push(e); });
+    const clientsById = Object.fromEntries((clientsCache || []).map(c => [c.id, c]));
+    const CONV = new Set(['customer', 'former_customer']);
+    const now = Date.now();
+    return Object.keys(byVis).map(vid => {
+      const evs = byVis[vid];
+      const types = new Set(evs.map(e => e.event_type));
+      const cid = (evs.find(e => e.client_id) || {}).client_id || null;
+      const cli = cid ? clientsById[cid] : null;
+      const isCustomer = !!(cli && (CONV.has(cli.status) || cli.first_purchase_at));
+      let score = 0, last = 0;
+      evs.forEach(e => {
+        if(e.event_type === 'pageview') score += 1;
+        else if(e.event_type === 'buy_click') score += 20;
+        else if(e.event_type === 'fasciculo' || e.event_type === 'lead') score += 5;
+        const t = new Date(e.created_at).getTime(); if(t > last) last = t;
+      });
+      if(now - last < 7 * 864e5) score += 5;
+      return { vid, types, cid, cli, isCustomer, score, last, evs };
+    });
+  }
+  // Estatística por slug comp-* (conta visitantes, anônimo incluso).
+  function _compStatsBySlug(list, compRows){
+    const out = {};
+    for(const t of list){
+      if(!_isCompTag(t)) continue;
+      const cond = COMP_COND[t.slug]; if(!cond) continue;
+      const rows = compRows.filter(cond);
+      const conv = rows.filter(r => r.isCustomer).length;
+      const ltv  = rows.reduce((s, r) => s + (r.cid ? clientLTV(r.cid) : 0), 0);
+      out[t.slug] = {
+        count: rows.length,
+        anonN: rows.filter(r => !r.cid).length,
+        conv, pct: rows.length ? Math.round(conv / rows.length * 100) : 0,
+        ltv, rows
+      };
+    }
+    return out;
+  }
+  // Dropdown do "Ver clientes" para tag comp-*: com conta + anônimos.
+  function _compDrawerHtml(rows){
+    if(!rows || !rows.length) return '<div class="ctag-drawer-empty">Ninguém com esse comportamento ainda.</div>';
+    const comConta = rows.filter(r => r.cli);
+    const anon = rows.filter(r => !r.cli);
+    const head = `<div class="ctag-drawer-head">${rows.length} pessoa${rows.length === 1 ? '' : 's'} · ${comConta.length} com conta · ${anon.length} anônima${anon.length === 1 ? '' : 's'}</div>`;
+    const tempDe = sc => sc >= 15 ? 'quente' : sc >= 5 ? 'morno' : 'frio';
+    const corDe = t => t === 'quente' ? '#e08a5a' : t === 'morno' ? '#c8a97e' : 'var(--text-mute)';
+    const rowC = r => {
+      const c = r.cli, sc = clientScore(c.id), ltv = clientLTV(c.id), cor = corDe(sc.temp);
+      const contato = c.phone || c.email || '—', pn = (c.full_name || '').split(' ')[0];
+      const wa = c.phone ? `<button class="wa-btn" data-wa="${esc(c.phone)}" data-nome="${esc(pn)}" title="Abrir WhatsApp com mensagem pronta">WhatsApp</button>` : '';
+      return `<div class="ctag-drawer-row" data-open-client="${esc(c.id)}">
+          <span class="ctag-drawer-name">${esc(c.full_name || '—')}</span>
+          <span class="ctag-drawer-temp" style="color:${cor}">${sc.temp}</span>
+          <span class="ctag-drawer-contact">${esc(contato)}</span>
+          <span class="ctag-drawer-ltv">${ltv > 0 ? fmtBRL(ltv) : ''}${wa}</span>
+        </div>`;
+    };
+    const rowA = r => {
+      const t = tempDe(r.score), cor = corDe(t);
+      return `<div class="ctag-drawer-row" data-of-lead="${esc(r.vid)}" style="cursor:pointer" title="Abrir no funil de leads">
+          <span class="ctag-drawer-name anon" style="color:var(--text-mute);font-style:italic">visitante sem conta</span>
+          <span class="ctag-drawer-temp" style="color:${cor}">${t}</span>
+          <span class="ctag-drawer-contact">${esc(String(r.vid).slice(0, 10))}…</span>
+          <span class="ctag-drawer-ltv">${r.evs.length} ações</span>
+        </div>`;
+    };
+    const body = comConta.slice(0, 40).map(rowC).join('') + anon.slice(0, 40).map(rowA).join('');
+    const shown = Math.min(comConta.length, 40) + Math.min(anon.length, 40);
+    const mais = rows.length > shown ? `<div class="ctag-drawer-more">+${rows.length - shown} outros — "Público Meta" exporta os que têm contato</div>` : '';
+    return head + body + mais;
+  }
+  // Pula para o funil de Leads filtrando por este visitante.
+  function _irParaLead(vid){
+    try {
+      const grp = document.querySelector('[data-group="atribuicao"]'); if(grp) grp.click();
+      const tab = document.querySelector('#group-atribuicao .tab[data-tab="of-leads"]'); if(tab) tab.click();
+      const s = document.getElementById('of-leads-search'); if(s) s.value = String(vid).slice(0, 10);
+      if(typeof renderOfLeads === 'function') renderOfLeads();
+    } catch(_){}
+  }
   function _metaCsv(clients, filename){
     if(!clients || clients.length === 0){ showMsg('globalMessage4', 'Nenhum cliente nesse segmento.'); return; }
     const rows = [['email', 'phone', 'fn', 'country']].concat(clients.map(c => [(c.email || '').toLowerCase().trim(), (c.phone || '').replace(/\D/g, ''), (c.full_name || '').toLowerCase().trim(), 'BR']));
@@ -38846,11 +38946,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return head + rows + mais;
   }
   // Abre/fecha o drawer de um card; preenche sob demanda na 1ª abertura.
-  function _toggleClientsDrawer(card, getClients){
+  function _toggleClientsDrawer(card, getClients, htmlFn){
     if(!card) return;
     const dr = card.querySelector('.ctag-drawer'); if(!dr) return;
     const abrir = dr.hidden;
-    if(abrir && !dr.dataset.filled){ dr.innerHTML = _clientsDrawerHtml(getClients() || []); dr.dataset.filled = '1'; }
+    if(abrir && !dr.dataset.filled){ dr.innerHTML = (htmlFn || _clientsDrawerHtml)(getClients() || []); dr.dataset.filled = '1'; }
     dr.hidden = !abrir;
     const bt = card.querySelector('[data-tag-ver],[data-seg-ver]'); if(bt) bt.textContent = abrir ? 'Ocultar clientes' : 'Ver clientes';
   }
@@ -46461,15 +46561,25 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // na lista abaixo com conversão, LTV, Ver clientes e público Meta como qualquer tag.
     const segHtml = `
       <div class="sub-h" style="margin:.4rem 0 .6rem"><span class="sub-h-text">Tags comportamentais (automáticas)</span><span class="sub-h-rule"></span><button class="btn btn-ghost btn-sm" id="recalcCompTags">↻ Recalcular agora</button></div>
-      <p class="sec-note" style="margin:0 0 1.2rem;font-size:.8rem;color:var(--text-mute)">Toda atividade rastreada vira tag (slug <code>comp-*</code>), aplicada sozinha a cada ~10 min: <strong>Lead quente</strong>, <strong>Visitou página de venda</strong>, <strong>Abandonou carrinho</strong>, <strong>Criou conta</strong>, <strong>Respondeu questões</strong>, <strong>Bateu em bloqueio</strong> e <strong>Explorou o portal</strong>. Aparecem na lista abaixo como qualquer tag — com conversão, LTV, Ver clientes e público Meta. A tag só gruda em quem tem conta/cliente ligado ao visitante.</p>`;
+      <p class="sec-note" style="margin:0 0 1.2rem;font-size:.8rem;color:var(--text-mute)">Toda atividade rastreada vira tag (slug <code>comp-*</code>), aplicada sozinha a cada ~10 min: <strong>Lead quente</strong>, <strong>Visitou página de venda</strong>, <strong>Abandonou carrinho</strong>, <strong>Criou conta</strong>, <strong>Respondeu questões</strong>, <strong>Bateu em bloqueio</strong> e <strong>Explorou o portal</strong>. A contagem conta <strong>todo mundo que fez a ação — inclusive anônimo sem conta</strong>; o card mostra quantos têm conta e quantos são anônimos. "Ver clientes" lista os dois (anônimo abre no funil de leads); "Público Meta" exporta só quem tem contato.</p>`;
+
+    // Estatística por visitante das tags comportamentais (anônimo incluso).
+    const compRows = list.some(_isCompTag) ? _compVisitorRows() : [];
+    const compBySlug = _compStatsBySlug(list, compRows);
 
     box.innerHTML = insight + segHtml + `<div class="ctag-list">${list.map(t => {
       const brand = t.brand_id ? brandsMap[t.brand_id] : null;
-      const st = statsByTag[t.id] || { total: new Set(), conv: new Set() };
-      const count = st.total.size;
-      const conv = st.conv.size;
-      const pct = count > 0 ? Math.round((conv / count) * 100) : 0;
-      const ltvTotal = [...st.total].reduce((s, id) => s + clientLTV(id), 0);
+      const isComp = _isCompTag(t);
+      const cs = isComp ? compBySlug[t.slug] : null;
+      let count, conv, pct, ltvTotal;
+      if(cs){ count = cs.count; conv = cs.conv; pct = cs.pct; ltvTotal = cs.ltv; }
+      else {
+        const st = statsByTag[t.id] || { total: new Set(), conv: new Set() };
+        count = st.total.size; conv = st.conv.size;
+        pct = count > 0 ? Math.round((conv / count) * 100) : 0;
+        ltvTotal = [...st.total].reduce((s, id) => s + clientLTV(id), 0);
+      }
+      const unit = isComp ? (count === 1 ? 'pessoa' : 'pessoas') : (count === 1 ? 'cliente' : 'clientes');
       const color = t.color || '#c8a97e';
       const convColor = count === 0 ? 'var(--text-mute)'
         : pct >= 25 ? '#7ea875'
@@ -46477,6 +46587,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         : 'var(--red)';
       const convTxt = count === 0 ? ''
         : `${conv} ${conv === 1 ? 'virou aluno' : 'viraram aluno'} · ${pct}%`;
+      const breakdown = (cs && cs.count > 0)
+        ? `<div style="margin-top:.35rem;font-size:.72rem;font-family:var(--mono);color:var(--text-mute)">${cs.count - cs.anonN} com conta · ${cs.anonN} anônim${cs.anonN === 1 ? 'o' : 'os'}</div>`
+        : '';
       return `
         <div class="ctag-card" data-id="${t.id}" style="border-left-color:${esc(color)}">
           <div class="ctag-card-head">
@@ -46487,9 +46600,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
           <div class="ctag-card-footer">
             <span class="ctag-card-slug">${esc(t.slug || '')}</span>
             <span class="ctag-card-usage ${count > 0 ? 'active' : 'unused'}">
-              ${count > 0 ? `${count} ${count === 1 ? 'cliente' : 'clientes'}` : 'não usada'}
+              ${count > 0 ? `${count} ${unit}` : 'não usada'}
             </span>
           </div>
+          ${breakdown}
           ${convTxt ? `<div style="margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border-soft);font-size:.72rem;font-family:var(--mono);letter-spacing:.03em;color:${convColor}">↳ ${convTxt}</div>` : ''}
           ${ltvTotal > 0 ? `<div style="margin-top:.25rem;font-size:.72rem;font-family:var(--mono);color:var(--text-mute)">LTV total ${fmtBRL(ltvTotal)}</div>` : ''}
           ${count > 0 ? `<div style="margin-top:.6rem;display:flex;gap:.4rem;flex-wrap:wrap">
@@ -46517,13 +46631,30 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }
     });
     // Ações das tags
-    box.querySelectorAll('[data-tag-ver]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); const id = parseInt(b.dataset.tagVer); _toggleClientsDrawer(b.closest('.ctag-card'), () => _clientsOfTag(id)); }));
-    box.querySelectorAll('[data-tag-meta]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); _metaCsv(_clientsOfTag(parseInt(b.dataset.tagMeta)), 'publico-tag.csv'); }));
+    box.querySelectorAll('[data-tag-ver]').forEach(b => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = parseInt(b.dataset.tagVer);
+      const t = clientTagsCache.find(x => x.id === id);
+      const card = b.closest('.ctag-card');
+      if(t && _isCompTag(t) && compBySlug[t.slug]) _toggleClientsDrawer(card, () => compBySlug[t.slug].rows, _compDrawerHtml);
+      else _toggleClientsDrawer(card, () => _clientsOfTag(id));
+    }));
+    box.querySelectorAll('[data-tag-meta]').forEach(b => b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = parseInt(b.dataset.tagMeta);
+      const t = clientTagsCache.find(x => x.id === id);
+      const clients = (t && _isCompTag(t) && compBySlug[t.slug])
+        ? compBySlug[t.slug].rows.filter(r => r.cli).map(r => r.cli)
+        : _clientsOfTag(id);
+      _metaCsv(clients, 'publico-tag.csv');
+    }));
     // Clique dentro do drawer não abre a edição da tag; numa linha, abre o cliente.
     box.querySelectorAll('.ctag-drawer').forEach(dr => dr.addEventListener('click', (e) => {
       e.stopPropagation();
       const wa = e.target.closest('[data-wa]');
       if(wa){ _waOpen(wa.getAttribute('data-wa'), wa.getAttribute('data-nome')); return; }
+      const lead = e.target.closest('[data-of-lead]');
+      if(lead){ _irParaLead(lead.getAttribute('data-of-lead')); return; }
       const row = e.target.closest('[data-open-client]');
       if(row && typeof openClientModal === 'function') openClientModal(row.getAttribute('data-open-client'));
     }));

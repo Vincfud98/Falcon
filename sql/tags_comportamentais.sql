@@ -120,7 +120,7 @@ begin
              max(created_at)                                                   as last_at,
              bool_or(event_type = 'buy_click')                                 as teve_buy,
              bool_or(event_type = 'vis_conta_criada')                          as criou_conta,
-             bool_or(event_type in ('vis_corrigiu'))                           as respondeu,
+             bool_or(event_type in ('vis_corrigiu','vis_questao'))             as respondeu,
              bool_or(event_type in ('vis_cota','vis_trancada','vis_convite','paywall')) as bloqueio,
              bool_or(event_type in ('vis_inicio','vis_pagina','pageview','fasciculo')) as explorou
       from crm.web_events
