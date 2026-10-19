@@ -1,7 +1,9 @@
 # Pagamentos — Edge Functions (Supabase)
 
-Integração de checkout do portal. **Fase 1 = Mercado Pago** (Pix em destaque +
-cartão em até 12×). Fase 2 (Stripe, assinatura) virá depois.
+Gateway **único: Mercado Pago** (Pix em destaque + cartão em até 12×). Decisão
+2026-10-19: usar só o Mercado Pago. O Stripe (assinatura) está **parado** —
+os arquivos `stripe-*` + `sql/assinatura_stripe.sql` ficam no repo mas NÃO são
+deployados/usados por enquanto.
 
 Como funciona:
 
@@ -33,8 +35,22 @@ Carrinho → vendas.criar_pedido (já existe)
 ```bash
 supabase secrets set MP_ACCESS_TOKEN="SEU_ACCESS_TOKEN_DE_TESTE"
 supabase secrets set APP_URL="https://www.grupoubique.com.br"
+# recomendado — valida a assinatura do webhook (pegue no painel do MP ao criar o webhook):
+supabase secrets set MP_WEBHOOK_SECRET="A_CHAVE_SECRETA_DO_WEBHOOK_DO_MP"
 ```
 (`SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` já são injetados pelo Supabase.)
+Se `MP_WEBHOOK_SECRET` não estiver setado, o webhook funciona mas **sem**
+validar a assinatura — configure antes de ir pra produção.
+
+### Estorno e cancelamento (engenharia reversa)
+O `mp-webhook` trata o ciclo todo, não só a aprovação:
+- **aprovado** → grava `paid` → o trigger do banco **libera o acesso**.
+- **estornado / chargeback** (`refunded`/`charged_back`, ou reembolso total) →
+  grava `refunded` + `refunded_at`/`refund_amount`/`refund_reason`, **igual ao
+  botão "estornar" do admin** → o mesmo trigger **reverte o acesso** (matrícula).
+- **cancelado / rejeitado** → grava `failed` (nunca houve acesso).
+Tudo idempotente por `gateway_payment_id` (reprocessar a mesma notificação não
+duplica nem desfaz nada errado).
 
 **3) Deploy das functions:**
 ```bash
