@@ -45345,6 +45345,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   let webEventsCache = [];
   let webEventsLoaded = false;
   let ofState = { period: 'all' };
+  let ofLeadsSeg = 'all';   // filtro da aba Leads: all|quentes|questao|carrinho|lead|cliente
   let ofBound = false;
 
   async function loadWebEvents(){
@@ -45535,47 +45536,83 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       const fasc = evs.some(e => e.event_type === 'fasciculo' || e.event_type === 'lead');
       const comprou = !!(c && (c.first_purchase_at || c.status === 'customer'));
       const canalRaw = (evs.find(e => e.channel && e.channel !== 'app') || {}).channel || (c && c.source);
+      const visitas = sessions.size || 1;
+      const engajou = questoes > 0 || carrinho > 0 || visitas >= 2 || fasc;
+      const estagio = comprou ? 'cliente'
+        : ((c && (c.status === 'lead' || c.status === 'customer')) || fasc ? 'lead'
+        : (engajou ? 'engajou' : 'anonimo'));
+      const score = questoes * 3 + carrinho * 5 + visitas + (fasc ? 4 : 0) + (comprou ? 20 : 0) + (sc.temp === 'quente' ? 10 : (sc.temp === 'morno' ? 4 : 0));
       return {
         vid, c,
         nome: c ? (c.full_name || '—') : 'visitante sem conta',
         phone: c ? (c.phone || '') : '', email: c ? (c.email || '') : '',
         canal: _canalLabel(canalRaw), status: c ? (c.status || '') : '',
         temp: c ? sc.temp : '', ltv: c ? clientLTV(c.id) : 0,
-        visitas: sessions.size || 1, acessos, questoes, carrinho, fasc, comprou,
+        visitas, acessos, questoes, carrinho, fasc, comprou,
         naoComprou: carrinho > 0 && !comprou,
+        engajou, estagio, score,
         data: evs[evs.length - 1].created_at, evs
       };
-    }).sort((a, b) => new Date(b.data) - new Date(a.data));
-    const vis = rows.filter(r => !q || (r.nome + r.email + r.phone + r.canal + r.vid).toLowerCase().indexOf(q) >= 0);
-    const anon = rows.filter(r => !r.c).length;
-    const cEl = document.getElementById('of-count-leads'); if(cEl) cEl.textContent = rows.length;
-    const c2 = document.getElementById('of-leads-count2'); if(c2) c2.textContent = rows.length + ' pessoas · ' + anon + ' sem conta';
+    });
+    // Funil (jornada) + contagem por segmento
+    const hotN = rows.filter(r => r.engajou).length;
+    const qN = rows.filter(r => r.questoes > 0).length;
+    const cartN = rows.filter(r => r.naoComprou).length;
+    const leadN = rows.filter(r => r.estagio === 'lead' || r.estagio === 'cliente').length;
+    const cliN = rows.filter(r => r.estagio === 'cliente').length;
+    const total = rows.length;
+    const segMatch = r => ofLeadsSeg === 'all' ? true
+      : ofLeadsSeg === 'quentes' ? r.engajou
+      : ofLeadsSeg === 'questao' ? r.questoes > 0
+      : ofLeadsSeg === 'carrinho' ? r.naoComprou
+      : ofLeadsSeg === 'lead' ? (r.estagio === 'lead' || r.estagio === 'cliente')
+      : ofLeadsSeg === 'cliente' ? r.estagio === 'cliente' : true;
+    const vis = rows.filter(r => segMatch(r) && (!q || (r.nome + r.email + r.phone + r.canal + r.vid).toLowerCase().indexOf(q) >= 0))
+      .sort((a, b) => (b.score - a.score) || (new Date(b.data) - new Date(a.data)));
+    const cEl = document.getElementById('of-count-leads'); if(cEl) cEl.textContent = total;
+    const c2 = document.getElementById('of-leads-count2'); if(c2) c2.textContent = total + ' pessoas · ' + hotN + ' quentes';
     const box = document.getElementById('of-leads-table');
     if(!box) return;
-    if(vis.length === 0){ box.innerHTML = '<div class="dash-empty-state" style="padding:1.2rem">Nenhuma atividade ' + (q ? 'encontrada.' : 'ainda.') + '</div>'; return; }
-    const evLabel = { pageview: 'Acessou a página', buy_click: 'Clicou em comprar', fasciculo: 'Solicitou o fascículo', lead: 'Preencheu o formulário', vis_questao: 'Respondeu questão (sem conta)', vis_convite: 'Viu o convite de conta', paywall: 'Bateu no muro', marco: 'Marco de engajamento' };
-    const num = (n, cor) => '<td style="padding:.65rem .5rem;text-align:right;font-family:var(--mono);color:' + (cor || 'var(--text)') + '">' + n + '</td>';
-    box.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:.85rem">' +
-      '<thead><tr style="color:var(--text-mute);font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase"><th style="width:28px"></th><th style="text-align:left;padding:.5rem .5rem">Última ativ.</th><th style="text-align:left;padding:.5rem .5rem">Quem</th><th style="text-align:left;padding:.5rem .5rem">Contato</th><th style="text-align:left;padding:.5rem .5rem">Canal</th><th style="text-align:right;padding:.5rem .5rem" title="Quantas vezes entrou (sessões)">Visitas</th><th style="text-align:right;padding:.5rem .5rem" title="Questões respondidas sem conta">Questões</th><th style="text-align:right;padding:.5rem .5rem" title="Cliques em comprar">Carrinho</th><th style="text-align:center;padding:.5rem .5rem">Comprou?</th><th style="text-align:center;padding:.5rem .5rem">Temp.</th><th style="text-align:right;padding:.5rem .5rem">LTV</th></tr></thead><tbody>' +
-      vis.map((r, i) => {
+    const pct = n => total ? Math.round(n / total * 100) : 0;
+    // ── Funil (jornada anônimo → lead → cliente) ──
+    const stage = (lbl, n, cor, sub) => '<div style="flex:1;min-width:110px;padding:.7rem .9rem;border:1px solid var(--border);border-left:3px solid ' + cor + ';border-radius:6px;background:var(--bg-card)"><div style="font-family:var(--mono);font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-mute)">' + lbl + '</div><div style="font-family:var(--serif);font-size:1.45rem;color:var(--text);line-height:1.2">' + n + '</div><div style="font-family:var(--mono);font-size:.6rem;color:var(--text-mute)">' + sub + '</div></div>';
+    const funnel = '<div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:1rem">'
+      + stage('Entraram', total, 'var(--text-mute)', 'pessoas')
+      + stage('Engajaram', hotN, '#6b8cae', pct(hotN) + '% · questão/carrinho/voltou')
+      + stage('Viraram lead', leadN, 'var(--accent)', pct(leadN) + '%')
+      + stage('Compraram', cliN, '#7ea875', pct(cliN) + '%') + '</div>';
+    // ── Chips de segmento/filtro ──
+    const segs = [['all', 'Todos', total], ['quentes', '🔥 Quentes', hotN], ['questao', 'Responderam questão', qN], ['carrinho', 'Carrinho s/ compra', cartN], ['lead', 'Viraram lead', leadN], ['cliente', 'Compraram', cliN]];
+    const chips = '<div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.9rem">' + segs.map(s => { const on = ofLeadsSeg === s[0]; return '<button data-seg="' + s[0] + '" style="cursor:pointer;padding:.35rem .8rem;border-radius:16px;font-size:.74rem;font-family:var(--sans);border:1px solid ' + (on ? 'var(--accent)' : 'var(--border)') + ';background:' + (on ? 'rgba(200,169,126,.12)' : 'transparent') + ';color:' + (on ? 'var(--accent)' : 'var(--text-dim)') + '">' + s[1] + ' <b style="font-family:var(--mono)">' + s[2] + '</b></button>'; }).join('') + '</div>';
+    const evLabel = { pageview: 'Acessou a página', buy_click: 'Clicou em comprar', fasciculo: 'Solicitou o fascículo', lead: 'Preencheu o formulário', vis_entrou: 'Entrou (sem conta)', vis_questao: 'Respondeu questão (sem conta)', vis_convite: 'Viu o convite de conta', paywall: 'Bateu no muro', marco: 'Marco de engajamento' };
+    const estCor = { anonimo: 'var(--text-mute)', engajou: '#6b8cae', lead: 'var(--accent)', cliente: '#7ea875' };
+    const estLbl = { anonimo: 'anônimo', engajou: 'engajou', lead: 'lead', cliente: 'cliente' };
+    const badge = (txt, cor) => '<span style="font-family:var(--mono);font-size:.62rem;color:' + cor + ';border:1px solid ' + cor + ';border-radius:8px;padding:.04rem .4rem;margin:0 .25rem .2rem 0;display:inline-block">' + txt + '</span>';
+    const tableHtml = vis.length === 0 ? '<div class="dash-empty-state" style="padding:1.2rem">Ninguém neste filtro' + (q ? ' com essa busca' : '') + '.</div>'
+      : '<table style="width:100%;border-collapse:collapse;font-size:.85rem"><thead><tr style="color:var(--text-mute);font-family:var(--mono);font-size:.62rem;letter-spacing:.1em;text-transform:uppercase"><th style="width:28px"></th><th style="text-align:left;padding:.5rem .5rem">Quem</th><th style="text-align:left;padding:.5rem .5rem">Contato</th><th style="text-align:left;padding:.5rem .5rem">Sinais</th><th style="text-align:left;padding:.5rem .5rem">Canal</th><th style="text-align:left;padding:.5rem .5rem">Estágio</th><th style="text-align:left;padding:.5rem .5rem">Última ativ.</th></tr></thead><tbody>'
+      + vis.map((r, i) => {
+        const sinais = [];
+        if(r.visitas > 1) sinais.push(badge(r.visitas + '× entrou', 'var(--text-mute)'));
+        if(r.questoes > 0) sinais.push(badge(r.questoes + ' questões', '#6b8cae'));
+        if(r.carrinho > 0) sinais.push(badge(r.carrinho + '× carrinho', r.naoComprou ? '#c77272' : 'var(--accent)'));
+        if(r.fasc) sinais.push(badge('fascículo', '#7ea875'));
+        const sinaisHtml = sinais.join('') || '<span style="color:var(--text-mute);font-size:.72rem">só entrou</span>';
         const tl = r.evs.length === 0 ? '<div style="color:var(--text-mute);padding:.4rem 0">Sem eventos rastreados.</div>' :
           r.evs.slice().reverse().map(e => '<div style="display:flex;gap:.7rem;align-items:center;padding:.25rem 0"><span style="font-family:var(--mono);font-size:.72rem;color:var(--text-mute)">' + _ofFmtDt(e.created_at) + '</span><span style="width:7px;height:7px;border-radius:50%;background:' + (e.event_type==='fasciculo'||e.event_type==='lead'?'#7ea875':(e.event_type==='buy_click'?'var(--accent)':(e.event_type==='vis_questao'?'#6b8cae':'var(--text-mute)'))) + '"></span><span>' + (evLabel[e.event_type] || e.event_type) + (e.materia ? ' · ' + esc(e.materia) : '') + ((e.meta && e.meta.motivo) ? ' · ' + esc(e.meta.motivo) : '') + '</span></div>').join('');
         return '<tr class="of-lead-row ' + (r.naoComprou ? 'of-lead-abandon' : '') + '" data-idx="' + i + '" style="border-top:1px solid var(--border-soft);cursor:pointer">' +
           '<td style="padding:.65rem .5rem;text-align:center;color:var(--text-mute)">▸</td>' +
-          '<td style="padding:.65rem .5rem;color:var(--text-mute);font-family:var(--mono);font-size:.78rem">' + _ofFmtDt(r.data) + '</td>' +
-          '<td style="padding:.65rem .5rem;color:' + (r.c ? 'var(--text)' : 'var(--text-mute)') + ';font-style:' + (r.c ? 'normal' : 'italic') + '">' + esc(r.nome) + '</td>' +
+          '<td style="padding:.65rem .5rem;color:' + (r.c ? 'var(--text)' : 'var(--text-mute)') + ';font-style:' + (r.c ? 'normal' : 'italic') + '">' + esc(r.nome) + (r.temp === 'quente' ? ' 🔥' : '') + '</td>' +
           '<td style="padding:.65rem .5rem">' + (r.phone
               ? '<span style="font-family:var(--mono);font-size:.76rem;color:var(--accent)">' + esc(r.phone) + '</span> <button class="wa-btn" data-wa="' + esc(r.phone) + '" data-nome="' + esc((r.nome || '').split(' ')[0]) + '" title="Abrir WhatsApp com mensagem pronta">WhatsApp</button>'
               : (r.email ? '<span style="font-family:var(--mono);font-size:.76rem;color:var(--text-mute)">' + esc(r.email) + '</span>' : '<span style="font-family:var(--mono);font-size:.68rem;color:var(--text-mute)">' + esc(String(r.vid).slice(0, 10)) + '…</span>')) + '</td>' +
+          '<td style="padding:.65rem .5rem;max-width:300px">' + sinaisHtml + '</td>' +
           '<td style="padding:.65rem .5rem">' + esc(r.canal) + '</td>' +
-          num(r.visitas) +
-          num(r.questoes, r.questoes > 0 ? '#6b8cae' : 'var(--text-mute)') +
-          num(r.carrinho, r.carrinho > 0 ? 'var(--accent)' : 'var(--text-mute)') +
-          '<td style="padding:.65rem .5rem;text-align:center">' + (r.comprou ? '<span style="color:#7ea875;font-size:.7rem">✓ comprou</span>' : (r.carrinho > 0 ? '<span style="color:#c77272;font-size:.7rem">não comprou</span>' : '<span style="color:var(--text-mute);font-size:.7rem">—</span>')) + '</td>' +
-          '<td style="padding:.65rem .5rem;text-align:center;font-family:var(--mono);font-size:.7rem;text-transform:uppercase;color:' + (r.temp==='quente'?'#e08a5a':(r.temp==='morno'?'#c8a97e':'var(--text-mute)')) + '">' + (r.temp || '—') + '</td>' +
-          '<td style="padding:.65rem .5rem;text-align:right;font-family:var(--mono);font-size:.78rem;color:' + (r.ltv>0?'#7ea875':'var(--text-mute)') + '">' + (r.ltv>0?fmtBRL(r.ltv):'—') + '</td></tr>' +
-          '<tr class="of-lead-tl" data-tl="' + i + '" style="display:none"><td></td><td colspan="10" style="padding:.3rem .5rem 1rem"><div style="border-left:2px solid var(--border);padding-left:1rem"><div style="font-family:var(--mono);font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-mute);margin-bottom:.4rem">Perfil · linha do tempo</div>' + tl + '</div></td></tr>';
+          '<td style="padding:.65rem .5rem"><span style="font-size:.7rem;color:' + estCor[r.estagio] + ';border:1px solid ' + estCor[r.estagio] + ';border-radius:10px;padding:.08rem .5rem;opacity:.9">' + estLbl[r.estagio] + '</span>' + (r.ltv > 0 ? ' <span style="font-family:var(--mono);font-size:.72rem;color:#7ea875">' + fmtBRL(r.ltv) + '</span>' : '') + '</td>' +
+          '<td style="padding:.65rem .5rem;color:var(--text-mute);font-family:var(--mono);font-size:.76rem">' + _ofFmtDt(r.data) + '</td></tr>' +
+          '<tr class="of-lead-tl" data-tl="' + i + '" style="display:none"><td></td><td colspan="6" style="padding:.3rem .5rem 1rem"><div style="border-left:2px solid var(--border);padding-left:1rem"><div style="font-family:var(--mono);font-size:.6rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-mute);margin-bottom:.4rem">Perfil · linha do tempo</div>' + tl + '</div></td></tr>';
       }).join('') + '</tbody></table>';
+    box.innerHTML = funnel + chips + tableHtml;
+    box.querySelectorAll('[data-seg]').forEach(b => b.addEventListener('click', () => { ofLeadsSeg = b.getAttribute('data-seg'); renderOfLeads(); }));
     box.querySelectorAll('.of-lead-row').forEach(tr => tr.addEventListener('click', (e) => {
       const wa = e.target.closest('[data-wa]');
       if(wa){ e.stopPropagation(); _waOpen(wa.getAttribute('data-wa'), wa.getAttribute('data-nome')); return; }
