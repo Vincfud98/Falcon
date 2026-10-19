@@ -1,8 +1,14 @@
 // ════════════════════════════════════════════════════════════════════════
-// Edge Function: stripe-webhook
-// Recebe eventos do Stripe (assinatura), valida a assinatura do webhook e
-// aplica o estado via vendas.aplicar_assinatura_stripe (que registra e libera/
-// estende o acesso até o fim do período pago).
+// Edge Function: stripe-webhook  (assinatura recorrente — mentoria)
+// Valida a assinatura do webhook e aplica o estado via
+// vendas.aplicar_assinatura_stripe (registra + libera/estende OU revoga acesso).
+// Cobre o ciclo todo (paridade com o mp-webhook):
+//   · checkout.session.completed / invoice.paid / invoice.payment_succeeded
+//        → assinatura ativa → libera/estende o acesso até current_period_end
+//   · invoice.payment_failed → status past_due/unpaid → acesso expira no período
+//   · customer.subscription.updated/deleted → cancelamento → REVOGA/expira acesso
+//   · charge.refunded → estorno → reverte (reconsulta a assinatura ligada)
+// Idempotente (upsert por subscription_id na função SQL).
 //
 // Secrets: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET.
 // verify_jwt = false (é o Stripe que chama) — ver supabase/config.toml.
@@ -71,7 +77,8 @@ Deno.serve(async (req) => {
         break;
       }
       case "invoice.paid":
-      case "invoice.payment_succeeded": {
+      case "invoice.payment_succeeded":
+      case "invoice.payment_failed": {   // pagou / falhou → re-sincroniza (falha vira past_due/unpaid → acesso expira)
         const inv = event.data.object as Stripe.Invoice;
         if (inv.subscription) {
           const sub = await stripe.subscriptions.retrieve(String(inv.subscription));
@@ -80,8 +87,18 @@ Deno.serve(async (req) => {
         break;
       }
       case "customer.subscription.updated":
-      case "customer.subscription.deleted": {
+      case "customer.subscription.deleted": {   // cancelamento → engenharia reversa (status canceled → revoga/expira acesso)
         await applySub(event.data.object as Stripe.Subscription);
+        break;
+      }
+      case "charge.refunded": {   // estorno → reverte (reconsulta a assinatura ligada à cobrança)
+        const ch = event.data.object as Stripe.Charge;
+        let invId: string | null = ch.invoice ? String(ch.invoice) : null;
+        try {
+          const subId = (ch as any).subscription ? String((ch as any).subscription)
+            : (invId ? String((await stripe.invoices.retrieve(invId)).subscription || "") : "");
+          if (subId) await applySub(await stripe.subscriptions.retrieve(subId));
+        } catch (_) { /* refund avulso sem assinatura: nada a reverter aqui */ }
         break;
       }
       default:

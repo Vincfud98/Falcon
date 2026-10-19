@@ -1,9 +1,13 @@
 # Pagamentos — Edge Functions (Supabase)
 
-Gateway **único: Mercado Pago** (Pix em destaque + cartão em até 12×). Decisão
-2026-10-19: usar só o Mercado Pago. O Stripe (assinatura) está **parado** —
-os arquivos `stripe-*` + `sql/assinatura_stripe.sql` ficam no repo mas NÃO são
-deployados/usados por enquanto.
+Dois gateways, ambos **prontos pra deploy**:
+- **Mercado Pago** — venda avulsa (Pix em destaque + cartão em até 12×). É o
+  que entra primeiro.
+- **Stripe** — assinatura recorrente (mentoria). Pronto também; falta só o time
+  preencher no SQL o que cada price libera de acesso (a única regra de negócio).
+
+Os dois webhooks cobrem o ciclo completo, incluindo a **engenharia reversa**
+(estorno/cancelamento/não-pagamento revertem o acesso).
 
 Como funciona:
 
@@ -130,8 +134,17 @@ supabase functions deploy stripe-webhook
 https://kluqjqojxzpuiauuidwx.supabase.co/functions/v1/stripe-webhook
 ```
 Eventos: `checkout.session.completed`, `invoice.paid`,
-`customer.subscription.updated`, `customer.subscription.deleted`.
+`invoice.payment_succeeded`, `invoice.payment_failed`,
+`customer.subscription.updated`, `customer.subscription.deleted`,
+`charge.refunded`.
 Copie o **Signing secret** gerado pro secret `STRIPE_WEBHOOK_SECRET` e redeploy.
+
+**Engenharia reversa (Stripe):** o webhook cobre o ciclo todo — ativa libera/
+estende o acesso; **falha de pagamento** vira `past_due`/`unpaid` (acesso expira
+no fim do período); **cancelamento** (`subscription.deleted`) e **estorno**
+(`charge.refunded`) revogam/expiram o acesso. O corte de acesso em si fica no
+`sql/assinatura_stripe.sql` (branch já pronto — preencher as matérias da
+mentoria).
 
 **5) Ligar o botão** no app: `onclick="window.UbqSubscribe('price_...')"` no
 botão de assinar a mentoria (me diga onde fica que eu ligo).

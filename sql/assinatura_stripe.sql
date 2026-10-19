@@ -19,6 +19,13 @@ create table if not exists vendas.stripe_subscriptions (
   updated_at          timestamptz default now()
 );
 
+-- RLS: só admin lê pelo app (a edge function usa service role e bypassa).
+alter table vendas.stripe_subscriptions enable row level security;
+drop policy if exists stripe_subscriptions_admin on vendas.stripe_subscriptions;
+create policy stripe_subscriptions_admin on vendas.stripe_subscriptions
+  for all using (public.is_admin()) with check (public.is_admin());
+grant select on vendas.stripe_subscriptions to authenticated;
+
 -- 2) Aplica o estado da assinatura: registra sempre e, quando ativa, deve
 --    liberar/estender o acesso até current_period_end.
 create or replace function vendas.aplicar_assinatura_stripe(
@@ -53,23 +60,31 @@ begin
         updated_at         = now();
 
   -- ───────────────────────────────────────────────────────────────────────
-  -- TODO (time Ubique) — LIBERAR / ESTENDER O ACESSO DA ASSINATURA
-  -- Só vocês sabem o que a mentoria (cada price_id) libera: matérias, turma,
-  -- banco… Quando p_status in ('active','trialing'), estenda o acesso até
-  -- p_current_period_end; quando 'canceled'/'unpaid', deixe expirar no período.
+  -- ACESSO (o único ponto que depende de regra de negócio de vocês)
+  -- Só vocês sabem o que cada price_id da mentoria libera (matérias/turma/banco).
+  -- A estrutura dos dois lados já está aqui — basta preencher as matérias e o
+  -- tipo e descomentar. (dar_acesso ESTENDE o prazo de quem já tem, então a
+  -- renovação mensal só empurra o current_period_end.)
   --
-  -- Exemplo usando vendas.dar_acesso (ajuste as matérias e o p_tipo de vocês):
-  --   if p_status in ('active','trialing') and p_email is not null then
-  --     perform vendas.dar_acesso(
-  --       array[p_email],
-  --       array[ <ids_das_materias_da_assinatura> ],   -- conforme o p_price_id
-  --       p_current_period_end,
-  --       'Assinatura Stripe '||p_subscription_id,
-  --       '<tipo>'                                      -- ex.: completo / banco
-  --     );
-  --   end if;
-  -- (Como dar_acesso ESTENDE o prazo de quem já tem acesso, a renovação mensal
-  --  só empurra o current_period_end — é exatamente o comportamento desejado.)
+  -- if p_status in ('active','trialing') and p_email is not null then
+  --   -- LIBERA / ESTENDE até o fim do período pago
+  --   perform vendas.dar_acesso(
+  --     array[p_email],
+  --     array[ <ids_das_materias_da_assinatura> ],   -- conforme o p_price_id
+  --     p_current_period_end,
+  --     'Assinatura Stripe '||p_subscription_id,
+  --     '<tipo>'                                      -- ex.: completo / banco
+  --   );
+  -- elsif p_status in ('canceled','unpaid','incomplete_expired') then
+  --   -- ENGENHARIA REVERSA: cancelou / não pagou → encerra o acesso.
+  --   -- Opção A (recomendada): não fazer nada — como o acesso foi dado só até
+  --   --   current_period_end, ele EXPIRA sozinho no fim do período já pago.
+  --   -- Opção B (corte imediato): encerre as matrículas da assinatura, ex.:
+  --   --   update vendas.enrollments set status='cancelled',
+  --   --          cancel_reason='Assinatura Stripe cancelada', ends_at=now()
+  --   --    where client_id = v_client and status in ('active','paused')
+  --   --      and notes like 'Assinatura Stripe '||p_subscription_id||'%';
+  -- end if;
   -- ───────────────────────────────────────────────────────────────────────
 
   return jsonb_build_object('client_id', v_client, 'status', p_status, 'ate', p_current_period_end);
