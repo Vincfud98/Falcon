@@ -229,19 +229,34 @@ supabase secrets set META_TEST_EVENT_CODE="TESTxxxxx"
 ```bash
 supabase functions deploy meta-capi
 ```
-**3) SQL do Purchase automático** (`sql/meta_capi.sql`): troque
-`<META_CAPI_PROXY_SECRET>` pelo mesmo valor acima e rode. Cria o trigger em
-`vendas.payments` que dispara o Purchase sempre que um pagamento vira `paid`
-(botão do admin, mp-webhook ou stripe-webhook — um lugar só).
+**3) SQL dos eventos automáticos** (`sql/meta_capi.sql`): troque
+`<META_CAPI_PROXY_SECRET>` pelo mesmo valor acima (nas DUAS ocorrências) e rode.
+Cria **dois** triggers:
+- `vendas.payments` → **Purchase** sempre que um pagamento vira `paid`
+  (botão do admin, mp-webhook ou stripe-webhook — um lugar só).
+- `crm.app_users` → **CompleteRegistration** sempre que uma conta é criada no
+  portal (é o evento de conversão do anúncio que manda pro `/#/inicio`).
+  `event_id='reg_'||id` = o mesmo do pixel do navegador (`ubqPixel` no signUp),
+  então a Meta **deduplica** navegador + servidor.
 
 ## Testar
-- Com `META_TEST_EVENT_CODE` setado, marque um pagamento como pago (ou rode um
-  teste) e veja o evento chegar em **Events Manager › Test Events**.
+- Com `META_TEST_EVENT_CODE` setado, marque um pagamento como pago (ou crie uma
+  conta no portal) e veja o evento chegar em **Events Manager › Test Events**.
 - O e-mail/telefone são **hasheados (SHA-256)** dentro da `meta-capi` — nunca
   saem em texto puro.
+- **Otimização do anúncio:** com o anúncio mandando pro `/#/inicio`, configure a
+  campanha para otimizar por **CompleteRegistration** (ou crie uma Conversão
+  Personalizada por esse evento). Pré-lançamento: como o signUp é whitelisted,
+  esse evento só dispara pra conta real — volume baixo até abrir o cadastro.
+
+## Consentimento (LGPD)
+- O pixel do navegador só envia **com consentimento** (`consent.js`). A CAPI
+  (servidor) dispara Purchase/CompleteRegistration para toda conversão real,
+  como o padrão do mercado para eventos de transação/relacionamento. Se quiser
+  restringir a CAPI a quem consentiu, dá pra passar o consentimento do navegador
+  e filtrar no trigger — é só pedir.
 
 ## Próximos eventos pela CAPI (mesma função)
-- **Lead / CompleteRegistration** do servidor (dedupe com o navegador).
 - **Conversion Leads**: sincronizar lead→cliente pra Meta otimizar por lead que
   compra. **Valor (LTV)** nos eventos pra otimização por valor.
 - **Marcos de engajamento** (1º simulado, Nº questões, voltou no D7).
