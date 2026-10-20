@@ -166,13 +166,13 @@ grant execute on function crm.regua_pendentes(int) to authenticated;
 insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select * from (values
   ('Recuperar carrinho', 'abandonou', 'whatsapp',
-   'Oi {{nome}}, tudo bem? Vi que você começou a escolher um curso na Falcon, mas não finalizou. Posso te ajudar a concluir? Se ficou alguma dúvida sobre conteúdo, prazo ou pagamento, é só me responder por aqui que a gente resolve juntos. — Falcon',
+   'Oi {{nome}}, você chegou pertinho de garantir seu curso na Falcon e parou na última etapa. Foi o preço, a forma de pagamento ou bateu uma dúvida? Me conta aqui que eu resolvo com você rapidinho e hoje mesmo você já começa a estudar. Vamos fechar isso?',
    10),
   ('Reengajar cliente em risco', 'em_risco', 'whatsapp',
-   'Oi {{nome}}, senti sua falta nos estudos. Faz um tempo que você não entra na plataforma — que tal retomar de onde parou? Se quiser, posso te enviar um roteiro rápido do edital para destravar esta semana. É só responder. — Falcon',
+   'Oi {{nome}}, você sumiu dos estudos faz um tempo e eu não quero te ver perder o ritmo justo agora. O edital não espera por ninguém, mas dá para recuperar o terreno: me responde que eu te monto um plano de 20 minutos por dia para esta semana. Topa recomeçar hoje?',
    21),
   ('Reativar lead frio', 'frios', 'whatsapp',
-   'Oi {{nome}}, você criou conta na Falcon, mas ainda não começou a usar. Tem conteúdo liberado esperando por você: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar por aqui. — Falcon',
+   'Oi {{nome}}, você criou sua conta na Falcon e ainda não aproveitou o que já é seu: questões comentadas e a primeira unidade de cada matéria, tudo liberado. Em 5 minutos você sente como é estudar de verdade para o seu concurso. Quer que eu te mostre por onde começar agora?',
    30)
 ) as v(nome, segmento, canal, corpo, cooldown_dias)
 where not exists (select 1 from crm.automacoes);
@@ -181,37 +181,37 @@ where not exists (select 1 from crm.automacoes);
 -- WhatsApp e troca o texto antigo (HTML) pelo texto de WhatsApp. Só mexe nas 3
 -- regras padrão por nome; não toca em regras que você tenha criado/editado.
 update crm.automacoes set canal = 'whatsapp', assunto = null,
-  corpo = 'Oi {{nome}}, tudo bem? Vi que você começou a escolher um curso na Falcon, mas não finalizou. Posso te ajudar a concluir? Se ficou alguma dúvida sobre conteúdo, prazo ou pagamento, é só me responder por aqui que a gente resolve juntos. — Falcon'
+  corpo = 'Oi {{nome}}, você chegou pertinho de garantir seu curso na Falcon e parou na última etapa. Foi o preço, a forma de pagamento ou bateu uma dúvida? Me conta aqui que eu resolvo com você rapidinho e hoje mesmo você já começa a estudar. Vamos fechar isso?'
  where nome = 'Recuperar carrinho' and corpo like '<p>%';
 update crm.automacoes set canal = 'whatsapp', assunto = null,
-  corpo = 'Oi {{nome}}, senti sua falta nos estudos. Faz um tempo que você não entra na plataforma — que tal retomar de onde parou? Se quiser, posso te enviar um roteiro rápido do edital para destravar esta semana. É só responder. — Falcon'
+  corpo = 'Oi {{nome}}, você sumiu dos estudos faz um tempo e eu não quero te ver perder o ritmo justo agora. O edital não espera por ninguém, mas dá para recuperar o terreno: me responde que eu te monto um plano de 20 minutos por dia para esta semana. Topa recomeçar hoje?'
  where nome = 'Reengajar cliente em risco' and corpo like '<p>%';
 update crm.automacoes set canal = 'whatsapp', assunto = null,
-  corpo = 'Oi {{nome}}, você criou conta na Falcon, mas ainda não começou a usar. Tem conteúdo liberado esperando por você: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar por aqui. — Falcon'
+  corpo = 'Oi {{nome}}, você criou sua conta na Falcon e ainda não aproveitou o que já é seu: questões comentadas e a primeira unidade de cada matéria, tudo liberado. Em 5 minutos você sente como é estudar de verdade para o seu concurso. Quer que eu te mostre por onde começar agora?'
  where nome = 'Reativar lead frio' and corpo like '<p>%';
 
 -- 4c) Regra NOVA: oferta por interesse de matéria (idempotente por nome).
 -- Dispara pra quem tem sinal forte numa matéria e não comprou. Usa {{materia}}.
 insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select 'Oferta por interesse', 'interesse_materia', 'whatsapp',
-  'Oi {{nome}}, vi que você andou estudando {{materia}} aqui na Falcon. Quer destravar o conteúdo completo dessa matéria — teoria, questões comentadas e o tutor de IA? É só me responder que eu te mostro como começar. — Falcon',
+  'Oi {{nome}}, reparei que você vem estudando {{materia}} aqui na Falcon. Se é por aí que você quer ir, faz todo sentido ter a matéria completa: teoria, questões comentadas e o tutor de IA corrigindo você. Quer que eu te mostre o plano com {{materia}} liberada?',
   14
 where not exists (select 1 from crm.automacoes where nome = 'Oferta por interesse');
 
 -- 4d) Regras NOVAS por combo de comportamento (idempotentes por nome).
 insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select 'Bateu no limite grátis', 'bateu_cota', 'whatsapp',
-  'Oi {{nome}}, vi que você mandou bem nas questões e esbarrou no limite de 10 por dia da versão gratuita. No plano completo, as questões são ilimitadas e todas com o comentário do professor. Quer destravar {{materia}}? É só me chamar. — Falcon', 14
+  'Oi {{nome}}, deu para ver que você pegou gosto por resolver questões, mas esbarrou no limite de 10 por dia bem na hora que engatou. No plano completo não existe teto: você resolve quantas quiser, todas com o comentário do professor explicando o porquê. Quer treinar {{materia}} sem limite já a partir de hoje?', 14
 where not exists (select 1 from crm.automacoes where nome = 'Bateu no limite grátis');
 
 insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select 'Interesse forte em matéria', 'interesse_forte', 'whatsapp',
-  'Oi {{nome}}, dá para ver que {{materia}} é a sua prioridade — você andou estudando bastante aqui na Falcon. Quer o pacote completo dessa matéria (teoria, questões comentadas e o tutor)? Te mostro como. — Falcon', 14
+  'Oi {{nome}}, {{materia}} é claramente a sua prioridade, pelo tanto que você já estudou aqui. Quem leva a sério assim não merece ficar preso na versão limitada. Quer o pacote completo de {{materia}}, com teoria, questões comentadas e o tutor, e sair na frente dos concorrentes? Me responde que eu já te mostro.', 14
 where not exists (select 1 from crm.automacoes where nome = 'Interesse forte em matéria');
 
 insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select 'Criou conta e sumiu', 'conta_sumiu', 'whatsapp',
-  'Oi {{nome}}, você criou sua conta na Falcon, mas sumiu faz alguns dias. Travou em algo para começar? Tem conteúdo liberado esperando por você — é só me chamar que eu te dou um empurrão. — Falcon', 7
+  'Oi {{nome}}, você criou sua conta na Falcon e sumiu faz alguns dias. Acontece, mas seria uma pena largar bem no comecinho. Me conta o que te travou que eu te ajudo a resolver, e hoje mesmo você volta a avançar. Posso te dar esse empurrão?', 7
 where not exists (select 1 from crm.automacoes where nome = 'Criou conta e sumiu');
 
 
