@@ -157,24 +157,39 @@ botão de assinar a mentoria (me diga onde fica que eu ligo).
 
 ---
 
-# Régua automática (follow-up por e-mail)
+# Régua automática (follow-up por WhatsApp)
 
-Dispara e-mails pros segmentos **Abandonou carrinho**, **Em risco** e **Frios**.
-Tudo **desligado por padrão** e com trava anti-spam (cooldown por regra).
+Dispara **WhatsApp** pros segmentos **Abandonou carrinho**, **Em risco** e
+**Frios**, mirando no **telefone** do cliente (`crm.clients.phone`). Tudo
+**desligado por padrão** e com trava anti-spam (cooldown por regra). O canal é
+por regra (`crm.automacoes.canal`): `whatsapp` (padrão) ou `email`.
+
+## Escolher o provedor de WhatsApp (decisão do time)
+- **API oficial da Meta (WhatsApp Cloud API):** robusta e dentro das regras, mas
+  mensagem **iniciada pela empresa** (régua, fora da janela de 24h) **exige
+  template aprovado** pela Meta. O texto das regras vira o conteúdo que você
+  submete pra aprovação; depois a função manda por nome do template + `{{nome}}`.
+- **Z-API / Evolution (não-oficial):** manda **texto livre** (sem aprovação),
+  mais rápido de ligar, porém fora dos termos do WhatsApp (risco de bloqueio do
+  número). O sender atual já fala esse formato (`POST { phone, message }`).
 
 ## Passo a passo
 
 **1) Rodar o SQL** `sql/regua_automatica.sql` (cria `crm.automacoes`,
-`crm.automacao_envios`, `crm.regua_pendentes` e 3 regras **desligadas**).
+`crm.automacao_envios`, `crm.regua_pendentes` e 3 regras **desligadas**, já no
+canal `whatsapp` com texto de WhatsApp; migra regras antigas de e-mail).
 
-**2) Provedor de e-mail (Resend):** criar conta, **verificar o domínio**
-`grupoubique.com.br` (DNS) e gerar a API key.
+**2) Provedor de WhatsApp:** contratar/criar a instância (Z-API/Evolution) ou
+configurar a WhatsApp Cloud API no Meta Business. Pegar a URL do endpoint de
+envio de texto e o token.
 
 **3) Secrets:**
 ```bash
-supabase secrets set RESEND_API_KEY="re_..."
-supabase secrets set RESEND_FROM="Ubique <contato@grupoubique.com.br>"
+supabase secrets set WHATSAPP_SEND_URL="https://api.z-api.io/instances/SEU_ID/token/SEU_TOKEN/send-text"
+supabase secrets set WHATSAPP_CLIENT_TOKEN="seu-client-token"   # Z-API; opcional
 supabase secrets set REGUA_CRON_SECRET="um-segredo-forte-qualquer"
+# só se tiver alguma regra em canal=email:
+# supabase secrets set RESEND_API_KEY="re_..." RESEND_FROM="Ubique <contato@grupoubique.com.br>"
 ```
 
 **4) Deploy:**
@@ -190,8 +205,8 @@ curl -X POST https://kluqjqojxzpuiauuidwx.supabase.co/functions/v1/regua-automat
 ```
 Retorna quantos clientes são elegíveis por regra (sem disparar nada).
 
-**6) Ligar as regras:** no SQL Editor, revise os textos e marque `ativo=true`
-nas regras que quiser (`update crm.automacoes set ativo=true where id=...;`).
+**6) Ligar as regras:** no admin (Comercial › CRM › Automações) revise o texto e
+ligue o toggle, ou no SQL (`update crm.automacoes set ativo=true where id=...;`).
 
 **7) Agendar (diário):** habilite `pg_cron` **e** `pg_net` e rode a PARTE 2 do
 `sql/regua_automatica.sql` (troque `<REGUA_CRON_SECRET>` pelo mesmo segredo).
@@ -199,11 +214,13 @@ nas regras que quiser (`update crm.automacoes set ativo=true where id=...;`).
 ## Observações
 - Anti-spam: cada regra tem `cooldown_dias` (não reenvia pro mesmo cliente
   antes disso) e `limite_por_rodada` (teto de segurança por execução).
-- Nunca envia pra cliente `blocked` nem sem e-mail. Todo envio fica em
-  `crm.automacao_envios`.
-- **WhatsApp**: hoje só `email`. Pra WhatsApp, escolher provedor (API oficial
-  da Meta ou Z-API) e estender a função `regua-automatica` (o motor já separa
-  os elegíveis por `canal`).
+- Nunca envia pra cliente `blocked` nem sem telefone. Todo envio fica em
+  `crm.automacao_envios` (com o `canal`).
+- **Cloud API oficial (template):** pra usar o caminho oficial, troque o corpo do
+  POST do WhatsApp (na função) pelo payload de template da Graph API e guarde o
+  nome do template por regra. Me avise que eu faço essa versão.
+- **E-mail** continua suportado: basta uma regra com `canal='email'` e as
+  secrets do Resend.
 
 ---
 

@@ -1,9 +1,13 @@
 -- ════════════════════════════════════════════════════════════════════════
--- Régua automática (follow-up) — Ubique CRM — 2026-10-17
+-- Régua automática (follow-up por WhatsApp) — Ubique CRM
+-- (2026-10-17 · migrado p/ WhatsApp 2026-10-20)
 -- Motor de disparo pros segmentos (abandonou carrinho / em risco / frios).
 -- Tudo DESLIGADO por padrão (ativo=false) e com trava anti-spam (cooldown).
 -- Rode no SQL Editor do Supabase. O envio em si é feito pela edge function
--- regua-automatica (e-mail via Resend).
+-- regua-automatica (WhatsApp; e-mail via Resend ainda suportado por canal).
+-- ⚠️ WhatsApp mira no TELEFONE do cliente (c.phone). Iniciado pela empresa
+-- exige template aprovado se usar a API oficial da Meta (Cloud API); Z-API/
+-- Evolution mandam texto livre. O texto abaixo é o conteúdo da mensagem.
 -- ════════════════════════════════════════════════════════════════════════
 
 -- 1) Regras da régua (editáveis) ──────────────────────────────────────────
@@ -11,9 +15,9 @@ create table if not exists crm.automacoes (
   id                serial primary key,
   nome              text not null,
   segmento          text not null,                 -- abandonou | em_risco | frios
-  canal             text not null default 'email', -- email (whatsapp: futuro)
-  assunto           text,
-  corpo             text,                           -- HTML; suporta {{nome}}
+  canal             text not null default 'whatsapp', -- whatsapp | email
+  assunto           text,                              -- só e-mail (WhatsApp ignora)
+  corpo             text,                              -- texto; suporta {{nome}}
   cooldown_dias     int  not null default 14,       -- não reenvia pro mesmo antes disso
   limite_por_rodada int  not null default 200,      -- teto por execução (segurança)
   ativo             boolean not null default false, -- liga/desliga a regra
@@ -44,9 +48,11 @@ grant select, insert, update, delete on crm.automacoes to authenticated;
 grant usage, select on sequence crm.automacoes_id_seq to authenticated;
 grant select on crm.automacao_envios to authenticated;
 
--- 3) Clientes elegíveis de uma regra (segmento + anti-spam + tem e-mail) ──
+-- 3) Clientes elegíveis de uma regra (segmento + anti-spam + tem contato) ──
+-- canal='whatsapp' → mira c.phone; canal='email' → mira c.email. Retorna o
+-- contato certo em "contato".
 create or replace function crm.regua_pendentes(p_automacao_id int)
-returns table (client_id uuid, email text, nome text)
+returns table (client_id uuid, contato text, nome text)
 language plpgsql
 security definer
 set search_path = crm, public
@@ -58,9 +64,14 @@ begin
 
   return query
   with base as (
-    select c.id, c.email, c.full_name
+    select c.id,
+           case when a.canal = 'whatsapp' then c.phone else c.email end as contato,
+           c.full_name
     from crm.clients c
-    where c.email is not null and c.email <> '' and coalesce(c.status,'') <> 'blocked'
+    where coalesce(c.status,'') <> 'blocked'
+      and case when a.canal = 'whatsapp'
+               then (c.phone is not null and c.phone <> '')
+               else (c.email is not null and c.email <> '') end
       and case a.segmento
         when 'abandonou' then (
           c.first_purchase_at is null and coalesce(c.status,'') <> 'customer'
@@ -75,7 +86,7 @@ begin
         else false
       end
   )
-  select b.id, b.email, b.full_name
+  select b.id, b.contato, b.full_name
   from base b
   where not exists (
     select 1 from crm.automacao_envios e
@@ -89,22 +100,33 @@ $$;
 grant execute on function crm.regua_pendentes(int) to authenticated;
 
 -- 4) Regras padrão (só na primeira vez; ficam DESLIGADAS) ─────────────────
-insert into crm.automacoes (nome, segmento, assunto, corpo, cooldown_dias)
+-- Texto de WhatsApp: curto, pessoal, 1 chamada pra ação, sem assunto/HTML.
+insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select * from (values
-  ('Recuperar carrinho', 'abandonou',
-   'Faltou pouco pra começar, {{nome}} 👋',
-   '<p>Oi {{nome}},</p><p>Vi que você chegou a escolher um curso da Ubique mas não concluiu. Posso te ajudar a finalizar? Qualquer dúvida sobre conteúdo, prazo ou pagamento, é só responder este e-mail.</p><p>— Equipe Ubique</p>',
+  ('Recuperar carrinho', 'abandonou', 'whatsapp',
+   'Oi {{nome}}, tudo bem? Vi que você chegou a escolher um curso na Ubique mas não finalizou. Posso te ajudar a concluir? Se ficou alguma dúvida de conteúdo, prazo ou pagamento, me responde aqui que a gente resolve junto. — Ubique',
    10),
-  ('Reengajar cliente em risco', 'em_risco',
-   '{{nome}}, sentimos sua falta nos estudos',
-   '<p>Oi {{nome}},</p><p>Faz um tempo que você não aparece na plataforma. Que tal retomar de onde parou? Se precisar de um norte pro edital, respondo por aqui.</p><p>— Equipe Ubique</p>',
+  ('Reengajar cliente em risco', 'em_risco', 'whatsapp',
+   'Oi {{nome}}, senti sua falta nos estudos. Faz um tempo que você não entra na plataforma — bora retomar de onde parou? Se quiser, te mando um roteiro rápido do edital pra destravar essa semana. É só responder. — Ubique',
    21),
-  ('Reativar lead frio', 'frios',
-   'Ainda pensando no CACD, {{nome}}?',
-   '<p>Oi {{nome}},</p><p>Você criou conta na Ubique mas ainda não explorou o conteúdo. Tem material grátis esperando por você — e qualquer dúvida sobre a preparação, é só responder.</p><p>— Equipe Ubique</p>',
+  ('Reativar lead frio', 'frios', 'whatsapp',
+   'Oi {{nome}}, você criou conta na Ubique mas ainda não começou a usar. Tem conteúdo liberado te esperando: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar aqui. — Ubique',
    30)
-) as v(nome, segmento, assunto, corpo, cooldown_dias)
+) as v(nome, segmento, canal, corpo, cooldown_dias)
 where not exists (select 1 from crm.automacoes);
+
+-- 4b) Migração (idempotente): se as regras já existiam no e-mail, passa pra
+-- WhatsApp e troca o texto antigo (HTML) pelo texto de WhatsApp. Só mexe nas 3
+-- regras padrão por nome; não toca em regras que você tenha criado/editado.
+update crm.automacoes set canal = 'whatsapp', assunto = null,
+  corpo = 'Oi {{nome}}, tudo bem? Vi que você chegou a escolher um curso na Ubique mas não finalizou. Posso te ajudar a concluir? Se ficou alguma dúvida de conteúdo, prazo ou pagamento, me responde aqui que a gente resolve junto. — Ubique'
+ where nome = 'Recuperar carrinho' and corpo like '<p>%';
+update crm.automacoes set canal = 'whatsapp', assunto = null,
+  corpo = 'Oi {{nome}}, senti sua falta nos estudos. Faz um tempo que você não entra na plataforma — bora retomar de onde parou? Se quiser, te mando um roteiro rápido do edital pra destravar essa semana. É só responder. — Ubique'
+ where nome = 'Reengajar cliente em risco' and corpo like '<p>%';
+update crm.automacoes set canal = 'whatsapp', assunto = null,
+  corpo = 'Oi {{nome}}, você criou conta na Ubique mas ainda não começou a usar. Tem conteúdo liberado te esperando: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar aqui. — Ubique'
+ where nome = 'Reativar lead frio' and corpo like '<p>%';
 
 
 -- ─────────────────────────── PARTE 2 (agendamento) ───────────────────────
