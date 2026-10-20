@@ -71,16 +71,25 @@ begin
     returning id into v_abandonou;
   end if;
 
+  -- comp-criou-conta = TEM conta (entrou logado: o 'herdar' só roda com sessão).
   select id into v_conta from crm.tags where slug = 'comp-criou-conta';
   if v_conta is null then
     insert into crm.tags(name, slug, color, description, brand_id)
-    values ('Tentou criar conta', 'comp-criou-conta', '#6aa06a',
-            'Automática: tentou criar conta grátis (pré-lançamento: pode não virar conta real).', null)
+    values ('Tem conta', 'comp-criou-conta', '#6aa06a',
+            'Automática: entrou logado numa conta real (migrou as respostas de visitante).', null)
     returning id into v_conta;
   else
-    update crm.tags set name = 'Tentou criar conta',
-           description = 'Automática: tentou criar conta grátis (pré-lançamento: pode não virar conta real).'
-     where id = v_conta and name <> 'Tentou criar conta';
+    update crm.tags set name = 'Tem conta',
+           description = 'Automática: entrou logado numa conta real (migrou as respostas de visitante).'
+     where id = v_conta and name <> 'Tem conta';
+  end if;
+
+  -- comp-tentou-conta = tentou mas NÃO logou (abriu/pendente/erro). Só o rótulo
+  -- aqui; a contagem no painel é feita no front (por visitante).
+  if not exists (select 1 from crm.tags where slug = 'comp-tentou-conta') then
+    insert into crm.tags(name, slug, color, description, brand_id)
+    values ('Tentou criar conta', 'comp-tentou-conta', '#d19a52',
+            'Automática: abriu o cadastro mas não confirmou/logou (abandono, pendente ou erro).', null);
   end if;
 
   select id into v_respondeu from crm.tags where slug = 'comp-respondeu-questoes';
