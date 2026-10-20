@@ -52,6 +52,9 @@ grant select on crm.automacao_envios to authenticated;
 -- canal='whatsapp' → mira c.phone; canal='email' → mira c.email. Retorna o
 -- contato certo em "contato" e a "materia" (só p/ o segmento interesse_materia;
 -- null nos demais) pra personalizar a mensagem com {{materia}}.
+-- drop antes: o retorno mudou (ganhou "materia"), e create or replace não troca
+-- o tipo de retorno de uma função existente.
+drop function if exists crm.regua_pendentes(int);
 create or replace function crm.regua_pendentes(p_automacao_id int)
 returns table (client_id uuid, contato text, nome text, materia text)
 language plpgsql
