@@ -17,7 +17,8 @@ create table if not exists crm.automacoes (
   segmento          text not null,                 -- abandonou | em_risco | frios
   canal             text not null default 'whatsapp', -- whatsapp | email
   assunto           text,                              -- só e-mail (WhatsApp ignora)
-  corpo             text,                              -- texto; suporta {{nome}}
+  corpo             text,                              -- texto A; suporta {{nome}} (e {{materia}})
+  corpo_b           text,                              -- texto B (teste A/B); vazio = sem teste
   cooldown_dias     int  not null default 14,       -- não reenvia pro mesmo antes disso
   limite_por_rodada int  not null default 200,      -- teto por execução (segurança)
   ativo             boolean not null default false, -- liga/desliga a regra
@@ -213,6 +214,17 @@ insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select 'Criou conta e sumiu', 'conta_sumiu', 'whatsapp',
   'Oi {{nome}}, você criou sua conta na Falcon e sumiu faz alguns dias. Acontece, mas seria uma pena largar bem no comecinho. Me conta o que te travou que eu te ajudo a resolver, e hoje mesmo você volta a avançar. Posso te dar esse empurrão?', 7
 where not exists (select 1 from crm.automacoes where nome = 'Criou conta e sumiu');
+
+
+-- 4e) Teste A/B: coluna corpo_b + variacoes B padrao (so se ainda vazio; edite no admin).
+alter table crm.automacoes add column if not exists corpo_b text;
+update crm.automacoes set corpo_b = 'Oi {{nome}}, seu curso ficou a um clique de ser seu e eu separei ele aqui pra você. Cada dia que passa é conteúdo do edital que fica pra trás. Quer que eu finalize agora com você e já libere seu acesso hoje?' where nome = 'Recuperar carrinho' and corpo_b is null;
+update crm.automacoes set corpo_b = 'Oi {{nome}}, todo mundo que passa dá uma pausa em algum momento. A diferença está em quem volta. Você já venceu a parte mais difícil, que é começar. Me responde que em 5 minutos eu te coloco de volta no trilho. Volta comigo hoje?' where nome = 'Reengajar cliente em risco' and corpo_b is null;
+update crm.automacoes set corpo_b = 'Oi {{nome}}, você abriu a porta da Falcon e não chegou a entrar. Tem uma unidade completa e 10 questões comentadas liberadas, de graça, esperando por você. Quer que eu te mande agora o passo a passo pra começar em 2 minutos?' where nome = 'Reativar lead frio' and corpo_b is null;
+update crm.automacoes set corpo_b = 'Oi {{nome}}, você já investiu tempo em {{materia}} aqui, mas está vendo só uma fração do que ela tem. Com a matéria completa e o tutor corrigindo você, seu rendimento muda de patamar. Quer liberar {{materia}} inteira hoje?' where nome = 'Oferta por interesse' and corpo_b is null;
+update crm.automacoes set corpo_b = 'Oi {{nome}}, você travou no limite de 10 questões bem quando estava embalando, né? Quem está de olho na aprovação não pode parar de treinar. No plano completo você resolve {{materia}} sem limite e ainda vê exatamente onde erra. Quer destravar agora?' where nome = 'Bateu no limite grátis' and corpo_b is null;
+update crm.automacoes set corpo_b = 'Oi {{nome}}, dá pra ver que você quer {{materia}} de verdade, não é passatempo. Quem foca assim merece as melhores ferramentas pra chegar lá antes dos outros. Quer que eu te mostre o plano completo de {{materia}} agora?' where nome = 'Interesse forte em matéria' and corpo_b is null;
+update crm.automacoes set corpo_b = 'Oi {{nome}}, criar a conta foi o passo mais difícil e você já deu. Falta só voltar. Me responde com um "bora" que eu te mando seu primeiro objetivo de hoje, dá pra fazer em 10 minutos. Topa?' where nome = 'Criou conta e sumiu' and corpo_b is null;
 
 
 -- ─────────────────────────── PARTE 2 (agendamento) ───────────────────────
