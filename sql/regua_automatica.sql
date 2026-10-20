@@ -70,7 +70,10 @@ begin
   -- que ainda não comprou. A matéria de maior interesse vai na mensagem.
   -- Peso dos sinais igual ao do painel: comprar 5 > fascículo/lead 4 >
   -- questões 3 > bloqueio 2 > navegou 1.
-  if a.segmento = 'interesse_materia' then
+  -- Segmentos que usam a matéria de maior interesse (vai no {{materia}}):
+  -- interesse_materia (score>=4), interesse_forte (score>=8) e bateu_cota
+  -- (respondeu questões E bateu na cota de 10/dia). Todos só "não comprou".
+  if a.segmento in ('interesse_materia','interesse_forte','bateu_cota') then
     return query
     with sinais as (
       select w.client_id, w.materia,
@@ -91,12 +94,18 @@ begin
            c.full_name, t.materia
       from crm.clients c
       join topm t on t.client_id = c.id
-     where t.score >= 4
-       and coalesce(c.status,'') <> 'blocked'
+     where coalesce(c.status,'') <> 'blocked'
        and c.first_purchase_at is null and coalesce(c.status,'') <> 'customer'
        and case when a.canal = 'whatsapp'
                 then (c.phone is not null and c.phone <> '')
                 else (c.email is not null and c.email <> '') end
+       and case a.segmento
+             when 'interesse_materia' then t.score >= 4
+             when 'interesse_forte'   then t.score >= 8
+             when 'bateu_cota' then (
+               exists (select 1 from crm.web_events w2 where w2.client_id = c.id and w2.event_type in ('vis_questao','vis_corrigiu'))
+               and exists (select 1 from crm.web_events w3 where w3.client_id = c.id and w3.event_type = 'vis_cota'))
+             else false end
        and not exists (
          select 1 from crm.automacao_envios e
           where e.automacao_id = p_automacao_id and e.client_id = c.id
@@ -127,6 +136,15 @@ begin
         when 'frios' then (
           coalesce(c.status,'') = 'lead'
           and not exists (select 1 from crm.web_events w where w.client_id = c.id))
+        -- criou conta e sumiu: tem conta (app_user ou vis_conta_criada), não
+        -- comprou e sem atividade há 2+ dias.
+        when 'conta_sumiu' then (
+          c.first_purchase_at is null and coalesce(c.status,'') <> 'customer'
+          and (c.app_user_id is not null
+               or exists (select 1 from crm.web_events w where w.client_id = c.id and w.event_type = 'vis_conta_criada'))
+          and coalesce(c.last_activity_at,
+                       (select max(w.created_at) from crm.web_events w where w.client_id = c.id))
+              < now() - interval '2 days')
         else false
       end
   )
@@ -148,13 +166,13 @@ grant execute on function crm.regua_pendentes(int) to authenticated;
 insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select * from (values
   ('Recuperar carrinho', 'abandonou', 'whatsapp',
-   'Oi {{nome}}, tudo bem? Vi que você chegou a escolher um curso na Ubique mas não finalizou. Posso te ajudar a concluir? Se ficou alguma dúvida de conteúdo, prazo ou pagamento, me responde aqui que a gente resolve junto. — Ubique',
+   'Oi {{nome}}, tudo bem? Vi que você chegou a escolher um curso na Falcon mas não finalizou. Posso te ajudar a concluir? Se ficou alguma dúvida de conteúdo, prazo ou pagamento, me responde aqui que a gente resolve junto. — Falcon',
    10),
   ('Reengajar cliente em risco', 'em_risco', 'whatsapp',
-   'Oi {{nome}}, senti sua falta nos estudos. Faz um tempo que você não entra na plataforma — bora retomar de onde parou? Se quiser, te mando um roteiro rápido do edital pra destravar essa semana. É só responder. — Ubique',
+   'Oi {{nome}}, senti sua falta nos estudos. Faz um tempo que você não entra na plataforma — bora retomar de onde parou? Se quiser, te mando um roteiro rápido do edital pra destravar essa semana. É só responder. — Falcon',
    21),
   ('Reativar lead frio', 'frios', 'whatsapp',
-   'Oi {{nome}}, você criou conta na Ubique mas ainda não começou a usar. Tem conteúdo liberado te esperando: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar aqui. — Ubique',
+   'Oi {{nome}}, você criou conta na Falcon mas ainda não começou a usar. Tem conteúdo liberado te esperando: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar aqui. — Falcon',
    30)
 ) as v(nome, segmento, canal, corpo, cooldown_dias)
 where not exists (select 1 from crm.automacoes);
@@ -163,22 +181,38 @@ where not exists (select 1 from crm.automacoes);
 -- WhatsApp e troca o texto antigo (HTML) pelo texto de WhatsApp. Só mexe nas 3
 -- regras padrão por nome; não toca em regras que você tenha criado/editado.
 update crm.automacoes set canal = 'whatsapp', assunto = null,
-  corpo = 'Oi {{nome}}, tudo bem? Vi que você chegou a escolher um curso na Ubique mas não finalizou. Posso te ajudar a concluir? Se ficou alguma dúvida de conteúdo, prazo ou pagamento, me responde aqui que a gente resolve junto. — Ubique'
+  corpo = 'Oi {{nome}}, tudo bem? Vi que você chegou a escolher um curso na Falcon mas não finalizou. Posso te ajudar a concluir? Se ficou alguma dúvida de conteúdo, prazo ou pagamento, me responde aqui que a gente resolve junto. — Falcon'
  where nome = 'Recuperar carrinho' and corpo like '<p>%';
 update crm.automacoes set canal = 'whatsapp', assunto = null,
-  corpo = 'Oi {{nome}}, senti sua falta nos estudos. Faz um tempo que você não entra na plataforma — bora retomar de onde parou? Se quiser, te mando um roteiro rápido do edital pra destravar essa semana. É só responder. — Ubique'
+  corpo = 'Oi {{nome}}, senti sua falta nos estudos. Faz um tempo que você não entra na plataforma — bora retomar de onde parou? Se quiser, te mando um roteiro rápido do edital pra destravar essa semana. É só responder. — Falcon'
  where nome = 'Reengajar cliente em risco' and corpo like '<p>%';
 update crm.automacoes set canal = 'whatsapp', assunto = null,
-  corpo = 'Oi {{nome}}, você criou conta na Ubique mas ainda não começou a usar. Tem conteúdo liberado te esperando: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar aqui. — Ubique'
+  corpo = 'Oi {{nome}}, você criou conta na Falcon mas ainda não começou a usar. Tem conteúdo liberado te esperando: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar aqui. — Falcon'
  where nome = 'Reativar lead frio' and corpo like '<p>%';
 
 -- 4c) Regra NOVA: oferta por interesse de matéria (idempotente por nome).
 -- Dispara pra quem tem sinal forte numa matéria e não comprou. Usa {{materia}}.
 insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
 select 'Oferta por interesse', 'interesse_materia', 'whatsapp',
-  'Oi {{nome}}, vi que você andou estudando {{materia}} aqui na Ubique. Quer destravar o conteúdo completo dessa matéria — teoria, questões comentadas e o tutor de IA? Me responde aqui que eu te mostro como começar. — Ubique',
+  'Oi {{nome}}, vi que você andou estudando {{materia}} aqui na Falcon. Quer destravar o conteúdo completo dessa matéria — teoria, questões comentadas e o tutor de IA? Me responde aqui que eu te mostro como começar. — Falcon',
   14
 where not exists (select 1 from crm.automacoes where nome = 'Oferta por interesse');
+
+-- 4d) Regras NOVAS por combo de comportamento (idempotentes por nome).
+insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
+select 'Bateu no limite grátis', 'bateu_cota', 'whatsapp',
+  'Oi {{nome}}, vi que você mandou bem nas questões e esbarrou no limite de 10 por dia do grátis. No completo são ilimitadas, com o comentário do professor em cada uma. Quer destravar {{materia}}? Me chama aqui. — Falcon', 14
+where not exists (select 1 from crm.automacoes where nome = 'Bateu no limite grátis');
+
+insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
+select 'Interesse forte em matéria', 'interesse_forte', 'whatsapp',
+  'Oi {{nome}}, dá pra ver que {{materia}} é a sua prioridade — você andou estudando bastante aqui na Falcon. Quer o pacote completo dessa matéria (teoria, questões comentadas e o tutor)? Te mostro como. — Falcon', 14
+where not exists (select 1 from crm.automacoes where nome = 'Interesse forte em matéria');
+
+insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
+select 'Criou conta e sumiu', 'conta_sumiu', 'whatsapp',
+  'Oi {{nome}}, você criou sua conta na Falcon mas sumiu faz uns dias. Travou em algo pra começar? Tem conteúdo liberado te esperando — me chama aqui que te dou um empurrão. — Falcon', 7
+where not exists (select 1 from crm.automacoes where nome = 'Criou conta e sumiu');
 
 
 -- ─────────────────────────── PARTE 2 (agendamento) ───────────────────────

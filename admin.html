@@ -47322,7 +47322,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // COMERCIAL — CRM — AUTOMAÇÕES (régua de follow-up)
   // ═══════════════════════════════════════════════════════════
   let automacoesCache = [];
-  const AUT_SEG_LABEL = { abandonou: 'Carrinho abandonado', em_risco: 'Cliente em risco', frios: 'Lead frio', interesse_materia: 'Interesse por matéria' };
+  const AUT_SEG_LABEL = { abandonou: 'Carrinho abandonado', em_risco: 'Cliente em risco', frios: 'Lead frio', interesse_materia: 'Interesse por matéria', interesse_forte: 'Interesse forte', bateu_cota: 'Bateu no limite grátis', conta_sumiu: 'Criou conta e sumiu' };
+  // Segmentos cuja mensagem usa {{materia}}.
+  const _segUsaMateria = s => s === 'interesse_materia' || s === 'interesse_forte' || s === 'bateu_cota';
   async function loadAutomacoes(){
     if(!window._sb) return { error: { message: 'sem conexão' } };
     const { data, error } = await crm().from('automacoes').select('*').order('id');
@@ -47336,18 +47338,32 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   function _reguaSegClientes(seg){
     const buyers = new Set(webEventsCache.filter(e => e.event_type === 'buy_click' && e.client_id).map(e => e.client_id));
     const comEvento = _clientsComEventos();
+    // Agregados de comportamento por cliente + interesse por matéria.
+    const byCli = {}, byCliMat = {};
+    webEventsCache.forEach(e => {
+      if(!e.client_id) return;
+      const o = byCli[e.client_id] || (byCli[e.client_id] = { questao: false, cota: false, conta: false, lastAt: 0 });
+      if(e.event_type === 'vis_questao' || e.event_type === 'vis_corrigiu') o.questao = true;
+      if(e.event_type === 'vis_cota') o.cota = true;
+      if(e.event_type === 'vis_conta_criada') o.conta = true;
+      const t = new Date(e.created_at).getTime(); if(t > o.lastAt) o.lastAt = t;
+      const m = e.materia || (e.meta && e.meta.materia);
+      if(m){ const k = e.client_id + '|' + m; byCliMat[k] = (byCliMat[k] || 0) + (_INT_PESO[e.event_type] || 1); }
+    });
     const intTop = {}, intMat = {};
-    if(seg === 'interesse_materia'){
-      const byCliMat = {};
-      webEventsCache.forEach(e => { const m = e.materia || (e.meta && e.meta.materia); if(!e.client_id || !m) return; const k = e.client_id + '|' + m; byCliMat[k] = (byCliMat[k] || 0) + (_INT_PESO[e.event_type] || 1); });
-      Object.keys(byCliMat).forEach(k => { const cid = k.slice(0, k.lastIndexOf('|')); const mat = k.slice(k.lastIndexOf('|') + 1); if(byCliMat[k] > (intTop[cid] || 0)){ intTop[cid] = byCliMat[k]; intMat[cid] = mat; } });
-    }
+    Object.keys(byCliMat).forEach(k => { const cid = k.slice(0, k.lastIndexOf('|')); const mat = k.slice(k.lastIndexOf('|') + 1); if(byCliMat[k] > (intTop[cid] || 0)){ intTop[cid] = byCliMat[k]; intMat[cid] = mat; } });
+    const now = Date.now();
+    const naoComprou = c => !c.first_purchase_at && c.status !== 'customer';
     return clientsCache.filter(c => {
       if(!(c.phone && c.phone.trim()) || c.status === 'blocked') return false;   // WhatsApp mira no telefone
-      if(seg === 'abandonou') return buyers.has(c.id) && !c.first_purchase_at && c.status !== 'customer';
+      const o = byCli[c.id] || {};
+      if(seg === 'abandonou') return buyers.has(c.id) && naoComprou(c);
       if(seg === 'em_risco'){ const d = _daysSinceAct(c); return c.status === 'customer' && d != null && d >= 45; }
       if(seg === 'frios') return c.status === 'lead' && !comEvento.has(c.id);
-      if(seg === 'interesse_materia') return (intTop[c.id] || 0) >= 4 && !c.first_purchase_at && c.status !== 'customer';
+      if(seg === 'interesse_materia') return (intTop[c.id] || 0) >= 4 && naoComprou(c);
+      if(seg === 'interesse_forte')  return (intTop[c.id] || 0) >= 8 && naoComprou(c);
+      if(seg === 'bateu_cota')       return o.questao && o.cota && naoComprou(c);
+      if(seg === 'conta_sumiu')      return (o.conta || c.app_user_id) && naoComprou(c) && o.lastAt > 0 && (now - o.lastAt) >= 2 * 864e5;
       return false;
     }).map(c => ({ c, materia: intMat[c.id] || null }));
   }
@@ -47396,7 +47412,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         <div class="aut-body">
           ${a.canal === 'whatsapp' ? '' : `<label>Assunto</label>
           <input type="text" class="aut-input" value="${esc(a.assunto || '')}" data-aut-assunto="${a.id}">`}
-          <label>Mensagem · ${a.canal === 'whatsapp' ? 'WhatsApp' : 'HTML'} · use {{nome}}${a.segmento === 'interesse_materia' ? ' e {{materia}}' : ''}${a.canal === 'whatsapp' ? ' · *negrito*' : ''}</label>
+          <label>Mensagem · ${a.canal === 'whatsapp' ? 'WhatsApp' : 'HTML'} · use {{nome}}${_segUsaMateria(a.segmento) ? ' e {{materia}}' : ''}${a.canal === 'whatsapp' ? ' · *negrito*' : ''}</label>
           <textarea class="aut-input aut-textarea" data-aut-corpo="${a.id}">${esc(a.corpo || '')}</textarea>
           <div class="aut-actions">
             <span class="aut-meta">WhatsApp manual · ${n} pra enviar${a.cooldown_dias ? ' · cooldown ' + a.cooldown_dias + 'd' : ''}</span>
@@ -47431,7 +47447,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   }
   // Botão "Testar envio (simulação)": mostra quantos receberiam por segmento (sem enviar).
   document.getElementById('automacoesTestBtn')?.addEventListener('click', () => {
-    const linhas = ['abandonou', 'em_risco', 'frios', 'interesse_materia'].map(s => (AUT_SEG_LABEL[s] + ': ' + _reguaSegCount(s)));
+    const linhas = ['abandonou', 'em_risco', 'frios', 'interesse_materia', 'interesse_forte', 'bateu_cota', 'conta_sumiu'].map(s => (AUT_SEG_LABEL[s] + ': ' + _reguaSegCount(s)));
     showMsg('globalMessage4', 'Simulação — quem receberia se ligada (a régua ainda respeita o cooldown): ' + linhas.join(' · '), 'success');
   });
   // Re-renderiza ao abrir a aba (conta atualizada).
