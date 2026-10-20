@@ -23,12 +23,12 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 function esc(s: string): string {
   return String(s ?? "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c] || c));
 }
-function fill(tpl: string, nome: string): string {
-  return String(tpl ?? "").replaceAll("{{nome}}", esc(nome || "aluno(a)"));
+function fill(tpl: string, nome: string, materia?: string): string {
+  return String(tpl ?? "").replaceAll("{{nome}}", esc(nome || "aluno(a)")).replaceAll("{{materia}}", esc(materia || "a matéria"));
 }
 // WhatsApp usa texto puro (sem escapar HTML).
-function fillText(tpl: string, nome: string): string {
-  return String(tpl ?? "").replaceAll("{{nome}}", nome || "aluno(a)");
+function fillText(tpl: string, nome: string, materia?: string): string {
+  return String(tpl ?? "").replaceAll("{{nome}}", nome || "aluno(a)").replaceAll("{{materia}}", materia || "a matéria");
 }
 // E.164 Brasil: só dígitos, garante o 55.
 function normPhone(p: string): string {
@@ -82,7 +82,7 @@ Deno.serve(async (req) => {
           if (WA_TOKEN) headers["Client-Token"] = WA_TOKEN;
           const res = await fetch(WA_URL!, {
             method: "POST", headers,
-            body: JSON.stringify({ phone: normPhone(c.contato), message: fillText(r.corpo || "", c.nome) }),
+            body: JSON.stringify({ phone: normPhone(c.contato), message: fillText(r.corpo || "", c.nome, c.materia) }),
           });
           ok = res.ok;
           if (!ok) erro = (await res.text()).slice(0, 500);
@@ -92,7 +92,7 @@ Deno.serve(async (req) => {
             headers: { "Authorization": `Bearer ${RESEND_KEY}`, "Content-Type": "application/json" },
             body: JSON.stringify({
               from: RESEND_FROM, to: c.contato,
-              subject: fill(r.assunto || "", c.nome), html: fill(r.corpo || "", c.nome),
+              subject: fill(r.assunto || "", c.nome, c.materia), html: fill(r.corpo || "", c.nome, c.materia),
             }),
           });
           ok = res.ok;

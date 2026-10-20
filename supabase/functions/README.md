@@ -211,7 +211,16 @@ ligue o toggle, ou no SQL (`update crm.automacoes set ativo=true where id=...;`)
 **7) Agendar (diário):** habilite `pg_cron` **e** `pg_net` e rode a PARTE 2 do
 `sql/regua_automatica.sql` (troque `<REGUA_CRON_SECRET>` pelo mesmo segredo).
 
+## Segmentos
+- **Carrinho abandonado / Em risco / Frios** — por estágio do cliente.
+- **Interesse por matéria** (`interesse_materia`) — dispara pra quem tem sinal
+  forte numa matéria (peso: comprar 5 > fascículo 4 > questões 3 > bloqueio 2 >
+  navegou 1; derivado de `web_events.materia`) e **ainda não comprou**. A matéria
+  de maior interesse entra na mensagem via `{{materia}}` (ex.: "vi que você andou
+  estudando *História do Brasil*…"). `regua_pendentes` devolve a matéria por pessoa.
+
 ## Observações
+- Variáveis na mensagem: `{{nome}}` em todas; `{{materia}}` na regra de interesse.
 - Anti-spam: cada regra tem `cooldown_dias` (não reenvia pro mesmo cliente
   antes disso) e `limite_por_rodada` (teto de segurança por execução).
 - Nunca envia pra cliente `blocked` nem sem telefone. Todo envio fica em

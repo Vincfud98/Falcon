@@ -50,9 +50,10 @@ grant select on crm.automacao_envios to authenticated;
 
 -- 3) Clientes elegíveis de uma regra (segmento + anti-spam + tem contato) ──
 -- canal='whatsapp' → mira c.phone; canal='email' → mira c.email. Retorna o
--- contato certo em "contato".
+-- contato certo em "contato" e a "materia" (só p/ o segmento interesse_materia;
+-- null nos demais) pra personalizar a mensagem com {{materia}}.
 create or replace function crm.regua_pendentes(p_automacao_id int)
-returns table (client_id uuid, contato text, nome text)
+returns table (client_id uuid, contato text, nome text, materia text)
 language plpgsql
 security definer
 set search_path = crm, public
@@ -62,6 +63,46 @@ begin
   select * into a from crm.automacoes where id = p_automacao_id and ativo;
   if not found then return; end if;
 
+  -- Segmento por INTERESSE de matéria: pessoa com sinal forte numa matéria e
+  -- que ainda não comprou. A matéria de maior interesse vai na mensagem.
+  -- Peso dos sinais igual ao do painel: comprar 5 > fascículo/lead 4 >
+  -- questões 3 > bloqueio 2 > navegou 1.
+  if a.segmento = 'interesse_materia' then
+    return query
+    with sinais as (
+      select w.client_id, w.materia,
+             sum(case w.event_type
+                   when 'buy_click' then 5 when 'fasciculo' then 4 when 'lead' then 4
+                   when 'vis_questao' then 3 when 'vis_trancada' then 2
+                   when 'vis_cota' then 2 when 'vis_convite' then 2 else 1 end) as score
+        from crm.web_events w
+       where w.client_id is not null and w.materia is not null and w.materia <> ''
+       group by w.client_id, w.materia
+    ),
+    topm as (
+      select distinct on (client_id) client_id, materia, score
+        from sinais order by client_id, score desc
+    )
+    select c.id,
+           case when a.canal = 'whatsapp' then c.phone else c.email end,
+           c.full_name, t.materia
+      from crm.clients c
+      join topm t on t.client_id = c.id
+     where t.score >= 4
+       and coalesce(c.status,'') <> 'blocked'
+       and c.first_purchase_at is null and coalesce(c.status,'') <> 'customer'
+       and case when a.canal = 'whatsapp'
+                then (c.phone is not null and c.phone <> '')
+                else (c.email is not null and c.email <> '') end
+       and not exists (
+         select 1 from crm.automacao_envios e
+          where e.automacao_id = p_automacao_id and e.client_id = c.id
+            and e.enviado_em > now() - make_interval(days => a.cooldown_dias))
+     limit a.limite_por_rodada;
+    return;
+  end if;
+
+  -- Segmentos por estágio (materia null).
   return query
   with base as (
     select c.id,
@@ -86,7 +127,7 @@ begin
         else false
       end
   )
-  select b.id, b.contato, b.full_name
+  select b.id, b.contato, b.full_name, null::text
   from base b
   where not exists (
     select 1 from crm.automacao_envios e
@@ -127,6 +168,14 @@ update crm.automacoes set canal = 'whatsapp', assunto = null,
 update crm.automacoes set canal = 'whatsapp', assunto = null,
   corpo = 'Oi {{nome}}, você criou conta na Ubique mas ainda não começou a usar. Tem conteúdo liberado te esperando: questões comentadas e a primeira unidade de cada matéria. Qualquer dúvida sobre por onde começar, é só me chamar aqui. — Ubique'
  where nome = 'Reativar lead frio' and corpo like '<p>%';
+
+-- 4c) Regra NOVA: oferta por interesse de matéria (idempotente por nome).
+-- Dispara pra quem tem sinal forte numa matéria e não comprou. Usa {{materia}}.
+insert into crm.automacoes (nome, segmento, canal, corpo, cooldown_dias)
+select 'Oferta por interesse', 'interesse_materia', 'whatsapp',
+  'Oi {{nome}}, vi que você andou estudando {{materia}} aqui na Ubique. Quer destravar o conteúdo completo dessa matéria — teoria, questões comentadas e o tutor de IA? Me responde aqui que eu te mostro como começar. — Ubique',
+  14
+where not exists (select 1 from crm.automacoes where nome = 'Oferta por interesse');
 
 
 -- ─────────────────────────── PARTE 2 (agendamento) ───────────────────────
