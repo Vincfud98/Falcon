@@ -15178,6 +15178,20 @@ tr.ral-online .ral-pres{ display:inline-flex; }
                 </select>
               </div>
             </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:.6rem">
+              <div class="field">
+                <label>Gateway</label>
+                <select id="pay-gateway">
+                  <option value="manual">Manual / outro</option>
+                  <option value="mercado_pago">Mercado Pago</option>
+                  <option value="stripe">Stripe</option>
+                </select>
+              </div>
+              <div class="field" id="pay-installments-field" style="display:none">
+                <label>Parcelas</label>
+                <input type="number" id="pay-installments" min="1" max="48" value="1">
+              </div>
+            </div>
             <div class="field" style="margin-bottom:.6rem">
               <label>Observações (opcional)</label>
               <input type="text" id="pay-notes" placeholder="ex: Pix recebido via comprovante tal">
@@ -41940,8 +41954,18 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
     document.getElementById('pay-status').value = 'paid';
     document.getElementById('pay-notes').value = '';
+    document.getElementById('pay-gateway').value = 'manual';
+    document.getElementById('pay-installments').value = '1';
+    _togglePayInstallments();
     document.getElementById('ord-payment-form').style.display = 'block';
   }
+  // Parcelas só fazem sentido em cartão de crédito.
+  function _togglePayInstallments(){
+    const m = document.getElementById('pay-method').value;
+    const field = document.getElementById('pay-installments-field');
+    if(field) field.style.display = (m === 'credit_card') ? 'block' : 'none';
+  }
+  document.getElementById('pay-method')?.addEventListener('change', _togglePayInstallments);
 
   function hideOrderPaymentForm(){
     document.getElementById('ord-payment-form').style.display = 'none';
@@ -41958,6 +41982,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const paidAtRaw = document.getElementById('pay-paid-at').value;
     const status = document.getElementById('pay-status').value;
     const notes = document.getElementById('pay-notes').value.trim();
+    const gateway = document.getElementById('pay-gateway').value || 'manual';
+    const installments = (method === 'credit_card') ? (parseInt(document.getElementById('pay-installments').value) || 1) : 1;
 
     if(!amount || amount <= 0){ showMsg('orderModalMessage', 'Valor do pagamento inválido.'); return; }
     if(!paidAtRaw){ showMsg('orderModalMessage', 'Data do pagamento é obrigatória.'); return; }
@@ -41968,7 +41994,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       currency: 'BRL',
       method,
       status,
-      gateway: 'manual',
+      gateway,
+      installments,
       paid_at: status === 'paid' ? new Date(paidAtRaw).toISOString() : null,
       notes: notes || null,
     };
@@ -42189,22 +42216,46 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
     const isPaid = o.status === 'paid';
     const msg = isPaid
-      ? 'Este pedido já está pago. Cancelar vai marcá-lo como estornado (os enrollments criados permanecerão no banco — cancele-os manualmente em Matrículas se necessário).\n\nConfirmar?'
+      ? 'Este pedido está PAGO. Confirmar vai:\n  1) marcar o pedido como ESTORNADO (devolução);\n  2) marcar os pagamentos como estornados;\n  3) CANCELAR O ACESSO do aluno (matrículas deste pedido).\n\nA devolução do dinheiro no Mercado Pago/cartão você faz no painel do gateway; aqui fica o registro.\n\nConfirmar estorno e cancelamento do acesso?'
       : 'Cancelar este pedido?';
 
-    const reason = prompt(msg + '\n\n(Motivo do cancelamento — opcional)');
+    const reason = prompt(msg + '\n\n(Motivo — opcional)');
     if(reason === null) return;
+    const agora = new Date().toISOString();
+    const motivo = reason.trim() || null;
 
-    const payload = {
+    const { error } = await vendas().from('orders').update({
       status: isPaid ? 'refunded' : 'cancelled',
-      cancelled_at: new Date().toISOString(),
-      cancelled_reason: reason.trim() || null,
-    };
-    const { error } = await vendas().from('orders').update(payload).eq('id', editingOrderId);
+      cancelled_at: agora,
+      cancelled_reason: motivo,
+    }).eq('id', editingOrderId);
     if(error){ showMsg('orderModalMessage', `Erro: ${error.message}`); return; }
 
-    await loadOrders();
-    showMsg('globalMessage6', isPaid ? 'Pedido estornado.' : 'Pedido cancelado.', 'success');
+    let acessosCancelados = 0;
+    if(isPaid){
+      // 2) pagamentos pagos -> estornados (dispara a revogação no banco, se houver trigger)
+      const pays = paymentsCache.filter(p => p.order_id === editingOrderId && p.status === 'paid');
+      for(const p of pays){
+        await vendas().from('payments').update({
+          status: 'refunded', refunded_at: agora,
+          refund_amount: p.amount, refund_reason: motivo || 'cancelamento do pedido',
+        }).eq('id', p.id);
+      }
+      // 3) cancela o ACESSO: matrículas ligadas aos itens deste pedido
+      const itemIds = new Set(orderItemsCache.filter(oi => oi.order_id === editingOrderId).map(oi => oi.id));
+      const enrs = enrollmentsCache.filter(e => itemIds.has(e.order_item_id) && e.status !== 'cancelled');
+      for(const e of enrs){
+        const r = await vendas().from('enrollments')
+          .update({ status: 'cancelled', cancel_reason: motivo || 'estorno do pedido' })
+          .eq('id', e.id);
+        if(!r.error) acessosCancelados++;
+      }
+    }
+
+    await Promise.all([loadOrders(), loadPayments(), loadEnrollments()]);
+    showMsg('globalMessage6', isPaid
+      ? ('Pedido estornado · acesso cancelado' + (acessosCancelados ? ' (' + acessosCancelados + ' matrícula' + (acessosCancelados === 1 ? '' : 's') + ')' : '') + '.')
+      : 'Pedido cancelado.', 'success');
     closeOrderModal();
     renderOrdersList();
     updateGroupCounts();
@@ -42469,7 +42520,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       return `
         <tr class="${rowClass}" data-pay-id="${p.id}" data-order-id="${p.order_id}">
           <td>
-            <div class="pay-method-cell">${_methodBadge(p.method)}</div>
+            <div class="pay-method-cell">${_methodBadge(p.method)}${p.installments > 1 ? ' <span style="font-size:.7rem;font-family:var(--mono);color:var(--text-mute)">' + p.installments + 'x</span>' : ''}</div>
             <div style="margin-top:.3rem">${_gatewayBadge(p.gateway)}</div>
           </td>
           <td>

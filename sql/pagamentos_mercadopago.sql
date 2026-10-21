@@ -12,3 +12,9 @@ alter table vendas.payments add column if not exists gateway_payment_id text;
 -- pagamentos manuais sem id seguem convivendo). Permite o upsert do webhook.
 create unique index if not exists payments_gateway_payment_id_uidx
   on vendas.payments (gateway_payment_id);
+
+-- Nº de parcelas (cartão). 1 = à vista / demais métodos.
+alter table vendas.payments add column if not exists installments int default 1;
+
+-- Recarrega o cache do PostgREST (senão o front reclama de coluna inexistente).
+notify pgrst, 'reload schema';
