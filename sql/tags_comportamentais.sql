@@ -104,8 +104,12 @@ begin
   if v_bloqueio is null then
     insert into crm.tags(name, slug, color, description, brand_id)
     values ('Bateu em bloqueio', 'comp-bateu-bloqueio', '#d19a52',
-            'Automática: esbarrou em cota/conteúdo trancado/convite de login (quente p/ upgrade).', null)
+            E'Automática: esbarrou num limite do plano grátis e quis mais — quente p/ upgrade. Bloqueio é um destes três:\n• Cota — estourou as questões grátis do dia\n• Conteúdo trancado — tentou abrir algo premium\n• Convite de login/paywall — bateu na parede de cadastro/assinatura', null)
     returning id into v_bloqueio;
+  else
+    update crm.tags set description =
+      E'Automática: esbarrou num limite do plano grátis e quis mais — quente p/ upgrade. Bloqueio é um destes três:\n• Cota — estourou as questões grátis do dia\n• Conteúdo trancado — tentou abrir algo premium\n• Convite de login/paywall — bateu na parede de cadastro/assinatura'
+     where id = v_bloqueio and description not like '%destes três%';
   end if;
 
   select id into v_explorou from crm.tags where slug = 'comp-explorou-portal';
