@@ -3299,6 +3299,27 @@
     border-color:#c77272;
     color:#c77272;
   }
+  .enr-action-btn.primary{ border-color:var(--accent);color:var(--accent);background:rgba(200,169,126,.08);font-weight:500 }
+  .enr-action-btn.wa{ border-color:rgba(37,211,102,.35);color:#43c463 }
+  .enr-action-btn.wa:hover{ border-color:#25d366;color:#25d366;background:rgba(37,211,102,.06) }
+  /* Matrículas — painel de retenção */
+  .enr-kpis{ display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem }
+  .enr-kpi{ display:flex;flex-direction:column;gap:.1rem;padding:.5rem .9rem;border:1px solid var(--border);border-radius:8px;min-width:88px;background:var(--bg-elev) }
+  .enr-kpi-v{ font-family:var(--serif);font-size:1.3rem;color:var(--text);line-height:1 }
+  .enr-kpi-l{ font-size:.64rem;letter-spacing:.06em;text-transform:uppercase;color:var(--text-mute) }
+  .enr-kpi.ok .enr-kpi-v{ color:#7ea875 }
+  .enr-kpi.warn .enr-kpi-v{ color:#d19a52 }
+  .enr-kpi.cold .enr-kpi-v{ color:#c77272 }
+  .enr-eng{ font-size:.72rem;font-family:var(--sans) }
+  .enr-eng.ok{ color:#7ea875 }
+  .enr-eng.warn{ color:#d19a52 }
+  .enr-eng.cold{ color:#c77272 }
+  .enr-eng.none{ color:var(--text-mute);font-style:italic }
+  .enr-motivo{ display:block;margin-top:.2rem;font-size:.68rem;color:var(--text-mute) }
+  .enr-motivo.estorno{ color:#c77272 }
+  .enr-vencendo td{ box-shadow:inset 3px 0 0 #d19a52 }
+  .enr-check-cell{ width:34px;text-align:center }
+  .enr-bulkbar{ display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;margin-bottom:.8rem;padding:.6rem .85rem;border:1px solid rgba(200,169,126,.3);border-radius:8px;background:rgba(200,169,126,.06);font-size:.8rem;color:var(--text-dim) }
 
   /* ═══════════════════════════════════════════════════════════
      PAGAMENTOS — aba (lista global)
@@ -43322,6 +43343,83 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     return arr;
   }
 
+  // ── Matrículas: retenção / engajamento / export ──
+  let enrollmentsSelection = new Set();
+  function _enrLastSeenMap(){
+    const m = {};
+    (webEventsCache || []).forEach(e => {
+      if(!e.client_id) return;
+      const t = new Date(e.created_at).getTime();
+      if(!m[e.client_id] || t > m[e.client_id]) m[e.client_id] = t;
+    });
+    return m;
+  }
+  function _enrEngajamentoHtml(lastTs){
+    if(!lastTs) return '<span class="enr-eng none">nunca acessou</span>';
+    const d = Math.floor((Date.now() - lastTs) / 864e5);
+    if(d <= 7) return '<span class="enr-eng ok">estudando' + (d <= 1 ? ' hoje' : ' · há ' + d + 'd') + '</span>';
+    if(d <= 30) return '<span class="enr-eng warn">sem acesso há ' + d + 'd</span>';
+    return '<span class="enr-eng cold">sumiu há ' + d + 'd</span>';
+  }
+  function _enrKpiHtml(){
+    let ativas=0, vencendo=0, expiradas=0, cortesias=0, canceladas=0;
+    (enrollmentsCache || []).forEach(e => {
+      const st = effectiveStatus(e);
+      if(st === 'active') ativas++;
+      if(st === 'expired') expiradas++;
+      if(e.status === 'cancelled') canceladas++;
+      if(enrollmentOrigin(e) === 'courtesy') cortesias++;
+      if(st === 'active'){ const d = daysUntilExpiry(e); if(d != null && d >= 0 && d <= 30) vencendo++; }
+    });
+    const cell = (lbl, val, cls) => `<div class="enr-kpi ${cls||''}"><span class="enr-kpi-v">${val}</span><span class="enr-kpi-l">${lbl}</span></div>`;
+    return `<div class="enr-kpis">
+      ${cell('Ativas', ativas, 'ok')}
+      ${cell('Vencendo ≤30d', vencendo, 'warn')}
+      ${cell('Expiradas', expiradas, 'cold')}
+      ${cell('Cortesias', cortesias)}
+      ${cell('Canceladas', canceladas)}
+      <button class="btn btn-ghost btn-sm" id="enrExportBtn" style="margin-left:auto">Exportar CSV</button>
+    </div>`;
+  }
+  function _enrExportCSV(list){
+    const clientsMap = Object.fromEntries(clientsCache.map(c => [c.id, c]));
+    const productsMap = Object.fromEntries(productsCache.map(p => [p.id, p]));
+    const head = ['Cliente','Email','Telefone','Produto','Status','Origem','Inicio','Fim','DiasRestantes','Motivo'];
+    const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+    const lines = [head.map(q).join(',')];
+    list.forEach(e => {
+      const c = clientsMap[e.client_id] || {}; const p = productsMap[e.product_id] || {};
+      const d = daysUntilExpiry(e);
+      lines.push([ c.full_name||'', c.email||'', c.phone||'', p.name||('#'+e.product_id),
+        ENROLLMENT_STATUS_LABELS[effectiveStatus(e)] || effectiveStatus(e),
+        enrollmentOrigin(e) === 'courtesy' ? 'cortesia' : 'comprada',
+        (e.starts_at||'').slice(0,10), (e.ends_at||'').slice(0,10),
+        d == null ? '' : d, e.cancel_reason || e.pause_reason || '' ].map(q).join(','));
+    });
+    const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url;
+    a.download = 'matriculas-' + new Date().toISOString().slice(0,10) + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  async function _enrBulk(action){
+    const ids = Array.from(enrollmentsSelection);
+    if(!ids.length) return;
+    const labels = { pause:'pausar', cancel:'cancelar' };
+    if(!confirm(`${action === 'cancel' ? 'Cancelar' : 'Pausar'} ${ids.length} matrícula(s) selecionada(s)?`)) return;
+    const patch = action === 'cancel' ? { status:'cancelled', cancel_reason:'ação em massa' } : { status:'paused', pause_reason:'ação em massa' };
+    if(window._demoActive){
+      enrollmentsCache.forEach(e => { if(enrollmentsSelection.has(e.id)) Object.assign(e, patch); });
+    } else {
+      for(const id of ids){ await vendas().from('enrollments').update(patch).eq('id', id); }
+      await loadEnrollments();
+    }
+    enrollmentsSelection.clear();
+    renderEnrollmentsList(); updateGroupCounts();
+    showMsg('globalMessage6', `${ids.length} matrícula(s) ${action === 'cancel' ? 'cancelada(s)' : 'pausada(s)'}.`, 'success');
+  }
+
   function renderEnrollmentsList(){
     const box = document.getElementById('enrollmentsList');
     if(!box) return;
@@ -43347,6 +43445,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const productsMap = Object.fromEntries(productsCache.map(p => [p.id, p]));
     const offersMap = Object.fromEntries(offersCache.map(o => [o.id, o]));
     const brandsMap = Object.fromEntries(brandsCache.map(b => [b.id, b]));
+    const lastSeen = _enrLastSeenMap();
 
     const rows = page.map(e => {
       const client = clientsMap[e.client_id];
@@ -43356,6 +43455,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       const origin = enrollmentOrigin(e);
       const effStatus = effectiveStatus(e);
       const days = daysUntilExpiry(e);
+      const checked = enrollmentsSelection.has(e.id) ? ' checked' : '';
+      const motivo = e.status === 'cancelled' ? e.cancel_reason : (e.status === 'paused' ? e.pause_reason : '');
+      const motivoHtml = motivo ? `<span class="enr-motivo${/estorno/i.test(motivo) ? ' estorno' : ''}">${esc(motivo)}</span>` : '';
+      const vence = effStatus === 'active' && days != null && days <= 30;
+      const waPhone = client && client.phone ? String(client.phone) : '';
 
       // Period display
       let periodText, daysText;
@@ -43381,7 +43485,8 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       const isActive = e.status === 'active';
 
       return `
-        <tr class="${rowClass}" data-id="${e.id}">
+        <tr class="${rowClass}${vence ? ' enr-vencendo' : ''}" data-id="${e.id}">
+          <td class="enr-check-cell"><input type="checkbox" class="enr-check" data-enr-check="${e.id}"${checked}></td>
           <td>
             ${client
               ? `<span class="enr-client-name">${esc(client.full_name)}</span><span class="enr-client-email">${esc(client.email || '')}</span>`
@@ -43396,11 +43501,16 @@ tr.ral-online .ral-pres{ display:inline-flex; }
             <span class="enr-period">${periodText}</span>
             ${daysText}
           </td>
-          <td><span class="enr-status ${effStatus}">${ENROLLMENT_STATUS_LABELS[effStatus] || effStatus}</span></td>
+          <td>${_enrEngajamentoHtml(lastSeen[e.client_id])}</td>
+          <td>
+            <span class="enr-status ${effStatus}">${ENROLLMENT_STATUS_LABELS[effStatus] || effStatus}</span>
+            ${motivoHtml}
+          </td>
           <td><span class="enr-origin-chip ${origin}">${origin === 'courtesy' ? 'cortesia' : 'comprada'}</span></td>
           <td class="enr-actions-cell">
+            ${waPhone ? `<button class="enr-action-btn wa" data-wa="${e.id}">WhatsApp</button>` : ''}
             ${isActive ? `
-              <button class="enr-action-btn" data-extend="${e.id}">estender</button>
+              <button class="enr-action-btn${vence ? ' primary' : ''}" data-extend="${e.id}">${vence ? 'renovar' : 'estender'}</button>
               <button class="enr-action-btn" data-pause="${e.id}">pausar</button>
               <button class="enr-action-btn danger" data-cancel="${e.id}">cancelar</button>
             ` : ''}
@@ -43409,19 +43519,78 @@ tr.ral-online .ral-pres{ display:inline-flex; }
         </tr>`;
     }).join('');
 
+    const selN = enrollmentsSelection.size;
+    const bulkBar = selN > 0 ? `
+      <div class="enr-bulkbar">
+        <span>${selN} selecionada${selN === 1 ? '' : 's'}</span>
+        <button class="btn btn-ghost btn-sm" id="enrBulkExport">Exportar CSV</button>
+        <button class="btn btn-ghost btn-sm" id="enrBulkPause">Pausar</button>
+        <button class="btn btn-ghost btn-sm" id="enrBulkCancel">Cancelar</button>
+        <button class="btn btn-ghost btn-sm" id="enrBulkClear" style="margin-left:auto">limpar seleção</button>
+      </div>` : '';
+
     box.innerHTML = `
+      ${_enrKpiHtml()}
+      ${bulkBar}
       <table>
         <thead><tr>
+          <th class="enr-check-cell"><input type="checkbox" id="enrCheckAll" title="selecionar a página"></th>
           <th>Cliente</th>
           <th>Produto</th>
           <th>Marca</th>
           <th>Janela</th>
+          <th>Engajamento</th>
           <th>Status</th>
           <th>Origem</th>
           <th style="text-align:right">Ações</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>`;
+
+    // Export CSV (lista filtrada inteira)
+    const expBtn = document.getElementById('enrExportBtn');
+    if(expBtn) expBtn.addEventListener('click', () => _enrExportCSV(all));
+    // Seleção
+    const chkAll = document.getElementById('enrCheckAll');
+    if(chkAll){
+      chkAll.checked = page.length > 0 && page.every(e => enrollmentsSelection.has(e.id));
+      chkAll.addEventListener('change', () => {
+        page.forEach(e => { if(chkAll.checked) enrollmentsSelection.add(e.id); else enrollmentsSelection.delete(e.id); });
+        renderEnrollmentsList();
+      });
+    }
+    box.querySelectorAll('[data-enr-check]').forEach(cb => {
+      cb.addEventListener('click', ev => ev.stopPropagation());
+      cb.addEventListener('change', () => {
+        if(cb.checked) enrollmentsSelection.add(cb.dataset.enrCheck); else enrollmentsSelection.delete(cb.dataset.enrCheck);
+        renderEnrollmentsList();
+      });
+    });
+    // WhatsApp (cobrar renovação / reengajar)
+    box.querySelectorAll('[data-wa]').forEach(btn => {
+      btn.addEventListener('click', ev => {
+        ev.stopPropagation();
+        const e = enrollmentsCache.find(x => x.id === btn.dataset.wa); if(!e) return;
+        const c = clientsMap[e.client_id]; if(!c || !c.phone) return;
+        const prod = productsMap[e.product_id];
+        const d = daysUntilExpiry(e);
+        const nome = (c.full_name || '').split(' ')[0] || '';
+        let msg;
+        if(effectiveStatus(e) === 'active' && d != null && d <= 30){
+          msg = `Oi ${nome}! Seu acesso ${prod ? 'ao ' + prod.name + ' ' : ''}` + (d < 0 ? 'venceu' : 'vence em ' + d + ' dia' + (d === 1 ? '' : 's')) + ` na Falcon. Quer renovar e seguir sem perder o ritmo dos estudos? Posso deixar tudo pronto pra você hoje.`;
+        } else {
+          msg = `Oi ${nome}! Aqui é da Falcon. Vi que faz um tempo que você não acessa seus estudos — quer que eu te ajude a retomar o ritmo?`;
+        }
+        const link = _waLinkMsg(c.phone, msg);
+        if(link) window.open(link, '_blank', 'noopener');
+      });
+    });
+    // Ações em massa
+    const bind = (id, fn) => { const el = document.getElementById(id); if(el) el.addEventListener('click', fn); };
+    bind('enrBulkExport', () => _enrExportCSV(enrollmentsCache.filter(e => enrollmentsSelection.has(e.id))));
+    bind('enrBulkPause', () => _enrBulk('pause'));
+    bind('enrBulkCancel', () => _enrBulk('cancel'));
+    bind('enrBulkClear', () => { enrollmentsSelection.clear(); renderEnrollmentsList(); });
 
     // Bind actions
     box.querySelectorAll('[data-extend]').forEach(btn => {
