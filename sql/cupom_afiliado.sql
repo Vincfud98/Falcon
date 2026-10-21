@@ -7,6 +7,7 @@
 
 alter table catalogo.coupons add column if not exists afiliado_nome    text;
 alter table catalogo.coupons add column if not exists afiliado_contato text;   -- @handle ou WhatsApp
+alter table catalogo.coupons add column if not exists afiliado_tipo    text default 'influencer';  -- influencer | aluno (indique e ganhe)
 alter table catalogo.coupons add column if not exists comissao_tipo    text default 'nenhum';  -- nenhum | percent | ubitokens
 alter table catalogo.coupons add column if not exists comissao_valor   numeric;
 
