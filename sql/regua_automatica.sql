@@ -47,7 +47,9 @@ drop policy if exists automacao_envios_admin on crm.automacao_envios;
 create policy automacao_envios_admin on crm.automacao_envios for all using (public.is_admin()) with check (public.is_admin());
 grant select, insert, update, delete on crm.automacoes to authenticated;
 grant usage, select on sequence crm.automacoes_id_seq to authenticated;
-grant select on crm.automacao_envios to authenticated;
+-- O admin registra/desfaz envios manuais (botão "✓ enviado") direto nesta tabela.
+grant select, insert, delete on crm.automacao_envios to authenticated;
+grant usage, select on sequence crm.automacao_envios_id_seq to authenticated;
 
 -- 3) Clientes elegíveis de uma regra (segmento + anti-spam + tem contato) ──
 -- canal='whatsapp' → mira c.phone; canal='email' → mira c.email. Retorna o
