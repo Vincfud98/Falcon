@@ -32259,9 +32259,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
   function _demoRerender(){
     _scoreMapCache = null;   // recomputa score/tags a partir dos eventos demo
+    if(window._demoActive){ try{ _dmtInto(); }catch(_){} }   // turmas de mentoria demo
     [populateOrderFilters, populatePaymentFilters, renderOrdersList, renderPaymentsList,
      renderEnrollmentsList, renderDashboard, updateGroupCounts,
-     renderAutomacoesList, renderClientsList, renderClientTagsList, renderCouponsList, renderAfiliadosPage].forEach(fn => {
+     renderAutomacoesList, renderClientsList, renderClientTagsList, renderCouponsList, renderAfiliadosPage,
+     renderMentoria].forEach(fn => {
       try{ fn(); }catch(e){ console.warn('[demo] render falhou:', e); }
     });
   }
@@ -32283,7 +32285,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // zera as caches comerciais na entrada (pedidos reais ficam no snapshot) e injeta a 1ª leva
     ordersCache = []; orderItemsCache = []; paymentsCache = []; enrollmentsCache = []; enrollmentEventsCache = []; automacaoEnviosCache = []; couponsCache = [];
     webEventsLoaded = true;   // trava o lazy-load de web_events enquanto no demo
-    _demoBatch = 0;
+    _demoBatch = 0; window._dmtCleared = false;
     _demoApply(_buildDemoData(_demoBatch));
     window._demoActive = true;
     const btn = document.getElementById('demoModeBtn');
@@ -32296,7 +32298,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   // Gera mais uma leva de dados fake por cima dos atuais.
   function addMoreDemoData(){
     if(!window._demoActive){ enterDemoMode(); return; }
-    _demoBatch++;
+    _demoBatch++; window._dmtCleared = false;
     _demoApply(_buildDemoData(_demoBatch));
     _demoRerender();
   }
@@ -32311,6 +32313,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     ordersCache = []; orderItemsCache = []; paymentsCache = []; enrollmentsCache = []; enrollmentEventsCache = []; automacaoEnviosCache = [];
     couponsCache = (couponsCache || []).filter(c => !(c.id && String(c.id).indexOf('demo-cp-') === 0));
     webEventsCache = (webEventsCache || []).filter(e => !(e.id && String(e.id).indexOf('demo-ev-') === 0));
+    window._dmtCleared = true;   // some com as turmas demo até gerar de novo
+    MT.turmaId = null; MT.alunos = [];
+    subjectsCache = (subjectsCache || []).filter(s => !s._demo);
     _demoBatch = 0;
     _demoRerender();
   }
@@ -32335,9 +32340,15 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     if(btn){ btn.classList.remove('on'); btn.textContent = '▸ Modo demo'; }
     const ban = document.getElementById('demoBanner');
     if(ban) ban.classList.remove('on');
+    // zera a mentoria demo e, se a pessoa puder ver mentoria, recarrega as reais
+    window._dmtCleared = false;
+    MT.turmas = []; MT.materias = []; MT.contagem = {}; MT.turmaId = null; MT.alunos = [];
+    subjectsCache = (subjectsCache || []).filter(s => !s._demo);
     // recarrega os reais do banco e re-renderiza
-    Promise.all([loadClients(), loadOrders(), loadOrderItems(), loadPayments(), loadEnrollments(), loadWebEvents(), loadEnrollmentEvents(), loadAutomacaoEnvios(), loadCoupons()])
-      .then(_demoRerender).catch(_demoRerender);
+    const _al = (typeof userAllowedAreas === 'function') ? userAllowedAreas() : new Set();
+    const tarefas = [loadClients(), loadOrders(), loadOrderItems(), loadPayments(), loadEnrollments(), loadWebEvents(), loadEnrollmentEvents(), loadAutomacaoEnvios(), loadCoupons()];
+    if(currentIsSuperadmin || _al.has('mentor') || _al.has('portaria')) tarefas.push(loadMentoria());
+    Promise.all(tarefas).then(_demoRerender).catch(_demoRerender);
   }
 
   (function wireDemo(){
@@ -59289,8 +59300,10 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     an: { tipo: 'aluno', aluno: '', periodo: null, materia: 'todas', secoes: null, ubique: false, gerando: false, historico: null, aberta: null, duracao: 60, notas: '', previa: null },
   };
   const _mtAluno = () => supabase.schema('aluno');
-  const _mtPodeMontar = () => currentIsSuperadmin || userAllowedAreas().has('portaria');
-  const _mtEMentor = t => !!t && (currentIsSuperadmin || (userAllowedAreas().has('mentor') && currentAuthUser && t.mentor_id === currentAuthUser.id));
+  // No modo demo a Mentoria vira só-leitura: nenhum botão de escrita aparece
+  // e nada toca o banco (os ids demo nem existiriam lá).
+  const _mtPodeMontar = () => !window._demoActive && (currentIsSuperadmin || userAllowedAreas().has('portaria'));
+  const _mtEMentor = t => !window._demoActive && !!t && (currentIsSuperadmin || (userAllowedAreas().has('mentor') && currentAuthUser && t.mentor_id === currentAuthUser.id));
   const _mtTurma = () => MT.turmas.find(t => t.id === MT.turmaId) || null;
   const _mtNomeMateria = id => { const s = (subjectsCache || []).find(x => String(x.id) === String(id)); return s ? (s.subject || s.sigla || ('Matéria ' + id)) : ('Matéria ' + id); };
   const _mtSigla = id => { const s = (subjectsCache || []).find(x => String(x.id) === String(id)); return s ? (s.sigla || s.subject || String(id)) : String(id); };
@@ -59299,6 +59312,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   function _mtAgoraLocal(){ const d = new Date(Date.now() + 60 * 60 * 1000); d.setSeconds(0, 0); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
 
   async function loadMentoria(){
+    if(window._demoActive){ _dmtInto(); return; }
     try{
       const [tR, aR, mR] = await Promise.all([
         _mtAluno().from('mentoria_turmas').select('*').order('created_at', { ascending: false }),
@@ -59368,6 +59382,7 @@ tr.ral-online .ral-pres{ display:inline-flex; }
   async function _mtCarregarTurma(){
     const id = MT.turmaId;
     if(MT.an.turma !== id){ MT.an = { tipo: 'aluno', aluno: '', periodo: null, materia: 'todas', secoes: null, ubique: false, gerando: false, historico: null, aberta: null, duracao: 60, notas: '', previa: null, turma: id }; }
+    if(window._demoActive && String(id).indexOf('demo-mt-') === 0){ _dmtCarregarTurma(id); return; }
     const [al, li, vi, av, en] = await Promise.all([
       _mtAluno().rpc('mentoria_alunos_da_turma', { p_turma: id }),
       _mtAluno().from('mentoria_liberacoes').select('*').eq('turma_id', id),
@@ -60154,6 +60169,255 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }
       if(d.mtApagarEncontro){ if(!confirm('Apagar este encontro?')) return; await _mtGravar(_mtAluno().from('mentoria_encontros').delete().eq('id', d.mtApagarEncontro), 'Encontro apagado.'); return; }
     });
+  })();
+
+  // ═══════════════════════════════════════════════════════════
+  // MENTORIA · DADOS DEMO + PREVIEW "VER COMO ALUNO"
+  // Só vive no modo demo (window._demoActive). Nada toca o banco:
+  // a Mentoria fica só-leitura e as turmas/alunos/avisos são fake.
+  // ═══════════════════════════════════════════════════════════
+  const _DMT_SUBS = [
+    ['demo-sub-port', 'PORT', 'Língua Portuguesa'],
+    ['demo-sub-hist', 'HIST', 'História Mundial e do Brasil'],
+    ['demo-sub-pi',   'PI',   'Política Internacional'],
+    ['demo-sub-dir',  'DIR',  'Direito'],
+    ['demo-sub-eco',  'ECO',  'Economia'],
+    ['demo-sub-ing',  'ING',  'Inglês'],
+    ['demo-sub-geo',  'GEO',  'Geografia'],
+  ];
+  const _DMT_MENTORES = { 'demo-m-1': 'Marcílio Falcão', 'demo-m-2': 'Giovanna Souza', 'demo-m-3': 'Rodrigo Valle' };
+  const _DMT_NOMES = ['Ana Beatriz Rocha','Carlos Henrique Dias','Mariana Teixeira','Rafael Moura','Juliana Prado','Bruno Carvalho','Letícia Nogueira','Pedro Vasconcelos','Camila Andrade','Thiago Bastos','Fernanda Lima','Gustavo Rangel','Larissa Fontes','Diego Martins','Patrícia Gomes','Vinícius Araújo','Beatriz Sales','Rodrigo Pires','Natália Campos','Eduardo Freitas','Isabela Monteiro','Felipe Cordeiro'];
+  function _dmtIso(offsetDays, hora){ const d = new Date(); d.setDate(d.getDate() + offsetDays); if(hora != null) d.setHours(hora, 0, 0, 0); return d.toISOString(); }
+  function _dmtGarantirSubs(){
+    if(!Array.isArray(subjectsCache)) return;
+    _DMT_SUBS.forEach(([id, sigla, subject]) => {
+      if(!subjectsCache.some(s => String(s.id) === id)) subjectsCache.push({ id, sigla, subject, _demo: true });
+    });
+  }
+  // Turmas demo (3): nome, mentor, período, nº de matérias, nº de alunos
+  const _DMT_TURMAS = [
+    { id: 'demo-mt-1', nome: 'Mentoria Outubro 2026 · CACD', mentor_id: 'demo-m-1', inicio: _dmtIso(-21).slice(0,10), fim: _dmtIso(150).slice(0,10), link: 'https://meet.google.com/ubique-mentoria', depois: 'prazo', dias: 30, nMat: 5, nAlunos: 12 },
+    { id: 'demo-mt-2', nome: 'Intensivo Reta Final 2026', mentor_id: 'demo-m-2', inicio: _dmtIso(-45).slice(0,10), fim: _dmtIso(60).slice(0,10), link: 'https://meet.google.com/ubique-intensivo', depois: 'sempre', dias: null, nMat: 4, nAlunos: 9 },
+    { id: 'demo-mt-3', nome: 'Diplomacia · Turma Noturna', mentor_id: 'demo-m-3', inicio: _dmtIso(-10).slice(0,10), fim: _dmtIso(200).slice(0,10), link: 'https://meet.google.com/ubique-noturna', depois: 'prazo', dias: 45, nMat: 3, nAlunos: 7 },
+  ];
+  // Monta MT.* (lista) a partir das turmas demo. Não mexe em MT.alunos/turmaId.
+  function _dmtInto(){
+    _dmtGarantirSubs();
+    Object.assign(MT.nomes, _DMT_MENTORES);
+    if(window._dmtCleared){ MT.turmas = []; MT.materias = []; MT.contagem = {}; return; }
+    MT.turmas = _DMT_TURMAS.map(t => ({ id: t.id, nome: t.nome, mentor_id: t.mentor_id, inicio: t.inicio, fim: t.fim, link_encontros: t.link, depois_do_fim: t.depois, dias_depois: t.dias, arquivada: false, created_at: _dmtIso(-30) }));
+    MT.materias = [];
+    MT.contagem = {};
+    _DMT_TURMAS.forEach(t => {
+      MT.contagem[t.id] = t.nAlunos;
+      for(let i = 0; i < t.nMat; i++){
+        const sub = _DMT_SUBS[i % _DMT_SUBS.length];
+        MT.materias.push({ turma_id: t.id, subject_id: sub[0], ciclo: Math.floor(i / 2) + 1, posicao: i });
+      }
+    });
+    if(MT.turmaId && !MT.turmas.some(t => t.id === MT.turmaId)) MT.turmaId = null;
+  }
+  // Carrega o "interior" de uma turma demo (alunos, avisos, encontros).
+  function _dmtCarregarTurma(id){
+    const t = _DMT_TURMAS.find(x => x.id === id) || _DMT_TURMAS[0];
+    const n = t.nAlunos;
+    const mats = MT.materias.filter(m => m.turma_id === id);
+    MT.alunos = [];
+    for(let i = 0; i < n; i++){
+      const nome = _DMT_NOMES[i % _DMT_NOMES.length];
+      const primeiro = nome.split(' ')[0].toLowerCase();
+      const sit = i % 9 === 0 ? 'suspensa' : (i % 7 === 0 ? 'sem-conta' : 'ativa');
+      const ups = (i % 4 === 0 && mats.length) ? [{ id: 'demo-up-' + id + '-' + i, materia: mats[i % mats.length].subject_id, modo: i % 2 ? 'materia' : 'videos', ate: i % 2 ? _dmtIso(60).slice(0,10) : null }] : [];
+      MT.alunos.push({ client_id: 'demo-al-' + id + '-' + i, user_id: null, nome, email: primeiro + '@email.com', saiu_em: null, situacao: sit, upgrades: ups });
+    }
+    MT.avisos = [
+      { id: 'demo-av-' + id + '-1', titulo: 'Encontro ao vivo do Ciclo 1', texto: 'Nesta quinta, às 19h, fazemos a correção comentada da redação e tiramos dúvidas do ciclo 1. O link está na aba Encontros.', fixado: true, created_at: _dmtIso(-1) },
+      { id: 'demo-av-' + id + '-2', titulo: 'Gabarito da semana liberado', texto: 'O gabarito comentado das questões de Política Internacional já está disponível na sua trilha.', fixado: false, created_at: _dmtIso(-3) },
+      { id: 'demo-av-' + id + '-3', titulo: 'Novo material de História', texto: 'Subi o resumo de História do Brasil (República Velha) no ciclo 2. Bons estudos!', fixado: false, created_at: _dmtIso(-6) },
+    ];
+    MT.encontros = [
+      { id: 'demo-en-' + id + '-1', quando: _dmtIso(2, 19), titulo: 'Encontro do Ciclo 1 — Redação', link: null },
+      { id: 'demo-en-' + id + '-2', quando: _dmtIso(9, 19), titulo: 'Política Internacional — temas quentes', link: null },
+      { id: 'demo-en-' + id + '-3', quando: _dmtIso(-5, 19), titulo: 'Abertura da turma', link: null },
+    ];
+    MT.liberacoes = []; MT.videos = []; MT.blocosVideo = [];
+  }
+
+  // ── Preview "Ver como aluno": a Área do Aluno da turma de mentoria ──
+  // Autossuficiente (não depende de conteúdo real) — sempre rico pro demo.
+  function _dmtTrilha(turmaIdx){
+    const base = [
+      { sigla: 'PORT', nome: 'Língua Portuguesa', ciclo: 1, itens: [
+        { k: 'u', t: 'Concordância verbal e nominal', e: 'lib', q: -8 },
+        { k: 'v', t: 'Correção comentada — redação', e: 'lib', q: -5 },
+        { k: 'u', t: 'Crase e regência', e: 'lib', q: -2 },
+        { k: 'u', t: 'Interpretação de texto II', e: 'ag', q: 3 },
+      ] },
+      { sigla: 'HIST', nome: 'História Mundial e do Brasil', ciclo: 1, itens: [
+        { k: 'u', t: 'Guerra Fria e descolonização', e: 'lib', q: -6 },
+        { k: 'u', t: 'República Velha', e: 'lib', q: -1 },
+        { k: 'v', t: 'Aula — Era Vargas', e: 'ag', q: 2 },
+        { k: 'u', t: 'Ordem mundial pós-1945', e: 'fech' },
+      ] },
+      { sigla: 'PI', nome: 'Política Internacional', ciclo: 2, itens: [
+        { k: 'u', t: 'Teorias de Relações Internacionais', e: 'lib', q: -3 },
+        { k: 'u', t: 'Organismos multilaterais (ONU, OMC)', e: 'ag', q: 5 },
+        { k: 'u', t: 'Política externa brasileira', e: 'fech' },
+      ] },
+      { sigla: 'DIR', nome: 'Direito', ciclo: 2, itens: [
+        { k: 'u', t: 'Direito Constitucional — princípios', e: 'lib', q: -2 },
+        { k: 'u', t: 'Direito Internacional Público', e: 'fech' },
+      ] },
+      { sigla: 'ING', nome: 'Inglês', ciclo: 3, upgrade: true, itens: [
+        { k: 'u', t: 'Reading comprehension', e: 'lib', q: -4 },
+        { k: 'v', t: 'Writing — summary & essay', e: 'lib', q: -1 },
+        { k: 'u', t: 'Version (PT→EN)', e: 'ag', q: 6 },
+      ] },
+    ];
+    // leve variação por turma pra não parecerem iguais
+    return base.slice(0, [5, 4, 3][turmaIdx % 3] || 5);
+  }
+  function _dmtCssOnce(){
+    if(document.getElementById('dmtCss')) return;
+    const st = document.createElement('style'); st.id = 'dmtCss';
+    st.textContent = `
+      #mtAlunoPreview .modal{max-width:860px}
+      .mta-head{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap;padding-bottom:1rem;border-bottom:1px solid var(--accent-border-soft)}
+      .mta-label{font-family:var(--sans);font-weight:300;font-size:.6rem;letter-spacing:.24em;text-transform:uppercase;color:var(--accent);margin-bottom:.35rem}
+      .mta-turma{font-family:var(--serif);font-weight:400;font-size:1.5rem;line-height:1.15;color:var(--text)}
+      .mta-mentor{display:flex;align-items:center;gap:.55rem;margin-top:.5rem;color:var(--text-dim);font-size:.85rem}
+      .mta-av{width:32px;height:32px;border-radius:50%;background:var(--accent-lo);border:1px solid var(--accent-border);display:grid;place-items:center;font-family:var(--serif);color:var(--accent);font-size:.9rem;flex-shrink:0}
+      .mta-per{font-family:var(--mono);font-size:.7rem;letter-spacing:.04em;color:var(--text-mute);white-space:nowrap}
+      .mta-enc{display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap;margin:1.1rem 0;padding:1rem 1.2rem;border:1px solid var(--accent-border);border-radius:var(--radius-lg);background:var(--accent-xlo)}
+      .mta-enc-t{font-family:var(--serif);font-size:1.1rem;color:var(--text)}
+      .mta-enc-d{font-size:.8rem;color:var(--text-dim);margin-top:.15rem}
+      .mta-sec{font-family:var(--sans);font-weight:300;font-size:.62rem;letter-spacing:.22em;text-transform:uppercase;color:var(--text-mute);margin:1.4rem 0 .7rem;display:flex;align-items:center;gap:.6rem}
+      .mta-sec::after{content:'';flex:1;height:1px;background:var(--accent-border-soft)}
+      .mta-avisos{display:flex;flex-direction:column;gap:.6rem}
+      .mta-aviso{padding:.8rem 1rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius);background:var(--bg-elev)}
+      .mta-aviso.fix{border-color:var(--amber-border);background:var(--amber-lo)}
+      .mta-aviso-top{display:flex;align-items:center;gap:.5rem;margin-bottom:.25rem}
+      .mta-aviso-top strong{font-family:var(--serif);font-weight:500;font-size:.98rem;color:var(--text)}
+      .mta-pin{font-size:.58rem;letter-spacing:.14em;text-transform:uppercase;color:var(--amber);border:1px solid var(--amber-border);border-radius:999px;padding:.08rem .45rem}
+      .mta-aviso-tx{font-size:.84rem;line-height:1.6;color:var(--text-dim)}
+      .mta-mat{border:1px solid var(--accent-border-soft);border-radius:var(--radius-lg);margin-bottom:.8rem;overflow:hidden}
+      .mta-mat-h{display:flex;align-items:center;gap:.7rem;padding:.7rem 1rem;background:var(--bg-elev)}
+      .mta-sig{font-family:var(--mono);font-size:.62rem;letter-spacing:.06em;color:var(--accent);border:1px solid var(--accent-border);border-radius:3px;padding:.12rem .4rem}
+      .mta-mat-n{font-family:var(--serif);font-size:1.02rem;color:var(--text);flex:1;min-width:0}
+      .mta-ciclo{font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
+      .mta-up{font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--green);border:1px solid var(--green-border);background:var(--green-lo);border-radius:999px;padding:.1rem .45rem}
+      .mta-prog{height:3px;background:var(--accent-border-soft)}
+      .mta-prog>span{display:block;height:100%;background:var(--accent)}
+      .mta-item{display:flex;align-items:center;gap:.7rem;padding:.6rem 1rem;border-top:1px solid var(--accent-border-soft)}
+      .mta-ic{width:22px;height:22px;flex-shrink:0;color:var(--text-mute)}
+      .mta-it-t{flex:1;min-width:0;font-size:.86rem;color:var(--text)}
+      .mta-item.fech .mta-it-t{color:var(--text-mute)}
+      .mta-est{font-size:.6rem;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap;border-radius:999px;padding:.12rem .5rem;border:1px solid}
+      .mta-est.lib{color:var(--green);border-color:var(--green-border);background:var(--green-lo)}
+      .mta-est.ag{color:var(--amber);border-color:var(--amber-border);background:var(--amber-lo)}
+      .mta-est.fech{color:var(--text-mute);border-color:var(--accent-border-soft)}
+      .mta-foot{margin-top:1.1rem;font-size:.76rem;color:var(--text-mute);line-height:1.6}
+      .dmt-row-btn{margin-left:.4rem}`;
+    document.head.appendChild(st);
+  }
+  function _dmtPreview(turmaId){
+    _dmtCssOnce();
+    const idx = Math.max(0, _DMT_TURMAS.findIndex(t => t.id === turmaId));
+    const t = _DMT_TURMAS[idx] || _DMT_TURMAS[0];
+    const mentor = _DMT_MENTORES[t.mentor_id] || '—';
+    const ini = (mentor.match(/\b\w/g) || []).slice(0, 2).join('').toUpperCase();
+    const per = fmtDate(t.inicio + 'T12:00') + ' a ' + fmtDate(t.fim + 'T12:00');
+    const prox = [{ q: _dmtIso(2, 19), t: 'Encontro do Ciclo 1 — Redação' }][0];
+    const avisos = [
+      { titulo: 'Encontro ao vivo do Ciclo 1', texto: 'Nesta quinta, às 19h, correção comentada da redação e dúvidas do ciclo 1.', fix: true },
+      { titulo: 'Gabarito da semana liberado', texto: 'Gabarito comentado de Política Internacional já está na sua trilha.', fix: false },
+    ];
+    const icU = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" width="18" height="18"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>';
+    const icV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" width="18" height="18"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>';
+    const estLbl = { lib: 'liberado', ag: 'agendado', fech: 'em breve' };
+    const trilha = _dmtTrilha(idx).map(m => {
+      const libs = m.itens.filter(x => x.e === 'lib').length;
+      const pct = Math.round(libs / m.itens.length * 100);
+      const itens = m.itens.map(x => {
+        const q = x.e === 'lib' ? '' : x.e === 'ag' ? ` · ${fmtDate(_dmtIso(x.q, 19))}` : '';
+        return `<div class="mta-item ${x.e === 'fech' ? 'fech' : ''}"><span class="mta-ic">${x.k === 'v' ? icV : icU}</span><span class="mta-it-t">${x.k === 'v' ? 'Vídeo · ' : ''}${esc(x.t)}</span><span class="mta-est ${x.e}">${estLbl[x.e]}${q}</span></div>`;
+      }).join('');
+      return `<div class="mta-mat"><div class="mta-mat-h"><span class="mta-sig">${esc(m.sigla)}</span><span class="mta-mat-n">${esc(m.nome)}</span>${m.upgrade ? '<span class="mta-up">upgrade ✦</span>' : ''}<span class="mta-ciclo">Ciclo ${m.ciclo}</span></div><div class="mta-prog"><span style="width:${pct}%"></span></div>${itens}</div>`;
+    }).join('');
+    let ov = document.getElementById('mtAlunoPreview');
+    if(!ov){
+      ov = document.createElement('div'); ov.className = 'modal-backdrop'; ov.id = 'mtAlunoPreview';
+      ov.innerHTML = '<div class="modal"><div class="modal-header"><h3 style="margin:0;font-family:var(--serif);font-weight:400">Área do Aluno · prévia</h3><button class="modal-close" id="mtAlunoPreviewClose" type="button">×</button></div><div class="modal-body" id="mtAlunoPreviewBody" style="max-height:78vh;overflow-y:auto"></div></div>';
+      document.body.appendChild(ov);
+      const close = () => ov.classList.remove('active');
+      ov.addEventListener('click', e => { if(e.target === ov) close(); });
+      ov.querySelector('#mtAlunoPreviewClose').addEventListener('click', close);
+    }
+    ov.querySelector('#mtAlunoPreviewBody').innerHTML = `
+      <div class="mta-head">
+        <div>
+          <div class="mta-label">Área do Aluno · Mentoria</div>
+          <div class="mta-turma">${esc(t.nome)}</div>
+          <div class="mta-mentor"><span class="mta-av">${esc(ini)}</span> Mentor: <strong style="color:var(--text)">${esc(mentor)}</strong></div>
+        </div>
+        <span class="mta-per">${esc(per)}</span>
+      </div>
+      <div class="mta-enc">
+        <div><div class="mta-label" style="color:var(--text-mute)">Próximo encontro ao vivo</div><div class="mta-enc-t">${esc(prox.t)}</div><div class="mta-enc-d">${esc(fmtDateTime(prox.q))}</div></div>
+        <a class="btn" href="${esc(t.link)}" target="_blank" rel="noopener">Entrar na sala</a>
+      </div>
+      <div class="mta-sec">Avisos do mentor</div>
+      <div class="mta-avisos">${avisos.map(a => `<div class="mta-aviso ${a.fix ? 'fix' : ''}"><div class="mta-aviso-top"><strong>${esc(a.titulo)}</strong>${a.fix ? '<span class="mta-pin">fixado</span>' : ''}</div><div class="mta-aviso-tx">${esc(a.texto)}</div></div>`).join('')}</div>
+      <div class="mta-sec">Sua trilha</div>
+      ${trilha}
+      <div class="mta-foot">É isto que o aluno vê ao entrar na turma: os encontros, os avisos do mentor e a trilha com o que já foi liberado, o que está agendado e o que vem a seguir. O mentor libera módulos, capítulos, unidades ou vídeos — na hora ou com data marcada.</div>`;
+    ov.classList.add('active');
+  }
+
+  // Botões "Ver como aluno" (só no demo): cabeçalho da lista, cada turma e o topo da turma aberta.
+  function _dmtEnhanceLista(){
+    if(!window._demoActive) return;
+    // CTA no cabeçalho, ao lado de "Nova turma"
+    const nova = document.getElementById('mentoriaNovaTurmaBtn');
+    if(nova && nova.parentElement && !document.getElementById('mentoriaVerAlunoBtn') && MT.turmas.length){
+      const b = document.createElement('button');
+      b.className = 'btn'; b.id = 'mentoriaVerAlunoBtn'; b.textContent = '◈ Ver área do aluno';
+      b.dataset.dmtPreview = MT.turmas[0].id;
+      nova.parentElement.insertBefore(b, nova);
+    }
+    // botão por turma, ao lado de "abrir"
+    document.querySelectorAll('#mentoriaLista [data-mt-abrir]').forEach(ab => {
+      if(ab.parentElement.querySelector('[data-dmt-preview]')) return;
+      const b = document.createElement('button');
+      b.className = 'btn btn-ghost btn-sm dmt-row-btn'; b.textContent = 'ver como aluno';
+      b.dataset.dmtPreview = ab.dataset.mtAbrir;
+      ab.parentElement.appendChild(b);
+    });
+  }
+  // delegação única pros cliques de preview
+  document.addEventListener('click', e => {
+    const b = e.target.closest && e.target.closest('[data-dmt-preview]');
+    if(b){ e.preventDefault(); _dmtPreview(b.dataset.dmtPreview); }
+  });
+  // injeta os botões logo após cada render da lista de mentoria
+  function _dmtLimparBotoes(){ ['mentoriaVerAlunoBtn', 'mentoriaVerAlunoTopo'].forEach(id => document.getElementById(id)?.remove()); }
+  (function _dmtHookRender(){
+    const _origRM = renderMentoria;
+    renderMentoria = function(){ _origRM.apply(this, arguments); if(window._demoActive) _dmtEnhanceLista(); else _dmtLimparBotoes(); };
+    const _origRT = _mtRenderTurma;
+    _mtRenderTurma = function(){
+      _origRT.apply(this, arguments);
+      if(!window._demoActive){ document.getElementById('mentoriaVerAlunoTopo')?.remove(); }
+      if(window._demoActive && MT.turmaId && String(MT.turmaId).indexOf('demo-mt-') === 0){
+        const topo = document.getElementById('mentoriaEditarTurmaBtn');
+        if(topo && topo.parentElement && !document.getElementById('mentoriaVerAlunoTopo')){
+          const b = document.createElement('button');
+          b.className = 'btn'; b.id = 'mentoriaVerAlunoTopo'; b.textContent = '◈ Ver como aluno';
+          b.dataset.dmtPreview = MT.turmaId;
+          topo.parentElement.appendChild(b);
+        }
+      }
+    };
   })();
 
   // ═══════════════════════════════════════════════════════════
