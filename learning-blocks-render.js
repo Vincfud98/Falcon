@@ -1881,6 +1881,262 @@
     }
   };
 
+  /* ─────────── Fórmulas em LaTeX no texto ($...$ e $$...$$, como no AI Studio) ─────────── */
+  // ── Núcleo sem DOM (o mesmo texto vai para a função do servidor gerar-leitura) ──
+  // Divide um texto em pedaços { t: texto } ou { tex, display, fonte }.
+  // Regras: \$ é cifrão de verdade; $$...$$ e \[...\] ficam sozinhas; $...$ e \(...\) no meio da
+  // frase. "R$ 10" continua dinheiro: o $ só abre fórmula se não vier depois de letra, número ou
+  // barra e se vier colado no que segue; o de fechamento vem colado no que antecede e não antes
+  // de número (assim "custa $5 e $10" também não vira fórmula).
+  function _fmAlnum(c){ return !!c && /[0-9A-Za-zÀ-ÿ]/.test(c); }
+  function _fmEspaco(c){ return !c || /\s/.test(c); }
+  function fmPartes(s){
+    s = String(s == null ? '' : s);
+    const out = []; let buf = '', i = 0;
+    const n = s.length;
+    const solta = function(){ if(buf){ out.push({ t: buf }); buf = ''; } };
+    const poe = function(tex, display, fonte){ solta(); out.push({ tex: tex.trim(), display: display, fonte: fonte }); };
+    while(i < n){
+      const c = s[i];
+      if(c === '\\' && s[i + 1] === '$'){ buf += '$'; i += 2; continue; }
+      if(c === '\\' && (s[i + 1] === '(' || s[i + 1] === '[')){
+        const fecha = s[i + 1] === '(' ? '\\)' : '\\]';
+        const j = s.indexOf(fecha, i + 2);
+        if(j > i + 2 && s.slice(i + 2, j).trim()){ poe(s.slice(i + 2, j), s[i + 1] === '[', s.slice(i, j + 2)); i = j + 2; continue; }
+        buf += c; i++; continue;
+      }
+      if(c === '$'){
+        const ant = i > 0 ? s[i - 1] : '';
+        if(s[i + 1] === '$'){
+          if(!_fmAlnum(ant) && ant !== '\\'){
+            const j = s.indexOf('$$', i + 2);
+            if(j > i + 2 && s.slice(i + 2, j).trim()){ poe(s.slice(i + 2, j), true, s.slice(i, j + 2)); i = j + 2; continue; }
+          }
+          buf += '$$'; i += 2; continue;
+        }
+        const prox = s[i + 1];
+        if(!_fmAlnum(ant) && ant !== '\\' && prox && !_fmEspaco(prox)){
+          let j = i + 1, achou = -1;
+          while(j < n && j - i <= 800){
+            j = s.indexOf('$', j);
+            if(j < 0) break;
+            if(s[j - 1] === '\\'){ j++; continue; }                  // \$ dentro da fórmula
+            if(s[j + 1] === '$'){ j += 2; continue; }                 // $$ não fecha fórmula do meio da frase
+            if(!_fmEspaco(s[j - 1]) && !/[0-9]/.test(s[j + 1] || '')){ achou = j; break; }
+            j++;
+          }
+          // fórmula do meio da frase não tem outro $ solto dentro nem parágrafo em branco
+          const miolo = achou > i + 1 ? s.slice(i + 1, achou) : '';
+          if(miolo && miolo.indexOf('\n\n') < 0 && !/(^|[^\\])\$/.test(miolo)){ poe(miolo, false, s.slice(i, achou + 1)); i = achou + 1; continue; }
+        }
+        buf += c; i++; continue;
+      }
+      buf += c; i++;
+    }
+    solta();
+    return out;
+  }
+  function fmTem(s){ s = String(s || ''); return /\$|\\\(|\\\[/.test(s) && fmPartes(s).some(function(p){ return p.tex; }); }
+
+  // A fórmula em voz alta, em português: "\frac{\Delta K}{\Delta L}" → "delta K sobre delta L".
+  const _FM_GREGO = { alpha:'alfa', beta:'beta', gamma:'gama', Gamma:'gama', delta:'delta', Delta:'delta', epsilon:'épsilon', varepsilon:'épsilon', zeta:'zeta', eta:'eta', theta:'teta', Theta:'teta', vartheta:'teta', iota:'iota', kappa:'capa', lambda:'lambda', Lambda:'lambda', mu:'mi', nu:'ni', xi:'csi', Xi:'csi', pi:'pi', Pi:'pi', rho:'rô', sigma:'sigma', Sigma:'somatório', tau:'tau', upsilon:'úpsilon', phi:'fi', varphi:'fi', Phi:'fi', chi:'qui', psi:'psi', Psi:'psi', omega:'ômega', Omega:'ômega' };
+  const _FM_CMD = { times:'vezes', cdot:'vezes', div:'dividido por', pm:'mais ou menos', mp:'menos ou mais', leq:'menor ou igual a', le:'menor ou igual a', leqslant:'menor ou igual a', geq:'maior ou igual a', ge:'maior ou igual a', geqslant:'maior ou igual a', neq:'diferente de', ne:'diferente de', approx:'aproximadamente', equiv:'equivale a', sim:'aproximadamente', propto:'proporcional a', infty:'infinito', to:'tende a', rightarrow:'leva a', longrightarrow:'leva a', Rightarrow:'implica', Longrightarrow:'implica', implies:'implica', leftarrow:'vem de', Leftarrow:'decorre de', leftrightarrow:'equivale a', Leftrightarrow:'se e somente se', iff:'se e somente se', uparrow:'sobe', downarrow:'cai', partial:'derivada parcial de', nabla:'gradiente de', sum:'somatório de', prod:'produtório de', int:'integral de', lim:'limite de', log:'log de', ln:'logaritmo natural de', exp:'exponencial de', max:'máximo de', min:'mínimo de', in:'pertence a', notin:'não pertence a', cup:'união', cap:'interseção', subset:'contido em', subseteq:'contido em', forall:'para todo', exists:'existe', ldots:'e assim por diante', cdots:'e assim por diante', dots:'e assim por diante', prime:'linha', circ:'graus', degree:'graus', '%':'por cento', '$':'cifrão', '&':'e', '#':'número', '_':' ', ',':' ', ';':' ', ':':' ', '!':'', ' ':' ', quad:' ', qquad:' ', left:'', right:'', big:'', Big:'', bigg:'', Bigg:'', bigl:'', bigr:'', displaystyle:'', textstyle:'', limits:'' };
+  const _FM_TEXTO = { text:1, mathrm:1, textrm:1, textbf:1, mathbf:1, textit:1, mathit:1, mathsf:1, mathtt:1, operatorname:1, mbox:1, boldsymbol:1, mathcal:1, mathbb:1, bar:1, overline:1, hat:1, widehat:1, tilde:1, vec:1, dot:1, ddot:1, underline:1 };
+  const _FM_SINAL = { '=':'igual a', '+':'mais', '-':'menos', '<':'menor que', '>':'maior que', '/':'sobre', '*':'vezes', '→':'leva a', '⇒':'implica', '≤':'menor ou igual a', '≥':'maior ou igual a', '≠':'diferente de', '×':'vezes', '·':'vezes', "'":'linha', '|':'', '&':',', '~':' ' };
+  function fmFalado(tex){
+    const s = String(tex == null ? '' : tex);
+    let i = 0;
+    const grupo = function(){              // lê um argumento: {…}, um comando ou um caractere
+      while(s[i] === ' ') i++;
+      if(s[i] === '{'){
+        let nivel = 1, j = i + 1;
+        while(j < s.length && nivel){ if(s[j] === '{') nivel++; else if(s[j] === '}') nivel--; j++; }
+        const dentro = s.slice(i + 1, j - 1); i = j;
+        return fmFalado(dentro);
+      }
+      if(s[i] === '\\'){ const m = /^\\([A-Za-z]+|.)/.exec(s.slice(i)); i += m ? m[0].length : 1; return m ? palavra(m[1]) : ''; }
+      const c = s[i++] || '';
+      return _FM_SINAL[c] != null ? _FM_SINAL[c] : c;
+    };
+    const opcional = function(){           // [n] de \sqrt[n]{x}
+      if(s[i] !== '[') return '';
+      const j = s.indexOf(']', i); if(j < 0) return '';
+      const v = fmFalado(s.slice(i + 1, j)); i = j + 1; return v;
+    };
+    const palavra = function(cmd){
+      if(cmd === 'frac' || cmd === 'dfrac' || cmd === 'tfrac' || cmd === 'cfrac'){
+        const a = grupo().trim(), b = grupo().trim();
+        const longo = function(x){ return / sobre |, /.test(x) || x.split(' ').length > 3; };
+        return (longo(a) || longo(b)) ? ('a razão entre ' + a + ', e ' + b) : (a + ' sobre ' + b);
+      }
+      if(cmd === 'sqrt'){ const n = opcional(); const x = grupo(); return n ? ('raiz de índice ' + n + ' de ' + x) : ('raiz quadrada de ' + x); }
+      if(_FM_TEXTO[cmd]) return grupo();
+      if(_FM_GREGO[cmd]) return _FM_GREGO[cmd];
+      if(_FM_CMD[cmd] != null) return _FM_CMD[cmd];
+      if(cmd === '\\') return ',';
+      return /^[A-Za-z]+$/.test(cmd) ? cmd : '';
+    };
+    let out = '';
+    while(i < s.length){
+      const c = s[i];
+      if(c === '\\'){ const m = /^\\([A-Za-z]+|.)/.exec(s.slice(i)); i += m ? m[0].length : 1; if(m) out += ' ' + palavra(m[1]) + ' '; continue; }
+      if(c === '^'){
+        i++; while(s[i] === ' ') i++;
+        if(s[i] === '*'){ i++; out += ' estrela '; continue; }            // P^* : o ponto ótimo
+        const e = grupo().trim();
+        out += e === '2' ? ' ao quadrado ' : e === '3' ? ' ao cubo ' : (e === 'linha' ? ' linha ' : ' elevado a ' + e + ' ');
+        continue;
+      }
+      if(c === '_'){ i++; out += ' ' + grupo() + ' '; continue; }
+      if(c === '{'){ out += ' ' + grupo() + ' '; continue; }
+      if(c === '}'){ i++; continue; }
+      if(c === '(' || c === ')' || c === '[' || c === ']'){ out += ', '; i++; continue; }
+      if(_FM_SINAL[c] != null){ out += ' ' + _FM_SINAL[c] + ' '; i++; continue; }
+      out += c; i++;
+    }
+    return out.replace(/\s*,\s*(,\s*)+/g, ', ').replace(/\s+/g, ' ').replace(/ a a razão/g, ' à razão').replace(/\s+([,.;:])/g, '$1').replace(/^[\s,]+|[\s,]+$/g, '');
+  }
+  // O texto para ouvir: cada fórmula vira a sua fala; o resto fica igual (texto sem fórmula volta idêntico).
+  function fmParaLeitura(s){
+    s = String(s == null ? '' : s);
+    if(!/\$|\\\(|\\\[/.test(s)) return s;
+    return fmPartes(s).map(function(p){ return p.tex ? (p.display ? ' ' + fmFalado(p.tex) + '. ' : fmFalado(p.tex)) : p.t; }).join('');
+  }
+
+  // ── Desenho (KaTeX) e o que a página precisa ──
+  // Cada fórmula vira uma peça fechada: <span class="ubq-math" data-tex data-display> com o desenho
+  // numa shadow root. O texto de dentro da shadow root não entra no texto do parágrafo, então os
+  // grifos e as notas (ancorados pela posição das letras) não se deslocam, um grifo por cima marca
+  // a fórmula inteira e a busca de texto não tropeça no desenho. Copiar devolve o LaTeX.
+  // O KaTeX só é baixado quando aparece fórmula na tela (fica guardado para o modo offline).
+  const UbqMath = (function(){
+    const BASE = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/';
+    const PULA = { SCRIPT: 1, STYLE: 1, TEXTAREA: 1, INPUT: 1, SELECT: 1, OPTION: 1, CODE: 1, PRE: 1, KBD: 1, SAMP: 1, BUTTON: 1 };
+    let _prom = null, _css = '';
+    const _esperando = new Set();
+    function _esc(s){ return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    // CSS do KaTeX com o endereço das fontes completo: vai como <style> dentro de cada peça (sem
+    // piscar) e uma vez no documento (as fontes só valem declaradas no documento).
+    function carregar(){
+      if(_prom) return _prom;
+      _prom = new Promise(function(resolve, reject){
+        const css = fetch(BASE + 'katex.min.css').then(function(r){ return r.text(); }).then(function(t){
+          _css = t.replace(/url\((['"]?)fonts\//g, 'url($1' + BASE + 'fonts/');
+          const st = document.createElement('style'); st.id = 'ubqKatexCss'; st.textContent = _css;
+          document.head.appendChild(st);
+        });
+        const js = window.katex ? Promise.resolve() : new Promise(function(ok, falha){
+          const sc = document.createElement('script');
+          sc.src = BASE + 'katex.min.js'; sc.crossOrigin = 'anonymous';
+          sc.onload = ok; sc.onerror = falha;
+          document.head.appendChild(sc);
+        });
+        Promise.all([css, js]).then(function(){
+          resolve(window.katex);
+          _esperando.forEach(function(el){ if(el.isConnected) _pinta(el); });
+          _esperando.clear();
+        }, function(e){ _prom = null; reject(e); });
+      });
+      return _prom;
+    }
+    function html(tex, display){
+      try{
+        return window.katex.renderToString(String(tex), { displayMode: !!display, throwOnError: false, errorColor: '#e87878', output: 'htmlAndMathml', strict: 'ignore', trust: false });
+      }catch(e){ return '<span style="color:#e87878">' + _esc(tex) + '</span>'; }
+    }
+    // As fórmulas com erro de LaTeX (para o aviso do editor). Vazio se tudo certo ou se o KaTeX não chegou.
+    function erros(texto){
+      if(!window.katex) return [];
+      return fmPartes(texto).filter(function(p){ return p.tex; }).map(function(p){
+        try{ window.katex.renderToString(p.tex, { displayMode: p.display, throwOnError: true, strict: 'ignore' }); return null; }
+        catch(e){ return { fonte: p.fonte, msg: String(e && e.message || e).replace(/^KaTeX parse error:\s*/, '') }; }
+      }).filter(Boolean);
+    }
+    function _pinta(el){
+      const sr = el.shadowRoot; if(!sr) return;
+      const disp = el.getAttribute('data-display') === '1';
+      const base = ':host{' + (disp ? 'display:block;margin:.7em 0;text-align:center;overflow-x:auto;overflow-y:hidden;' : 'display:inline;') + '}' +
+        '.katex{font-size:1.1em}.katex-display{margin:0}.pend{opacity:0}';
+      if(window.katex && _css){
+        sr.innerHTML = '<style>' + _css + base + '</style>' + html(el.getAttribute('data-tex'), disp);
+      } else {
+        sr.innerHTML = '<style>' + base + '</style><span class="pend">' + _esc(el.getAttribute('data-tex')) + '</span>';
+        _esperando.add(el);
+        carregar().catch(function(){ sr.innerHTML = '<style>' + base + '</style><span>' + _esc(el.getAttribute('data-tex')) + '</span>'; });
+      }
+    }
+    function _peca(p){
+      const el = document.createElement('span');
+      el.className = 'ubq-math';
+      el.setAttribute('data-tex', p.tex);
+      el.setAttribute('data-display', p.display ? '1' : '0');
+      el.setAttribute('role', 'math');
+      el.setAttribute('aria-label', fmFalado(p.tex));
+      el.setAttribute('contenteditable', 'false');
+      if(el.attachShadow){ el.attachShadow({ mode: 'open' }); _pinta(el); }
+      else el.textContent = p.fonte;
+      return el;
+    }
+    // Troca as fórmulas escritas no texto de `raiz` pelas peças desenhadas. Pula campos de
+    // formulário, código, botões, áreas editáveis e o que já virou fórmula. Devolve quantas trocou.
+    function renderEm(raiz){
+      if(!raiz || !raiz.ownerDocument) return 0;
+      const todo = raiz.textContent || '';
+      if(todo.indexOf('$') < 0 && todo.indexOf('\\(') < 0 && todo.indexOf('\\[') < 0) return 0;
+      const nos = [];
+      const w = document.createTreeWalker(raiz, NodeFilter.SHOW_TEXT, { acceptNode: function(no){
+        for(let p = no.parentElement; p; p = p.parentElement){
+          if(PULA[p.tagName] || p.classList.contains('ubq-math') || p.getAttribute('contenteditable') === 'true') return NodeFilter.FILTER_REJECT;
+          if(p === raiz) break;
+        }
+        return /\$|\\\(|\\\[/.test(no.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+      } });
+      for(let no = w.nextNode(); no; no = w.nextNode()) nos.push(no);
+      let n = 0;
+      nos.forEach(function(no){
+        const ps = fmPartes(no.nodeValue);
+        if(!ps.some(function(p){ return p.tex; })){
+          // só "\$": vira um cifrão de verdade
+          const limpo = ps.map(function(p){ return p.t; }).join('');
+          if(limpo !== no.nodeValue) no.nodeValue = limpo;
+          return;
+        }
+        const frag = document.createDocumentFragment();
+        ps.forEach(function(p){ if(p.tex){ frag.appendChild(_peca(p)); n++; } else frag.appendChild(document.createTextNode(p.t)); });
+        no.parentNode.replaceChild(frag, no);
+      });
+      return n;
+    }
+    // Para documentos que serão salvos ou impressos (o "Compilar texto"): o desenho vai também para
+    // dentro da peça, que é o que sai no HTML (a shadow root não vai). Chamar com o KaTeX carregado.
+    function achatar(raiz){
+      if(!raiz || !window.katex) return;
+      raiz.querySelectorAll('.ubq-math').forEach(function(el){ el.innerHTML = html(el.getAttribute('data-tex'), el.getAttribute('data-display') === '1'); });
+    }
+    function cssDocumento(){ return _css; }
+    // Copiar um trecho com fórmula leva o LaTeX ($...$), não o desenho nem um buraco.
+    if(typeof document !== 'undefined'){
+      document.addEventListener('copy', function(e){
+        try{
+          const sel = window.getSelection();
+          if(!sel || sel.isCollapsed || !sel.rangeCount || !e.clipboardData) return;
+          const frag = sel.getRangeAt(0).cloneContents();
+          if(!frag.querySelector || !frag.querySelector('.ubq-math')) return;
+          frag.querySelectorAll('.ubq-math').forEach(function(m){
+            const t = m.getAttribute('data-tex') || '';
+            m.replaceWith(document.createTextNode(m.getAttribute('data-display') === '1' ? '$$' + t + '$$' : '$' + t + '$'));
+          });
+          const div = document.createElement('div'); div.appendChild(frag);
+          e.clipboardData.setData('text/plain', div.textContent);
+          e.clipboardData.setData('text/html', div.innerHTML);
+          e.preventDefault();
+        }catch(_){ }
+      });
+    }
+    return { partes: fmPartes, tem: fmTem, falado: fmFalado, paraLeitura: fmParaLeitura, carregar: carregar, renderEm: renderEm, achatar: achatar, html: html, erros: erros, cssDocumento: cssDocumento };
+  })();
+  global.UbqMath = UbqMath;
+
   /* ─────────── export ─────────── */
   global.LearningBlocks = {
     render:              renderLearningBlock,
