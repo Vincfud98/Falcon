@@ -2004,14 +2004,15 @@
   }
 
   // ── Desenho (KaTeX) e o que a página precisa ──
-  // Cada fórmula vira uma peça fechada: <span class="ubq-math" data-tex data-display> com o desenho
-  // numa shadow root. O texto de dentro da shadow root não entra no texto do parágrafo, então os
-  // grifos e as notas (ancorados pela posição das letras) não se deslocam, um grifo por cima marca
-  // a fórmula inteira e a busca de texto não tropeça no desenho. Copiar devolve o LaTeX.
+  // Cada fórmula vira uma peça fechada: <span class="ubq-math" data-tex data-display> cujo TEXTO é a
+  // própria fonte ($x^2$) e cujo desenho fica numa shadow root. O texto do parágrafo é o mesmo com
+  // e sem desenho, então grifos e notas (ancorados pela posição das letras) não se deslocam, o tutor
+  // e a busca continuam lendo a fórmula como LaTeX, um grifo por cima pega a peça inteira e copiar
+  // devolve o LaTeX. A fonte fica num <slot> invisível (recortado, não escondido: o innerText a vê).
   // O KaTeX só é baixado quando aparece fórmula na tela (fica guardado para o modo offline).
   const UbqMath = (function(){
     const BASE = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/';
-    const PULA = { SCRIPT: 1, STYLE: 1, TEXTAREA: 1, INPUT: 1, SELECT: 1, OPTION: 1, CODE: 1, PRE: 1, KBD: 1, SAMP: 1, BUTTON: 1 };
+    const PULA = { SCRIPT: 1, STYLE: 1, TEXTAREA: 1, INPUT: 1, SELECT: 1, OPTION: 1, CODE: 1, PRE: 1, KBD: 1, SAMP: 1, NOSCRIPT: 1 };
     let _prom = null, _css = '';
     const _esperando = new Set();
     function _esc(s){ return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -2056,13 +2057,15 @@
       const sr = el.shadowRoot; if(!sr) return;
       const disp = el.getAttribute('data-display') === '1';
       const base = ':host{' + (disp ? 'display:block;margin:.7em 0;text-align:center;overflow-x:auto;overflow-y:hidden;' : 'display:inline;') + '}' +
-        '.katex{font-size:1.1em}.katex-display{margin:0}.pend{opacity:0}';
+        '.katex{font-size:1.1em}.katex-display{margin:0}.pend{opacity:0}' +
+        '.src{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}';
+      const fonte = '<span class="src" aria-hidden="true"><slot></slot></span>';   // a fonte ($x$) continua no texto
       if(window.katex && _css){
-        sr.innerHTML = '<style>' + _css + base + '</style>' + html(el.getAttribute('data-tex'), disp);
+        sr.innerHTML = '<style>' + _css + base + '</style>' + html(el.getAttribute('data-tex'), disp) + fonte;
       } else {
-        sr.innerHTML = '<style>' + base + '</style><span class="pend">' + _esc(el.getAttribute('data-tex')) + '</span>';
+        sr.innerHTML = '<style>' + base + '</style><span class="pend">' + _esc(el.getAttribute('data-tex')) + '</span>' + fonte;
         _esperando.add(el);
-        carregar().catch(function(){ sr.innerHTML = '<style>' + base + '</style><span>' + _esc(el.getAttribute('data-tex')) + '</span>'; });
+        carregar().catch(function(){ sr.innerHTML = '<style>' + base + '</style><span>' + _esc(el.getAttribute('data-tex')) + '</span>' + fonte; });
       }
     }
     function _peca(p){
@@ -2073,39 +2076,103 @@
       el.setAttribute('role', 'math');
       el.setAttribute('aria-label', fmFalado(p.tex));
       el.setAttribute('contenteditable', 'false');
+      el.textContent = p.fonte;
       if(el.attachShadow){ el.attachShadow({ mode: 'open' }); _pinta(el); }
-      else el.textContent = p.fonte;
       return el;
     }
+    function _naEdicao(no){ for(let p = no && (no.nodeType === 1 ? no : no.parentElement); p; p = p.parentElement){ if(p.getAttribute('contenteditable') === 'true') return true; } return false; }
     // Troca as fórmulas escritas no texto de `raiz` pelas peças desenhadas. Pula campos de
-    // formulário, código, botões, áreas editáveis e o que já virou fórmula. Devolve quantas trocou.
-    function renderEm(raiz){
+    // formulário, código e o que já virou fórmula. Áreas editáveis (o caderno) só com
+    // { editavel: true }: aí a fórmula onde está o cursor fica como texto até o cursor sair dela,
+    // e o cursor é devolvido no mesmo lugar (depois da peça, se estava logo depois da fórmula).
+    // Peças que chegaram sem desenho (HTML salvo, copiado) ganham o desenho. Devolve quantas trocou.
+    function renderEm(raiz, opc){
+      opc = opc || {};
       if(!raiz || !raiz.ownerDocument) return 0;
+      if(!opc.editavel && _naEdicao(raiz)) return 0;
+      raiz.querySelectorAll && raiz.querySelectorAll('.ubq-math').forEach(function(el){
+        if(!el.shadowRoot && el.attachShadow){ el.attachShadow({ mode: 'open' }); _pinta(el); }
+      });
       const todo = raiz.textContent || '';
       if(todo.indexOf('$') < 0 && todo.indexOf('\\(') < 0 && todo.indexOf('\\[') < 0) return 0;
       const nos = [];
       const w = document.createTreeWalker(raiz, NodeFilter.SHOW_TEXT, { acceptNode: function(no){
         for(let p = no.parentElement; p; p = p.parentElement){
-          if(PULA[p.tagName] || p.classList.contains('ubq-math') || p.getAttribute('contenteditable') === 'true') return NodeFilter.FILTER_REJECT;
+          if(PULA[p.tagName] || p.classList.contains('ubq-math')) return NodeFilter.FILTER_REJECT;
+          if(!opc.editavel && p.getAttribute('contenteditable') === 'true') return NodeFilter.FILTER_REJECT;
           if(p === raiz) break;
         }
         return /\$|\\\(|\\\[/.test(no.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       } });
       for(let no = w.nextNode(); no; no = w.nextNode()) nos.push(no);
+      // cursor (só no modo editável): o nó e a posição dele, para não desenhar a fórmula em edição
+      let cNo = null, cOff = -1;
+      if(opc.editavel){
+        const sel = window.getSelection && window.getSelection();
+        if(sel && sel.rangeCount && sel.isCollapsed && sel.anchorNode && sel.anchorNode.nodeType === 3){ cNo = sel.anchorNode; cOff = sel.anchorOffset; }
+      }
       let n = 0;
       nos.forEach(function(no){
         const ps = fmPartes(no.nodeValue);
         if(!ps.some(function(p){ return p.tex; })){
+          if(opc.editavel) return;   // no caderno, "\$" fica como o aluno escreveu
           // só "\$": vira um cifrão de verdade
           const limpo = ps.map(function(p){ return p.t; }).join('');
           if(limpo !== no.nodeValue) no.nodeValue = limpo;
           return;
         }
         const frag = document.createDocumentFragment();
-        ps.forEach(function(p){ if(p.tex){ frag.appendChild(_peca(p)); n++; } else frag.appendChild(document.createTextNode(p.t)); });
+        let pos = 0, novoCursor = null;
+        ps.forEach(function(p){
+          const txt = p.tex ? p.fonte : p.t, ini = pos, fim = pos + txt.length; pos = fim;
+          const temCursor = no === cNo && cOff > ini && cOff < fim;          // cursor DENTRO desta parte
+          if(p.tex && !temCursor){
+            const pc = _peca(p); frag.appendChild(pc); n++;
+            if(no === cNo && cOff === fim) novoCursor = { depois: pc };
+          } else {
+            const t = document.createTextNode(txt); frag.appendChild(t);
+            if(no === cNo && cOff >= ini && cOff <= fim && !novoCursor) novoCursor = { no: t, off: cOff - ini };
+          }
+        });
+        if(no === cNo && !n) return;
         no.parentNode.replaceChild(frag, no);
+        if(novoCursor){
+          try{
+            const r = document.createRange();
+            if(novoCursor.depois) r.setStartAfter(novoCursor.depois); else r.setStart(novoCursor.no, novoCursor.off);
+            r.collapse(true);
+            const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+          }catch(_){ }
+        }
       });
       return n;
+    }
+    // A peça volta a ser texto ($x^2$): para salvar o caderno sempre como o aluno escreveu e para
+    // editar uma fórmula (clique nela). Devolve o nó de texto (do último, se forem várias).
+    function desfazer(raiz){
+      let ultimo = null;
+      if(!raiz) return null;
+      const lista = raiz.classList && raiz.classList.contains('ubq-math') ? [raiz] : Array.prototype.slice.call(raiz.querySelectorAll('.ubq-math'));
+      lista.forEach(function(el){ const t = document.createTextNode(el.textContent || ''); el.replaceWith(t); ultimo = t; });
+      return ultimo;
+    }
+    // Desenha as fórmulas do que for entrando na página (respostas do tutor, comentários, cards,
+    // questões que se redesenham). Áreas editáveis ficam de fora: o caderno cuida das dele.
+    function observar(alvo){
+      if(!alvo || !window.MutationObserver) return;
+      const tem = function(t){ return t && (t.indexOf('$') >= 0 || t.indexOf('\\(') >= 0 || t.indexOf('\\[') >= 0); };
+      new MutationObserver(function(muts){
+        const vistos = new Set();
+        muts.forEach(function(m){
+          m.addedNodes.forEach(function(no){
+            const el = no.nodeType === 1 ? no : (no.nodeType === 3 ? no.parentElement : null);
+            if(!el || vistos.has(el) || (el.classList && el.classList.contains('ubq-math')) || !el.isConnected) return;
+            if(!tem(no.textContent) && !(el.querySelector && el.querySelector('.ubq-math'))) return;
+            vistos.add(el);
+            if(!_naEdicao(el)) renderEm(el);
+          });
+        });
+      }).observe(alvo, { childList: true, subtree: true });
     }
     // Para documentos que serão salvos ou impressos (o "Compilar texto"): o desenho vai também para
     // dentro da peça, que é o que sai no HTML (a shadow root não vai). Chamar com o KaTeX carregado.
@@ -2114,6 +2181,41 @@
       raiz.querySelectorAll('.ubq-math').forEach(function(el){ el.innerHTML = html(el.getAttribute('data-tex'), el.getAttribute('data-display') === '1'); });
     }
     function cssDocumento(){ return _css; }
+    // O manualzinho: como escrever cada tipo de fórmula. Cada item insere o exemplo (data-tex).
+    const GUIA = [
+      ['No meio da frase', '$P_L = 10$', 'Entre cifrões simples, colados no texto. "R$ 10" continua dinheiro.'],
+      ['Sozinha, centralizada', '$$Y = C + I + G$$', 'Entre cifrões duplos.'],
+      ['Fração', '$\\frac{a}{b}$', '\\frac{em cima}{embaixo}'],
+      ['Potência', '$x^{2}$', 'Mais de um caractere no expoente: entre chaves, como x^{n+1}.'],
+      ['Índice (subscrito)', '$P_{L}$', 'Mais de um caractere: entre chaves, como x_{i,t}.'],
+      ['Raiz quadrada', '$\\sqrt{x}$', ''],
+      ['Raiz de outro índice', '$\\sqrt[3]{x}$', ''],
+      ['Variação (delta)', '$\\Delta Q$', '\\Delta maiúsculo; \\delta minúsculo.'],
+      ['Letras gregas', '$\\alpha \\; \\beta \\; \\varepsilon \\; \\pi \\; \\sigma$', '\\alpha, \\beta, \\varepsilon, \\pi, \\sigma, \\lambda, \\theta'],
+      ['Multiplicação', '$a \\times b \\quad a \\cdot b$', ''],
+      ['Comparações', '$x \\leq y \\quad x \\geq y \\quad x \\neq y \\quad x \\approx y$', '\\leq, \\geq, \\neq, \\approx'],
+      ['Setas', '$A \\Rightarrow B \\quad P \\uparrow \\; Q \\downarrow$', '\\Rightarrow (implica), \\rightarrow, \\uparrow, \\downarrow'],
+      ['Somatório', '$\\sum_{i=1}^{n} x_{i}$', ''],
+      ['Derivada', '$\\frac{dY}{dX} \\quad \\frac{\\partial U}{\\partial x}$', '\\partial para derivada parcial'],
+      ['Limite', '$\\lim_{x \\to \\infty} f(x)$', ''],
+      ['Texto dentro', '$\\text{PIB} = C + I + G$', 'Palavras com acento e espaço: \\text{...}'],
+      ['Média (barra) e ótimo (estrela)', '$\\bar{x} \\quad P^{*}$', ''],
+      ['Porcentagem', '$10\\%$', 'O % sozinho apaga o resto: escreva \\%.'],
+      ['Parênteses que crescem', '$\\left( \\frac{a}{b} \\right)$', '\\left( ... \\right)'],
+      ['Exemplo: elasticidade', '$\\varepsilon = \\frac{\\Delta Q / Q}{\\Delta P / P}$', '']
+    ];
+    // HTML do guia (lista de itens com o desenho, a fonte e a dica). Quem abre decide o que o clique
+    // faz com data-tex (inserir no caderno, copiar no admin). Desenhe com renderEm depois de inserir.
+    function guiaHtml(){
+      return GUIA.map(function(g){
+        return '<button type="button" class="ubq-guia-it" data-tex="' + _esc(g[1]) + '">'
+          + '<span class="ubq-guia-t">' + _esc(g[0]) + '</span>'
+          + '<span class="ubq-guia-ex">' + _esc(g[1]) + '</span>'
+          + '<code class="ubq-guia-src">' + _esc(g[1]) + '</code>'
+          + (g[2] ? '<span class="ubq-guia-dica">' + _esc(g[2]) + '</span>' : '')
+          + '</button>';
+      }).join('');
+    }
     // Copiar um trecho com fórmula leva o LaTeX ($...$), não o desenho nem um buraco.
     if(typeof document !== 'undefined'){
       document.addEventListener('copy', function(e){
@@ -2133,7 +2235,7 @@
         }catch(_){ }
       });
     }
-    return { partes: fmPartes, tem: fmTem, falado: fmFalado, paraLeitura: fmParaLeitura, carregar: carregar, renderEm: renderEm, achatar: achatar, html: html, erros: erros, cssDocumento: cssDocumento };
+    return { partes: fmPartes, tem: fmTem, falado: fmFalado, paraLeitura: fmParaLeitura, carregar: carregar, renderEm: renderEm, desfazer: desfazer, observar: observar, achatar: achatar, html: html, erros: erros, cssDocumento: cssDocumento, guia: GUIA, guiaHtml: guiaHtml };
   })();
   global.UbqMath = UbqMath;
 
