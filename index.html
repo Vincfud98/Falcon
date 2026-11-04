@@ -11254,6 +11254,11 @@ a.pr-crumb:hover{color:var(--accent)}
   opacity:0;
 }
 .hl-comp-item:hover .hl-comp-link{opacity:1}
+@media (pointer:coarse){
+  .hl-comp-remove,.hl-comp-link{opacity:1}
+  .hl-comp-veil{background:transparent;color:var(--text)}
+  .notes-tab-bar{overflow-x:auto;flex-wrap:nowrap;-webkit-overflow-scrolling:touch}
+}
 .hl-comp-link:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-glow)}
 
 .note-card{
@@ -18686,9 +18691,15 @@ const Store = (function(){
         .eq('user_id', userId);
       if(error){ console.warn('[hydrate reading_list]', error); return; }
       if(!Array.isArray(_state.readingList)) _state.readingList = [];
+      // A conta prevalece: o que foi tirado em outro aparelho sai daqui. Fica só o que acabou de
+      // entrar neste aparelho (a gravação dele ainda pode estar a caminho).
+      const _antes = _state.readingList.length;
+      const _agora = Date.now();
+      const _naConta = new Set((data || []).map(r => r.unit_id+'::'+r.block_id));
+      _state.readingList = _state.readingList.filter(e => _naConta.has(e.unitId+'::'+e.blockId) || (_agora - (e.addedAt || 0)) < 60000);
       // Merge sem duplicar (chave: unitId+blockId)
       const existing = new Set(_state.readingList.map(e => e.unitId+'::'+e.blockId));
-      let n = 0;
+      let n = _state.readingList.length !== _antes ? 1 : 0;
       (data || []).forEach(row => {
         const key = row.unit_id+'::'+row.block_id;
         if(existing.has(key)) return;
@@ -37734,9 +37745,8 @@ Renderers.glossario.mount = function(stageEl){
   }
   if(clear){
     clear.addEventListener('click', () => {
-      st.q = ''; st.exam = ''; st.subject = ''; st.class = '';
+      st.q = ''; st.subject = ''; st.class = '';   // o concurso é o universo da página: Limpar não o solta
       if(search) search.value = '';
-      if(exam) exam.value = '';
       if(klass) klass.value = '';
       repopulateSubjects();
       refreshBody();
@@ -37828,15 +37838,23 @@ async function _forumResolveAuthors(userIds){
   }
   return _forumAuthorCache;
 }
+// Só as publicações do concurso ativo e as sem concurso: em concurso menos movimentado elas não saem do limite de 300.
+function _forumExamFiltro(){
+  const ex = (typeof activeExamId === 'function') ? activeExamId() : '';
+  return ex ? 'exam_id.eq.' + ex + ',exam_id.is.null' : 'id.not.is.null';
+}
 async function _forumFetchPosts(){
   if(!window._sb) return [];
   try{
     const { data, error } = await window._sb.schema('aluno').from('forum_posts')
       .select('id, user_id, exam_id, subject_id, unit_id, title, subtitle, body, kind, question, created_at, edited_at, restricted, restricted_reason')
-      .is('deleted_at', null).order('created_at', { ascending:false }).limit(300);
-    if(error){ console.warn('[forum fetch]', error.message); return []; }
+      .is('deleted_at', null)
+      .or(_forumExamFiltro())
+      .order('created_at', { ascending:false }).limit(300);
+    if(error){ console.warn('[forum fetch]', error.message); window._forumFalhou = true; return []; }
+    window._forumFalhou = false;
     return data || [];
-  }catch(e){ console.warn('[forum fetch ex]', e); return []; }
+  }catch(e){ console.warn('[forum fetch ex]', e); window._forumFalhou = true; return []; }
 }
 function _forumBodyHTML(text){
   const escd = Util.esc(text||'');
@@ -37942,7 +37960,9 @@ async function _forumLoadComments(postId){
 function _forumCommentsTreeHTML(rows, authors){
   const repliesByParent = {};
   rows.filter(r => r.parent_id).forEach(r => { (repliesByParent[String(r.parent_id)] = repliesByParent[String(r.parent_id)] || []).push(r); });
-  const top = rows.filter(r => !r.parent_id);
+  const _idsVivos = new Set(rows.map(r => String(r.id)));
+  // Resposta cujo comentário foi excluído sobe de nível, com a marca: não some nem deixa o balão mentindo.
+  const top = rows.filter(r => !r.parent_id || !_idsVivos.has(String(r.parent_id)));
   const myUid = _forumMyUid();
   const admin = _forumIsAdmin();
   const one = (c, isReply) => {
@@ -37951,9 +37971,10 @@ function _forumCommentsTreeHTML(rows, authors){
     const handle = a.handle ? '@'+a.handle : '';
     const replies = repliesByParent[String(c.id)] || [];
     const mine = myUid && String(myUid) === String(c.user_id);
+    const _orfa = !isReply && c.parent_id;
     return `<div class="forum-cm${isReply?' is-reply':''}" data-cm="${Util.attr(c.id)}">
       <div class="forum-cm-avatar" data-avatar="${Util.attr(c.user_id)}"></div>
-      <div class="forum-cm-main">
+      <div class="forum-cm-main">${_orfa ? '<div class="forum-cm-excl">Resposta a um comentário excluído</div>' : ''}
         <div class="forum-cm-head"><span class="forum-cm-name">${Util.esc(name)}</span>${handle?`<span class="forum-cm-handle">${Util.esc(handle)}</span>`:''}<span class="forum-cm-when">${Util.esc(_forumWhen(c.created_at))}${c.edited_at?' · editado':''}</span></div>
         <div class="forum-cm-body" data-raw="${Util.attr(c.body||'')}">${_forumBodyHTML(c.body)}</div>
         <div class="forum-cm-acts">
@@ -38114,7 +38135,9 @@ function _forumQuestionHTML(q, comment){
   return `<div class="forum-q">
     ${q.origin ? `<div class="forum-q-origin">${Util.esc(q.origin)}</div>` : ''}
     ${ref}
+    ${q.reference_image ? `<img class="coop-q-ref-img" src="${Util.attr(_safeUrl(q.reference_image))}" alt="" loading="lazy">` : ''}
     <div class="forum-q-statement">${_forumQHtml(q.statement || '')}</div>
+    ${(Array.isArray(q.options) && q.options.length > 2) ? `<ul class="forum-q-opts">${q.options.map(o => `<li>${_forumQHtml(String(o))}</li>`).join('')}</ul>` : ''}
     <div class="forum-spoiler" data-spoiler>
       <div class="forum-spoiler-content">${spoiler}</div>
       <div class="forum-spoiler-hint">Toque para revelar a resposta</div>
@@ -38248,6 +38271,7 @@ function _forumInjectStyles(){
   .forum-q-origin{ font-family:var(--mono); font-size:.6rem; letter-spacing:.1em; text-transform:uppercase; color:var(--text-mute); margin-bottom:.45rem; }
   .forum-q-ref{ font-family:var(--sans); font-size:.84rem; color:var(--text-dim); border-left:2px solid var(--accent-border); padding:.4rem .8rem; margin-bottom:.6rem; }
   .forum-q-statement{ font-family:var(--sans); font-size:.92rem; line-height:1.6; color:var(--text); }
+  .forum-cm-excl{ font-family:var(--sans); font-size:.68rem; font-style:italic; color:var(--text-mute); margin-bottom:.2rem; }
   .forum-q-opts{ list-style:none; padding:0; margin:.7rem 0 0; display:flex; flex-direction:column; gap:.4rem; }
   .forum-q-opts li{ font-family:var(--sans); font-size:.86rem; color:var(--text-dim); padding:.45rem .75rem; border:1px solid var(--accent-border-soft); border-radius:var(--radius,4px); }
   .forum-q-gab{ font-family:var(--sans); font-size:.88rem; color:var(--text); margin-bottom:.4rem; }
@@ -38391,7 +38415,7 @@ const ForumCompose = (function(){
       try{
         const map = await _forumLoadPolls([post.id], _forumMyUid());
         const poll = map[String(post.id)];
-        if(poll){ _editPollId = poll.id; _editPollOrigOptIds = poll.options.map(o => o.id); el._loadPoll(poll); if(pt) pt.style.display = ''; }
+        if(poll){ _editPollId = poll.pollId; _editPollOrigOptIds = poll.options.map(o => o.id); el._loadPoll(poll); if(pt) pt.style.display = ''; }
       }catch(_){}
     }
   }
@@ -38513,7 +38537,7 @@ Renderers.forum.mount = function(stageEl, route){
   async function _renderList(posts){
     if(!posts.length){
       const filtered = subjSel.value || unitSel.value;
-      listEl.innerHTML = `<p class="forum-empty">${filtered ? 'Nenhuma publicação com esse filtro.' : 'Nenhuma publicação ainda. Seja o primeiro a publicar!'}</p>`;
+      listEl.innerHTML = `<p class="forum-empty">${window._forumFalhou ? 'Não consegui carregar o Fórum agora. Recarregue a página em instantes.' : (filtered ? 'Nenhuma publicação com esse filtro.' : 'Nenhuma publicação ainda. Seja o primeiro a publicar!')}</p>`;
       countEl.textContent = ''; return;
     }
     countEl.textContent = posts.length + (posts.length===1 ? ' publicação' : ' publicações');
@@ -39044,6 +39068,15 @@ const CoopSessionModal = (function(){
     const panes = tabs.map((t,i) => `<div class="coop-tabpane${i===0?' on':''}" data-coop-pane="${t.key}">${_gabPaneHTML(q, t.key)}</div>`).join('');
     return `<div class="coop-tabs">${btns}</div><div class="coop-tabpanes">${panes}</div>`;
   }
+  // Nota entre 0 e o máximo do campo.
+  function _coopNotaValida(n){
+    const inp = _el.querySelector('#coopGrade'), max = parseFloat(inp && inp.getAttribute('max'));
+    if(n < 0 || (!isNaN(max) && max > 0 && n > max)){
+      if(window.ueToast) window.ueToast('A nota vai de 0 a ' + (isNaN(max) ? '' : max) + '.', 'warn');
+      return false;
+    }
+    return true;
+  }
   function _qHTMLQuiz(q){
     const ref = q.reference_text ? `<div class="coop-q-ref">${_sanitizeInlineHTML(q.reference_text)}</div>` : '';
     const img = q.reference_image ? `<img class="coop-q-ref-img" src="${Util.attr(_safeUrl(q.reference_image))}" alt="" loading="lazy">` : '';
@@ -39223,6 +39256,7 @@ const CoopSessionModal = (function(){
       const gv = _el.querySelector('#coopGrade').value; const grade = parseFloat(gv);
       const comment = (_el.querySelector('#coopComment').value || '').trim();
       if(gv === '' || isNaN(grade)){ if(window.ueToast) window.ueToast('Dê uma nota antes de enviar.', 'warn'); return; }
+      if(!_coopNotaValida(grade)) return;
       gGrade.disabled = true; gGrade.textContent = 'Enviando…';
       const ok = await _coopSubmitGroupCorrection({ grade, comment: comment || null });
       if(!ok){ gGrade.disabled = false; gGrade.textContent = 'Enviar correção'; }
@@ -39232,7 +39266,7 @@ const CoopSessionModal = (function(){
     const gVerdict = e.target.closest('#coopGroupVerdict');
     if(gVerdict){
       const sel = _el.querySelector('#coopVerdict .coop-verdict-btn.on');
-      if(!sel){ if(window.ueToast) window.ueToast('Escolha Correta ou Incorreta.', 'warn'); return; }
+      if(!sel){ if(window.ueToast) window.ueToast('Escolha Sim ou Não.', 'warn'); return; }
       const comment = (_el.querySelector('#coopComment').value || '').trim();
       gVerdict.disabled = true; gVerdict.textContent = 'Enviando…';
       const ok = await _coopSubmitGroupCorrection({ verdict: sel.dataset.verdict, comment: comment || null });
@@ -39246,6 +39280,7 @@ const CoopSessionModal = (function(){
       const grade = parseFloat(gv);
       const comment = (_el.querySelector('#coopComment').value || '').trim();
       if(gv === '' || isNaN(grade)){ if(window.ueToast) window.ueToast('Dê uma nota antes de enviar.', 'warn'); return; }
+      if(!_coopNotaValida(grade)) return;
       send.disabled = true; send.textContent = 'Enviando…';
       try{
         const { error } = await window._sb.schema('aluno').from('coop_sessions')
@@ -39262,7 +39297,7 @@ const CoopSessionModal = (function(){
     const sendQ = e.target.closest('#coopSendVerdict');
     if(sendQ){
       const sel = _el.querySelector('#coopVerdict .coop-verdict-btn.on');
-      if(!sel){ if(window.ueToast) window.ueToast('Escolha Correta ou Incorreta.', 'warn'); return; }
+      if(!sel){ if(window.ueToast) window.ueToast('Escolha Sim ou Não.', 'warn'); return; }
       const verdict = sel.dataset.verdict;
       const comment = (_el.querySelector('#coopComment').value || '').trim();
       sendQ.disabled = true; sendQ.textContent = 'Enviando…';
@@ -39739,7 +39774,7 @@ async function _salasRenderRanking(drawer){
     if(ended && ranking.length && ranking[0].xp > 0){ html += `<div class="srank-winner">Vencedor: ${Util.esc(_coopName(ranking[0].uid))}</div>`; }
     html += `<div class="srank-head">Ranking ${ended ? 'final' : 'até'} <strong>${Util.esc(fmtBR(endStr))}</strong></div>`;
   } else {
-    const periods = [['today','Hoje'],['week','Semana'],['month','Mês'],['year','Ano'],['total','Total']];
+    const periods = [['today','Hoje'],['week','Semana'],['month','Mês'],['year','Ano'],['total','Último ano']];
     html += `<div class="srank-tabs">${periods.map(([k, lbl]) => `<button type="button" class="srank-tab${period === k ? ' on' : ''}" data-rankp="${k}">${lbl}</button>`).join('')}</div>`;
   }
   if(!ranking.length){ pane.innerHTML = html + '<p class="salas-soon">Sem ninguém no ranking ainda.</p>'; return; }
@@ -40184,6 +40219,7 @@ function _salasOpenCreateModal(onDone){
       const name = (el.querySelector('#srName').value || '').trim(); const err = el.querySelector('#srErr');
       if(!name){ err.textContent = 'Dê um nome à sala.'; err.hidden = false; return; }
       const mode = el.querySelector('#srMode').value;
+      if(mode === 'dated' && !el.querySelector('#srDate').value){ err.textContent = 'Escolha a data final da sala.'; err.hidden = false; return; }
       const payload = { name, description:(el.querySelector('#srDesc').value||'').trim(), goal_type: el.querySelector('#srGoalType').value||'questions_per_day', daily_goal: parseInt(el.querySelector('#srGoal').value,10)||0, ranking_mode: mode, end_date: mode==='dated' ? (el.querySelector('#srDate').value||null) : null };
       if(el.querySelector('#srPrenda').checked){
         const tipo = el.querySelector('#srPrTipo').value || 'questoes';
@@ -40421,7 +40457,7 @@ Renderers.salas.mount = function(stageEl){
       <div class="salas-room-head">
         <div><span class="salas-group-eyebrow">${_daTurma ? 'Sala da turma · mentoria' : 'Sala de estudos'}</span><h2 class="salas-room-title">${Util.esc(room.name)}</h2>${room.description?`<p class="salas-room-desc">${Util.esc(room.description)}</p>`:''}</div>
         <div class="salas-room-actions">
-          ${_daTurma ? '' : `<button class="btn-ghost" data-invite="${Util.attr(room.id)}" type="button">Convidar colega</button>`}
+          ${(_daTurma || !isOwner) ? '' : `<button class="btn-ghost" data-invite="${Util.attr(room.id)}" type="button">Convidar colega</button>`}
           ${_daTurma ? '' : (isOwner ? `<button class="btn-ghost" data-del="${Util.attr(room.id)}" type="button">Excluir</button>` : `<button class="btn-ghost" data-leave="${Util.attr(room.id)}" type="button">Sair</button>`)}
           <button class="btn-primary" data-drawer-toggle="1" type="button">Painéis <span class="salas-badge" id="salasPanelBadge" hidden></span></button>
         </div>
@@ -42027,7 +42063,7 @@ window.ProvasPassadasTab = (function(){
   }
   function _ligar(){
     _host.querySelectorAll('[data-dp-lancar]').forEach(b => b.addEventListener('click', () => EP().abrirLancar(b.getAttribute('data-dp-lancar') || null)));
-    _host.querySelectorAll('[data-dp-usar]').forEach(b => b.addEventListener('click', async function(){
+    _host.querySelectorAll('[data-dp-usar]').forEach(b => { if(b.__ligado) return; b.__ligado = true; b.addEventListener('click', async function(){
       const id = b.getAttribute('data-dp-usar'), n = Number(b.getAttribute('data-dp-tent')) || 1;
       b.disabled = true; b.textContent = 'Calculando…';
       try{
@@ -42038,7 +42074,7 @@ window.ProvasPassadasTab = (function(){
       }catch(e){ console.warn('[usar tentativa]', e); }
       b.disabled = false; b.textContent = 'Usar a ' + n + 'ª tentativa como a do dia da prova';
       if(window.ueToast) ueToast('Não foi possível usar a tentativa agora. Tente de novo.', 'error');
-    }));
+    }); });
     const comp = _host.querySelector('[data-dp-comparar]');
     if(comp) comp.addEventListener('click', function(ev){
       const b = ev.target.closest ? ev.target.closest('[data-dp-ed]') : null;
@@ -62362,6 +62398,7 @@ window.TutorIA = (function(){
     const _fo = _exMenu.querySelector('[data-fcia]');
     if(_fo) _fo.addEventListener('click', function(){
       const meta = _exMeta, trecho = _exExcerptFull; _exHide();
+      if(_exExcerptFull.length >= 6500 && window.ueToast) ueToast('Trecho muito longo: os cards saem do começo dele. Para o bloco inteiro, use "Criar flashcards deste bloco".', 'info');
       if(window.FlashcardsIA) FlashcardsIA.abrirPreview({ trecho: trecho, blockId: meta.blockId, unitId: meta.unitId, rect: rect });
     });
     _exMenu.querySelectorAll('.tutor-selopt[data-i]').forEach(function(b){
@@ -69382,7 +69419,8 @@ Renderers.notes = function(route){
   // Enrich with module/unit context
   const hlEnriched = allHighlights.map(h => {
     const enriched = Object.assign({}, h);
-    for(const mod of window.COURSE.modules){
+    for(const mod of (window.COURSES || []).filter(Boolean).flatMap(c => c.modules || [])){
+      if(enriched._moduleId) break;
       for(const e of Util.unitsOfModule(mod)){
         if(e.unit.id === h.unitId){
           enriched._moduleId = mod.id;
@@ -69465,7 +69503,7 @@ Renderers.notes = function(route){
   return `<div class="hero">
     <span class="s-label" data-a="1">Notas e destaques</span>
     <h1 class="s-title hero" data-a="2">Minhas anotações</h1>
-    <p class="s-subtitle" data-a="3">${total - userFlashcards.length} nota${(total-userFlashcards.length)===1?'':'s'} · ${userFlashcards.length} flashcard${userFlashcards.length===1?'':'s'} · ${allHighlights.length} destaque${allHighlights.length===1?'':'s'} · ${cadTotal} caderno${cadTotal===1?'':'s'}</p>
+    <p class="s-subtitle" data-a="3">${total} nota${total===1?'':'s'} · ${userFlashcards.length} flashcard${userFlashcards.length===1?'':'s'} · ${allHighlights.length} destaque${allHighlights.length===1?'':'s'} · ${cadTotal} caderno${cadTotal===1?'':'s'}</p>
     <div class="s-divider" data-a="4"></div>
     <p class="s-body" data-a="5">Suas anotações e trechos destacados do curso em um só lugar.</p>
   </div>
@@ -69505,7 +69543,7 @@ Renderers.notes = function(route){
     </div>
     <button class="fb-clear" id="fbClear">Limpar</button>
     <button class="fb-action-btn" id="notesCompileBtn" ${notes.length?'':'disabled'} title="Compilar as notas filtradas em um documento de estudo">${Icons.download} Compilar para estudo</button>
-    <span class="fb-count">${notes.length} resultados</span>
+    <span class="fb-count">${notes.length} ${notes.length === 1 ? 'resultado' : 'resultados'}</span>
   </div>
   ${notesHtml}
   </div>
@@ -69536,12 +69574,21 @@ Renderers.notes.mount = function(stageEl, route){
       stageEl.querySelectorAll('.notes-view-content').forEach(s => {
         s.style.display = s.getAttribute('data-view') === view ? '' : 'none';
       });
+      // A aba fica no endereço: buscar, limpar ou voltar um filtro não joga de volta para Notas.
+      if(view === 'notes') delete route.query.aba; else route.query.aba = view;
+      try{ history.replaceState(null, '', '#/notes' + Router.querystring(route.query)); if(window.App && App.marcarEndereco) App.marcarEndereco(); }catch(_){}
     });
   });
+  // A busca redesenha a página: o cursor continua no campo.
+  if(window._notasFocoBusca){
+    window._notasFocoBusca = false;
+    const _qi = stageEl.querySelector('.notes-search-input');
+    if(_qi){ _qi.focus(); try{ const k = _qi.value.length; _qi.setSelectionRange(k, k); }catch(_){} }
+  }
   // Relatórios: as pesquisas aprofundadas salvas (abrem na página Tutor)
   const _relBox = stageEl.querySelector('#notesRelatorios');
   if(_relBox && window.PesquisaUI) PesquisaUI.relatoriosHtml().then(function(h){ if(_relBox.isConnected) _relBox.innerHTML = h; });
-  if(route && route.query && route.query.aba === 'relatorios'){ const _rb = stageEl.querySelector('.ntb-btn[data-view="relatorios"]'); if(_rb) _rb.click(); }
+  if(route && route.query && route.query.aba){ const _rb = stageEl.querySelector('.ntb-btn[data-view="' + String(route.query.aba).replace(/"/g, '') + '"]'); if(_rb) _rb.click(); }
   // User flashcard interactions
   stageEl.querySelectorAll('.ufc-card').forEach(card => {
     card.addEventListener('click', e => {
@@ -69684,6 +69731,8 @@ Renderers.notes.mount = function(stageEl, route){
     q[key] = val;
     // Trocar a matéria zera os filtros dependentes (eram da matéria anterior).
     if(key === 'subject'){ delete q.module; delete q.chapter; delete q.unit; delete q.topic; delete q.tag; }
+    if(key === 'module'){ delete q.chapter; delete q.unit; }   // a unidade era do módulo anterior
+    if(key === 'q') window._notasFocoBusca = true;
     Object.keys(q).forEach(k => { if(!q[k]) delete q[k]; });
     Router.go(`/notes${Router.querystring(q)}`);
   }
@@ -71078,8 +71127,13 @@ const StudyTimer = (function(){
   }
   async function _deleteSession(id){
     try{
+      // A sessão pode ter nascido do "Feito" de um plano: o plano volta a ser só planejado.
+      const pl = await window._sb.schema('aluno').from('study_plans').update({ status: 'planejado', done_session_id: null }).eq('done_session_id', id).select('id');
       const { error } = await window._sb.schema('aluno').from('study_sessions').delete().eq('id', id);
-      if(!error) _changed();
+      if(!error){
+        _changed();
+        if(pl && pl.data && pl.data.length){ try{ document.dispatchEvent(new CustomEvent('ubq:plans-changed')); }catch(_){} }
+      }
       return !error;
     }catch(e){ return false; }
   }
@@ -71284,7 +71338,8 @@ const StudyTimer = (function(){
       last = t;
       if(S && S.kind === 'auto'){
         S.lastActivityAt = t;
-        if(!S.running){ S.running = true; S.startedAt = t; _save(); _tickStart(); }
+        // Pausa que o aluno pediu só volta com o "Retomar"; a de inatividade volta com o movimento.
+        if(!S.running && !S.pausaManual){ S.running = true; S.startedAt = t; _save(); _tickStart(); }
         _save();
       }
     };
@@ -71458,9 +71513,9 @@ const StudyTimer = (function(){
         '<div class="st-btnrow"><button type="button" class="btn-ghost" id="stDiscard" style="font-size:.68rem;padding:.3rem .8rem;opacity:.7">Descartar sessão</button></div>';
       box.innerHTML = h;
       const pa = box.querySelector('#stPause');
-      if(pa) pa.addEventListener('click', function(){ S.accSec = _elapsedSec(); S.running = false; _save(); _pillUpdate(); _renderModal(box); });
+      if(pa) pa.addEventListener('click', function(){ S.accSec = _elapsedSec(); S.running = false; S.pausaManual = true; _save(); _pillUpdate(); _renderModal(box); });
       const re = box.querySelector('#stResume');
-      if(re) re.addEventListener('click', function(){ S.startedAt = now(); S.running = true; S.lastActivityAt = now(); _save(); _tickStart(); _renderModal(box); });
+      if(re) re.addEventListener('click', function(){ S.startedAt = now(); S.running = true; S.pausaManual = false; S.lastActivityAt = now(); _save(); _tickStart(); _renderModal(box); });
       box.querySelector('#stFinish').addEventListener('click', function(){
         const a = box.querySelector('#stAssunto'); if(a && S) S.assunto = a.value;
         _finishAndSave();
@@ -71473,7 +71528,7 @@ const StudyTimer = (function(){
 
     if(_view === 'inserir'){
       const editando = !!_editRow;
-      h += '<div class="st-field"><label>Dia</label><input type="date" class="st-input" id="stDia" value="' + _esc(F.dia || _diaLocal()) + '"></div>' +
+      h += '<div class="st-field"><label>Dia</label><input type="date" class="st-input" id="stDia" max="' + _esc(_diaLocal()) + '" value="' + _esc(F.dia || _diaLocal()) + '"></div>' +
         '<div class="st-field"><label>Matéria</label>' + _dd('stMat', mats, F.catKey, 'Escolha a matéria') + '</div>' +
         (units.length ? '<div class="st-field"><label>Unidade (opcional)</label>' + _dd('stUni', units, F.unitId, 'Sem unidade específica') + '</div>' : '') +
         '<div class="st-field"><label>Assunto (opcional)</label><input class="st-input" id="stAss" value="' + _esc(F.assunto) + '" maxlength="200" placeholder="ex.: Inconfidência Mineira"></div>' +
@@ -77464,7 +77519,7 @@ const Practice = (function(){
     }
     if(!fila.length){
       let msg = 'Nenhum card para praticar nesta seleção.';
-      if(scope.tipo === 'pendentes'){
+      if(!scope.cram){
         // passos intradiários (esqueci → 1 min, Difícil → 12 h) e cards PULADOS ainda fora do prazo: diz quando voltam
         const agora = Date.now(), fim = new Date(); fim.setHours(23, 59, 59, 999);
         const prox = _itensDeEscopo(scope).filter(x => !x.suspended).map(x => {
@@ -77593,6 +77648,7 @@ const Practice = (function(){
       if(digitando && !(e.key === 'Enter' && (e.ctrlKey || e.metaKey))) return;
       if(document.querySelector('.note-list-modal.open')) return;
       if((e.key === ' ' || e.key === 'Enter') && _s.atual.contexto){ e.preventDefault(); _entendi(); return; }
+      if(_s.atual.contexto && /^[1-4]$/.test(e.key)){ e.preventDefault(); return; }   // contexto não mexe na agenda
       if((e.key === ' ' || e.key === 'Enter') && _s.atual.face === 'front'){ e.preventDefault(); _mostrar(); return; }
       if(_s.atual.face === 'back'){
         if((e.key === 'p' || e.key === 'P') && !e.metaKey && !e.ctrlKey && !e.altKey && _pularCabe(_s.atual)){ e.preventDefault(); pular(); return; }
@@ -78060,7 +78116,7 @@ const Practice = (function(){
     const sq = _seqDe(a);
     if(sq.ativo && sq.errou) return '<button type="button" class="btn-primary pr-show pr-seq-cont" data-seq="cont">Continuar · este card ficou como Errei <kbd>espaço</kbd></button>';
     // Pular: quinto botão, cinza — fora da escala de notas (não conta como resposta; o card volta em 1 h)
-    const pl = _pularCabe(a) ? '<button type="button" class="pr-rate pr-pular" data-pular="1" data-tip="Não conta como resposta: o card volta em 1 hora"><span class="pr-rate-n">Pular</span>' + (prev ? '<span class="pr-rate-t">1 h</span>' : '') + '<kbd>P</kbd></button>' : '';
+    const pl = _pularCabe(a) ? '<button type="button" class="pr-rate pr-pular" data-pular="1" data-tip="' + ((_s && _s.scope && _s.scope.cram) ? 'Não conta como resposta' : 'Não conta como resposta: o card volta em 1 hora') + '"><span class="pr-rate-n">Pular</span>' + (prev ? '<span class="pr-rate-t">1 h</span>' : '') + '<kbd>P</kbd></button>' : '';
     if(sq.ativo && !sq.completo) return '<button type="button" class="pr-rate pr-r1 pr-seq-errei" data-seq="errei"><span class="pr-rate-n">Errei</span><span class="pr-rate-t">o card volta do zero</span><kbd>1</kbd></button>'
       + '<button type="button" class="btn-primary pr-show pr-seq-ok" data-seq="ok">' + (sq.idx < sq.n ? 'Acertei, próximo item' : 'Acertei, terminar') + ' <span class="pr-seq-prog">' + sq.idx + ' de ' + sq.n + '</span><kbd>espaço</kbd></button>' + pl;
     return [1, 2, 3, 4].map(r => '<button type="button" class="pr-rate pr-r' + r + '" data-rate="' + r + '"><span class="pr-rate-n">' + esc(NOMES[r]) + '</span>' + (prev ? '<span class="pr-rate-t">' + esc(prev[r - 1]) + '</span>' : '') + '<kbd>' + r + '</kbd></button>').join('') + pl;
@@ -78079,7 +78135,7 @@ const Practice = (function(){
     _prTtsParar();
     _s.queue.shift();
     _s.queue = PracticeQueue.adiarIrmaos(_s.queue, a.cardId);
-    toast('Card pulado: nada foi registrado. Ele volta em 1 hora.', 'info');
+    toast(livre ? 'Card pulado: nada foi registrado.' : 'Card pulado: nada foi registrado. Ele volta em 1 hora.', 'info');
     _persistir(); _proximo();
   }
   function _bindAcoes(acts){
@@ -82072,7 +82128,7 @@ const FlashcardsPage = (function(){
     <h1 class="s-title hero" data-a="2">Flashcards</h1>
     <p class="s-subtitle" data-a="3">${k.cards} card${k.cards === 1 ? '' : 's'} · ${k.itens} ${k.itens === 1 ? 'item' : 'itens'} de revisão · ${k.hoje} vence${k.hoje === 1 ? '' : 'm'} hoje</p>
     <div class="s-divider" data-a="4"></div>
-    <p class="s-body" data-a="5">Seus cards agendados pelo SM-2: o que vence hoje, o que é novo e o que você já domina. Crie cards em <a href="#/notes?fc=1">Notas</a> ou direto no texto das unidades.</p>
+    <p class="s-body" data-a="5">Seus cards agendados pelo SM-2: o que vence hoje, o que é novo e o que você já domina. Crie cards selecionando um trecho no texto das unidades ou escrevendo no Caderno.</p>
   </div>
   <div class="perf-tabs fcp-tabs">${tabBtn('visao', 'Visão geral')}${tabBtn('cards', 'Cards', k.cards)}${tabBtn('evolucao', 'Evolução')}</div>
   <div class="fcp-body" id="fcpBody">${tab === 'cards' ? _cardsHtml(ls) : tab === 'evolucao' ? _evolucaoHtml() : _visaoHtml(ls, k)}</div>`;
@@ -82277,7 +82333,8 @@ const FlashcardsPage = (function(){
     const hoje = x.hoje; const fmtD = k => { const d = FlashcardsStats.deKey(k); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0'); };
     const mapa = FlashcardsStats.mapaCalor(x.dias, hoje, 26, x.cfg.dailyGoal);
     const cr = FlashcardsStats.criados(Store.deckList(), hoje, 30);
-    const px = FlashcardsStats.proximos(Store.srsList(), hoje, 30);
+    const _vivos = new Set(Store.deckList().map(c => c.id));   // card na lixeira não vence
+    const px = FlashcardsStats.proximos(Store.srsList().filter(x => _vivos.has(x.cardId)), hoje, 30);
     const rc = FlashcardsStats.ultimosN(x.dias, hoje, 30);
     const periodo = (a, b) => fmtD(a) + ' – ' + fmtD(b);
     const bars30 = (itens, key, v2key, hiLast) => itens.map((d, i) => ({ label: fmtD(d.dia), v: d[key] || 0, v2: v2key ? (d[v2key] || 0) : 0, hi: hiLast ? i === itens.length - 1 : i === 0, tip: FlashcardsStats.deKey(d.dia).toLocaleDateString('pt-BR') + ': ' + (d[key] || 0) + (v2key && d[v2key] ? ' revisões + ' + d[v2key] + ' novos' : '') }));
