@@ -291,7 +291,7 @@
     let crit = '';
     const mc = ((ag && ag.discursivas && ag.discursivas.media_por_criterio) || []);
     if(mc.length){
-      crit = '<div class="rx-chart"><div class="rx-chart-h">Média da turma em cada critério da correção</div>' +
+      crit = '<div class="rx-chart"><div class="rx-chart-h">Média em cada critério da correção</div>' +
         mc.map(function(c){ return _barRow(_esc(c.criterio), c.media_pct, c.n + (c.n === 1 ? ' correção' : ' correções')); }).join('') + '</div>';
     }
     return { vies: vies, dif: dif, ling: ling, evo: evo, disc: disc, prio: prio, crit: crit };
