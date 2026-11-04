@@ -20177,6 +20177,10 @@ const Store = (function(){
       if(idx < 0) return null;
       _state.deck[idx] = Object.assign({}, _state.deck[idx], patch, { updatedAt: Date.now() });
       if(patch && (patch.clozeText != null || patch.kind != null)) _srsLocalSync(_state.deck[idx]);
+      // Reescreveu o card: é outra chance, a marca de sanguessuga sai.
+      if(patch && (patch.front != null || patch.back != null || patch.clozeText != null || patch.lines != null) && Array.isArray(_state.srs)){
+        _state.srs.forEach(x => { if(x.cardId === id && x.leech){ x.leech = false; _syncSrsUpsert(x).catch(()=>{}); } });
+      }
       _persist(); _emit();
       _syncDeckUpdateToSupabase(_state.deck[idx]).catch(()=>{});
       try{ document.dispatchEvent(new CustomEvent('ubq:fc-changed', { detail: { id: id, acao: 'update' } })); }catch(_){}
@@ -28427,6 +28431,12 @@ function _glossUnitChip(d){
     : (d.unit_label || ('Unidade #' + d.unit_id));
   return ' <span class="gloss-def-unit" title="Definição escrita para: ' + Util.attr(rot) + '">' + Util.esc(rot) + '</span>';
 }
+// A montagem do bloco nem sempre traz unit_id: vale a unidade da página (o id do curso é "u" + id da unidade).
+function _glossUnidadeDoBloco(block, ctx){
+  if(block && block.unit_id != null) return block.unit_id;
+  const u = ctx && ctx.unitId;
+  return u == null ? null : String(u).replace(/^u/, '');
+}
 function _resolveGlossaryItem(g, unitId){
   if(unitId == null && g && g.__unitId != null) unitId = g.__unitId;
   if(g && g.bank_id){
@@ -28941,7 +28951,7 @@ function renderGlossaryListBlock(block, ctx){
   // _resolveGlossaryItem retorna null nesses casos.
   const rawItems = block.items || [];
   const validPairs = rawItems
-    .map(g => ({ raw: g, resolved: _resolveGlossaryItem(g, block.unit_id) }))
+    .map(g => ({ raw: g, resolved: _resolveGlossaryItem(g, _glossUnidadeDoBloco(block, ctx)) }))
     .filter(p => p.resolved);
   if(!validPairs.length){
     return `<section class="block-wrap glossary-block glossary-list-block">
@@ -29015,7 +29025,7 @@ Blocks.glossary = {
     // (refs órfãs ou inline vazio → _resolveGlossaryItem retorna null).
     const filteredBlock = Object.assign({}, block, {
       // carrega a unidade no item: o slide é pintado sem acesso ao bloco
-      items: (block.items || []).filter(g => _resolveGlossaryItem(g) != null).map(g => Object.assign({}, g, { __unitId: block.unit_id }))
+      items: (block.items || []).filter(g => _resolveGlossaryItem(g) != null).map(g => Object.assign({}, g, { __unitId: _glossUnidadeDoBloco(block, ctx) }))
     });
     return renderCarouselBlock(filteredBlock, ctx, {
       blockClass:'glossary-block', typeLabel:'Glossário', icon:Icons.glossary,
@@ -46126,6 +46136,13 @@ function _professorWorksSection(prof){
   }).join('');
   return `<section class="sources-block" style="grid-column:1/-1;margin-top:1.8rem"><h3 class="src-detail-section-title" style="margin-bottom:.8rem">Obras</h3><div class="srcs-grid">${cards}</div></section>`;
 }
+// Cartão Flashcards do Início com pendentes: abre direto a prática.
+document.addEventListener('click', function(e){
+  const a = e.target.closest && e.target.closest('[data-ini-praticar]');
+  if(!a || !window.Practice) return;
+  e.preventDefault();
+  Practice.iniciar({ tipo: 'pendentes' });
+});
 // Clique na foto/nome do professor no bloco de vídeo → abre a bio.
 document.addEventListener('click', function(e){
   const btn = e.target.closest && e.target.closest('.lb-presenter');
@@ -47224,7 +47241,7 @@ Renderers.inicio = function(){
       ${_chaveModo}
     </section>`;
   const _fcHtml = (function(){ try{ if(!window.FlashcardsPage) return ''; const k = FlashcardsPage.kpis(FlashcardsPage.linhas()); if(!k.cards) return ''; const pend = k.hoje + k.novos;
-          return `<a class="ini-fc" href="#/flashcards">${Icons.flashcardsIA || ''}<span class="ini-fc-t">Flashcards</span><span class="ini-fc-s">${k.hoje ? `<b>${k.hoje}</b> vence${k.hoje === 1 ? '' : 'm'} hoje` : 'nada vencido hoje'}${k.novos ? ` · ${k.novos} novo${k.novos === 1 ? '' : 's'}` : ''}</span><span class="ini-fc-go">${pend ? 'Praticar' : 'Ver'} &#8594;</span></a>`; }catch(_){ return ''; } })();
+          return `<a class="ini-fc" href="#/flashcards"${k.hoje ? ' data-ini-praticar="1"' : ''}>${Icons.flashcardsIA || ''}<span class="ini-fc-t">Flashcards</span><span class="ini-fc-s">${k.hoje ? `<b>${k.hoje}</b> vence${k.hoje === 1 ? '' : 'm'} hoje` : 'nada vencido hoje'}${k.novos ? ` · ${k.novos} novo${k.novos === 1 ? '' : 's'}` : ''}</span><span class="ini-fc-go">${pend ? 'Praticar' : 'Ver'} &#8594;</span></a>`; }catch(_){ return ''; } })();
 
   // MENTORIA: a mesma página, com a turma no lugar do concurso
   if(_modo === 'mentoria'){
@@ -85423,6 +85440,8 @@ function bindQuizDataPanel(itemEl, item){
   if(!panel || panel._bound) return;
   panel._bound = true;
   const inner = panel.querySelector('.qd-panel-inner');
+  const _semColega = itemEl.querySelector('[data-action="q-coop"]');
+  if(_semColega) _semColega.remove();
   const dataBtn = itemEl.querySelector('[data-action="q-data"]');
   const commBtn = itemEl.querySelector('[data-action="q-comments"]');
   const countEl = itemEl.querySelector('.q-pill-count');
