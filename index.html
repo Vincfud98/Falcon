@@ -6189,6 +6189,8 @@ html[data-font="sans"] .essay-refs .essay-ref-body{
   line-height:1.75;color:var(--text);
 }
 .essay-textarea:focus{outline:none;border-color:var(--accent)}
+.essay-textarea[readonly]{cursor:default;opacity:.88}
+.essay-textarea[readonly]:focus{border-color:var(--border)}
 html[data-theme="light"] .essay-textarea{background:#fff}
 .essay-tabs{display:flex;gap:1.1rem;margin-bottom:1rem;border-bottom:1px solid var(--border)}
 .essay-tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--text-mute);font-family:var(--sans);font-weight:400;font-size:.74rem;letter-spacing:.1em;text-transform:uppercase;padding:.3rem 0 .55rem;cursor:pointer;transition:color .2s var(--ease)}
@@ -12579,8 +12581,26 @@ if(typeof supabase === 'undefined'){ document.write('<script src="https://cdn.js
   };
   window._fetchGuardado = _fetchGuardado;
   /* FETCH-GUARDADO-FIM */
+  // "Lembrar de mim" na entrada: ligado (o padrão), a sessão fica guardada no aparelho; desligado,
+  // fica só enquanto a aba estiver aberta (computador compartilhado). A chave diz qual gaveta usar.
+  const _CHAVE_LEMBRAR = 'ubique.auth.lembrar';
+  window.AuthLembrar = {
+    ligado: function(){ try{ return localStorage.getItem(_CHAVE_LEMBRAR) !== '0'; }catch(_){ return true; } },
+    definir: function(v){ try{ localStorage.setItem(_CHAVE_LEMBRAR, v ? '1' : '0'); }catch(_){} }
+  };
+  const _guardaDaSessao = {
+    getItem: function(k){ try{ return (AuthLembrar.ligado() ? localStorage : sessionStorage).getItem(k); }catch(_){ return null; } },
+    setItem: function(k, v){
+      try{
+        if(AuthLembrar.ligado()){ localStorage.setItem(k, v); sessionStorage.removeItem(k); }
+        else { sessionStorage.setItem(k, v); localStorage.removeItem(k); }
+      }catch(_){}
+    },
+    removeItem: function(k){ try{ localStorage.removeItem(k); sessionStorage.removeItem(k); }catch(_){} }
+  };
   try {
     window._sb = supabase.createClient(URL, KEY, {
+      auth: { storage: _guardaDaSessao },
       global: { fetch: _fetchGuardado },
       // antena do realtime: offline, tenta reconectar só a cada 60 s (em vez de 10 s)
       realtime: { reconnectAfterMs: function(tent){ return (window.Rede && Rede.offline()) ? 60000 : ([1000, 2000, 5000, 10000][tent - 1] || 10000); } }
@@ -15574,6 +15594,8 @@ window._hydrateDirectory = async function(){
       // Atualização fora do boot (voltou para a aba): entra no Store em silêncio;
       // a próxima navegação já usa o dado novo. Nada muda na frente do aluno.
       if(window.__conteudoSilencioso) return;
+      // Fórum com comentário sendo escrito: redesenhar fecharia os painéis e apagaria o texto.
+      if(Array.from(document.querySelectorAll('.forum-cm-input')).some(function(t){ return t.value.trim(); })) return;
       _renderSoon();
     }
   });
@@ -15957,10 +15979,11 @@ const Auth = (function(){
   const USER_CACHE_KEY = 'ubique.user.session';
   const USER_CACHE_TTL = 8 * 3600 * 1000; // 8 horas
 
+  function _gavetaDoCache(){ return (window.AuthLembrar && !AuthLembrar.ligado()) ? sessionStorage : localStorage; }
   function _saveCachedSession(user){
     if(!user) return;
     try{
-      localStorage.setItem(USER_CACHE_KEY, JSON.stringify({
+      _gavetaDoCache().setItem(USER_CACHE_KEY, JSON.stringify({
         id: user.id,
         email: user.email,
         name: user.name,
@@ -15980,7 +16003,7 @@ const Auth = (function(){
   }
   function _loadCachedSession(){
     try{
-      const raw = localStorage.getItem(USER_CACHE_KEY);
+      const raw = _gavetaDoCache().getItem(USER_CACHE_KEY);
       if(!raw) return null;
       const cached = JSON.parse(raw);
       if(!cached || !cached.id || !cached.email) return null;
@@ -15999,7 +16022,7 @@ const Auth = (function(){
   }
   function _erroDeRede(err){ return !!err && /fetch|network|timeout|retry|load failed|econn/i.test(String(err.message || err.name || err)); }
   function _clearCachedSession(){
-    try{ localStorage.removeItem(USER_CACHE_KEY); }catch(_){}
+    try{ localStorage.removeItem(USER_CACHE_KEY); sessionStorage.removeItem(USER_CACHE_KEY); }catch(_){}
   }
 
   // Revalida JWT do Supabase em background. NÃO bloqueia UI.
@@ -16207,6 +16230,7 @@ const Auth = (function(){
   // onde `kind` indica timeout/credenciais (usado pela UI pra mensagem).
   async function login(email, password, remember){
     const normalizedEmail = String(email||'').trim().toLowerCase();
+    if(window.AuthLembrar) AuthLembrar.definir(remember !== false);   // antes do login: é ele que grava a sessão
     if(!window._sb){
       return { ok:false, kind:'no-supabase', message:'Não consegui conectar. Recarregue a página.' };
     }
@@ -16263,6 +16287,7 @@ const Auth = (function(){
     }
     try{
       Object.keys(localStorage).filter(k => k.startsWith('sb-')).forEach(k => localStorage.removeItem(k));
+      Object.keys(sessionStorage).filter(k => k.startsWith('sb-')).forEach(k => sessionStorage.removeItem(k));
     }catch(_){}
     current = null;
     syncMockUser();
@@ -17380,6 +17405,14 @@ const Store = (function(){
   }
   // Até nov/2026 o app inventava uma nota (isMocked) quando a correção por IA falhava. Essa nota
   // não vale: fica só o texto do aluno, sem nota, para ele enviar de novo.
+  function _unidadeDoId(unitId){
+    for(const c of ((window.COURSES_ALL || window.COURSES || []).filter(Boolean))){
+      for(const m of (c.modules || [])){
+        for(const e of Util.unitsOfModule(m)){ if(e.unit && String(e.unit.id) === String(unitId)) return e.unit; }
+      }
+    }
+    return null;
+  }
   function _essaySemNotaInventada(p){
     return (p && p.isMocked === true) ? { text: p.text, submittedAt: p.submittedAt } : p;
   }
@@ -18821,6 +18854,12 @@ const Store = (function(){
         (Array.isArray(_state.cadAvulsos) ? _state.cadAvulsos : []).forEach(l => {
           if(l && (l.updatedAt || 0) >= inicio) porId.set(String(l.id), l);
         });
+        // O que ficou só no aparelho (a conta não chegou a confirmar) e é mais novo que a conta volta e é reenviado.
+        _cadPendLista().forEach(l => {
+          const s = porId.get(String(l.id));
+          if(!s || (l.updatedAt || 0) > (s.updatedAt || 0)){ porId.set(String(l.id), l); _cadPendAgendar(1000); }
+          else { try{ localStorage.removeItem(_cadPendPrefixo() + l.id); }catch(_){} }
+        });
         _state.cadAvulsos = Array.from(porId.values());
         const limite = Date.now() - 30 * 24 * 60 * 60 * 1000;
         _state.cadAvulsos.filter(c => c.deletedAt && c.deletedAt < limite)
@@ -18879,9 +18918,36 @@ const Store = (function(){
       if(error) console.warn('[selecao del]', error);
     }catch(e){ console.warn('[selecao del ex]', e); }
   }
+  // Caderno próprio: enquanto a conta não confirma, fica uma cópia no aparelho (falcon_cad_pend:<aluno>:<id>)
+  // e o envio é repetido sozinho. Fechar a página ou ficar sem internet não perde o texto.
+  function _cadPendPrefixo(){ return 'falcon_cad_pend:' + (_currentSupaUserId() || '') + ':'; }
+  let _cadPendTimer = null;
+  const _cadAvulsoEnvios = {};
+  function _cadPendAgendar(ms){ if(!_cadPendTimer) _cadPendTimer = setTimeout(_cadPendReenviar, ms || 20000); }
+  function _cadPendLista(){
+    const pre = _cadPendPrefixo(), out = [];
+    try{
+      Object.keys(localStorage).filter(k => k.indexOf(pre) === 0).forEach(k => {
+        try{ const d = JSON.parse(localStorage.getItem(k)); if(d && d.id) out.push(d); }catch(_){}
+      });
+    }catch(_){}
+    return out;
+  }
+  async function _cadPendReenviar(){
+    _cadPendTimer = null;
+    for(const d of _cadPendLista()){
+      if(await _syncCadAvulsoUpsert(d)){
+        try{ document.dispatchEvent(new CustomEvent('ubq:cad-avulso-enviado', { detail: { id: String(d.id) } })); }catch(_){}
+      }
+    }
+  }
+  window.addEventListener('online', function(){ if(_currentSupaUserId()) _cadPendAgendar(1000); });
+  // Devolve true quando a conta confirmou a gravação.
   async function _syncCadAvulsoUpsert(doc){
     const userId = _currentSupaUserId();
-    if(!userId || !window._sb || !doc) return;
+    if(!userId || !window._sb || !doc) return false;
+    const chavePend = _cadPendPrefixo() + doc.id, versao = doc.updatedAt;
+    try{ localStorage.setItem(chavePend, JSON.stringify(doc)); }catch(e){ console.warn('[cad avulso cópia]', e); }
     try{
       const { error } = await window._sb.schema('aluno').from('cadernos_avulsos').upsert({
         id: doc.id, user_id: userId, titulo: doc.titulo || 'Sem título', body: doc.body || '',
@@ -18890,8 +18956,18 @@ const Store = (function(){
         deleted_at: doc.deletedAt ? new Date(doc.deletedAt).toISOString() : null,
         updated_at: new Date(doc.updatedAt || Date.now()).toISOString()
       }, { onConflict: 'id' });
-      if(error) console.warn('[cad avulso sync]', error);
-    }catch(e){ console.warn('[cad avulso sync ex]', e); }
+      if(error) throw error;
+      // só apaga a cópia se nada mais novo foi escrito enquanto este envio ia e vinha
+      try{
+        const c = JSON.parse(localStorage.getItem(chavePend) || 'null');
+        if(!c || c.updatedAt === versao) localStorage.removeItem(chavePend);
+      }catch(_){}
+      return true;
+    }catch(e){
+      console.warn('[cad avulso sync]', e);
+      _cadPendAgendar();
+      return false;
+    }
   }
   async function _syncCadAvulsoDelete(id){
     const userId = _currentSupaUserId();
@@ -19415,9 +19491,11 @@ const Store = (function(){
       // (pasta/matéria) vem de arrastar — aí o _emit é seguro, e o grafo e a
       // sidebar se atualizam sozinhos.
       if(mudouOrganizacao) _emit();
-      _syncCadAvulsoUpsert(doc).catch(()=>{});
+      _cadAvulsoEnvios[String(doc.id)] = _syncCadAvulsoUpsert(doc);
       return doc;
     },
+    // A resposta da última gravação do caderno: true quando a conta confirmou.
+    cadAvulsoEnvio(id){ return Promise.resolve(_cadAvulsoEnvios[String(id)]); },
     cadAvulsoApagar(id){
       const doc = (_state && Array.isArray(_state.cadAvulsos)) ? _state.cadAvulsos.find(c => String(c.id) === String(id)) : null;
       if(!doc) return;
@@ -19826,6 +19904,26 @@ const Store = (function(){
       const wasMarked = !!_state.bookmarks[unitId][blockId];
       if(wasMarked) delete _state.bookmarks[unitId][blockId];
       else _state.bookmarks[unitId][blockId] = true;
+      // O último bloco lido conclui a unidade (é o que o botão já mostrava); tirar a marca de
+      // um bloco desfaz a conclusão. Início, Edital e Desempenho leem a mesma conclusão.
+      const v = _state.unitViews[unitId] || null;
+      if(wasMarked && v && v.completed){
+        v.completed = false; v.completedAt = null;
+        _syncUnitProgressToSupabase(unitId, { completed: false }).catch(()=>{});
+      } else if(!wasMarked && !(v && v.completed)){
+        const un = _unidadeDoId(unitId);
+        const ids = un ? Util.unitBlockIds(un) : [];
+        if(ids.length && ids.every(id => _state.bookmarks[unitId][id])){
+          const nv = v || { firstSeenAt: Date.now(), viewCount: 1 };
+          nv.completed = true; nv.completedAt = Date.now(); nv.lastSeenAt = Date.now();
+          nv.resumeBlockId = null; nv.resumeSectionId = null;
+          _state.unitViews[unitId] = nv;
+          _syncUnitProgressToSupabase(unitId, {
+            firstSeenAt: nv.firstSeenAt, viewCount: nv.viewCount, completed: true, resumeBlockId: null, resumeSectionId: null
+          }).catch(()=>{});
+          if(typeof window._editalAutoMarcaPorUnidade === 'function' && un._storeId != null) setTimeout(function(){ window._editalAutoMarcaPorUnidade(un._storeId); }, 0);
+        }
+      }
       _persist(); _emit();
       // Fase 4f+ — fire-and-forget sync Supabase (insere se marcou, deleta se desmarcou)
       _syncBlockBookmarkToSupabase(unitId, blockId, !wasMarked).catch(()=>{});
@@ -20226,10 +20324,10 @@ const Store = (function(){
     isBookmarked(unitId, blockId){
       return !!(_state.bookmarks[unitId] && _state.bookmarks[unitId][blockId]);
     },
-    // Conta as questões objetivas respondidas HOJE (modo instantâneo OU adiado/
-    // marcado), DISTINTAS, a partir do store local — a fonte que tem as marcadas
-    // na hora (no modo adiado a resposta só vai pro banco ao "Verificar"). Grava
-    // em window._questionsToday; o heartbeat propaga pro perfil (Meta Coletiva).
+    // Conta as questões objetivas respondidas HOJE, DISTINTAS, a partir do store
+    // local. Marcação ainda não verificada não conta: não vale ponto no placar nem
+    // entrega o gabarito. Grava em window._questionsToday; o heartbeat propaga pro
+    // perfil (Meta Coletiva).
     recountQuestionsToday(){
       if(!_state){ return 0; }
       const n = new Date();
@@ -20239,12 +20337,12 @@ const Store = (function(){
       // ANULADA não entra: nem no XP, nem em acertos/erros, nem no total do dia.
       const _anul = (id) => !!(window._isAnnulledItem && window._isAnnulledItem(id));
       const byBank = _state.quizAnswersByBankId || {};
-      for(const bid in byBank){ const a = byBank[bid]; if(a && a.selected != null && isToday(a.answeredAt) && !_anul(bid)) add('b:' + bid, a); }
+      for(const bid in byBank){ const a = byBank[bid]; if(a && a.selected != null && a.verified !== false && isToday(a.answeredAt) && !_anul(bid)) add('b:' + bid, a); }
       const byUnit = _state.quizAnswers || {};
       for(const u in byUnit){
         if(String(u).indexOf('__sim_') === 0) continue; // simulado não conta
         const bb = byUnit[u] || {};
-        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || !isToday(a.answeredAt)) continue; if(_anul(it)) continue; const _ch = _quizChaveBanco(u, it); add(_ch ? ('b:' + _ch) : ('q:' + u + ':' + b + ':' + it), a); } }
+        for(const b in bb){ const ii = bb[b] || {}; for(const it in ii){ const a = ii[it]; if(!a || a.selected == null || a.verified === false || !isToday(a.answeredAt)) continue; if(_anul(it)) continue; const _ch = _quizChaveBanco(u, it); add(_ch ? ('b:' + _ch) : ('q:' + u + ':' + b + ':' + it), a); } }
       }
       // XP do dia (Gamificação — Parte G): acerto=50, erro=10; só conta as que já
       // têm correção conhecida (a.correct === true/false).
@@ -20670,14 +20768,13 @@ window._editalAutoMarcaPorUnidade = async function(storeUnitId){
     ((window.COURSES_ALL || window.COURSES || []).filter(Boolean)).forEach(c => {
       (c.modules || []).forEach(m => {
         ((typeof Util !== 'undefined' && Util.unitsOfModule) ? Util.unitsOfModule(m) : []).forEach(e2 => {
-          if(e2.unit && e2.unit._storeId != null) s2c[String(e2.unit._storeId)] = e2.unit.id;
+          if(e2.unit && e2.unit._storeId != null) s2c[String(e2.unit._storeId)] = e2.unit;
         });
       });
     });
-    const views = (window.Store && Store.get) ? ((Store.get() || {}).unitViews || {}) : {};   // era Store.getState, que não existe: a marcação nunca disparava
     const concluida = sid => {
-      const cid = s2c[String(sid)];
-      return !!(cid != null && (views[cid] || {}).completed);
+      const u = s2c[String(sid)];
+      return !!(u && Store.unitProgress(u).state === 'completed');
     };
     const marcados = new Set((St.edital_progress.list() || [])
       .filter(p => p.user_id === userId).map(p => String(p.topic_id)));
@@ -20726,8 +20823,15 @@ window._editalAutoMarcaPorUnidade = async function(storeUnitId){
         try{
           const { error } = await window._sb.schema('aluno').from('edital_progress')
             .upsert(rows, { onConflict: 'user_id,topic_id' });
-          if(error) console.warn('[edital auto-marca]', error.message);
-        }catch(_){}
+          if(error) throw error;
+        }catch(e){
+          // Marcação automática que não gravou não fica na tela; volta na próxima conclusão.
+          console.warn('[edital auto-marca]', e);
+          novos.forEach(tid => {
+            const row = St.edital_progress.list().find(x => x.user_id === userId && String(x.topic_id) === String(tid));
+            if(row) St.edital_progress.remove(row.id);
+          });
+        }
       }
     }
     if(window.ueToast) ueToast(novos.length === 1
@@ -23669,7 +23773,8 @@ function renderQuizItem(it, ctx, blockId){
   // adiado (ex.: banco do edital) mantém o comportamento de revelar ao marcar.
   const defer = !!(ctx && ctx.deferFeedback);
   const isSelected = !!(prior && prior.selected != null);
-  const revealed = defer ? !!(prior && prior.verified) : isSelected;
+  // Simulado em andamento: a marcação volta neutra (nem verde, nem vermelho, nem ✓/✗).
+  const revealed = (ctx && ctx.simuladoMode) ? false : (defer ? !!(prior && prior.verified) : isSelected);
 
   const opts = norm.values.map((v,j) => {
     const mark = norm.display[j];
@@ -23979,9 +24084,10 @@ Blocks.quiz = {
               _deferWhyRender(itemEl, _whyMode(null, existingDoubt));
             } else {
               // Salva a seleção LOCALMENTE (sem sincronizar/contar nas stats) e
-              // SEM revelar nada: só destaca a opção de forma neutra.
+              // SEM revelar nada: só destaca a opção de forma neutra. O certo/errado
+              // só existe depois de "Verificar": filtros, seleções e placar leem daqui.
               ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id,
-                { selected:value, correct, verified:false, doubt:existingDoubt }, { sync:false });
+                { selected:value, correct:null, verified:false, doubt:existingDoubt }, { sync:false });
               itemEl.querySelectorAll('.q-option').forEach((b,j) => {
                 b.classList.remove('selected','correct','wrong');
                 if(j === idx) b.classList.add('selected');
@@ -24024,14 +24130,12 @@ Blocks.quiz = {
       if(doubtBtn){
         doubtBtn.addEventListener('click', e => {
           e.stopPropagation();
-          const isActive = doubtBtn.classList.toggle('active');
           const prior = ctx.store.getQuizAnswer(ctx.unitId, block.id, item.id);
-          if(prior){
-            ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, Object.assign({}, prior, { doubt:isActive }));
-          } else {
-            // Save doubt even before answering
-            ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, { doubt:isActive });
-          }
+          // Com o resultado à vista a categoria não muda mais ("acerto" não vira "acerto com dúvida").
+          if(prior && prior.selected != null && (!defer || prior.verified)) return;
+          const isActive = doubtBtn.classList.toggle('active');
+          // Modo prova: a dúvida fica aqui, como a marcação; as duas vão para a conta na verificação.
+          ctx.store.updateQuizAnswer(ctx.unitId, block.id, item.id, Object.assign({}, prior, { doubt:isActive }), defer ? { sync:false } : undefined);
           // Modo prova: a dúvida faz o box aparecer/sumir e trocar de frase na
           // hora, sem perder o texto já digitado. Congela se já verificada.
           if(defer && !(prior && prior.verified)){
@@ -24059,6 +24163,7 @@ Blocks.quiz = {
       const barEl = sat.querySelector('[data-qz-bar]');
       const remainEl = sat.querySelector('[data-qz-remaining]');
       const detailEl = sat.querySelector('[data-qz-detail]');
+      const _detailVazio = detailEl ? detailEl.innerHTML : '';
       function updateSatellite(activeItem, isCorrect){
         // Conta progresso. No modo adiado, NÃO revela acertos antes de
         // verificar: mostra "respondidas / total". No modo instantâneo, mantém
@@ -24231,7 +24336,8 @@ Blocks.quiz = {
           const assertion = itemEl.querySelector('.q-assertion');
           const er = assertion && assertion.querySelector('.q-result'); if(er) er.remove();
           itemEl.classList.remove('answered','q-frozen');
-          const sk = itemEl.querySelector('.q-show-key'); if(sk) sk.style.display = 'none';
+          const sk = itemEl.querySelector('.q-show-key'); if(sk){ sk.style.display = 'none'; sk.classList.remove('is-active'); }
+          const dv = itemEl.querySelector('.q-doubt'); if(dv) dv.classList.remove('active');   // a resposta apagada levou a dúvida junto
           _deferWhyClear(itemEl);   // tira o campo do "porquê" e o comentário da IA
         }
         // Sincroniza UMA barra de verificar (global OU de grupo) sobre a sua
@@ -24342,6 +24448,8 @@ Blocks.quiz = {
             if(window._bankCota && ctx.unitId === '__bank_q') window._bankCota.limparAviso(stageEl);
             // "Tentar novamente" LIMPA as marcações (local + Supabase), pra não
             // voltar após reload nem continuar contando na estatística global.
+            // O painel lateral não fica mostrando o gabarito da questão refeita.
+            if(detailEl) detailEl.innerHTML = _detailVazio;
             items.forEach(it => {
               const p = ctx.store.getQuizAnswer(ctx.unitId, block.id, it.id);
               if(p && p.verified){
@@ -24370,6 +24478,9 @@ Blocks.quiz = {
                   const spec = _deferWhySpec(itemEl, it, norm, keyIdx, correct);
                   if(spec){
                     const _p = p, _it = it, _correct = correct;
+                    // O texto do aluno fica já, junto com a verificação; se o comentário da IA
+                    // não vier (sem saldo, sem conexão), o "por quê" continua guardado.
+                    ctx.store.updateQuizAnswer(ctx.unitId, block.id, _it.id, { selected:_p.selected, correct:_correct, verified:true, doubt:!!_p.doubt, why: spec.reason });
                     spec.onDone = function(md){ ctx.store.updateQuizAnswer(ctx.unitId, block.id, _it.id, { selected:_p.selected, correct:_correct, verified:true, doubt:!!_p.doubt, why: spec.reason, ai: md }); };
                     _whyBatch.push(spec);
                   }
@@ -26996,6 +27107,32 @@ async function _correctEssayViaAI(item, essayText){
   return null;
 }
 
+// Rascunho da discursiva no aparelho, enquanto o aluno escreve. Se a página se redesenhar (Carregar
+// mais, conteúdo chegando em segundo plano, voltar à unidade) o texto volta para a caixa. Vale o mais
+// novo entre o rascunho e a resposta enviada. Devolve a função que apaga o rascunho.
+function _essayRascunho(ta, unitId, blockId, itemId, prior){
+  const banco = _quizChaveBanco(unitId, itemId);
+  const u = (window.Auth && Auth.getUser && Auth.getUser()) ? Auth.getUser().id : 'anon';
+  const chave = 'falcon_essay_rasc:' + u + ':' + (banco ? 'banco:' + banco : unitId + ':' + blockId + ':' + itemId);
+  try{
+    const r = JSON.parse(localStorage.getItem(chave) || 'null');
+    if(r && r.t && r.t !== ta.value && (!prior || (r.at || 0) > (prior.submittedAt || 0))){
+      ta.value = r.t;
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }catch(_){}
+  let timer = null;
+  ta.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      try{
+        if(ta.value.trim()) localStorage.setItem(chave, JSON.stringify({ t: ta.value, at: Date.now() }));
+        else localStorage.removeItem(chave);
+      }catch(_){}
+    }, 400);
+  });
+  return function(){ clearTimeout(timer); try{ localStorage.removeItem(chave); }catch(_){} };
+}
 // Manda a resposta para a correção por IA e grava SÓ correção de verdade. Se a IA não responder,
 // nada é gravado como nota: o texto continua na caixa e o aluno é avisado para tentar de novo.
 // Devolve true quando corrigiu.
@@ -27027,9 +27164,10 @@ async function _essayEnviarParaCorrecao(o){
     if(typeof window.ueToast === 'function') window.ueToast('Não consegui corrigir agora. Sua resposta continua aqui; tente de novo em instantes.', 'error');
     return false;
   }
-  const payload = r.payload;
+  const payload = o.extra ? Object.assign({}, r.payload, o.extra) : r.payload;
   o.store.updateEssay(o.unitId, o.blockId, o.itemId, payload);
   injectEssayEvaluation(o.itemEl, item, payload);
+  if(o.aoCorrigir) o.aoCorrigir();
   // Relê o saldo do banco (fonte da verdade): evita mostrar número errado.
   if(window.UbtWallet) UbtWallet.load();
   if(typeof window.ueToast === 'function'){
@@ -27397,11 +27535,16 @@ Blocks.essay = {
     // (Fase C do Bug #4). Após Finalizar, ctx.simuladoMode vira false e o
     // render mostra tudo normalmente — incluindo a caixa de avaliação.
     const isSimAndamento = !!(ctx && ctx.simuladoMode);
+    // Revisão de simulado já enviado: resposta e correção só para leitura, sem brainstorm. O botão
+    // de envio só aparece na resposta que ficou sem correção (faltou saldo, a IA não respondeu).
+    const isSimEnviado = !isSimAndamento && String((ctx && ctx.unitId) || '').indexOf('__sim_') === 0;
 
     const items = (block.items||[]).map((rawItem, i) => {
       const it = _resolveEssayItem(rawItem) || {};
       const itemId = it._bank_id || it.id || ('essay-' + i);
       const prior = ctx && ctx.store ? ctx.store.getEssayAnswer(ctx.unitId, block.id, itemId) : null;
+      const _corrigirDepois = isSimEnviado && !!ctx.simCorrecaoIa && !!(prior && prior.text) && prior.score == null;
+      const _mostraEnvio = !isSimEnviado || _corrigirDepois;
 
       // Badge automático derivado do origin (Y3) OU "Ubique" se source_type
       let originBadgeHTML = '';
@@ -27634,21 +27777,21 @@ Blocks.essay = {
         <div class="essay-layout${(!hasAside || !prior || isSimAndamento) ? ' essay-layout--solo' : ''}">
           <div>
             <div class="essay-panel">
-              ${(!isSimAndamento) ? `<div class="essay-tabs" role="tablist"><button type="button" class="essay-tab is-active" data-essay-tab="redacao">Redação</button><button type="button" class="essay-tab" data-essay-tab="brainstorm">Brainstorm</button></div>` : ``}
+              ${(!isSimAndamento && !isSimEnviado) ? `<div class="essay-tabs" role="tablist"><button type="button" class="essay-tab is-active" data-essay-tab="redacao">Redação</button><button type="button" class="essay-tab" data-essay-tab="brainstorm">Brainstorm</button></div>` : ``}
               <div class="essay-tabpane" data-essay-pane="redacao">
               <div class="essay-panel-label">Sua resposta</div>
-              <textarea class="essay-textarea" placeholder="Escreva sua resposta aqui…">${Util.esc(prior?prior.text:'')}</textarea>
+              <textarea class="essay-textarea"${isSimEnviado ? ' readonly' : ''} placeholder="${isSimEnviado ? 'Sem resposta nesta questão.' : 'Escreva sua resposta aqui…'}">${Util.esc(prior?prior.text:'')}</textarea>
               <div class="essay-textarea-foot">
                 ${linesHint}
                 <div class="essay-foot-actions">
                   ${(hasAside && !isSimAndamento) ? `<button class="btn-ghost essay-toggle-aside" type="button">${prior ? 'Ocultar critérios' : 'Mostrar critérios'}</button>` : ''}
                   ${(!isSimAndamento) ? `<button class="essay-coop-btn" type="button" data-action="coop-essay" data-tip="Enviar para Colega de Estudo" aria-label="Enviar para Colega de Estudo"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.1"/><path d="M3.6 19a5.4 5.4 0 0 1 10.8 0"/><circle cx="17.2" cy="8.6" r="2.5"/><path d="M16.6 13.3a4.7 4.7 0 0 1 4 5.7"/></svg></button>` : ''}
-                  ${(!isSimAndamento) ? `<span class="ubt-cost" data-essay-cost title="Custo em UbiTokens, proporcional ao tamanho do texto. Debitado da sua carteira ao enviar."><span class="ubt-sym">ⓤ</span> <span data-essay-cost-val>~0.05</span></span>` : ''}
-                  <button class="btn-primary essay-submit">${(window.Visitante && Visitante.ativo()) ? 'Responder com a conta' : (isSimAndamento ? 'Salvar resposta' : 'Enviar para Avaliação')}</button>
+                  ${(!isSimAndamento && _mostraEnvio) ? `<span class="ubt-cost" data-essay-cost title="Custo em UbiTokens, proporcional ao tamanho do texto. Debitado da sua carteira ao enviar."><span class="ubt-sym">ⓤ</span> <span data-essay-cost-val>~0.05</span></span>` : ''}
+                  ${_mostraEnvio ? `<button class="btn-primary essay-submit">${(window.Visitante && Visitante.ativo()) ? 'Responder com a conta' : (isSimAndamento ? 'Salvar resposta' : (_corrigirDepois ? 'Enviar para correção' : 'Enviar para Avaliação'))}</button>` : ''}
                   ${(window.Visitante && Visitante.ativo()) ? '<span class="cmt-vis">Critérios, padrão de resposta e correção: com a conta</span>' : ''}
                 </div>
               </div>
-              </div>${(!isSimAndamento) ? `<div class="essay-tabpane" data-essay-pane="brainstorm" hidden><div class="essay-bs"><p class="essay-bs-intro">Liste, por item, tudo que você lembra que pode entrar nesta questão. Vamos avaliar e sugerir: a cobertura e a ordem ideal e o esqueleto da resposta.</p><div class="essay-bs-cols"></div><div class="essay-bs-foot"><button type="button" class="btn-ghost essay-bs-addcol">+ item</button><button type="button" class="btn-primary essay-bs-avaliar">Avaliar brainstorm</button><span class="ubt-cost"><span class="ubt-sym">ⓤ</span> ~0,06</span></div><div class="essay-bs-aviso" hidden></div><div class="essay-bs-feedback" hidden></div></div></div>` : ``}
+              </div>${(!isSimAndamento && !isSimEnviado) ? `<div class="essay-tabpane" data-essay-pane="brainstorm" hidden><div class="essay-bs"><p class="essay-bs-intro">Liste, por item, tudo que você lembra que pode entrar nesta questão. Vamos avaliar e sugerir: a cobertura e a ordem ideal e o esqueleto da resposta.</p><div class="essay-bs-cols"></div><div class="essay-bs-foot"><button type="button" class="btn-ghost essay-bs-addcol">+ item</button><button type="button" class="btn-primary essay-bs-avaliar">Avaliar brainstorm</button><span class="ubt-cost"><span class="ubt-sym">ⓤ</span> ~0,06</span></div><div class="essay-bs-aviso" hidden></div><div class="essay-bs-feedback" hidden></div></div></div>` : ``}
             </div>
           </div>
           ${(hasAside && !isSimAndamento) ? `<aside class="essay-aside"${prior ? '' : ' style="display:none"'}>
@@ -27719,8 +27862,21 @@ Blocks.essay = {
         ta.addEventListener('input', updWords);
         updWords();
       }
+      // Simulado em andamento: o texto vai sozinho para a conta enquanto o aluno escreve (recarregar não perde).
+      // Fora do simulado: rascunho no aparelho até a correção; redesenhar a página não apaga o que foi escrito.
+      const _essaySim = String(ctx.unitId || '').indexOf('__sim_') === 0;
+      let _rascLimpar = null;
+      if(ta && ctx.simuladoMode){
+        let _t = null;
+        ta.addEventListener('input', () => {
+          clearTimeout(_t);
+          _t = setTimeout(() => { ctx.store.updateEssay(ctx.unitId, block.id, itemId, { text: ta.value.trim() }); }, 1500);
+        });
+      } else if(ta && !_essaySim){
+        _rascLimpar = _essayRascunho(ta, ctx.unitId, block.id, itemId, ctx.store.getEssayAnswer(ctx.unitId, block.id, itemId));
+      }
       // Aba Brainstorm (rascunho de ideias avaliado pela IA)
-      try { _essayBrainstorm(itemEl, item, ctx, block); } catch(e){ console.warn('[brainstorm] wire', e); }
+      try { if(itemEl.querySelector('.essay-bs')) _essayBrainstorm(itemEl, item, ctx, block); } catch(e){ console.warn('[brainstorm] wire', e); }
       // CoopStudy — enviar a discursiva pra um colega corrigir
       const coopBtn = itemEl.querySelector('[data-action="coop-essay"]');
       if(coopBtn){
@@ -27768,7 +27924,15 @@ Blocks.essay = {
           await _essayEnviarParaCorrecao({
             item, text, submitBtn, itemEl,
             store: ctx.store, unitId: ctx.unitId, blockId: block.id, itemId,
-            moduleId: ctx.moduleId, chapterId: ctx.chapterId, unitTitle: ctx.unitTitle
+            moduleId: ctx.moduleId, chapterId: ctx.chapterId, unitTitle: ctx.unitTitle,
+            extra: _essaySim ? { aiCorrected: true } : null,
+            aoCorrigir: function(){
+              if(_rascLimpar) _rascLimpar();
+              if(_essaySim){                       // revisão do simulado: corrigiu, volta a ser só leitura
+                submitBtn.remove();
+                const cu = itemEl.querySelector('[data-essay-cost]'); if(cu) cu.remove();
+              }
+            }
           });
         });
       }
@@ -27781,6 +27945,7 @@ Blocks.essay = {
         itemEl.__essayReset = function(opts){
           ctx.store.resetEssay(ctx.unitId, block.id, itemId);
           if(opts && opts.brainstorm && itemEl.__bs && typeof itemEl.__bs.reset === 'function') itemEl.__bs.reset();
+          if(_rascLimpar) _rascLimpar();
           _essayClearEvaluation(itemEl);
           if(ta){ ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); }
           if(typeof window.ueToast === 'function') window.ueToast('Questão zerada. Pode responder de novo.', 'success');
@@ -31528,8 +31693,23 @@ const Profile = (function(){
     return merged;
   }
 
+  // Para a tela da Conta: grava na conta e só então aqui. Devolve false se a conta recusou (nada muda).
+  async function salvar(userId, patch){
+    const merged = Object.assign({}, get(userId), patch, { updated_at: Date.now() });
+    if(window.UBIQUE_USE_SUPABASE && window._sb && _UUID_RE.test(userId)){
+      let ok = false;
+      try{ ok = await _syncProfileToSupabase(userId, merged); }catch(e){ console.warn('[profile] supabase sync:', e); }
+      if(!ok) return false;
+    }
+    const list = (window.UbiqueStore && UbiqueStore.user_profiles) ? (UbiqueStore.user_profiles.list() || []) : [];
+    const existing = list.find(p => p && p.user_id === userId);
+    if(existing) UbiqueStore.user_profiles.update(existing.id, merged);
+    else if(window.UbiqueStore && UbiqueStore.user_profiles) UbiqueStore.user_profiles.add(merged);
+    return true;
+  }
+  // Devolve true quando as duas tabelas gravaram.
   async function _syncProfileToSupabase(userId, profile){
-    if(!window._sb) return;
+    if(!window._sb) return false;
     // 1) Upsert em crm.user_profiles
     // O CPF NÃO fica mais em user_profiles (tabela lida por todos p/ nomes de
     // colegas) — ele mora só em crm.clients, trancada por dono/admin, e é gravado
@@ -31547,7 +31727,7 @@ const Profile = (function(){
     };
     const { error: e1 } = await window._sb.schema('crm').from('user_profiles')
       .upsert(upPayload, { onConflict: 'user_id' });
-    if(e1) console.warn('[profile] user_profiles upsert error:', e1);
+    if(e1){ console.warn('[profile] user_profiles upsert error:', e1); return false; }
 
     // 2) Atualiza crm.app_users (full_name, nickname) — só campos que mudaram
     const auPatch = {};
@@ -31556,8 +31736,9 @@ const Profile = (function(){
     if(Object.keys(auPatch).length){
       const { error: e2 } = await window._sb.schema('crm').from('app_users')
         .update(auPatch).eq('id', userId);
-      if(e2) console.warn('[profile] app_users update error:', e2);
+      if(e2){ console.warn('[profile] app_users update error:', e2); return false; }
     }
+    return true;
   }
   function normalizeHandle(h){
     return String(h || '').toLowerCase()
@@ -31585,7 +31766,7 @@ const Profile = (function(){
     if(p.handle) return '@' + p.handle;
     return p.displayName || 'Aluno';
   }
-  return { get, update, normalizeHandle, handleAvailable, needsOnboarding, publicLabel };
+  return { get, update, salvar, normalizeHandle, handleAvailable, needsOnboarding, publicLabel };
 })();
 window.Profile = Profile;
 
@@ -33242,7 +33423,12 @@ Renderers.account.mount = function(stageEl){
           patch.photoUrl = '';
           patch.photoTransform = { x:0, y:0, scale:1 };
         }
-        Profile.update(user.id, patch);
+        // "Perfil salvo" só depois de a conta confirmar: uma recusa mostrada como sucesso deixava,
+        // por exemplo, o nome completo visível para quem achava que tinha escondido.
+        if(!(await Profile.salvar(user.id, patch))){
+          if(saveFB){ saveFB.textContent = 'Não consegui salvar agora. Nada foi alterado; confira a conexão e tente de novo.'; saveFB.className = 'account-save-feedback is-error'; }
+          return;
+        }
         pendingPhoto = null;
         pendingTransform = null;
         pendingPhotoRemove = false;
@@ -33251,14 +33437,20 @@ Renderers.account.mount = function(stageEl){
           saveFB.className = 'account-save-feedback is-ok';
           setTimeout(() => { if(saveFB){ saveFB.textContent = ''; saveFB.className = 'account-save-feedback'; } }, 2500);
         }
-        // CPF preenchido → trava NA HORA (não pode mais ser alterado/forjado —
-        // ele identifica o aluno na marca d'água; o banco também protege via
-        // trigger). Correção só pelo Suporte/admin; o webhook preenche sozinho.
-        if(cpfEl && cpfMasked) cpfEl.disabled = true;
         // Espelha o CPF no CRM (crm.clients) — identificação pela equipe adm.
         // RPC security definer: acha/cria o cliente deste usuário e grava.
-        if(cpfMasked && window._sb){
-          try{ window._sb.schema('crm').rpc('sync_meus_dados', { p_cpf: cpfMasked, p_phone: null }).then(function(r){ if(r && r.error) console.warn('[sync CRM]', r.error.message); }); }catch(_){}
+        // CPF preenchido → trava só depois de confirmado (não pode mais ser alterado/forjado —
+        // ele identifica o aluno na marca d'água; o banco também protege via trigger).
+        // Correção só pelo Suporte/admin; o webhook preenche sozinho.
+        if(cpfMasked && window._sb && cpfEl && !cpfEl.disabled){
+          let cpfOk = false;
+          try{
+            const r = await window._sb.schema('crm').rpc('sync_meus_dados', { p_cpf: cpfMasked, p_phone: null });
+            cpfOk = !(r && r.error);
+            if(!cpfOk) console.warn('[sync CRM]', r.error.message);
+          }catch(e){ console.warn('[sync CRM]', e); }
+          if(cpfOk) cpfEl.disabled = true;
+          else if(saveFB){ saveFB.textContent = 'O perfil foi salvo, mas o CPF não. Tente salvar de novo em instantes.'; saveFB.className = 'account-save-feedback is-error'; }
         }
         // Primeiro acesso: depois de salvar, oferece seguir pro Início (o
         // dashboard). Botão só aparece após um save bem-sucedido.
@@ -35319,7 +35511,7 @@ Renderers.tutor.mount = function(stageEl, route){
             scroll: _scroll,
             commentFn: function(specs){
               return window.TutorQuestions.commentBatch(specs, {
-                skipEnsureStyles: true, scroll: _scroll,
+                skipEnsureStyles: true, scroll: _scroll, modelo: _modelo,
                 ctx: { unitId:null, unitTitle:'', unitText:'' }
               });
             }
@@ -35610,12 +35802,23 @@ Renderers.support.mount = async function(stageEl, route){
     const sendBtn = stageEl.querySelector('#supNewSend');
     sendBtn.disabled = true; sendBtn.textContent = 'Enviando…';
     try{
+      const avisoErro = 'Não consegui enviar agora. Sua mensagem continua aqui; tente de novo em instantes.';
       const { data: th, error } = await window._sb.schema('aluno').from('support_threads')
         .insert({ user_id: user.id, subject, subject_id: subjectId, subject_label: subjectLabel }).select().single();
-      if(error){ console.warn('[suporte] criar conversa:', error); return; }
+      if(error){
+        console.warn('[suporte] criar conversa:', error);
+        if(errEl){ errEl.textContent = avisoErro; errEl.hidden = false; }
+        return;
+      }
       const { error: mErr } = await window._sb.schema('aluno').from('support_messages')
         .insert({ thread_id: th.id, sender_id: user.id, sender_is_admin: false, text });
-      if(mErr) console.warn('[suporte] primeira mensagem:', mErr);
+      if(mErr){
+        // Conversa sem mensagem não serve para ninguém: apaga e deixa o aluno tentar de novo com o texto.
+        console.warn('[suporte] primeira mensagem:', mErr);
+        try{ await window._sb.schema('aluno').from('support_threads').delete().eq('id', th.id); }catch(_){}
+        if(errEl){ errEl.textContent = avisoErro; errEl.hidden = false; }
+        return;
+      }
       form.hidden = true;
       stageEl.querySelector('#supNewSubject').value = '';
       stageEl.querySelector('#supNewText').value = '';
@@ -35835,7 +36038,11 @@ Renderers.support.mount = async function(stageEl, route){
         btn.textContent = 'Enviando…';
         const { error } = await window._sb.schema('aluno').from('support_messages')
           .insert({ thread_id: threadId, sender_id: user.id, sender_is_admin: false, text, attachment });
-        if(error){ console.warn('[suporte] enviar:', error); return; }
+        if(error){
+          console.warn('[suporte] enviar:', error);
+          if(window.ueToast) window.ueToast('Não consegui enviar agora. Sua mensagem continua aqui; tente de novo em instantes.', 'error');
+          return;
+        }
         ta.value = '';
         if(attachInput) attachInput.value = '';
         _setPendingFile(null);
@@ -36564,6 +36771,7 @@ Renderers.login.mount = function(stageEl){
                   || k === 'ubique.user.session'
                   || k === 'ubique.admin.token')
         .forEach(k => localStorage.removeItem(k));
+      Object.keys(sessionStorage).filter(k => k.startsWith('sb-') || k === 'ubique.user.session').forEach(k => sessionStorage.removeItem(k));
     }catch(_){}
     showStatus('Sessão limpa. Recarregando…');
     setTimeout(() => location.reload(), 500);
@@ -36686,6 +36894,7 @@ Renderers.login.mount = function(stageEl){
   if(gBtn) gBtn.addEventListener('click', async () => {
     if(!window._sb){ alert('Sem conexão com o servidor. Tente de novo em instantes.'); return; }
     gBtn.disabled = true; gBtn.textContent = 'Abrindo o Google…';
+    if(window.AuthLembrar && rememberInput) AuthLembrar.definir(!!rememberInput.checked);
     try{
       const { error } = await window._sb.auth.signInWithOAuth({
         provider: 'google',
@@ -38830,7 +39039,7 @@ const CoopSessionModal = (function(){
       html += `</div>`;
       // Objetiva: gabarito só agora (depois do julgamento) + feedback do acerto
       if(isQuiz){
-        html += `<div class="coop-model"><div class="coop-ans-lbl">Gabarito</div><div class="coop-corr-grade">Resposta correta: <strong>${Util.esc(q.key || '—')}</strong></div>${q.comments?`<div class="coop-model-body">${q.comments}</div>`:''}</div>`;
+        html += `<div class="coop-model"><div class="coop-ans-lbl">Gabarito</div><div class="coop-corr-grade">Resposta correta: <strong>${Util.esc(q.key || '—')}</strong></div>${q.comments?`<div class="coop-model-body">${_sanitizeInlineHTML(q.comments)}</div>`:''}</div>`;
         const authorCorrect = !!(s.author_answer && s.author_answer.is_correct);
         if(myCorr){
           // Acertou o julgamento se o veredito bate com o acerto real do autor
@@ -38891,7 +39100,7 @@ const CoopSessionModal = (function(){
           ${s.reviewer_comment?`<div class="coop-corr-comment">${_rich(s.reviewer_comment)}</div>`:''}</div>`;
         html += `<div class="coop-model"><div class="coop-ans-lbl">Gabarito</div>
           <div class="coop-corr-grade">Resposta correta: <strong>${Util.esc(q.key || '—')}</strong></div>
-          ${q.comments?`<div class="coop-model-body">${q.comments}</div>`:''}</div>`;
+          ${q.comments?`<div class="coop-model-body">${_sanitizeInlineHTML(q.comments)}</div>`:''}</div>`;
         html += isReviewer
           ? `<div class="coop-result ${reviewerCorrect?'is-ok':'is-no'}">${reviewerCorrect ? 'Você avaliou corretamente!' : 'Você avaliou de forma incorreta.'}</div>`
           : `<div class="coop-result ${authorCorrect?'is-ok':'is-no'}">${authorCorrect ? 'Você acertou a questão.' : 'Você errou a questão.'}</div>`;
@@ -39551,12 +39760,14 @@ async function _salasChatAppend(pane, m){
 async function _salasChatSend(pane){
   const ta = pane.querySelector('#salasChatText'); if(!ta) return;
   const text = (ta.value || '').trim();
-  if(!text || !window._sb || !_salasCurrentId) return;
+  // A mensagem vai para a sala que a gaveta está mostrando.
+  const roomId = window._salasChatRoom;
+  if(!text || !window._sb || !roomId) return;
   const meId = _salasMyUid(); if(!meId) return;
   ta.value = ''; ta.disabled = true;
   try{
     const { data, error } = await window._sb.schema('aluno').from('room_messages')
-      .insert({ room_id: _salasCurrentId, sender_id: meId, text }).select('*').single();
+      .insert({ room_id: roomId, sender_id: meId, text }).select('*').single();
     if(error){ if(window.ueToast) ueToast('Erro ao enviar: ' + error.message, 'error'); ta.value = text; }
     else if(data){ await _salasChatAppend(pane, data); } // mostra na hora (realtime deduplica)
   }catch(e){ console.warn('[chat send]', e); }
@@ -39583,7 +39794,7 @@ async function _salasChatLoadMore(pane){
 async function _salasRenderChat(drawer){
   const pane = drawer.querySelector('[data-spane="chat"]'); if(!pane) return;
   const roomId = _salasCurrentId;
-  if(!roomId){ pane.innerHTML = '<p class="salas-soon">Selecione uma sala.</p>'; _salasChatUnsubscribe(); return; }
+  if(!roomId){ window._salasChatRoom = null; pane.innerHTML = '<p class="salas-soon">Selecione uma sala.</p>'; _salasChatUnsubscribe(); return; }
   _salasChatInjectStyles();
   const meId = _salasMyUid();
   pane.innerHTML = `<div class="salas-chat">
@@ -40054,6 +40265,16 @@ Renderers.salas.mount = function(stageEl){
   const mainEl = stageEl.querySelector('#salasMain');
   const drawer = stageEl.querySelector('#salasDrawer');
   _salasWireDrawer(drawer);
+  let _gavetaDaSala = null;             // a sala que a gaveta está mostrando
+  function _pintarAbaDaGaveta(){
+    _gavetaDaSala = _salasCurrentId;
+    window._salasMetaEditing = false;
+    const act = drawer.querySelector('.salas-stab.on'); const k = act && act.dataset.stab;
+    if(k === 'ranking'){ _salasRenderRanking(drawer); _salasDrawerStartPoll(drawer); }
+    else if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
+    else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
+    else if(k === 'chat'){ _salasRenderChat(drawer); }
+  }
   let _mesaMemberIds = [];              // ids dos membros da sala atual (pra filtrar o realtime)
   let _mesaRefreshT = null;
   const _mesaRefreshSoon = () => { if(_mesaRefreshT) return; _mesaRefreshT = setTimeout(() => { _mesaRefreshT = null; if(_salasCurrentId) renderMain(); }, 1200); };
@@ -40148,6 +40369,8 @@ Renderers.salas.mount = function(stageEl){
       ? _salasRooms.map(r => { const _ur = (window._salasUnread && window._salasUnread[r.id]) || 0; return `<button class="salas-room-item${String(r.id)===String(_salasCurrentId)?' on':''}" data-room="${Util.attr(r.id)}" type="button"><span class="salas-room-name">${Util.esc(r.name)}</span>${_ur>0?`<span class="salas-badge">${_ur>99?'99+':_ur}</span>`:(r.mentoria_turma_id?'<span class="salas-room-owner">turma</span>':(String(r.creator_id)===String(_salasMyUid())?'<span class="salas-room-owner">dono</span>':''))}</button>`; }).join('')
       : '<p class="salas-empty">Você ainda não está em nenhuma sala. Crie uma!</p>';
     renderMain(); // renderMain já atualiza os badges (Painéis/aba Chat) ao terminar
+    // Trocou de sala (ou saiu dela) com a gaveta aberta: a aba aberta passa a mostrar a sala certa.
+    if(!drawer.hidden && String(_gavetaDaSala) !== String(_salasCurrentId)) _pintarAbaDaGaveta();
   }
   listEl.addEventListener('click', e => { const b = e.target.closest('[data-room]'); if(b){ _salasCurrentId = b.dataset.room; renderList(); } });
   stageEl.querySelector('#salasNewBtn').addEventListener('click', () => _salasOpenCreateModal(() => renderList()));
@@ -40159,13 +40382,8 @@ Renderers.salas.mount = function(stageEl){
     const lv = e.target.closest('[data-leave]'); if(lv){ if(await _salasLeave(lv.dataset.leave)) renderList(); return; }
     const dt = e.target.closest('[data-drawer-toggle]'); if(dt){
       drawer.hidden = !drawer.hidden;
-      if(!drawer.hidden){ // ao abrir, renderiza a aba ativa (padrão = Ranking)
-        const act = drawer.querySelector('.salas-stab.on'); const k = act && act.dataset.stab;
-        if(k === 'ranking'){ _salasRenderRanking(drawer); _salasDrawerStartPoll(drawer); }
-        else if(k === 'feed'){ _salasRenderFeed(drawer); _salasDrawerStartPoll(drawer); }
-        else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
-        else if(k === 'chat'){ _salasRenderChat(drawer); }
-      } else { _salasDrawerStopPoll(); _salasChatLeave(); }
+      if(!drawer.hidden) _pintarAbaDaGaveta(); // ao abrir, renderiza a aba ativa (padrão = Ranking)
+      else { _salasDrawerStopPoll(); _salasChatLeave(); }
       return;
     }
   });
@@ -40302,12 +40520,13 @@ Renderers.edital = function(route){
     const owned = course ? (!(window.Commerce && Commerce.temAcesso) || Commerce.temAcesso(course.id)) : true;
     return (_ownedSubjCache[k] = owned);
   }
-  // Unidades CONCLUÍDAS (store id), pelo mesmo registro do botão "Marcar unidade
-  // como concluída" (unitViews[id do curso].completed).
+  // Unidades CONCLUÍDAS (store id), pela regra de sempre: botão "Marcar unidade como
+  // concluída" ou todos os blocos lidos. Só as que o aluno já abriu podem estar concluídas.
   const _views = (window.Store && Store.get) ? ((Store.get() || {}).unitViews || {}) : {};
+  const _bmks = (window.Store && Store.get) ? ((Store.get() || {}).bookmarks || {}) : {};
   const _concluidas = new Set();
   ((window.COURSES_ALL || window.COURSES || []).filter(Boolean)).forEach(c => (c.modules || []).forEach(m => (m.chapters || []).forEach(ch => (ch.units || []).forEach(u => {
-    if(u && u._storeId != null && (_views[u.id] || {}).completed) _concluidas.add(String(u._storeId));
+    if(u && u._storeId != null && (_views[u.id] || _bmks[u.id]) && Store.unitProgress(u).state === 'completed') _concluidas.add(String(u._storeId));
   }))));
   const _okSvg = '<svg class="edital-unit-ok" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" aria-label="concluída"><polyline points="20 6 9 17 4 12"/></svg>';
   // Cadeado em SVG (proibido emoji).
@@ -40555,10 +40774,23 @@ Renderers.edital.mount = function(stage){
       if(window._sb && okU){
         try{
           const rows = soUuid(inserir).map(id => ({ user_id: userId, topic_id: id }));
-          if(rows.length) await window._sb.schema('aluno').from('edital_progress').upsert(rows, { onConflict: 'user_id,topic_id' });
+          if(rows.length){ const r1 = await window._sb.schema('aluno').from('edital_progress').upsert(rows, { onConflict: 'user_id,topic_id' }); if(r1.error) throw r1.error; }
           const dels = soUuid(remover);
-          if(dels.length) await window._sb.schema('aluno').from('edital_progress').delete().eq('user_id', userId).in('topic_id', dels);
-        }catch(err){ console.warn('[edital_progress lote]', err); }
+          if(dels.length){ const r2 = await window._sb.schema('aluno').from('edital_progress').delete().eq('user_id', userId).in('topic_id', dels); if(r2.error) throw r2.error; }
+        }catch(err){
+          // Não gravou: a tela volta ao que está na conta, em vez de mudar sozinha no próximo acesso.
+          console.warn('[edital_progress lote]', err);
+          inserir.forEach(id => {
+            const row = St.edital_progress.list().find(x => x.user_id === userId && String(x.topic_id) === id);
+            if(row) St.edital_progress.remove(row.id);
+            const el2 = stage.querySelector('[data-progress="' + id + '"]'); if(el2) el2.checked = false;
+          });
+          remover.forEach(id => {
+            St.edital_progress.add({ user_id: userId, topic_id: id, viewed_at: new Date().toISOString() });
+            const el2 = stage.querySelector('[data-progress="' + id + '"]'); if(el2) el2.checked = true;
+          });
+          if(window.ueToast) ueToast('Não consegui gravar sua marcação. Confira a conexão e tente de novo.', 'error');
+        }
       }
     });
   });
@@ -42377,10 +42609,20 @@ function _pfEvolucaoHtml(tents, id){
    por JSON usa exatamente a mesma — duplicar seria manter duas. */
 /* Pinta o satélite: progresso, mapa numérico e o gabarito do item ativo.
    Um só para a folha da prova e para o simulado por JSON. */
-function _pfSatPintar(stageEl, id, itens, itemAtivo){
-  const p = _pfPlacar(id, itens);
+function _pfSatPintar(stageEl, id, itens, itemAtivo, emAndamento){
   const c = stageEl.querySelector('#pfSatCount'), b = stageEl.querySelector('#pfSatBar'),
         nums = stageEl.querySelector('#pfSatNumeros'), d = stageEl.querySelector('#pfSatDetalhe');
+  // Simulado em andamento: só o que falta preencher; certo, errado e gabarito só depois de finalizar.
+  if(emAndamento){
+    const resp = itens.filter(function(it){ const r = _pfResposta(id, it.numero); return !!(r && r.selected != null); }).length;
+    const falta = Math.max(0, itens.length - resp);
+    if(c) c.textContent = resp + ' / ' + itens.length + ' respondidas';
+    if(b) b.style.width = (itens.length ? Math.round(resp / itens.length * 100) : 0) + '%';
+    if(nums) nums.innerHTML = '<div class="pf-num-nota">' + (falta ? falta + ' por preencher' : 'todos os itens respondidos') + '</div>';
+    if(d) d.innerHTML = '<div class="qz-sat-empty">O gabarito e os comentários aparecem depois de finalizar.</div>';
+    return;
+  }
+  const p = _pfPlacar(id, itens);
   if(c) c.textContent = p.certos + ' / ' + p.total + ' corretas';
   if(b) b.style.width = (p.total ? Math.round(p.certos / p.total * 100) : 0) + '%';
   if(nums) nums.innerHTML = _pfNumerosHtml(id, itens);
@@ -42389,11 +42631,11 @@ function _pfSatPintar(stageEl, id, itens, itemAtivo){
 /* Liga o satélite num simulado por JSON: ele se repinta quando qualquer
    resposta muda (Store.subscribe) e mostra o gabarito do item em que o aluno
    acabou de mexer. Devolve a função de desligar. */
-function _pfSatLigarNoSimulado(stageEl, id, itens){
+function _pfSatLigarNoSimulado(stageEl, id, itens, emAndamento){
   const porNum = {};
   itens.forEach(function(it){ porNum[String(it.numero)] = it; });
   let ativo = null;
-  const pinta = function(){ _pfSatPintar(stageEl, id, itens, ativo); };
+  const pinta = function(){ _pfSatPintar(stageEl, id, itens, ativo, emAndamento); };
   pinta();
   const aoClicar = function(ev){
     const el = ev.target.closest ? ev.target.closest('[data-item-id]') : null;
@@ -43556,11 +43798,15 @@ Renderers.provaResultado.mount = async function(stageEl, route){
   if(barVv) barVv.textContent = (Math.round(g.pontos * 100) / 100).toFixed(2);
   try{
     if(window._sb && typeof window._sb.rpc === 'function'){
-      const { data, error } = await _rankRpc({ id: id, kind: 'prova' });
+      // Prova conta a primeira tentativa de cada um; simulado, a última: a mesma do ranking de cada tipo.
+      const { data, error } = await _rankRpc(_simOuProva(id) || { id: id, kind: 'prova' });
       const rows = (!error && data) ? data : [];
       const notas = rows.map(function(r){ return parseFloat(r.score) || 0; }).filter(function(n){ return !isNaN(n); });
       const el = stageEl.querySelector('#pfBarMedia'), ev = stageEl.querySelector('#pfBarMediaVal');
-      if(notas.length){
+      if(error){
+        console.warn('[prova média]', error);
+        if(ev) ev.textContent = 'não consegui carregar agora';
+      } else if(notas.length){
         const media = notas.reduce(function(a, b){ return a + b; }, 0) / notas.length;
         const tot = parseFloat(rows[0].total) || g.total || 1;
         if(el) el.style.width = Math.max(0, Math.min(100, media / tot * 100)).toFixed(1) + '%';
@@ -43943,7 +44189,7 @@ Renderers.simuladoDetail = function(route){
     <div class="sem-map-loading" data-a="4">Carregando as suas respostas…</div>`;
   }
 
-  const ctx = { unitId:'__sim_'+sim.id, store:Store, suppressActions:true, semDadosDaQuestao:true, simuladoMode:!submitted,
+  const ctx = { unitId:'__sim_'+sim.id, store:Store, suppressActions:true, semDadosDaQuestao:true, simuladoMode:!submitted, simCorrecaoIa:!!sim.correcaoIaAtiva,
                 // a tela do simulado por JSON já tem o satélite da folha na coluna da direita
                 satelliteExterno: !!sim.temItensProprios };
   const blocksHtml = sim.blocks.map(b => {
@@ -44252,14 +44498,19 @@ async function _loadSimuladoNotes(simId){
   }catch(e){ console.warn('[sim notes load ex]', e); return ''; }
 }
 async function _saveSimuladoNotes(simId, content){
+  // Devolve true quando a conta confirmou. A cópia no aparelho fica até lá.
   const userId = _simNotesUserId();
-  if(!userId || !window._sb) return;
+  if(!userId || !window._sb) return false;
+  const copia = 'falcon_sim_notas:' + userId + ':' + simId;
+  try{ localStorage.setItem(copia, content); }catch(_){}
   try{
     const { error } = await window._sb.schema('aluno').from('simulado_notes')
       .upsert({ user_id: userId, simulado_id: String(simId), content: content,
                 updated_at: new Date().toISOString() }, { onConflict: 'user_id,simulado_id' });
-    if(error) console.warn('[sim notes save]', error);
-  }catch(e){ console.warn('[sim notes save ex]', e); }
+    if(error) throw error;
+    try{ if(localStorage.getItem(copia) === content) localStorage.removeItem(copia); }catch(_){}
+    return true;
+  }catch(e){ console.warn('[sim notes save]', e); return false; }
 }
 // Liga o editor de notas: carrega conteúdo, wire toolbar + auto-save.
 function _mountSimNotes(stageEl, sim){
@@ -44278,19 +44529,32 @@ function _mountSimNotes(stageEl, sim){
   });
   // Carrega conteúdo salvo
   _loadSimuladoNotes(sim.id).then(html => {
-    if(html && editor && !editor.dataset.dirty){ editor.innerHTML = html; }
+    // A cópia do aparelho só existe quando a conta não confirmou: é a mais nova.
+    let copia = null;
+    try{ copia = localStorage.getItem('falcon_sim_notas:' + _simNotesUserId() + ':' + sim.id); }catch(_){}
+    const texto = copia != null ? copia : html;
+    if(texto && editor && !editor.dataset.dirty){ editor.innerHTML = texto; }
+    if(copia != null) grava();
   });
-  // Auto-save debounced (1.5s após parar de digitar)
+  // Auto-save debounced (1.5s após parar de digitar). "salvo" só com a conta confirmando; se
+  // falhar, avisa e tenta de novo até dar certo.
   let saveTimer = null;
+  function grava(){
+    if(saveTimer) clearTimeout(saveTimer);
+    _saveSimuladoNotes(sim.id, editor.innerHTML).then(ok => {
+      if(ok){
+        if(statusEl){ statusEl.textContent = 'salvo'; setTimeout(() => { if(statusEl && statusEl.textContent === 'salvo') statusEl.textContent = ''; }, 1500); }
+      } else {
+        if(statusEl) statusEl.textContent = 'não salvou; tentando de novo';
+        if(editor.isConnected) saveTimer = setTimeout(grava, 15000);
+      }
+    });
+  }
   editor.addEventListener('input', () => {
     editor.dataset.dirty = '1';
     if(statusEl) statusEl.textContent = 'editando…';
     if(saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
-      _saveSimuladoNotes(sim.id, editor.innerHTML).then(() => {
-        if(statusEl){ statusEl.textContent = 'salvo'; setTimeout(() => { if(statusEl) statusEl.textContent = ''; }, 1500); }
-      });
-    }, 1500);
+    saveTimer = setTimeout(grava, 1500);
   });
 }
 
@@ -44378,14 +44642,6 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
     _simGarantirRespostas(sim, _tentResp).then(function(montou){ if(montou && window.App && App.render) App.render(); });
     return;
   }
-  /* Satélite do simulado por JSON: mesmo painel da folha da prova — progresso,
-     mapa numérico e o gabarito do item em que o aluno mexeu. Fica na coluna da
-     direita, acima do rascunho, em vez de no meio espremendo a questão. */
-  if(sim.temItensProprios && stageEl.querySelector('#pfSatDetalhe')){
-    if(stageEl.__pfSatOff) try{ stageEl.__pfSatOff(); }catch(_){}
-    const _its = (window._provaItens || {})[sim.id] || [];
-    if(_its.length) stageEl.__pfSatOff = _pfSatLigarNoSimulado(stageEl, sim.id, _its.filter(function(x){ return x.tipo !== 'discursiva'; }));
-  }
   const simState = Store.getSimuladoState(sim.id);
   const isEstudo = sim.attemptMode === 'estudo';
   const activeAttempt = (window._simCurrentAttempt && window._simCurrentAttempt[sim.id]) || 1;
@@ -44393,6 +44649,14 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
   const submittedAttempt = (simState && simState.submittedAt) ? (simState.attemptNumber || 1) : 0;
   const inProgress = !!(simState && simState.startedAt && !simState.submittedAt);
   const submitted = submittedAttempt > 0 && activeAttempt === submittedAttempt && !inProgress;
+  /* Satélite do simulado por JSON: mesmo painel da folha da prova — progresso,
+     mapa numérico e, depois de enviar, o gabarito do item em que o aluno mexeu. Fica
+     na coluna da direita, acima do rascunho, em vez de no meio espremendo a questão. */
+  if(sim.temItensProprios && stageEl.querySelector('#pfSatDetalhe')){
+    if(stageEl.__pfSatOff) try{ stageEl.__pfSatOff(); }catch(_){}
+    const _its = (window._provaItens || {})[sim.id] || [];
+    if(_its.length) stageEl.__pfSatOff = _pfSatLigarNoSimulado(stageEl, sim.id, _its.filter(function(x){ return x.tipo !== 'discursiva'; }), !submitted);
+  }
 
   // S7 A2 — Tela "Antes de começar": wire do botão Iniciar
   const startBtn = document.getElementById('simStartBtn');
@@ -44434,6 +44698,7 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
     // ficaria preso). Resetadas aqui, no setup de cada cronômetro.
     window._simAutoSubmitted = false;
     window._simExamFinishing = false;
+    window._simTempoEsgotado = false;
     const timerEl = document.getElementById('simExamTimer');
     const timerValEl = timerEl && timerEl.querySelector('.set-timer-value');
     const tLimMin = sim.timeLimitMinutes;
@@ -44463,6 +44728,7 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
             // Mostra aviso modal antes de auto-submit (1 vez só)
             if(!window._simAutoSubmitted){
               window._simAutoSubmitted = true;
+              window._simTempoEsgotado = true;   // o envio não pergunta "Tem certeza?": o tempo acabou
               alert('Tempo esgotado! O simulado será enviado automaticamente.');
               sb.click();
             }
@@ -44490,7 +44756,7 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
     tick(); // imediato pra não mostrar --:--:--
     window._simExamTimerInt = setInterval(tick, 1000);
   }
-  const ctx = { unitId:'__sim_'+sim.id, store:Store, suppressActions:true, semDadosDaQuestao:true, simuladoMode:!submitted,
+  const ctx = { unitId:'__sim_'+sim.id, store:Store, suppressActions:true, semDadosDaQuestao:true, simuladoMode:!submitted, simCorrecaoIa:!!sim.correcaoIaAtiva,
                 // a tela do simulado por JSON já tem o satélite da folha na coluna da direita
                 satelliteExterno: !!sim.temItensProprios };
 
@@ -44594,23 +44860,50 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
     simStage.querySelectorAll('.q-option.correct,.q-option.wrong').forEach(o => { o.classList.remove('correct','wrong','selected'); });
     simStage.querySelectorAll('.q-score').forEach(sc => { sc.textContent = ''; });
 
+    // As marcações já gravadas voltam destacadas (recarregou, saiu e voltou, outro aparelho) e
+    // entram na lista que o Finalizar lê. O certo/errado só é calculado no envio.
+    window._simSelections = window._simSelections || {};
+    simStage.querySelectorAll('.q-item[data-item-id]').forEach(item => {
+      const itemId = item.getAttribute('data-item-id');
+      const blockEl = item.closest('.block-section');
+      const blockId = blockEl ? blockEl.id.replace('block-','') : '';
+      const key = sim.id + '::' + blockId + '::' + itemId;
+      if(!window._simSelections[key]){
+        const a = Store.getQuizAnswer('__sim_' + sim.id, blockId, itemId);
+        if(a && a.selected != null){
+          const o = Array.from(item.querySelectorAll('.q-option')).find(x => String(x.getAttribute('data-value')) === String(a.selected));
+          if(o) window._simSelections[key] = { blockId, itemId, selected:a.selected, idx:parseInt(o.getAttribute('data-idx'),10) };
+        }
+      }
+      item.querySelectorAll('.q-option.selected').forEach(o => o.classList.remove('selected'));
+      const sel = window._simSelections[key];
+      const marcada = sel ? item.querySelector('.q-option[data-idx="' + sel.idx + '"]') : null;
+      if(marcada) marcada.classList.add('sim-selected');
+    });
+
     // Override option click to record silently (mark as selected but don't reveal answer)
     simStage.querySelectorAll('.q-option').forEach(btn => {
       btn.addEventListener('click', function(e){
         e.stopPropagation(); e.stopImmediatePropagation();
         const item = btn.closest('.q-item');
-        // Visually mark selected
-        item.querySelectorAll('.q-option').forEach(b => b.classList.remove('sim-selected'));
-        btn.classList.add('sim-selected');
-        // Record answer silently
         const itemId = item.getAttribute('data-item-id');
         const blockEl = btn.closest('.block-section');
         const blockId = blockEl ? blockEl.id.replace('block-','') : '';
         const value = btn.getAttribute('data-value');
-        // Store selection without revealing
         const key = sim.id + '::' + blockId + '::' + itemId;
+        // Clicar de novo na marcada desmarca: deixar em branco é uma resposta (o formato de prova desconta erro).
+        const desmarcou = btn.classList.contains('sim-selected');
+        item.querySelectorAll('.q-option').forEach(b => b.classList.remove('sim-selected'));
         window._simSelections = window._simSelections || {};
-        window._simSelections[key] = { blockId, itemId, selected:value, idx:parseInt(btn.getAttribute('data-idx'),10) };
+        if(desmarcou){
+          delete window._simSelections[key];
+          Store.updateQuizAnswer('__sim_' + sim.id, blockId, itemId, { selected:null, correct:null });
+        } else {
+          btn.classList.add('sim-selected');
+          window._simSelections[key] = { blockId, itemId, selected:value, idx:parseInt(btn.getAttribute('data-idx'),10) };
+          // Grava na hora, no aparelho e na conta, sem o certo/errado.
+          Store.updateQuizAnswer('__sim_' + sim.id, blockId, itemId, { selected:value, correct:null });
+        }
         // S7 A3 — atualiza o mapa (marca ✓ verde nesta questão)
         try{ _refreshSimExamMap(stageEl, sim); }catch(_){}
       }, true); // capture phase to override existing handlers
@@ -44644,7 +44937,7 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
       // tem sim.correcaoIaAtiva true). Cada chamada pode levar 30-60s, então
       // o loop é sequencial pra não esgotar o orçamento da Edge Function.
       submitBtn.addEventListener('click', async () => {
-        if(!confirm('Tem certeza? Após o envio, o gabarito será revelado e não será possível alterar suas respostas.')) return;
+        if(!window._simTempoEsgotado && !confirm('Tem certeza? Após o envio, o gabarito será revelado e não será possível alterar suas respostas.')) return;
         try { if(window.ubqMarcoUnico) window.ubqMarcoUnico('PrimeiroSimulado'); } catch(_){}
         // S7 fix — PARA o cronômetro IMEDIATAMENTE ao finalizar. Sem isto, se o
         // aluno termina faltando 30s e a correção da IA leva 1min, o timer
@@ -44681,22 +44974,35 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
         // feedback + ai_corrected_at via Store.updateEssay (que desvia pelo
         // __sim_ pra _syncSimuladoEssayResponseToSupabase). Se IA falhar →
         // resposta fica pendente pra correção manual no admin (Fase E).
+        // Antes de tudo, o texto de cada caixa é salvo: o que foi digitado vale, com ou sem
+        // "Salvar resposta" (e o mapa já mostrava a questão como respondida).
+        const _salvando = [];
+        stageEl.querySelectorAll('.essay-item[data-item-id]').forEach(itemEl => {
+          const ta = itemEl.querySelector('.essay-textarea');
+          const txt = ta ? ta.value.trim() : '';
+          const bl = itemEl.closest('.block-section');
+          if(!txt || !bl) return;
+          const blockId = bl.id.replace('block-', ''), itemId = itemEl.getAttribute('data-item-id');
+          const ans = Store.getEssayAnswer('__sim_'+sim.id, blockId, itemId);
+          if(!ans || String(ans.text || '').trim() !== txt) _salvando.push(Store.updateEssay('__sim_'+sim.id, blockId, itemId, { text: txt }));
+        });
+        if(_salvando.length) await Promise.all(_salvando);
         if(sim.correcaoIaAtiva){
-          // Coleta discursivas respondidas a partir do Store (já hidratado da
-          // tabela aluno.simulado_essay_responses no boot do simulado).
-          const essaysBucket = (Store.get().essays || {})['__sim_'+sim.id] || {};
+          // Coleta as discursivas respondidas a partir do Store (o id da resposta é o mesmo do render).
           const toCorrect = [];
           (sim.blocks || []).forEach(b => {
             if(b.type !== 'essay') return;
-            (b.items || []).forEach(it => {
-              const ans = essaysBucket[b.id] && essaysBucket[b.id][it.id];
+            (b.items || []).forEach((it, i) => {
+              const rico = (typeof _resolveEssayItem === 'function') ? (_resolveEssayItem(it) || it) : it;
+              const itemId = rico._bank_id || rico.id || ('essay-' + i);
+              const ans = Store.getEssayAnswer('__sim_'+sim.id, b.id, itemId);
               const txt = ans && typeof ans.text === 'string' ? ans.text.trim() : '';
               if(txt){
                 // Só processa se ainda NÃO foi corrigida pela IA na tentativa atual.
                 // Ex: se aluno volta pro simulado e clica Finalizar de novo (race),
                 // não re-cobra a Edge Function.
-                if(!ans.aiCorrected){
-                  toCorrect.push({ block: b, item: it, text: txt });
+                if(!ans.aiCorrected && !ans.aiCorrectedAt){
+                  toCorrect.push({ block: b, item: rico, itemId, text: txt });
                 }
               }
             });
@@ -44707,21 +45013,17 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
             // Texto mais claro pro aluno (sem mencionar "IA" — implementação interna)
             const _examBtn = document.getElementById('simExamFinishBtn');
             if(_examBtn){ _examBtn.disabled = true; }
-            let done = 0;
+            let done = 0, semSaldo = 0, falharam = 0;
             for(const ent of toCorrect){
               done++;
+              if(semSaldo){ semSaldo++; continue; }   // sem saldo para uma, sem saldo para as próximas
               const msg = `Corrigindo suas respostas… ${done}/${toCorrect.length}`;
               submitBtn.textContent = msg;
               if(_examBtn){
                 _examBtn.innerHTML = '<span>' + msg + '</span>';
               }
               try{
-                // Resolve item rico (com critérios, modelos, refs) — mesma função
-                // que Blocks.essay usa pra renderizar (consistência total).
-                const enriched = (typeof _resolveEssayItem === 'function')
-                  ? (_resolveEssayItem(ent.item) || ent.item)
-                  : ent.item;
-                const aiResult = await _correctEssayViaAI(enriched, ent.text);
+                const aiResult = await _correctEssayViaAI(ent.item, ent.text);
                 if(aiResult && aiResult.payload){
                   // Salva com flag aiCorrected:true → _syncSimuladoEssayResponseToSupabase
                   // preenche ai_corrected_at. Preserva o text original.
@@ -44729,14 +45031,22 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
                     text: ent.text,
                     aiCorrected: true
                   });
-                  Store.updateEssay('__sim_'+sim.id, ent.block.id, ent.item.id, finalPayload);
+                  Store.updateEssay('__sim_'+sim.id, ent.block.id, ent.itemId, finalPayload);
+                } else if(aiResult && aiResult.blocked){
+                  semSaldo++;
                 } else {
-                  // IA falhou → mantém só texto, sem score. Admin corrige depois.
-                  console.warn('[sim essay] IA não retornou pra item', ent.item.id, '— ficará pendente pra correção manual.');
+                  // IA falhou → mantém só texto, sem nota. Dá para enviar de novo pela revisão.
+                  falharam++;
+                  console.warn('[sim essay] IA não retornou pra item', ent.itemId);
                 }
               }catch(e){
-                console.warn('[sim essay] exception ao corrigir item', ent.item.id, e);
+                falharam++;
+                console.warn('[sim essay] exception ao corrigir item', ent.itemId, e);
               }
+            }
+            if(window.ueToast){
+              if(semSaldo) ueToast(semSaldo + (semSaldo === 1 ? ' discursiva ficou' : ' discursivas ficaram') + ' sem correção: faltou saldo de UbiTokens. Depois de recarregar a Carteira, envie pela revisão do simulado.', 'warn');
+              if(falharam) ueToast('Não consegui corrigir ' + falharam + (falharam === 1 ? ' discursiva' : ' discursivas') + ' agora. O texto ficou guardado: envie de novo pela revisão do simulado.', 'warn');
             }
             submitBtn.textContent = _originalBtnText;
             submitBtn.disabled = false;
@@ -44750,7 +45060,13 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
         }
 
         // Save submission + reveal by re-rendering the page
-        Store.submitSimulado(sim.id, correct, total, activeAttempt);
+        // Formato de prova: a nota do ranking é a líquida (com o desconto por erro), como na folha da prova.
+        let _nota = correct, _notaTotal = total;
+        if(sim.temItensProprios){
+          const _its = ((window._provaItens || {})[sim.id] || []).filter(x => x.tipo !== 'discursiva');
+          if(_its.length){ const _pl = _pfPlacar(sim.id, _its); _nota = Math.round(_pl.pontos * 100) / 100; _notaTotal = _pl.total; }
+        }
+        Store.submitSimulado(sim.id, _nota, _notaTotal, activeAttempt);
         // a lista de tentativas mudou: o desempenho (mesma tela da prova) lê de novo, como na folha
         if(window._pfTentativas) window._pfTentativas[sim.id] = null;
         // Consome a flag de "refazer" agora que a nova tentativa foi enviada.
@@ -45100,6 +45416,8 @@ Renderers.simuladoPerformance = function(route){
   const state = Store.get();
   const unitId = '__sim_'+sim.id;
   const fmtPct = v => v == null ? '—' : Math.round(v*100)+'%';
+  // Anulada pelo professor: o selo da questão diz "contada como acerto na sua nota"; aqui vale o mesmo.
+  const _anuladas = new Set((sim.voidedQuestionIds || []).map(String));
 
   // S3 — agrega por SEÇÃO do simulado (questões do banco não têm tópico no item).
   const sectionAgg = [];
@@ -45111,8 +45429,9 @@ Renderers.simuladoPerformance = function(route){
       // S2.2 — usa getQuizAnswer (tem fallback _all pra simulado) em vez de
       // ler state direto. Antes mostrava 0 porque o _all do banco não está em b.id.
       const prior = Store.getQuizAnswer(unitId, b.id, it.id);
-      const answered = !!prior && prior.selected != null;
-      const correct = answered && prior.correct;
+      const anulada = _anuladas.has(String(it.id));
+      const answered = anulada || (!!prior && prior.selected != null);
+      const correct = anulada || (answered && prior.correct);
       const doubt = prior && !!prior.doubt;
       a.total++;
       if(!answered) a.pending++;
@@ -45255,7 +45574,8 @@ Renderers.simuladoPerformance = function(route){
       const norm = normalizeOptions(it.options);
       const keyIdx = quizItemKeyIndex(it, norm);
       const selIdx = prior ? norm.values.findIndex(v => String(v) === String(prior.selected)) : -1;
-      const answered = !!prior && prior.selected != null;
+      const anulada = _anuladas.has(String(it.id));
+      const answered = anulada || (!!prior && prior.selected != null);
       objEntries.push({
         num: it._globalNum,
         assertion: it.assertion || '',
@@ -45264,7 +45584,7 @@ Renderers.simuladoPerformance = function(route){
         selectedDisplay: selIdx >= 0 ? norm.display[selIdx] : null,
         keyDisplay: keyIdx >= 0 ? norm.display[keyIdx] : null,
         answered,
-        correct: answered && !!prior.correct,
+        correct: anulada || (answered && !!prior.correct),
         doubt: prior && !!prior.doubt
       });
     }));
@@ -46452,6 +46772,7 @@ Renderers.inicio = function(){
     if(!hit || _porMateria.has(hit.c.id)) continue;
     let prog = { pct: 0 };
     try{ prog = Store.unitProgress(hit.entry.unit) || prog; }catch(_){}
+    if(prog.state === 'completed') continue;   // todos os blocos lidos: não é "continue de onde parou"
     _porMateria.set(hit.c.id, { c: hit.c, u: hit.entry.unit, prog: prog, href: _retomadaHref(hit, v), last: v.lastSeenAt });
   }
   const _retomadas = Array.from(_porMateria.values());
@@ -46547,7 +46868,8 @@ Renderers.inicio = function(){
       const S = perf.summary || {};
       const q = S.quiz || {}, es = S.essay || {}, un = S.units || {};
       const pctA = q.answered ? Math.round((q.correct || 0) / q.answered * 100) : null;
-      const nota = (es.maxTotal && es.submitted) ? (es.scoreTotal / es.maxTotal * 10) : null;
+      // Média sobre 10 só das discursivas enviadas (as que o aluno nunca respondeu não pesam).
+      const nota = (es.maxEnviadas && es.submitted) ? (es.scoreTotal / es.maxEnviadas * 10) : null;
       const li = function(k, v, s){ return '<div class="ini-stat-li"><span class="k">' + k + '</span><span class="v">' + v + (s ? ('<small>' + s + '</small>') : '') + '</span></div>'; };
       statsHtml = '<div class="ini-stat-list">'
         + li('Questões resolvidas', (q.answered || 0).toLocaleString('pt-BR'), '')
@@ -49616,7 +49938,7 @@ window.TutorIA = (function(){
         headers:{ 'Authorization':'Bearer ' + token, 'apikey': window._sbKey || '', 'content-type':'application/json' },
         body: JSON.stringify({
           ephemeral: true, comment_mode: true, unit_id: ctx.unitId, unit_title: ctx.unitTitle, unit_text: ctx.unitText,
-          mensagem: mensagem, historico: [], modelo: _modelo, apelido: '', modo: 'duvida',
+          mensagem: mensagem, historico: [], modelo: opts.modelo || _modelo, apelido: '', modo: 'duvida',
           subject_id: (window.COURSE && window.COURSE._subjectId != null) ? String(window.COURSE._subjectId) : '',
           subjects: (window.COURSES || []).map(function(c){ return (c && c._subjectId != null) ? String(c._subjectId) : ''; }).filter(Boolean)
         })
@@ -53435,12 +53757,18 @@ window.TutorIA = (function(){
         // caderno AVULSO: salva pelo Store (sync embutido) + versões em 'doc:'+id
         _cadStatus('salvando…', stAlvo);
         const doc = (window.Store && Store.cadAvulsoSalvar) ? Store.cadAvulsoSalvar(docAlvo, { body: body }) : null;
-        if(doc){ el.__cadBase = body; if((el.__cadEdits || 0) === edicoes) el.__cadDirty = false; }
-        if(doc) _portaisSincronizar(elSync, 'doc:' + docAlvo).catch(function(e2){ console.warn('[portal sync]', e2); });
-        _cadStatus(doc ? 'salvo' : 'erro ao salvar', stAlvo);
-        if(doc){ try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ } }
+        if(!doc){ _cadStatus('erro ao salvar', stAlvo); return; }
+        // "salvo" só depois de a conta confirmar. Sem confirmação o texto fica no aparelho e o envio se repete.
+        if(!(await Store.cadAvulsoEnvio(docAlvo))){
+          _cadStatus('sem conexão: guardado neste aparelho, tentando de novo', stAlvo);
+          return;
+        }
+        if(_poChaveAtual() === chavePo){ el.__cadBase = body; if((el.__cadEdits || 0) === edicoes) el.__cadDirty = false; }
+        _portaisSincronizar(elSync, 'doc:' + docAlvo).catch(function(e2){ console.warn('[portal sync]', e2); });
+        _cadStatus('salvo', stAlvo);
+        try{ document.dispatchEvent(new CustomEvent('ubq:cad-salvo')); }catch(_){ }
         const uid0 = await _cadUserId();
-        if(doc && uid0) _cadVersionar(uid0, 'doc:' + docAlvo, body);
+        if(uid0) _cadVersionar(uid0, 'doc:' + docAlvo, body);
         return;
       }
       const uid = await _cadUserId(); if(!uid || !window._sb) return;
@@ -53463,6 +53791,10 @@ window.TutorIA = (function(){
     gravacao.finally(function(){ if(_cadSaveEmCurso === gravacao) _cadSaveEmCurso = null; });
     return gravacao;
   }
+  // A nova tentativa do envio deu certo: o rodapé deixa de dizer "tentando de novo".
+  document.addEventListener('ubq:cad-avulso-enviado', function(e){
+    if(_cadDocId && e.detail && String(_cadDocId) === e.detail.id) _cadStatus('salvo');
+  });
   /* ── Histórico de versões do caderno (lixeira das anotações) ─────────────
      Fotos do corpo em aluno.caderno_versions, guardadas por 30 dias:
      a PRIMEIRA gravação da sessão preserva o estado ANTERIOR (o que estava
@@ -57521,11 +57853,46 @@ window.TutorIA = (function(){
     _cadSchedule();
     if(alvo){ alvo.classList.add('cad-ref-flash'); setTimeout(function(){ alvo.classList.remove('cad-ref-flash'); }, 2600); }
   }
+  // Troca na linha só o trecho que mudou, de nó de texto em nó de texto: imagem, grifo, cor e etiqueta
+  // [[ ]] continuam onde estão. Se o trecho corrigido passa por dentro de uma peça fechada (etiqueta,
+  // citação, fórmula), não mexe e devolve false: aí o aluno aplica à mão.
+  function _melTrocaNaLinha(l, novo){
+    const velho = l.textContent;
+    if(velho === novo) return true;
+    let ini = 0;
+    while(ini < velho.length && ini < novo.length && velho[ini] === novo[ini]) ini++;
+    let fimV = velho.length, fimN = novo.length;
+    while(fimV > ini && fimN > ini && velho[fimV - 1] === novo[fimN - 1]){ fimV--; fimN--; }
+    const nos = [], w = document.createTreeWalker(l, NodeFilter.SHOW_TEXT);
+    let pos = 0;
+    for(let n = w.nextNode(); n; n = w.nextNode()){
+      const de = pos; pos += n.nodeValue.length;
+      const pai = n.parentElement;
+      nos.push({ n: n, de: de, ate: pos, fechado: !!(pai && pai !== l && pai.closest('[contenteditable="false"]')) });
+    }
+    if(nos.some(function(x){ return x.fechado && x.de < fimV && x.ate > ini; })) return false;
+    const meio = novo.slice(ini, fimN);
+    let pos2 = false;
+    nos.forEach(function(x){
+      if(x.fechado || x.ate < ini || x.de > fimV) return;
+      if(x.de === fimV && pos2) return;
+      const a = Math.max(ini, x.de) - x.de, b = Math.min(fimV, x.ate) - x.de;
+      x.n.nodeValue = x.n.nodeValue.slice(0, a) + (pos2 ? '' : meio) + x.n.nodeValue.slice(b);
+      pos2 = true;
+    });
+    if(!pos2){   // linha sem nó de texto livre no ponto da mudança
+      l.appendChild(document.createTextNode(meio));
+    }
+    return true;
+  }
   function _melCorrigir(k){
     const m = _mel, s = m.sugestoes[k], ed = _revEd(); if(!s || !ed) return;
     const l = _melLinha(s.ref); if(!l) return;
+    if(!_melTrocaNaLinha(l, s.texto_novo)){
+      if(window.ueToast) ueToast('O trecho corrigido passa por uma etiqueta ou fórmula da linha. Aplique a correção à mão, para não perder a ligação.', 'info');
+      return;
+    }
     l.classList.remove('cad-mh-erro');
-    l.textContent = s.texto_novo;     // a linha guarda o recuo, a lista e o id; o texto é o corrigido
     s.estado = 'feita';
     _melDepoisDeMexer(ed, l);
     _melPintar();
@@ -57801,7 +58168,7 @@ window.TutorIA = (function(){
           const bg = window.resolveBankGroup(qid); if(!bg || !Array.isArray(bg.items)) return;
           bg.items.forEach(function(it){
             const a = Store.getQuizAnswerByItemId(it.id);
-            if(!a || a.selected == null || (a.correct !== true && a.correct !== false)) return;
+            if(!a || a.selected == null || a.verified === false || (a.correct !== true && a.correct !== false)) return;
             const errou = a.correct === false, t = a.answeredAt ? new Date(a.answeredAt).getTime() : 0;
             resp++; if(errou) err++;
             if(t >= semana){ respSem++; if(errou) errSem++; }
@@ -61280,9 +61647,10 @@ window.TutorIA = (function(){
     const disp = o.reason ? ('Marquei ' + (o.chosenLabel || '') + ' porque: ' + o.reason) : 'Me explica por que errei essa.';
     return ask(ctx, _explainWrongMsg(head, o.stmt || '', o.gabLabel || '', o.chosenLabel || '', o.just || '', o.reason || ''), disp);
   }
-  function close(){ _aliasClosePop(); const d = document.getElementById('tutorDrawer'); if(d) d.hidden = true; _revVozParar('saida'); _revMarcasLimpar(); _drawerLayoutSync(); }   // só esconde (mantém a conversa)
+  function close(){ _aliasClosePop(); if(_vozLive) _vozClose(); const d = document.getElementById('tutorDrawer'); if(d) d.hidden = true; _revVozParar('saida'); _revMarcasLimpar(); _drawerLayoutSync(); }   // só esconde (mantém a conversa)
   // Sai da unidade → limpa a VISÃO (o dado continua no banco e recarrega ao voltar).
   function _resetForLeave(){
+    if(_vozLive) _vozClose();   // a chamada é da gaveta: sair da unidade não pode deixá-la cobrando escondida
     _openedUnit = null; _cadUnit = null;
     _ctx = { unitId:null, unitTitle:'', unitText:'', conversaId:null, msgs:[] };
     const d = document.getElementById('tutorDrawer');
@@ -62985,6 +63353,13 @@ Renderers.unit.mount = function(stageEl, route){
         const mark = sideBtn.querySelector('.sb-mark');
         if(mark) mark.innerHTML = now ? Icons.check : '';
       }
+      // O botão do cabeçalho acompanha: o último "Lido" conclui, tirar um "Lido" desfaz.
+      const cBtn = stageEl.querySelector('#markCompleteBtn');
+      if(cBtn){
+        const feita = Store.unitProgress(unit).state === 'completed';
+        cBtn.classList.toggle('on', feita);
+        cBtn.innerHTML = Icons.check + (feita ? ' Unidade concluída' : ' Marcar unidade como concluída');
+      }
       _secProgressoAtualizar(stageEl, unit, groups);
       return;
     }
@@ -63140,7 +63515,8 @@ Renderers.unit.mount = function(stageEl, route){
     const btn = stageEl.querySelector('#markCompleteBtn');
     const already = btn.classList.contains('on');
     if(already){
-      // toggle off
+      // toggle off: apaga também o "Lido" de todos os blocos; só com o aluno de acordo
+      if(!confirm('Desmarcar a conclusão desta unidade? As marcas de "Lido" de todos os blocos também serão apagadas.')) return;
       Store.uncompleteUnit(unit.id);
       btn.classList.remove('on');
       btn.innerHTML = Icons.check + ' Marcar unidade como concluída';
@@ -63161,13 +63537,14 @@ Renderers.unit.mount = function(stageEl, route){
       const mark = sb.querySelector('.sb-mark');
       if(mark) mark.innerHTML = isBmk ? Icons.check : '';
     });
+    // Rodapés dos blocos ("Marcar como lido" / "Lido") seguem o mesmo estado da barra lateral.
+    stageEl.querySelectorAll('[data-action="bookmark"][data-block-id]').forEach(b => {
+      const lido = Store.isBookmarked(unit.id, b.getAttribute('data-block-id'));
+      b.classList.toggle('on', lido);
+      b.innerHTML = Icons.check + `<span>${lido ? 'Lido' : 'Marcar como lido'}</span>`;
+      b.title = lido ? 'Desmarcar' : 'Marcar como lido';
+    });
     _secProgressoAtualizar(stageEl, unit, groups);
-    // Re-render current block so its header action states refresh
-    // (currentBlock pode não estar em escopo dependendo do path de mount —
-    // guard pra evitar ReferenceError)
-    try {
-      if(typeof currentBlock !== 'undefined' && currentBlock) showBlock(currentBlock.id);
-    } catch(_){}
   });
   stageEl.querySelector('#addNoteBtn').addEventListener('click', () => {
     // Repurpose: abre o Caderno da unidade (anotação geral, com [[ pra linkar).
@@ -63642,7 +64019,8 @@ function _bankQuestionStatus(bankId){
   if(!bankId || !window.Store || !Store.getQuizAnswerByItemId) return 'unanswered';
   // Busca SÓ pelo id do item (robusto a formato de id e a timing de hidratação).
   const a = Store.getQuizAnswerByItemId(bankId);
-  if(!a || a.selected == null) return 'unanswered';
+  // Marcação ainda não verificada não é resposta: não diz certo nem errado.
+  if(!a || a.selected == null || a.verified === false) return 'unanswered';
   if(a.correct === true)  return a.doubt ? 'guess_right' : 'right';
   if(a.correct === false) return a.doubt ? 'guess_wrong' : 'wrong';
   return 'unanswered';
@@ -68593,7 +68971,8 @@ Renderers.notes = function(route){
   if(_filterSubjId && !_concursoSubjIds.has(_filterSubjId)) _filterSubjId = ''; // matéria fora do concurso → ignora
   const _scopeSubjIds = _filterSubjId ? new Set([_filterSubjId]) : _concursoSubjIds;
   const _scopeMods = (window.COURSES||[]).filter(c => c && _scopeSubjIds.has(String(c._subjectId))).reduce((a,c)=>a.concat(c.modules||[]),[]);
-  const inScope = n => _scopeSubjIds.has(_modToSubj[String(n.moduleId)]);
+  // Nota salva pela página Tutor não tem módulo: aparece em "Todas", marcada como "Do tutor".
+  const inScope = n => n.moduleId ? _scopeSubjIds.has(_modToSubj[String(n.moduleId)]) : !_filterSubjId;
   // A matéria em uso entra na lista mesmo sem notas: o filtro mostra o que está valendo.
   const subjectIdsWithNotes = [...new Set((Store.get().notes||[]).map(n => _modToSubj[String(n.moduleId)]).filter(Boolean).concat(_filterSubjId ? [_filterSubjId] : []))]
     .filter(id => _concursoSubjIds.has(id))
@@ -68712,7 +69091,7 @@ Renderers.notes = function(route){
     const href = n.unitId ? `#/m/${n.moduleId}${chapterPart}/u/${n.unitId}?b=${n.blockId||''}` : '#/';
     const mod = Util.findModule(n.moduleId);
     const modLabel = mod ? (mod.label+' · '+mod.title) : '';
-    const bits = [modLabel, n.unitTitle, n.blockTitle].filter(Boolean).join(' › ');
+    const bits = [modLabel, n.unitTitle, n.blockTitle].filter(Boolean).join(' › ') || 'Do tutor';
     return `<article class="note-card" data-note-id="${Util.attr(n.id)}">
       <div class="note-card-source">${Util.esc(bits)}</div>
       ${n.quote ? `<div class="note-card-quote">${Util.esc(n.quote)}</div>` : ''}
@@ -68722,7 +69101,7 @@ Renderers.notes = function(route){
         <span class="note-card-date">${fmtDate(n.updatedAt||n.createdAt)}</span>
         <div style="display:flex;gap:.8rem;align-items:center">
           <button class="note-card-link" data-action="delete">Excluir</button>
-          <a class="note-card-link" href="${href}">Abrir →</a>
+          ${n.unitId ? `<a class="note-card-link" href="${href}">Abrir →</a>` : ''}
         </div>
       </div>
     </article>`;
@@ -70746,7 +71125,8 @@ const StudyTimer = (function(){
   /* ── finalizar sessão ativa (manual ou auto) e salvar ── */
   async function _finishAndSave(motivo){
     if(!S) return;
-    const total = _elapsedSec();
+    // Timer: no máximo a duração escolhida (o navegador pode ter ficado fechado por horas).
+    const total = (S.mode === 'timer' && S.targetSec) ? Math.min(_elapsedSec(), S.targetSec) : _elapsedSec();
     const sess = S; S = null; _save(); _tickStop();
     const box = _overlay && _overlay.querySelector('.st-body');
     if(box) _renderModal(box);
@@ -70778,6 +71158,7 @@ const StudyTimer = (function(){
     if(_bootAuto){
       if(unitId && String(_bootAuto.unitId) === String(unitId)){
         S = _bootAuto; _bootAuto = null;
+        if(S.running) S.accSec = (S.accSec || 0) + Math.max(0, ((S.lastActivityAt || S.startedAt) - S.startedAt)/1000);
         S.running = true; S.startedAt = now(); S.lastActivityAt = now();
         _save(); _tickStart(); return;
       }
@@ -70980,6 +71361,8 @@ const StudyTimer = (function(){
   function _close(){
     if(_overlay){ _overlay.remove(); _overlay = null; }
     document.body.style.overflow = '';
+    // Edição esquecida não pode pegar a próxima sessão: "Inserir" volta a ser inserir.
+    if(_editRow){ _editRow = null; F.assunto = ''; F.dia = ''; F.durMin = ''; F.unitId = ''; }
   }
   function open(view){
     _ensureStyles(); _bindActivity();
@@ -71863,7 +72246,11 @@ const RotinaTab = (function(){
       if(minFim <= minIni){ err.textContent = 'O fim precisa ser depois do início.'; err.hidden = false; return; }
       const btn = box.querySelector('#rtPlSalvar');
       btn.disabled = true; btn.textContent = 'Salvando…';
-      await _planCriar(d, ini, cat, ass, minFim - minIni);
+      if(!(await _planCriar(d, ini, cat, ass, minFim - minIni))){
+        btn.disabled = false; btn.textContent = 'Salvar';
+        if(window.ueToast) ueToast('Não consegui salvar o plano. Confira a conexão e tente de novo.', 'error');
+        return;
+      }
       ov.remove();
       const diaModal = document.getElementById('rtCalDiaModal');
       if(diaModal) _calAbrirDia(d);                  // modal do dia aberto → atualiza
@@ -74376,12 +74763,18 @@ function _perfSubjectTopicTree(course, perUnit){
   (UbiqueStore.edital_topics.list()||[]).forEach(t => { const p = (t.parent_id==null)?'__root':t.parent_id; (childrenOf[p] = childrenOf[p] || []).push(t); });
   Object.values(childrenOf).forEach(arr => arr.sort((a,b)=>(a.position||0)-(b.position||0)));
   const cache = {};
+  // As unidades do tópico e de todos os subtópicos, cada uma uma vez só.
+  function unidadesDe(tid, set){
+    if(topicUnits[tid]) topicUnits[tid].forEach(uid => { if(subjUnitIds.has(uid)) set.add(uid); });
+    (childrenOf[tid]||[]).forEach(ch => unidadesDe(ch.id, set));
+    return set;
+  }
   function agg(tid){
     if(cache[tid]) return cache[tid];
-    const a = _perfEmptyAgg(); let touched = false;
-    if(topicUnits[tid]) topicUnits[tid].forEach(uid => { if(subjUnitIds.has(uid)){ _perfAddAgg(a, subjUnitAgg[uid]); touched = true; } });
-    (childrenOf[tid]||[]).forEach(ch => { const r = agg(ch.id); if(r.touched){ _perfAddAgg(a, r.agg); touched = true; } });
-    return (cache[tid] = { agg:a, touched });
+    const a = _perfEmptyAgg();
+    const set = unidadesDe(tid, new Set());
+    set.forEach(uid => _perfAddAgg(a, subjUnitAgg[uid]));
+    return (cache[tid] = { agg:a, touched: set.size > 0 });
   }
   const rows = [];
   function walk(t, depth, path){
@@ -74627,6 +75020,7 @@ function buildPerformanceReport(){
     });
   }
 
+  const _itensGerais = new Set();   // questão do banco em duas unidades: uma vez nos totais gerais e por tópico
   scopeMods.forEach(m => {
     (Util.unitsOfModule(m)||[]).forEach(entry => {
       const unit = entry.unit;
@@ -74634,7 +75028,8 @@ function buildPerformanceReport(){
       const perU = perUnit[unit.id] = { agg:emptyAgg(), itemIds:[], answers:[], subjectId:m._subjectId||null, storeUnitId:(unit._storeId!=null?unit._storeId:null), moduleId:m.id, chapterId:chapter?chapter.id:null, unitId:unit.id, unitNumber:unit.number, unitTitle:unit.title, moduleLabel:m.label, moduleTitle:m.title, chapterNumber:chapter?chapter.number:null, chapterTitle:chapter?chapter.title:null };
       summary.units.total++;
       const _itensVistos = new Set();   // a mesma questão do banco em dois blocos da unidade conta uma vez
-      const unitCompleted = !!((state.unitViews||{})[unit.id] || {}).completed;
+      const _unitAberta = (state.unitViews||{})[unit.id] || (state.bookmarks||{})[unit.id];
+      const unitCompleted = !!_unitAberta && Store.unitProgress(unit).state === 'completed';
       if(unitCompleted) summary.units.done++;
 
       // Os blocos vivem no UbiqueStore — hidrata a unidade (mesma fonte do
@@ -74706,27 +75101,31 @@ function buildPerformanceReport(){
                 else if(doubt){ a.quiz.answered++; a.quiz.wrong++; a.quiz.wrongDoubt++; }
                 else { a.quiz.answered++; a.quiz.wrong++; }
               };
-              bump(topicAgg, itTopics, qBump);
-              bump(tagAgg, itTags, qBump);
-              qBump(perU.agg); qBump(summary);
+              const _jaContada = !!_chaveIt && _itensGerais.has(_chaveIt);
+              if(_chaveIt) _itensGerais.add(_chaveIt);
+              if(!_jaContada){ bump(topicAgg, itTopics, qBump); bump(tagAgg, itTags, qBump); qBump(summary); }
+              qBump(perU.agg);
               if(it.id != null) perU.itemIds.push(it.id);
               if(answered) perU.answers.push({ at: (prior.answeredAt||0), correct: !!correct });
             });
           });
         } else if(b.type === 'essay'){
           (b.items||[]).forEach(it => {
-            const maxTotal = (it.criteria||[]).reduce((s,c)=>s+(c.maxScore||0),0);
-            const itTopics = Array.from(new Set([...(it.topics||[]), ...inheritTopics]));
-            const itTags = Array.from(new Set([...(it.tags||[]), ...inheritTags]));
-            const prior = (((state.essays||{})[unit.id]||{})[b.id]||{})[it.id];
-            const submitted = !!prior;
-            const score = submitted ? (prior.score||0) : 0;
-            bump(topicAgg, itTopics, a => { a.essay.maxTotal += maxTotal; if(submitted){ a.essay.scoreTotal += score; a.essay.submitted++; } });
-            bump(tagAgg, itTags, a => { a.essay.maxTotal += maxTotal; if(submitted){ a.essay.scoreTotal += score; a.essay.submitted++; } });
-            perU.agg.essay.maxTotal += maxTotal;
-            if(submitted){ perU.agg.essay.scoreTotal += score; perU.agg.essay.submitted++; }
-            summary.essay.maxTotal += maxTotal;
-            if(submitted){ summary.essay.scoreTotal += score; summary.essay.submitted++; }
+            // A resposta se lê pelo mesmo caminho da tela: a do Banco de discursivas vale na unidade.
+            // "Enviada" é a que tem correção; texto sem nota ainda não conta.
+            const rico = (typeof _resolveEssayItem === 'function') ? (_resolveEssayItem(it) || it) : it;
+            const maxTotal = (rico.criteria||[]).reduce((s,c)=>s+(c.maxScore||0),0);
+            const itTopics = Array.from(new Set([...(rico.topics||[]), ...inheritTopics]));
+            const itTags = Array.from(new Set([...(rico.tags||[]), ...inheritTags]));
+            const prior = Store.getEssayAnswer(unit.id, b.id, rico._bank_id || rico.id);
+            const submitted = !!prior && typeof prior.score === 'number';
+            const score = submitted ? prior.score : 0;
+            const maxEnviada = submitted ? (prior.maxScore || maxTotal) : 0;
+            const eBump = a => { a.essay.maxTotal += maxTotal; if(submitted){ a.essay.scoreTotal += score; a.essay.maxEnviadas = (a.essay.maxEnviadas || 0) + maxEnviada; a.essay.submitted++; } };
+            bump(topicAgg, itTopics, eBump);
+            bump(tagAgg, itTags, eBump);
+            eBump(perU.agg);
+            eBump(summary);
           });
         } else if(b.type === 'lang_exercise'){
           contarIdioma(b, inheritTopics, inheritTags);
@@ -74741,7 +75140,6 @@ function buildPerformanceReport(){
             bump(topicAgg, cTopics, fcBump);
             bump(tagAgg, cTags, fcBump);
             fcBump(perU.agg); fcBump(summary);
-            summary.completion.denom++; if(mastered) summary.completion.num++;
           });
         }
       }));
@@ -74876,7 +75274,7 @@ function buildContextBreakdown(filterDef, kind, perUnit){
             touched = true;
             agg.quiz.total++;
             const prior = (((state.quizAnswers||{})[unit.id]||{})[b.id]||{})[it.id];
-            if(prior){ agg.quiz.answered++; if(prior.correct) agg.quiz.correct++; }
+            if(prior && prior.selected != null && prior.verified !== false){ agg.quiz.answered++; if(prior.correct) agg.quiz.correct++; }
           }));
         } else if(b.type === 'essay'){
           (b.items||[]).forEach(it => {
@@ -83721,6 +84119,28 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  // A seleção partida por parágrafo/título/item: um trecho (Range) por bloco de texto.
+  function _trechosPorBloco(range){
+    const BLOCO = 'p,h1,h2,h3,h4,h5,h6,li,blockquote,td,th,div';
+    const raiz = range.commonAncestorContainer.nodeType === 1 ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement;
+    const w = document.createTreeWalker(raiz, NodeFilter.SHOW_TEXT);
+    const grupos = new Map();
+    for(let n = w.nextNode(); n; n = w.nextNode()){
+      if(!range.intersectsNode(n) || !n.nodeValue.trim()) continue;
+      const bl = n.parentElement.closest(BLOCO) || raiz;
+      if(!grupos.has(bl)) grupos.set(bl, []);
+      grupos.get(bl).push(n);
+    }
+    const out = [];
+    grupos.forEach(function(nos){
+      const r = document.createRange();
+      const a = nos[0], z = nos[nos.length - 1];
+      r.setStart(a, a === range.startContainer ? range.startOffset : 0);
+      r.setEnd(z, z === range.endContainer ? range.endOffset : z.nodeValue.length);
+      if(r.toString().trim()) out.push(r);
+    });
+    return out;
+  }
   function applyHighlightToSelection(color, hint){
     // Use saved range if current selection is collapsed (e.g. after hint input)
     let sel = window.getSelection();
@@ -83732,6 +84152,23 @@ document.addEventListener('DOMContentLoaded', () => {
     } else { return; }
     const text = _pendingSel || range.toString().trim();
     if(!text) return;
+    // Grifo atravessando parágrafos desmontaria o texto e não voltaria ao reabrir: vira um por parágrafo.
+    const _probe = range.cloneContents();
+    if(_probe && _probe.querySelector && _probe.querySelector('p,h1,h2,h3,h4,h5,h6,li,ul,ol,blockquote,table,tr,td,div')){
+      const _trechos = _trechosPorBloco(range);
+      if(_trechos.length > 1){
+        _trechos.forEach(function(r){ _grifarTrecho(r, r.toString().trim(), color, hint); });
+        if(sel) try{ sel.removeAllRanges(); }catch(e){}
+        hideToolbar();
+        return;
+      }
+      if(_trechos.length === 1) range = _trechos[0];
+    }
+    _grifarTrecho(range, text, color, hint);
+    if(sel) try{ sel.removeAllRanges(); }catch(e){}
+    hideToolbar();
+  }
+  function _grifarTrecho(range, text, color, hint){
 
     // ⚠️ Calcula o anchor ANTES de wrappar (precisa do texto não-marcado pra
     // que os offsets sejam estáveis). Padrão W3C Web Annotation Data Model:
@@ -83762,7 +84199,6 @@ document.addEventListener('DOMContentLoaded', () => {
       mark.appendChild(frag);
       range.insertNode(mark);
     }
-    if(sel) try{ sel.removeAllRanges(); }catch(e){}
     // Persist (passa o anchor pra ser persistido em metadata.anchor)
     if(ctx.unitId && ctx.blockId){
       const entry = Store.addHighlight(ctx.unitId, ctx.blockId, text, color, hint, anchor);
@@ -83770,7 +84206,6 @@ document.addEventListener('DOMContentLoaded', () => {
       // highlight remover do Store sem precisar de matching por texto.
       if(entry && entry.id) mark.setAttribute('data-hl-id', String(entry.id));
     }
-    hideToolbar();
   }
 
   // Show toolbar on text selection
@@ -84809,11 +85244,12 @@ function bindEssayItems(stageEl, items){
       if(prior.score != null) injectEssayEvaluation(itemEl, item, _essayCorrecaoParaMostrar(prior, item));
     }
     ta.addEventListener('input', () => { counter.textContent = ta.value.length; });
+    const rascLimpar = _essayRascunho(ta, unitId, blockId, itemId, prior);
     const submitBtn = itemEl.querySelector('.essay-submit');
     submitBtn.addEventListener('click', () => {
       if(window.Visitante && Visitante.ativo()){ Visitante.convite('discursiva'); return; }
       const text = ta.value.trim(); if(!text){ ta.focus(); return; }
-      _essayEnviarParaCorrecao({ item, text, submitBtn, itemEl, store: Store, unitId, blockId, itemId });
+      _essayEnviarParaCorrecao({ item, text, submitBtn, itemEl, store: Store, unitId, blockId, itemId, aoCorrigir: rascLimpar });
     });
   });
 }
