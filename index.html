@@ -6392,13 +6392,6 @@ html[data-theme="light"] .essay-textarea{background:#fff}
   letter-spacing:.22em;text-transform:uppercase;color:var(--accent);
   display:inline-flex;align-items:center;gap:.5rem;
 }
-.essay-ai-mock-tag{
-  display:inline-block;padding:.1rem .45rem;border-radius:2px;
-  font-family:var(--mono);font-size:.55rem;letter-spacing:.08em;
-  color:var(--text-mute);border:1px solid var(--border);
-  background:var(--bg-elevated);text-transform:lowercase;
-  cursor:help;
-}
 .essay-ai-verdict{
   font-family:var(--serif);font-weight:400;font-size:1.15rem;
   line-height:1.2;color:var(--text);
@@ -10490,7 +10483,7 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cad-alca{position:absolute;left:0;z-index:5;width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;background:transparent;border:none;border-radius:6px;color:var(--text-mute);cursor:pointer;opacity:.65;transition:all .15s var(--ease)}
 .cad-alca{width:18px}
 /* drawer e modal: calha à esquerda para a alça, como a página */
-#cadernoInput,.cadmodal-ed{padding-left:1.35rem}
+#cadernoInput{padding-left:1.35rem}
 /* cabeçalho do caderno no drawer: qual caderno está aberto + histórico + mais opções */
 .tutor-caderno-head{align-items:center;flex-wrap:nowrap}
 .tutor-caderno-tb-sp{flex:1}
@@ -11311,29 +11304,6 @@ a.pr-crumb:hover{color:var(--accent)}
 .note-card-chips{display:flex;flex-wrap:wrap}
 
 /* ─── Cards da aba "Cadernos" ─── */
-.cad-card{cursor:pointer}
-.cad-card-title{
-  font-family:var(--serif);font-weight:400;font-size:1.05rem;line-height:1.35;color:var(--text);
-}
-.cad-card-preview{
-  /* herda .note-card-body (line-clamp 6) — preview do início das anotações */
-  font-style:normal;
-}
-.cad-chips{display:flex;flex-wrap:wrap;gap:.4rem}
-.cad-chip{
-  font-family:var(--sans);font-weight:300;font-size:.58rem;letter-spacing:.08em;
-  text-transform:uppercase;color:var(--text-dim);
-  border:1px solid var(--accent-border-soft);border-radius:999px;padding:.18rem .55rem;
-}
-.cad-metrics{display:flex;align-items:center;gap:.7rem}
-.cad-metric{
-  font-family:var(--mono);font-size:.6rem;color:var(--text-mute);letter-spacing:.04em;
-}
-.cad-metric-link{
-  background:transparent;border:1px solid var(--accent-border-soft);border-radius:999px;
-  padding:.16rem .5rem;color:var(--accent);cursor:pointer;transition:all .2s var(--ease);
-}
-.cad-metric-link:hover{border-color:var(--accent);background:var(--accent-lo)}
 
 /* ─── TOPBAR nav link ─── */
 .tb-navlink{
@@ -16238,7 +16208,7 @@ const Auth = (function(){
   async function login(email, password, remember){
     const normalizedEmail = String(email||'').trim().toLowerCase();
     if(!window._sb){
-      return { ok:false, kind:'no-supabase', message:'Supabase indisponível. Recarregue a página.' };
+      return { ok:false, kind:'no-supabase', message:'Não consegui conectar. Recarregue a página.' };
     }
     try {
       const result = await _comPrazo(window._sb.auth.signInWithPassword({
@@ -17408,6 +17378,21 @@ const Store = (function(){
     }catch(e){ console.warn('[Store] load failed', e); }
     return null;
   }
+  // Até nov/2026 o app inventava uma nota (isMocked) quando a correção por IA falhava. Essa nota
+  // não vale: fica só o texto do aluno, sem nota, para ele enviar de novo.
+  function _essaySemNotaInventada(p){
+    return (p && p.isMocked === true) ? { text: p.text, submittedAt: p.submittedAt } : p;
+  }
+  function _limparNotasInventadas(st){
+    const banco = st.essaysByBankId || {};
+    Object.keys(banco).forEach(function(k){ banco[k] = _essaySemNotaInventada(banco[k]); });
+    const es = st.essays || {};
+    Object.keys(es).forEach(function(u){
+      Object.keys(es[u] || {}).forEach(function(b){
+        Object.keys(es[u][b] || {}).forEach(function(i){ es[u][b][i] = _essaySemNotaInventada(es[u][b][i]); });
+      });
+    });
+  }
   function _persist(){
     _rev++;
     clearTimeout(_writeTimer);
@@ -17583,7 +17568,7 @@ const Store = (function(){
                 : (typeof payload.userText === 'string') ? payload.userText
                 : (typeof payload.answer === 'string') ? payload.answer
                 : null;
-      // Score 0-100: payload da IA mock tem .score (parcial) e .maxScore (total)
+      // Score 0-100: o payload da correção tem .score (parcial) e .maxScore (total)
       let scorePercent = null;
       if(typeof payload.score === 'number' && typeof payload.maxScore === 'number' && payload.maxScore > 0){
         scorePercent = Math.round((payload.score / payload.maxScore) * 1000) / 10; // 1 casa decimal
@@ -17769,7 +17754,7 @@ const Store = (function(){
           }
           qCount++;
         } else if(row.question_type === 'essay'){
-          const ens = Object.assign({}, payload,
+          const ens = Object.assign({}, _essaySemNotaInventada(payload),
             { submittedAt: ts ? new Date(ts).getTime() : Date.now() });
           _state.essays[unitId] = _state.essays[unitId] || {};
           _state.essays[unitId][blockId] = _state.essays[unitId][blockId] || {};
@@ -19152,13 +19137,15 @@ const Store = (function(){
         // explícitos abaixo continuam valendo para linhas antigas, que só têm cinco.
         // ratio sempre presente: é o que o mount usa para reconhecer a correção como
         // pronta (sem ele, caía no "legado" e substituía a correção por uma simulada).
-        const fj = (r.feedback_json && typeof r.feedback_json === 'object') ? r.feedback_json : {};
+        const fj0 = (r.feedback_json && typeof r.feedback_json === 'object') ? r.feedback_json : {};
+        const inventada = fj0.isMocked === true;                // nota inventada não vale: fica só o texto
+        const fj = inventada ? {} : fj0;
         const _ratio = (typeof fj.ratio === 'number') ? fj.ratio
-                     : (typeof r.score === 'number' && r.max_score > 0) ? r.score / r.max_score : null;
+                     : (!inventada && typeof r.score === 'number' && r.max_score > 0) ? r.score / r.max_score : null;
         _state.essays[unitId]['_all'][String(r.item_id)] = Object.assign({}, fj, {
           text: r.essay_text || '',
-          score: r.score,
-          maxScore: r.max_score,
+          score: inventada ? null : r.score,
+          maxScore: inventada ? null : r.max_score,
           ratio: _ratio,
           feedback: fj.feedback || null,
           strengths: fj.strengths || null,
@@ -19327,6 +19314,7 @@ const Store = (function(){
       const existing = _load();
       if(existing && existing.version === 3){
         _state = existing;
+        _limparNotasInventadas(_state);
         // back-fill any missing fields so older records don't crash
         if(!Array.isArray(_state.readingList)) _state.readingList = [];
         _deckProntoMarca();                 // cache local = deck utilizável já
@@ -19361,6 +19349,7 @@ const Store = (function(){
       _h(_hydrateCadernosFromSupabase());         // Cadernos (aba "Cadernos" da página Notas)
       _h(_hydrateCadernosAvulsosFromSupabase());  // D2a — cadernos avulsos + pastas
       _h(_hydrateSelecoesFromSupabase());         // seleções salvas do Banco
+      _h(_glossHidratarSalvos());                 // termos salvos do Glossário
       // Encadeia: depois das tentativas, hidrata as respostas item-a-item da última.
       _h(_hydrateSimuladosFromSupabase()
         .then(() => Promise.all([
@@ -23772,8 +23761,7 @@ Blocks.quiz = {
     if(!groups.length){
       return `<section class="block-wrap quiz-block">
         ${blockHeader(block,'Questões objetivas', Icons.quiz, ctx)}
-        <div class="empty"><div class="empty-title">Nenhum grupo de questões configurado</div>
-        <div class="empty-sub">Adicione um grupo com texto-base e itens para exibir as questões.</div></div>
+        <div class="empty"><div class="empty-title">Este bloco ainda não tem questões</div></div>
       </section>`;
     }
     const singleFlat = groups.length === 1 && !groups[0].enunciado && !groups[0].reference
@@ -26293,7 +26281,7 @@ Blocks.keypoints = {
 // abaixo do esperado") porque os arrays vêm com nome errado.
 //
 // Retorna null se o payload do Claude não tiver formato mínimo válido —
-// nesse caso o caller usa o mock como fallback.
+// nesse caso o caller avisa o aluno; nota só de correção de verdade.
 function _mapClaudeEssayPayload(claude, item, text){
   if(!claude || typeof claude !== 'object') return null;
   if(typeof claude.score !== 'number' && !Array.isArray(claude.criteria)) return null;
@@ -26415,8 +26403,8 @@ function _mapClaudeEssayPayload(claude, item, text){
 //
 // Retorna { payload, usedAI:true } se a IA respondeu e mapeou OK.
 // Retorna null se: Supabase off, Edge Function falhou, timeout (120s),
-// resposta em formato inesperado, ou exception. O chamador decide se cai
-// pro mock ou deixa a discursiva pendente pra correção manual no admin.
+// resposta em formato inesperado, ou exception. O chamador avisa o aluno ou
+// deixa a discursiva pendente pra correção manual no admin.
 // ──────────────────────────────────────────────────────────────────────
 // Aba "Brainstorm" da discursiva: o aluno lista ideias por item; a IA avalia
 // cobertura/ordem/esqueleto (EF correct-brainstorm) e pode gerar um exemplo.
@@ -26980,7 +26968,7 @@ async function _correctEssayViaAI(item, essayText){
       new Promise(r => setTimeout(() => r({ error: { message: 'timeout 120s' } }), 120000))
     ]);
     // UbiTokens — saldo insuficiente: a Edge Function devolve ubt_error (HTTP 200).
-    // Não corrige nem cai no mock; sinaliza pro handler bloquear com aviso.
+    // Não corrige; sinaliza pro handler bloquear com aviso.
     if(racing && racing.data && racing.data.ubt_error){
       return { blocked: true, saldo: racing.data.saldo, needed: racing.data.needed };
     }
@@ -27008,61 +26996,87 @@ async function _correctEssayViaAI(item, essayText){
   return null;
 }
 
-function generateMockEssayFeedback(item, text){
-  // deterministic pseudo-random based on item.id + text length
-  function hash(s){ let h=0; for(let i=0;i<s.length;i++){ h=(h*31+s.charCodeAt(i))|0; } return Math.abs(h); }
-  const seed = hash((item.id||'')+'|'+(text||'').length);
-  const criteriaScores = {};
-  const criteriaComments = {};
-  let total = 0;
-  const strengths = [];
-  const weaknesses = [];
-  (item.criteria||[]).forEach((c,i) => {
-    const max = c.maxScore || 3;
-    const ratio = 0.6 + ((seed>>(i*3))&7)/20;
-    const score = Math.max(0, Math.round(max * Math.min(1, ratio) * 10)/10);
-    criteriaScores[c.label] = score;
-    total += score;
-    if(score >= max*0.8){
-      criteriaComments[c.label] = 'Critério bem atendido. Sua resposta demonstrou domínio claro do conteúdo esperado.';
-      strengths.push(c.label);
-    } else if(score >= max*0.6){
-      criteriaComments[c.label] = 'Cobertura parcial. Aprofunde a argumentação com mais exemplos ou conexões conceituais.';
-    } else {
-      criteriaComments[c.label] = 'Revise este critério. A resposta ficou pouco desenvolvida em relação ao esperado.';
-      weaknesses.push(c.label);
+// Manda a resposta para a correção por IA e grava SÓ correção de verdade. Se a IA não responder,
+// nada é gravado como nota: o texto continua na caixa e o aluno é avisado para tentar de novo.
+// Devolve true quando corrigiu.
+async function _essayEnviarParaCorrecao(o){
+  const item = o.item, text = o.text, btn = o.submitBtn;
+  // Pré-checagem de saldo (instantânea, no navegador): bloqueia ANTES de chamar a IA, sem nem
+  // mostrar "Corrigindo…". O servidor faz a checagem definitiva também.
+  if(window.UbtWallet && !(UbtWallet.isIlimitado && UbtWallet.isIlimitado())){
+    const _saldo = UbtWallet.get();
+    const _est = UbtWallet.essayCost(text);
+    if(_saldo != null && _saldo < _est){
+      if(typeof window.ueToast === 'function')
+        window.ueToast('Saldo de UbiTokens insuficiente (você tem ⓤ' + _saldo.toFixed(2) + ', a correção custa ~ⓤ' + _est.toFixed(2) + '). Adicione mais na sua Carteira (Conta) ou aguarde a renovação.', 'error');
+      return false;
     }
-  });
-  const maxTotal = (item.criteria||[]).reduce((s,c)=>s+(c.maxScore||0),0);
-  const finalScore = Math.round(total*10)/10;
-  const ratio = maxTotal > 0 ? finalScore / maxTotal : 0;
-  // Comentário geral baseado no ratio
-  let overallComment;
-  if(ratio >= 0.85){
-    overallComment = 'Resposta consistente e bem estruturada. Argumentação clara, repertório adequado e cobertura abrangente dos critérios. Pequenos ajustes podem elevá-la ao máximo da banca.';
-  } else if(ratio >= 0.7){
-    overallComment = 'Resposta acima da média. Demonstra domínio dos eixos principais, mas há espaço pra aprofundar alguns critérios — sobretudo onde o desenvolvimento ficou genérico ou faltaram exemplos concretos.';
-  } else if(ratio >= 0.55){
-    overallComment = 'Resposta razoável que cobre boa parte do esperado, mas precisa de mais densidade argumentativa, exemplos específicos e/ou conexões conceituais entre os tópicos abordados.';
-  } else {
-    overallComment = 'Resposta com lacunas relevantes. Reveja a leitura do enunciado e a aderência aos critérios — o desenvolvimento ficou aquém em vários eixos. Vale comparar com o padrão de resposta.';
   }
-  // Métricas básicas pra contextualizar (estimativas — IA real entregaria precisão real)
-  const wordCount = (text || '').trim().split(/\s+/).filter(Boolean).length;
-  return {
-    text,
-    score: finalScore,
-    maxScore: maxTotal,
-    criteriaScores,
-    criteriaComments,
-    overallComment,
-    strengths,
-    weaknesses,
-    wordCount,
-    ratio,
-    isMocked: true,
-    evaluatedAt: Date.now()
-  };
+  // Loading state: a correção longa pode demorar até ~60 s; deixa claro que não travou.
+  const rotulo = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Corrigindo sua resposta… (pode levar até 1 min)';
+  const r = await _correctEssayViaAI(item, text);
+  btn.disabled = false;
+  btn.textContent = rotulo;
+  if(r && r.blocked){
+    if(typeof window.ueToast === 'function') window.ueToast('Saldo de UbiTokens insuficiente para corrigir. Adicione mais na sua Carteira (Conta) ou aguarde a renovação.', 'error');
+    return false;
+  }
+  if(!r){
+    if(typeof window.ueToast === 'function') window.ueToast('Não consegui corrigir agora. Sua resposta continua aqui; tente de novo em instantes.', 'error');
+    return false;
+  }
+  const payload = r.payload;
+  o.store.updateEssay(o.unitId, o.blockId, o.itemId, payload);
+  injectEssayEvaluation(o.itemEl, item, payload);
+  // Relê o saldo do banco (fonte da verdade): evita mostrar número errado.
+  if(window.UbtWallet) UbtWallet.load();
+  if(typeof window.ueToast === 'function'){
+    const scoreStr = (typeof payload.score === 'number') ? payload.score.toFixed(1) : payload.score;
+    const _deb = (r.ubt && r.ubt.cost) ? (' · ⓤ' + Number(r.ubt.cost).toFixed(2)) : '';
+    window.ueToast('Corrigido: ' + scoreStr + ' pts' + _deb, 'success');
+  }
+  // Notificação de discursiva corrigida (badge do sino)
+  try {
+    const user = (typeof Auth !== 'undefined') ? Auth.getUser() : null;
+    if(user && window.Notifications){
+      setTimeout(() => {
+        Notifications.create(user.id, 'essay_corrected', {
+          score: payload.score,
+          maxScore: payload.maxScore != null ? payload.maxScore : (item.maxScore || 10),
+          essay_id: o.itemId,
+          block_id: o.blockId,
+          unit_id: o.unitId,
+          module_id: o.moduleId || null,
+          chapter_id: o.chapterId || null,
+          unitTitle: o.unitTitle || null,
+          isAI: true
+        });
+        if(window.AppShell && typeof AppShell.syncChrome === 'function'){
+          AppShell.syncChrome(Router.parse());
+        }
+      }, 400);
+    }
+  } catch(_){}
+  return true;
+}
+// Prepara para a tela uma correção guardada. Ao abrir nada é regravado: formato antigo se converte
+// só para mostrar e, quando não dá para converter, aparece a nota guardada com um aviso.
+function _essayCorrecaoParaMostrar(prior, item){
+  const interno = prior.overallComment != null && prior.ratio != null;
+  if(interno || prior.isAI || prior.aiProvider || prior.aiModel || prior.isMocked === false) return prior;
+  const cru = typeof prior.summary === 'string' || Array.isArray(prior.pontos_fortes) || Array.isArray(prior.a_melhorar) || Array.isArray(prior.criteria);
+  if(cru){
+    const m = _mapClaudeEssayPayload(prior, item, prior.text || '');
+    if(m) return m;
+  }
+  const max = prior.maxScore || (item.criteria || []).reduce((s, c) => s + (c.maxScore || 0), 0) || item.maxScore || 0;
+  return Object.assign({}, prior, {
+    maxScore: max,
+    ratio: (max > 0 && typeof prior.score === 'number') ? prior.score / max : 0,
+    overallComment: 'Esta correção foi feita numa versão antiga da plataforma; só a nota pôde ser recuperada.'
+  });
 }
 function renderCriterionEvaluation(crit, fb){
   if(!fb || !fb.criteriaScores) return '';
@@ -27119,8 +27133,7 @@ function injectEssayEvaluation(itemEl, item, payload){
   // 5) Painel grande de FEEDBACK DA IA — abaixo do textarea, na coluna
   //    de resposta. Mostra a nota global, comentário geral, pontos fortes
   //    e a melhorar, e métrica de palavras. É o "feedback rico" pedido
-  //    pelo aluno (até a IA real vir do Supabase, é mockado por
-  //    generateMockEssayFeedback).
+  //    pelo aluno.
   injectEssayAIFeedback(itemEl, item, payload);
 }
 
@@ -27178,10 +27191,6 @@ function injectEssayAIFeedback(itemEl, item, payload){
         </div>`).join('')}
     </div>` : '';
 
-  const mockedNote = payload.isMocked
-    ? '<span class="essay-ai-mock-tag" data-tip="A correção real por IA será habilitada quando a chave API estiver vinculada ao Supabase. Por ora, esta é uma avaliação simulada com base nos critérios cadastrados.">simulado</span>'
-    : '';
-
   const aside = itemEl.querySelector('.essay-aside');
   const asideHint = aside
     ? '<div class="essay-ai-foot">Detalhamento por critério no painel ao lado <span class="essay-ai-arrow">→</span></div>'
@@ -27211,7 +27220,7 @@ function injectEssayAIFeedback(itemEl, item, payload){
 `<aside class="essay-ai-feedback ${verdictClass}${_fbOpen ? '' : ' is-collapsed'}" role="region" aria-label="Feedback da IA">
   <header class="essay-ai-head">
     <div class="essay-ai-head-l">
-      <span class="essay-ai-label">Avaliação ${mockedNote}</span>
+      <span class="essay-ai-label">Avaliação</span>
       <span class="essay-ai-verdict">${verdictLabel}</span>
     </div>
     <div class="essay-ai-head-r">
@@ -27279,7 +27288,7 @@ function injectEssayAIFeedback(itemEl, item, payload){
     });
   }
 
-  // Tooltip rápido pra .essay-ai-mock-tag
+  // Dicas rápidas dos botões da caixa
   if(typeof window.setupQuickTooltips === 'function'){
     window.setupQuickTooltips(itemEl);
   }
@@ -27756,89 +27765,11 @@ Blocks.essay = {
             return;
           }
 
-          // Pré-checagem de saldo (instantânea, no navegador): bloqueia ANTES de
-          // chamar a IA, sem nem mostrar "Corrigindo…". O servidor faz a checagem
-          // definitiva também (defesa em profundidade).
-          if(window.UbtWallet && !(UbtWallet.isIlimitado && UbtWallet.isIlimitado())){
-            const _saldo = UbtWallet.get();
-            const _est = UbtWallet.essayCost(text);
-            if(_saldo != null && _saldo < _est){
-              if(typeof window.ueToast === 'function')
-                window.ueToast('Saldo de UbiTokens insuficiente (você tem ⓤ' + _saldo.toFixed(2) + ', a correção custa ~ⓤ' + _est.toFixed(2) + '). Adicione mais na sua Carteira (Minha Conta) ou aguarde a renovação.', 'error');
-              return;
-            }
-          }
-
-          // Loading state — Claude pode demorar até ~60s para correção
-          // longa; UX clara evita que o aluno ache que travou.
-          const originalLabel = submitBtn.textContent;
-          submitBtn.disabled = true;
-          submitBtn.textContent = 'Corrigindo sua resposta… (pode levar até 1 min)';
-
-          let payload = null;
-          let usedAI = false;
-
-          // 1) Tenta IA real via Edge Function correct-essay (timeout 120s).
-          //    Lógica extraída em _correctEssayViaAI (Bug #4 Fase C) pra ser
-          //    reusada também pelo handler "Finalizar simulado".
-          const _aiResult = await _correctEssayViaAI(item, text);
-          if(_aiResult && _aiResult.blocked){
-            submitBtn.disabled = false;
-            submitBtn.textContent = originalLabel;
-            if(typeof window.ueToast === 'function') window.ueToast('Saldo de UbiTokens insuficiente para corrigir. Adicione mais na sua Carteira (Minha Conta) ou aguarde a renovação.', 'error');
-            return;
-          }
-          if(_aiResult){
-            payload = _aiResult.payload;
-            usedAI = true;
-          }
-
-          // 2) Fallback mock se IA não respondeu
-          if(!payload){
-            payload = generateMockEssayFeedback(item, text);
-          }
-
-          ctx.store.updateEssay(ctx.unitId, block.id, itemId, payload);
-          injectEssayEvaluation(itemEl, item, payload);
-
-          // Atualiza o saldo relendo do banco (fonte da verdade) — evita mostrar
-          // número errado se a função devolver algo inesperado. Só após IA real.
-          if(usedAI && window.UbtWallet) UbtWallet.load();
-
-          submitBtn.disabled = false;
-          submitBtn.textContent = originalLabel;
-
-          if(typeof window.ueToast === 'function'){
-            const scoreStr = (typeof payload.score === 'number') ? payload.score.toFixed(1) : payload.score;
-            const _deb = (_aiResult && _aiResult.ubt && _aiResult.ubt.cost) ? (' · ⓤ' + Number(_aiResult.ubt.cost).toFixed(2)) : '';
-            const msg = usedAI
-              ? `✓ Corrigido por IA: ${scoreStr} pts${_deb}`
-              : `✓ Corrigido (mock — IA indisponível): ${scoreStr} pts`;
-            window.ueToast(msg, 'success');
-          }
-
-          // Notificação de essay corrigida (badge do sino)
-          try {
-            const user = (typeof Auth !== 'undefined') ? Auth.getUser() : null;
-            if(user && window.Notifications && payload){
-              setTimeout(() => {
-                Notifications.create(user.id, 'essay_corrected', {
-                  score: payload.score,
-                  maxScore: payload.maxScore != null ? payload.maxScore : (item.maxScore || 10),
-                  essay_id: itemId,
-                  block_id: block.id,
-                  unit_id: ctx.unitId,
-                  module_id: ctx.moduleId || null,
-                  chapter_id: ctx.chapterId || null,
-                  unitTitle: ctx.unitTitle || null,
-                  isAI: usedAI
-                });
-                if(window.AppShell && typeof AppShell.syncChrome === 'function'){
-                  AppShell.syncChrome(Router.parse());
-                }
-              }, 400);
-            }
-          } catch(_){}
+          await _essayEnviarParaCorrecao({
+            item, text, submitBtn, itemEl,
+            store: ctx.store, unitId: ctx.unitId, blockId: block.id, itemId,
+            moduleId: ctx.moduleId, chapterId: ctx.chapterId, unitTitle: ctx.unitTitle
+          });
         });
       }
       // "Zerar questão": apaga resposta + correção (Store, índice do banco e
@@ -27859,50 +27790,10 @@ Blocks.essay = {
       // feedback ao reabrir a unidade (sem isso, o aluno via só o textarea
       // pré-preenchido e perdia a nota + comentário).
       //
-      // Suporta 3 formatos persistidos:
-      //  (A) Shape interno completo (mock OU Claude já mapeado): tem
-      //      overallComment/ratio/aiProvider/isMocked=false. Usa direto.
-      //  (B) Shape cru do Claude (salvo em sessões antes do mapper existir):
-      //      tem summary/pontos_fortes/a_melhorar/criteria como array.
-      //      RE-MAPEIA pra shape interno e persiste a versão consertada —
-      //      nunca joga fora a correção real da IA.
-      //  (C) Legado quebrado de verdade (sem campos modernos e sem shape
-      //      do Claude): aí sim mocka como antes.
+      // Nota inventada de antes (isMocked) não chega aqui: o Store já a tirou (_essaySemNotaInventada).
       if(ctx && ctx.store){
         const prior = ctx.store.getEssayAnswer(ctx.unitId, block.id, itemId);
-        if(prior && prior.score != null){
-          const isInternalShape = prior.overallComment != null && prior.ratio != null;
-          const isAIPayload = !!prior.isAI || !!prior.aiProvider || !!prior.aiModel || prior.isMocked === false;
-          const looksLikeClaudeRaw = !isInternalShape && (
-            typeof prior.summary === 'string'
-            || Array.isArray(prior.pontos_fortes)
-            || Array.isArray(prior.a_melhorar)
-            || Array.isArray(prior.criteria)
-          );
-
-          let payload;
-          if(isInternalShape || isAIPayload){
-            // Já tá pronto. Usa direto.
-            payload = prior;
-          } else if(looksLikeClaudeRaw){
-            // Recupera correção real do Claude salva sem mapeamento.
-            const mapped = _mapClaudeEssayPayload(prior, item, prior.text || '');
-            if(mapped){
-              payload = mapped;
-              // Persiste a versão consertada — próxima hidratação cai em (A).
-              ctx.store.updateEssay(ctx.unitId, block.id, itemId, mapped);
-              console.log('[essay AI] correção do Claude recuperada e re-mapeada na hidratação.');
-            } else {
-              payload = generateMockEssayFeedback(item, prior.text || '');
-              ctx.store.updateEssay(ctx.unitId, block.id, itemId, payload);
-            }
-          } else {
-            // Legacy mock sem campos modernos — re-mocka pra preencher.
-            payload = generateMockEssayFeedback(item, prior.text || '');
-            ctx.store.updateEssay(ctx.unitId, block.id, itemId, payload);
-          }
-          injectEssayEvaluation(itemEl, item, payload);
-        }
+        if(prior && prior.score != null) injectEssayEvaluation(itemEl, item, _essayCorrecaoParaMostrar(prior, item));
       }
 
       // Slider de CRITÉRIOS (preservado do legado)
@@ -28099,8 +27990,7 @@ function renderCarouselBlock(block, ctx, opts){
   if(!items.length){
     return `<section class="block-wrap ${opts.blockClass}">
       ${blockHeader(block, opts.typeLabel, opts.icon, ctx)}
-      <div class="empty"><div class="empty-title">Sem itens</div>
-      <div class="empty-sub">Adicione itens a este bloco para exibir o carrossel.</div></div>
+      <div class="empty"><div class="empty-title">Este bloco ainda não tem conteúdo</div></div>
     </section>`;
   }
   const slides = items.map((it,i) => `<div class="carousel-slide${i===0?' active':''}" data-slide-idx="${i}" id="item-${Util.attr(it.id||'')}">
@@ -28825,8 +28715,7 @@ function renderGlossaryListBlock(block, ctx){
     return `<section class="block-wrap glossary-block glossary-list-block">
       ${blockHeader(block, 'Glossário', Icons.glossary, ctx)}
       ${renderViewToggle(block, 'list')}
-      <div class="empty"><div class="empty-title">Sem verbetes</div>
-      <div class="empty-sub">Adicione termos a este bloco.</div></div>
+      <div class="empty"><div class="empty-title">Este bloco ainda não tem verbetes</div></div>
     </section>`;
   }
   const sanitize = (window.LearningBlocks && window.LearningBlocks.sanitizeRichHTML) || Util.esc;
@@ -30072,7 +29961,7 @@ function openUserProfile(userId){
       const btn = document.createElement('button');
       btn.className = 'btn btn-ghost';
       btn.textContent = 'Pedido enviado · cancelar';
-      btn.addEventListener('click', () => { if(rel.edgeIToThey) UbiqueStore.follows.remove(rel.edgeIToThey.id); openUserProfile(u.id); });
+      btn.addEventListener('click', async () => { btn.disabled = true; await Follows.unfollow(me.id, u.id); openUserProfile(u.id); });
       actionsEl.appendChild(btn);
     } else {
       const btn = document.createElement('button');
@@ -31378,11 +31267,12 @@ const Follows = (function(){
     }catch(e){ console.warn('[follows sync update ex]', e); }
   }
   async function _syncDelete(id){
-    if(!window._sb || !_isUuid(id)) return;
+    if(!window._sb || !_isUuid(id)) return true;
     try{
       const { error } = await window._sb.schema('aluno').from('follows').delete().eq('id', id);
-      if(error) console.warn('[follows sync delete]', error);
-    }catch(e){ console.warn('[follows sync delete ex]', e); }
+      if(error){ console.warn('[follows sync delete]', error); return false; }
+      return true;
+    }catch(e){ console.warn('[follows sync delete ex]', e); return false; }
   }
 
   function findEdge(followerId, followingId){
@@ -31426,13 +31316,19 @@ const Follows = (function(){
     UbiqueStore.follows.update(followId, patch);
     _syncUpdate(followId, patch).catch(()=>{});
   }
-  function unfollow(fromId, toId){
-    if(!_t()) return;
+  // Deixar de seguir e cancelar pedido: apaga aqui e na conta. Se a conta não apagar, volta como
+  // estava e avisa (senão o pedido reapareceria sozinho na próxima atualização).
+  async function unfollow(fromId, toId){
+    if(!_t()) return true;
     const edge = findEdge(fromId, toId);
-    if(edge){
-      UbiqueStore.follows.remove(edge.id);
-      _syncDelete(edge.id).catch(()=>{});
+    if(!edge) return true;
+    UbiqueStore.follows.remove(edge.id);
+    const ok = await _syncDelete(edge.id);
+    if(!ok){
+      UbiqueStore.follows.add(edge);
+      if(window.ueToast) window.ueToast('Não consegui concluir agora. Tente de novo em instantes.', 'error');
     }
+    return ok;
   }
   /* Hidrata edges onde o usuário é follower OU following. */
   async function hydrate(userId){
@@ -31809,7 +31705,7 @@ async function _loadWalletCompras(stageEl){
         acBox.innerHTML = '<div class="wallet-sec-title">Acessos ativos</div>' + (ativos.length
           ? ativos.map(function(e){
               const nome = (window.Shop && Shop.nameForProduct)
-                ? (Shop.nameForProduct(e.product_id) || ('Produto ' + e.product_id)) : ('Produto ' + e.product_id);
+                ? (Shop.nameForProduct(e.product_id) || 'Curso') : 'Curso';
               let side = '<span class="wallet-compra-sub">sem vencimento</span>';
               if(e.ends_at){
                 const dias = Math.ceil((new Date(e.ends_at).getTime() - Date.now()) / 86400000);
@@ -31922,6 +31818,8 @@ async function _loadWalletPane(stageEl, user){
   await _ubtCarregarPreco();
   try { await _refreshWalletSaldo(stageEl, user); } catch(e){ console.warn('[carteira saldo]', e); }
   _wireWalletBuy(stageEl, user);
+  // Tabela de custos (o extrato usa os rótulos; o quadro de custos vem logo abaixo)
+  const _custosP = C.from('tabela_custos').select('acao,rotulo,categoria,unidade,valor,descricao').eq('ativo', true);
   // Extrato
   try {
     const { data } = await C.from('lancamentos')
@@ -31929,6 +31827,8 @@ async function _loadWalletPane(stageEl, user){
       .eq('user_id', user.id).order('criado_em', { ascending:false }).limit(200);
     const box = stageEl.querySelector('#walletExtrato');
     if(box){
+      const rotuloAcao = {};
+      try { (((await _custosP) || {}).data || []).forEach(function(c){ if(c.acao) rotuloAcao[c.acao] = c.rotulo; }); } catch(_){}
       if(!data || !data.length){
         box.innerHTML = '<div class="empty" style="margin-top:1rem"><div class="empty-body">Nenhuma movimentação ainda.</div></div>';
       } else {
@@ -31936,7 +31836,7 @@ async function _loadWalletPane(stageEl, user){
           data.map(function(r){
             const delta = Number(r.delta);
             const cls = delta < 0 ? 'wallet-neg' : 'wallet-pos';
-            const desc = Util.esc(r.descricao || r.acao || r.origem || '—');
+            const desc = Util.esc(r.descricao || rotuloAcao[r.acao] || (delta > 0 ? 'Crédito' : 'Uso de UbiTokens'));
             return '<div class="wallet-row"><span>'+Util.esc(fmtDt(r.criado_em))+'</span><span>'+desc+'</span>'+
               '<span class="wallet-num '+cls+'">'+(delta>0?'+':'')+_ubtFmt(delta)+'</span>'+
               '<span class="wallet-num">'+_ubtFmt(r.saldo_apos)+'</span></div>';
@@ -31946,7 +31846,7 @@ async function _loadWalletPane(stageEl, user){
   } catch(e){ console.warn('[carteira extrato]', e); }
   // Tabela de custos
   try {
-    const { data } = await C.from('tabela_custos').select('acao,rotulo,categoria,unidade,valor,descricao').eq('ativo', true);
+    const { data } = await _custosP;
     stageEl.__ubtCustos = data || [];
     const qEl = stageEl.querySelector('#walletBuyQty');
     _ubtExemplos(stageEl, qEl ? Number(qEl.textContent) || 10 : 10);
@@ -32494,11 +32394,8 @@ Renderers.account.mount = function(stageEl){
       btnAm.disabled = false;
       if(!d || d.ok === false || !d.url){
         btnAm.textContent = 'Ouvir amostra';
-        // EF antiga não conhece o escopo 'amostra' e devolve BLOCO_AUSENTE
-        const msg = (d && d.codigo === 'BLOCO_AUSENTE')
-          ? 'A amostra precisa da versão nova da função gerar-leitura publicada no servidor.'
-          : ((d && d.mensagem) || 'Não consegui tocar a amostra agora.');
-        if(window.ueToast) ueToast(msg + (d && d.detalhe ? ' — ' + String(d.detalhe).slice(0, 160) : ''), 'error');
+        if(d && d.detalhe) console.warn('[amostra de voz]', d.codigo, d.detalhe);
+        if(window.ueToast) ueToast((d && d.codigo !== 'BLOCO_AUSENTE' && d.mensagem) || 'Não consegui tocar a amostra agora.', 'error');
         return;
       }
       try{ if(window._amostraAudio) window._amostraAudio.pause(); }catch(_){ }
@@ -33610,6 +33507,8 @@ function _notifRenderItem(n){
       btns += `<span class="notif-status-tag">Você aceitou</span>`;
     } else if(follow && follow.status === 'declined'){
       btns += `<span class="notif-status-tag is-muted">Recusado</span>`;
+    } else if(!follow){
+      btns += `<span class="notif-status-tag is-muted">Pedido encerrado</span>`;
     }
     // "Seguir de volta" — só quando você ainda NÃO segue nem pediu pra seguir.
     if(meId && themId && !iFollowThem){
@@ -36328,7 +36227,7 @@ Renderers.novaSenha.mount = function(stageEl){
     const a = f1.value || '', b = f2.value || '';
     if(a.length < 6){ mostrar(err, 'A senha precisa ter pelo menos 6 caracteres.'); f1.focus(); return; }
     if(a !== b){ mostrar(err, 'As duas senhas não são iguais.'); f2.focus(); return; }
-    if(!window._sb){ mostrar(err, 'Supabase indisponível. Recarregue a página.'); return; }
+    if(!window._sb){ mostrar(err, 'Não consegui conectar. Recarregue a página.'); return; }
     btn.disabled = true; mostrar(sts, 'Salvando…');
     try{
       // Só funciona com a sessão do link de recuperação (ou já logado) — é o
@@ -36678,7 +36577,7 @@ Renderers.login.mount = function(stageEl){
       emailInput.focus();
       return;
     }
-    if(!window._sb){ showError('Supabase indisponível.'); return; }
+    if(!window._sb){ showError('Não consegui conectar. Recarregue a página.'); return; }
     showStatus(`Enviando link de redefinição pra ${email}…`);
     try{
       const result = await Promise.race([
@@ -37040,9 +36939,8 @@ window._glossFiltersState = window._glossFiltersState || {
   q: '', exam: '', subject: '', class: '', tab: 'global'  // 'global' | 'saved'
 };
 
-// ─── Bookmarks (favoritos) — per-user, em localStorage ───
-// Não vai pro UbiqueStore pra não vazar pros outros usuários do mock.
-// Quando houver backend, vira tabela `glossary_bookmarks(user_id, term_id)`.
+// ─── Termos salvos (estrela) — ficam na conta (aluno.glossary_bookmarks) ───
+// O aparelho guarda só uma cópia, para a lista abrir na hora; quem manda é a conta.
 function _glossBookmarkKey(){
   let uid = 'anon';
   try{
@@ -37060,41 +36958,79 @@ function _glossGetBookmarks(){
     return Array.isArray(arr) ? arr.map(String) : [];
   }catch(_){ return []; }
 }
+function _glossSetBookmarks(arr){
+  try{ localStorage.setItem(_glossBookmarkKey(), JSON.stringify(arr)); }catch(_){}
+}
+// Na entrada: traz a lista da conta. Na primeira vez, leva para a conta o que estava só neste
+// navegador (antes a estrela gravava só aqui). Depois disso a conta prevalece: o que foi tirado
+// em outro aparelho não volta.
+async function _glossHidratarSalvos(){
+  const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(!u || !window._sb) return;
+  const T = () => window._sb.schema('aluno').from('glossary_bookmarks');
+  const { data, error } = await T().select('term_id').eq('user_id', u.id).order('term_id').limit(5000);
+  if(error){ console.warn('[glossário salvos]', error); return; }
+  const daConta = (data || []).map(function(r){ return String(r.term_id); });
+  const marca = 'ubique.glossary.bookmarks.levados:' + u.id;
+  let levados = false;
+  try{ levados = localStorage.getItem(marca) === '1'; }catch(_){}
+  let lista = daConta;
+  if(!levados){
+    const soAqui = _glossGetBookmarks().filter(function(id){ return daConta.indexOf(id) < 0; });
+    if(soAqui.length){
+      const r = await T().upsert(soAqui.map(function(id){ return { user_id: u.id, term_id: id }; }), { onConflict: 'user_id,term_id', ignoreDuplicates: true });
+      if(r.error){ console.warn('[glossário salvos: levar para a conta]', r.error); return; }
+      lista = daConta.concat(soAqui);
+    }
+    try{ localStorage.setItem(marca, '1'); }catch(_){}
+  }
+  _glossSetBookmarks(lista);
+  _glossPintarSalvos();
+}
+// Redesenha o que depende da lista: estrelas visíveis, contagem da aba e, na aba "salvas", a lista.
+function _glossPintarSalvos(){
+  const lista = _glossGetBookmarks();
+  document.querySelectorAll('[data-glossbk]').forEach(function(btn){
+    const salvo = lista.indexOf(btn.getAttribute('data-glossbk')) >= 0;
+    btn.classList.toggle('is-bookmarked', salvo);
+    btn.setAttribute('title', salvo ? 'Remover dos meus salvos' : 'Salvar nos meus termos');
+    btn.setAttribute('aria-pressed', salvo ? 'true' : 'false');
+    btn.innerHTML = salvo ? '★' : '☆';
+  });
+  const st = window._glossFiltersState;
+  if(st && st.tab === 'saved'){
+    const bodyEl = document.getElementById('glossPageBody');
+    if(bodyEl) bodyEl.innerHTML = _glossEntriesHtml();
+  }
+  const tabCount = document.getElementById('glossTabSavedCount');
+  if(tabCount) tabCount.textContent = String(lista.length);
+}
 function _glossIsBookmarked(termId){
   if(termId == null) return false;
   return _glossGetBookmarks().indexOf(String(termId)) >= 0;
 }
-// Toggle: retorna true se acabou de salvar (acrescentou), false se removeu.
+// Toggle: retorna true se acabou de salvar (acrescentou), false se removeu. Muda na hora e grava na
+// conta; se a gravação falhar, volta como estava e avisa.
 window._glossToggleBookmark = function(termId){
   if(termId == null) return false;
-  const key = _glossBookmarkKey();
-  const arr = _glossGetBookmarks();
   const id = String(termId);
-  const idx = arr.indexOf(id);
-  const added = idx < 0;
-  if(added) arr.push(id); else arr.splice(idx, 1);
-  try{ localStorage.setItem(key, JSON.stringify(arr)); }catch(_){}
-
-  // Atualiza UIs visíveis sem re-render do shell
-  document.querySelectorAll('[data-glossbk="' + id.replace(/"/g, '\\"') + '"]').forEach(btn => {
-    btn.classList.toggle('is-bookmarked', added);
-    btn.setAttribute('title', added ? 'Remover dos meus salvos' : 'Salvar nos meus termos');
-    btn.setAttribute('aria-pressed', added ? 'true' : 'false');
-    btn.innerHTML = added ? '★' : '☆';
-  });
-
-  // Se está na página /glossario na aba "salvas", o item pode ter sumido —
-  // re-renderiza o body inteiro.
-  const st = window._glossFiltersState;
-  if(st && st.tab === 'saved' && !added){
-    const bodyEl = document.getElementById('glossPageBody');
-    if(bodyEl) bodyEl.innerHTML = _glossEntriesHtml();
-    // Atualiza contagem do tab "salvas"
-    const tabCount = document.getElementById('glossTabSavedCount');
-    if(tabCount) tabCount.textContent = String(_glossGetBookmarks().length);
-  } else {
-    const tabCount = document.getElementById('glossTabSavedCount');
-    if(tabCount) tabCount.textContent = String(_glossGetBookmarks().length);
+  const antes = _glossGetBookmarks();
+  const added = antes.indexOf(id) < 0;
+  _glossSetBookmarks(added ? antes.concat([id]) : antes.filter(function(x){ return x !== id; }));
+  _glossPintarSalvos();
+  const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(u && window._sb){
+    const T = window._sb.schema('aluno').from('glossary_bookmarks');
+    const envio = added
+      ? T.upsert({ user_id: u.id, term_id: id }, { onConflict: 'user_id,term_id', ignoreDuplicates: true })
+      : T.delete().eq('user_id', u.id).eq('term_id', id);
+    Promise.resolve(envio).then(function(r){ if(r && r.error) throw r.error; }).catch(function(e){
+      console.warn('[glossário salvos]', e);
+      const agora = _glossGetBookmarks();
+      _glossSetBookmarks(added ? agora.filter(function(x){ return x !== id; }) : agora.concat([id]));
+      _glossPintarSalvos();
+      if(window.ueToast) window.ueToast('Não consegui salvar na sua conta. Confira a conexão e tente de novo.', 'error');
+    });
   }
   return added;
 };
@@ -37179,7 +37115,7 @@ function _glossEntriesHtml(){
         <div class="empty-body">Você ainda não salvou nenhum termo. Clique na estrela (☆) ao lado de qualquer palavra no <strong>Banco global</strong> ou dentro de uma unidade pra começar a montar seu próprio glossário.</div></div>`;
     }
     return countBanner + `<div class="empty"><div class="empty-title">Glossário vazio</div>
-      <div class="empty-body">O administrador ainda não cadastrou termos. Os itens aparecem aqui assim que forem criados em <em>Gerenciar Conteúdo → Glossário</em>.</div></div>`;
+      <div class="empty-body">Os termos aparecem aqui assim que forem publicados.</div></div>`;
   }
   if(filtered.length === 0){
     return countBanner + `<div class="empty"><div class="empty-title">Nenhum resultado</div>
@@ -40105,9 +40041,9 @@ Renderers.salas = function(route){
           <button class="salas-drawer-x" type="button" aria-label="Fechar">&times;</button>
         </div>
         <div class="salas-drawer-body">
-          <div class="salas-pane on" data-spane="ranking"><p class="salas-soon">Ranking do grupo — chega na Parte G.</p></div>
-          <div class="salas-pane" data-spane="meta"><p class="salas-soon">Meta coletiva — chega na Parte F.</p></div>
-          <div class="salas-pane" data-spane="feed"><p class="salas-soon">Feed de ações — chega na Parte E.</p></div>
+          <div class="salas-pane on" data-spane="ranking"><p class="salas-soon">Carregando o ranking…</p></div>
+          <div class="salas-pane" data-spane="meta"><p class="salas-soon">Carregando a meta…</p></div>
+          <div class="salas-pane" data-spane="feed"><p class="salas-soon">Carregando o feed…</p></div>
           <div class="salas-pane" data-spane="chat"><p class="salas-soon">Chat da sala — chega na Parte H.</p></div>
         </div>
       </div>
@@ -40193,7 +40129,7 @@ Renderers.salas.mount = function(stageEl){
         <div class="salas-mesa">${onlineAvs || '<p class="salas-empty">Ninguém na mesa agora — quando um colega entrar e estudar, ele aparece aqui ao vivo.</p>'}</div>
         ${offlineAvs ? `<div class="salas-mesa-offh">Fora da mesa</div><div class="salas-mesa salas-mesa-offrow">${offlineAvs}</div>` : ''}
       </div>
-      ${actsHtml || '<div class="salas-acts"><div class="salas-acts-head">Atividades do grupo</div><p class="salas-empty">Nenhuma atividade ainda. Resolva uma questão e use o botão CoopStudy → "Uma sala" pra enviar pro grupo corrigir.</p></div>'}
+      ${actsHtml || '<div class="salas-acts"><div class="salas-acts-head">Atividades do grupo</div><p class="salas-empty">Nenhuma atividade ainda. Numa questão, clique em Enviar para Colega de Estudo e escolha uma sala para o grupo corrigir.</p></div>'}
     </section>`;
     mainEl.querySelectorAll('.salas-mesa-av[data-url]').forEach(el => { const url = el.dataset.url; if(url) renderAvatarInto(el, url, { x:parseFloat(el.dataset.x)||0, y:parseFloat(el.dataset.y)||0, scale:parseFloat(el.dataset.s)||1 }); });
     if(typeof _salasUpdateBadges === 'function') _salasUpdateBadges(); // badge "Painéis"/aba Chat sempre em dia
@@ -40735,7 +40671,9 @@ Renderers.simulados = function(route, opts){
     : sims.slice();
   // Pré-seleciona a matéria ATIVA do concurso (mesmo sem simulados → lista zera e
   // mostra "Nenhum simulado encontrado"). Matéria fora do concurso é ignorada.
-  if(!filters.subject){
+  // ?subject=all é "Todas" escolhida: não volta para a matéria aberta.
+  if(filters.subject === 'all') filters.subject = '';
+  else if(!filters.subject){
     const _subj = activeSubject();
     if(_subj && _subj._subjectId != null && _concursoSubjIds.has(String(_subj._subjectId))) filters.subject = String(_subj._subjectId);
   }
@@ -40762,7 +40700,7 @@ Renderers.simulados = function(route, opts){
 
   const subjectOpts = `<div class="fb-group"><span class="fb-label">Disciplina</span>
     <select class="fb-select" data-filter="subject">
-      <option value="">Todas</option>
+      <option value="all">Todas</option>
       ${subjectIdsInSims.map(id => `<option value="${Util.attr(id)}" ${String(filters.subject)===String(id)?'selected':''}>${Util.esc(_subjName[id]||('#'+id))}</option>`).join('')}
     </select></div>`;
   const diffOpts = `<div class="fb-group"><span class="fb-label">Dificuldade</span>
@@ -43757,7 +43695,7 @@ Renderers.simulados.mount = function(stageEl, route){
     });
   });
   const clear = stageEl.querySelector('#simClearFilters');
-  if(clear) clear.addEventListener('click', () => Router.go('/simulados'));
+  if(clear) clear.addEventListener('click', () => Router.go('/simulados?subject=all'));
 };
 
 /* ═══════════ SIMULADO DETAIL — take a mock test ═══════════ */
@@ -49004,17 +48942,6 @@ window.TutorIA = (function(){
     .tutor-caderno-bl-filter{ width:100%; background:var(--bg-elevated); border:1px solid var(--border); border-radius:6px; padding:.32rem .5rem; color:var(--text); font-family:var(--sans); font-size:.74rem; }
     .tutor-caderno-bl-items{ display:flex; flex-direction:column; gap:.55rem; }
     /* Modal do Caderno (aberto da página Notas) */
-    .cadmodal-back{ position:fixed; inset:0; z-index:1200; background:rgba(0,0,0,.62); display:flex; align-items:center; justify-content:center; padding:1.5rem; backdrop-filter:blur(2px); }
-    .cadmodal{ width:min(720px, 96vw); max-height:90vh; display:flex; flex-direction:column; background:var(--bg-card); border:1px solid var(--accent-border); border-radius:16px; box-shadow:0 30px 80px -24px rgba(0,0,0,.7); padding:1.1rem 1.2rem 1.2rem; }
-    .cadmodal-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:.8rem; margin-bottom:.7rem; }
-    .cadmodal-title{ font-family:var(--serif); font-size:1.15rem; line-height:1.3; color:var(--text); }
-    .cadmodal-x{ flex-shrink:0; width:30px; height:30px; display:inline-flex; align-items:center; justify-content:center; background:transparent; border:1px solid var(--accent-border-soft); border-radius:8px; color:var(--text-mute); cursor:pointer; font-size:.9rem; transition:all .2s var(--ease); }
-    .cadmodal-x:hover{ color:var(--accent); border-color:var(--accent-border); background:var(--accent-lo); }
-    .cadmodal-ed{ min-height:min(46vh, 420px); max-height:62vh; }
-    .cadmodal-foot{ display:flex; align-items:center; justify-content:space-between; gap:.8rem; margin-top:.5rem; font-family:var(--sans); font-size:.66rem; color:var(--text-mute); flex-wrap:wrap; }
-    .cadmodal-foot-r{ display:flex; align-items:center; gap:.9rem; }
-    .cadmodal-openunit{ color:var(--accent); text-decoration:none; font-size:.68rem; letter-spacing:.04em; }
-    .cadmodal-openunit:hover{ text-decoration:underline; }
     /* Aba "Conexões" — grafo */
     .tutor-grafo{ flex:1; min-height:0; display:flex; flex-direction:column; position:relative; }
     .tutor-grafo[hidden]{ display:none; }
@@ -53584,7 +53511,7 @@ window.TutorIA = (function(){
       versoes = r.data || [];
     }catch(e){
       const bd = el.querySelector('#cadHistBody');
-      if(bd) bd.innerHTML = '<div class="empty-body" style="padding:.8rem">Não consegui carregar o histórico (' + Util.esc(String(e && e.message || e)) + '). Se a tabela ainda não existe, rode o SQL da lixeira.</div>';
+      if(bd) bd.innerHTML = '<div class="empty-body" style="padding:.8rem">Não consegui carregar o histórico agora. Tente de novo em instantes.</div>';
       return;
     }
     const bd = el.querySelector('#cadHistBody');
@@ -57977,25 +57904,6 @@ window.TutorIA = (function(){
   // Abre o drawer direto na aba CADERNO (usado pelo botão "Caderno" do cabeçalho).
   function openCaderno(ctx){ return open(ctx).then(function(){ _setTab('caderno'); }); }
 
-  // ── MODAL do Caderno (aberto da página Notas → aba Cadernos) ──
-  // Reusa TODA a máquina do caderno (carregar/salvar/[[ ]]/aliases/backlinks/toolbar)
-  // registrando o editor do modal como "superfície ativa" (_cadActiveEl etc.).
-  let _cadModalEl = null;
-  function _cadModalKey(e){ if(e.key === 'Escape'){ _cadModalClose(); } }
-  function _cadModalClose(){
-    if(!_cadModalEl) return;
-    if(_cadTimer){ clearTimeout(_cadTimer); _cadTimer = null; }
-    const finish = function(){
-      _cadActiveEl = null; _cadActiveStatusEl = null; _cadActiveBl = null; _cadUnit = null;
-      _hideRefPicker(); _aliasClosePop();
-      if(_cadModalEl && _cadModalEl.parentNode) _cadModalEl.parentNode.removeChild(_cadModalEl);
-      _cadModalEl = null;
-      document.removeEventListener('keydown', _cadModalKey, true);
-      // NÃO re-renderiza aqui (evita "pular" pra aba Notas). O cache já foi
-      // atualizado no _cadSave; o preview do card reflete na próxima visita.
-    };
-    Promise.resolve(_cadSave()).then(finish, finish);
-  }
   /* Voltou a um caderno que já estava aberto (drawer reaberto, aba ou janela
      de volta): se NADA foi editado aqui e o servidor tem outro corpo (o portal
      de outro caderno gravou, outra aba salvou), recarrega. Editor sujo fica
@@ -61355,77 +61263,6 @@ window.TutorIA = (function(){
     _cadActiveEl = null; _cadActiveStatusEl = null; _cadActiveBl = null; _cadDocId = null;
     _cadSurfs = [];
   }
-  function openCadernoModal(ctx){
-    _ensureStyles();
-    if(_cadModalEl) _cadModalClose();
-    const unitId = ctx && ctx.unitId; if(!unitId) return Promise.resolve();
-    const title = (ctx && ctx.unitTitle) || '';
-    const back = document.createElement('div');
-    back.className = 'cadmodal-back';
-    back.innerHTML =
-      '<div class="cadmodal" role="dialog" aria-modal="true">'
-      + '<header class="cadmodal-head"><div class="cadmodal-title">' + _esc(title || 'Caderno') + '</div>'
-        + '<button type="button" class="cadmodal-x" aria-label="Fechar">&#10005;</button></header>'
-      + '<div class="tutor-caderno-tb cadmodal-tb">'
-        + '<button type="button" data-cmd="bold" data-tip="Negrito"><b>B</b></button>'
-        + '<button type="button" data-cmd="italic" data-tip="Itálico"><i>I</i></button>'
-        + '<button type="button" data-cmd="underline" data-tip="Sublinhado"><span style="text-decoration:underline">U</span></button>'
-        + '<button type="button" data-cmd="formatBlock" data-arg="h3" data-tip="Título">Título</button>'
-        + '<button type="button" data-cmd="insertUnorderedList" data-tip="Lista">&bull; Lista</button>'
-        + '<button type="button" data-cmd="insertOrderedList" data-tip="Lista numerada">1. Lista</button>'
-        + _cadColorBtnsHtml()
-        + '<button type="button" data-cmd="removeFormat" data-tip="Limpar formatação">&#9003;</button>'
-        + '<button type="button" data-cad-hist data-tip="Versões deste caderno (30 dias)">Histórico</button>'
-      + '</div>'
-      + '<div class="tutor-caderno-ed cadmodal-ed is-empty" id="cadernoModalInput" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="false" data-ph="Escreva suas anotações desta unidade…  (use [[ para linkar outra unidade)"></div>'
-      + '<div class="cadmodal-foot"><span class="tutor-caderno-status" id="cadernoModalStatus"></span>'
-        + '<div class="cadmodal-foot-r"><span class="tutor-caderno-hint">[[ para linkar · salva sozinho</span>'
-        + '<a class="cadmodal-openunit" id="cadModalOpenUnit" href="#">Abrir unidade &rarr;</a></div></div>'
-      + '<div class="tutor-caderno-bl" id="cadModalBacklinks" hidden><button type="button" class="tutor-caderno-bl-h" id="cadModalBlToggle" aria-expanded="false"><span class="tutor-caderno-bl-chev">&#9656;</span> Referências <span class="tutor-caderno-bl-count" id="cadModalBlCount">0</span></button><div class="tutor-caderno-bl-list" id="cadModalBlList" hidden></div></div>'
-      + '</div>';
-    document.body.appendChild(back);
-    _cadModalEl = back;
-    const ed = back.querySelector('#cadernoModalInput');
-    // Registra a superfície ativa (o resto da máquina passa a agir aqui).
-    _cadActiveEl = ed;
-    _ctx.unitId = unitId; // pro [[ priorizar unidades próximas e marcar a atual
-    _cadActiveStatusEl = back.querySelector('#cadernoModalStatus');
-    _cadActiveBl = { sec: back.querySelector('#cadModalBacklinks'), list: back.querySelector('#cadModalBlList'), count: back.querySelector('#cadModalBlCount') };
-    ligarEditorCaderno(ed);
-    back.querySelectorAll('.cadmodal-tb button[data-cmd]').forEach(function(b){
-      b.addEventListener('mousedown', function(e){ e.preventDefault(); });
-      b.addEventListener('click', function(){
-        ed.focus();
-        const cmd = b.getAttribute('data-cmd');
-        if(cmd === 'insertUnorderedList' || cmd === 'insertOrderedList'){ _cadListaToggle(ed, cmd === 'insertOrderedList' ? 'n' : 'b'); return; }
-        if(cmd === 'removeFormat') _cadLimparFormatacao(ed);
-        else if(_CAD_FMT_CMD[cmd] && _cadFmtSoChips(ed, _CAD_FMT_CMD[cmd])){ /* só chip na seleção: feito ali */ }
-        else { try { document.execCommand(cmd, false, b.getAttribute('data-arg') || null); } catch(_){} }
-        _emptyToggle(ed); _cadSchedule();
-      });
-    });
-    _cadBindCores(back.querySelector('.cadmodal-tb'));
-    const blToggle = back.querySelector('#cadModalBlToggle');
-    if(blToggle) blToggle.addEventListener('click', function(){ const sec = _cadActiveBl.sec, list = _cadActiveBl.list; const open = sec.classList.toggle('is-open'); if(list) list.hidden = !open; blToggle.setAttribute('aria-expanded', open ? 'true' : 'false'); });
-    const openUnit = back.querySelector('#cadModalOpenUnit');
-    if(openUnit) openUnit.addEventListener('click', function(e){ e.preventDefault(); const href = _unitHref(unitId); _cadModalClose(); if(href) location.hash = href; });
-    back.querySelector('.cadmodal-x').addEventListener('click', _cadModalClose);
-    back.addEventListener('mousedown', function(e){ if(e.target === back) _cadModalClose(); });
-    document.addEventListener('keydown', _cadModalKey, true);
-    if(typeof window.setupQuickTooltips === 'function') window.setupQuickTooltips(back);
-    _cadLoad(unitId);
-    setTimeout(function(){ ed.focus(); }, 40);
-    return Promise.resolve();
-  }
-  // Abre o mapa de Conexões já filtrado na matéria daquele caderno (da página Notas).
-  function openConexoesFor(ctx, subjectId){
-    // (2026-08-27, decisão do dono) SEM pré-filtro por matéria: o grafo abre
-    // INTEIRO sempre; recorte é escolha do aluno nos Ajustes ("só a atual").
-    return open(ctx).then(function(){
-      _setTab('grafo');
-      setTimeout(function(){ try { _grafoApply(); _grafoRenderPanel(); } catch(_){} }, 500);
-    });
-  }
   // Abre o tutor (na unidade) e já manda uma pergunta — usado pelo ✨ do texto.
   function ask(ctx, message, displayText){
     return open(ctx).then(function(){ _send(message, { displayText: displayText }); });
@@ -61443,7 +61280,7 @@ window.TutorIA = (function(){
     const disp = o.reason ? ('Marquei ' + (o.chosenLabel || '') + ' porque: ' + o.reason) : 'Me explica por que errei essa.';
     return ask(ctx, _explainWrongMsg(head, o.stmt || '', o.gabLabel || '', o.chosenLabel || '', o.just || '', o.reason || ''), disp);
   }
-  function close(){ _aliasClosePop(); if(_cadModalEl) _cadModalClose(); const d = document.getElementById('tutorDrawer'); if(d) d.hidden = true; _revVozParar('saida'); _revMarcasLimpar(); _drawerLayoutSync(); }   // só esconde (mantém a conversa)
+  function close(){ _aliasClosePop(); const d = document.getElementById('tutorDrawer'); if(d) d.hidden = true; _revVozParar('saida'); _revMarcasLimpar(); _drawerLayoutSync(); }   // só esconde (mantém a conversa)
   // Sai da unidade → limpa a VISÃO (o dado continua no banco e recarrega ao voltar).
   function _resetForLeave(){
     _openedUnit = null; _cadUnit = null;
@@ -62012,7 +61849,7 @@ window.TutorIA = (function(){
       if(key !== _cadT.key) _sairDoModoCaderno();
     });
   }
-  return { open: open, abrirNoCaderno: abrirNoCaderno, alternarNoCaderno: alternarNoCaderno, openCaderno: openCaderno, openCadernoModal: openCadernoModal, montarCadernoEm: montarCadernoEm, desmontarCaderno: desmontarCaderno, inserirHtml: inserirHtmlNoCaderno, unitHref: _unitHref, openConexoesFor: openConexoesFor, close: close, ask: ask, perguntar: perguntar, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, renderComment: renderComment, ensureStyles: _ensureStyles, sanitize: _cadSanitize, grafoMontarEm: grafoMontarEm, grafoTelaCheia: grafoTelaCheia, aliasPopover: _aliasPopover, fixChips: _cadFixChips,
+  return { open: open, abrirNoCaderno: abrirNoCaderno, alternarNoCaderno: alternarNoCaderno, openCaderno: openCaderno, montarCadernoEm: montarCadernoEm, desmontarCaderno: desmontarCaderno, inserirHtml: inserirHtmlNoCaderno, unitHref: _unitHref, close: close, ask: ask, perguntar: perguntar, excerptMenu: excerptMenu, explainWrong: explainWrong, commentBatch: commentBatch, renderComment: renderComment, ensureStyles: _ensureStyles, sanitize: _cadSanitize, grafoMontarEm: grafoMontarEm, grafoTelaCheia: grafoTelaCheia, aliasPopover: _aliasPopover, fixChips: _cadFixChips,
   montarEditorLivre: montarEditorLivre };
 })();
 
@@ -68027,7 +67864,7 @@ Renderers.essayBank = function(route){
   const hero = '<div class="hero">'+
     '<span class="s-label" data-a="1">Banco do curso</span>'+
     '<h1 class="s-title hero" data-a="2">Banco de discursivas</h1>'+
-    '<p class="s-subtitle" data-a="3">Filtre, escreva e envie pra correção mock-IA. Suas respostas aqui valem nas unidades.</p>'+
+    '<p class="s-subtitle" data-a="3">Filtre, escreva e envie para correção. Suas respostas aqui valem nas unidades.</p>'+
     '<div class="s-divider" data-a="4"></div>'+
     '<div class="cta-row" data-a="5"><a class="btn-ghost" href="#/banco">'+Icons.chevron+' Voltar ao banco</a></div>'+
   '</div>';
@@ -68750,19 +68587,20 @@ Renderers.notes = function(route){
     : ((window.COURSES||[]).filter(Boolean));
   const _concursoSubjIds = new Set(_concursoCourses.map(c => String(c._subjectId)));
   const _activeSubj = activeSubject();
-  let _filterSubjId = (route.query.subject != null && route.query.subject !== '')
-    ? String(route.query.subject)
-    : (_activeSubj ? String(_activeSubj._subjectId) : '');
+  // ?subject=all é "Todas" escolhida; sem nada no endereço vale a matéria aberta.
+  let _filterSubjId = route.query.subject === 'all' ? ''
+    : (route.query.subject ? String(route.query.subject) : (_activeSubj ? String(_activeSubj._subjectId) : ''));
   if(_filterSubjId && !_concursoSubjIds.has(_filterSubjId)) _filterSubjId = ''; // matéria fora do concurso → ignora
   const _scopeSubjIds = _filterSubjId ? new Set([_filterSubjId]) : _concursoSubjIds;
   const _scopeMods = (window.COURSES||[]).filter(c => c && _scopeSubjIds.has(String(c._subjectId))).reduce((a,c)=>a.concat(c.modules||[]),[]);
   const inScope = n => _scopeSubjIds.has(_modToSubj[String(n.moduleId)]);
-  const subjectIdsWithNotes = [...new Set((Store.get().notes||[]).map(n => _modToSubj[String(n.moduleId)]).filter(Boolean))]
+  // A matéria em uso entra na lista mesmo sem notas: o filtro mostra o que está valendo.
+  const subjectIdsWithNotes = [...new Set((Store.get().notes||[]).map(n => _modToSubj[String(n.moduleId)]).filter(Boolean).concat(_filterSubjId ? [_filterSubjId] : []))]
     .filter(id => _concursoSubjIds.has(id))
     .sort((a,b) => String(_subjTitleById[a]||a).localeCompare(String(_subjTitleById[b]||b), 'pt-BR'));
   const subjectFilterOpts = `<div class="fb-group"><span class="fb-label">Matéria</span>
     <select class="fb-select" data-filter="subject">
-      <option value="">Todas</option>
+      <option value="all">Todas</option>
       ${subjectIdsWithNotes.map(id => `<option value="${Util.attr(id)}" ${String(_filterSubjId)===String(id)?'selected':''}>${Util.esc(_subjTitleById[id]||('#'+id))}</option>`).join('')}
     </select></div>`;
   // Precompute module/unit order maps for deterministic module/unit sorting
@@ -69046,93 +68884,6 @@ Renderers.notes = function(route){
     ? `<div class="hl-comp-grid">${hlSections}</div>`
     : `<div class="empty"><div class="empty-title">Nenhum destaque encontrado</div><div class="empty-body">Selecione trechos de texto nas leituras e use a barra de cores para destacar, sublinhar ou ocultar fragmentos.</div></div>`;
 
-  // ───────── Aba "Cadernos" — anotações por unidade (aluno.caderno) ─────────
-  const _cadStrip = (html) => {
-    const tmp = document.createElement('div'); tmp.innerHTML = html || '';
-    return (tmp.textContent || '').replace(/ /g,' ').replace(/\s+/g,' ').trim();
-  };
-  const _cadRefCount = (html) => { const tmp = document.createElement('div'); tmp.innerHTML = html || ''; return tmp.querySelectorAll('.tutor-ref').length; };
-  const _cadMetaCache = {};
-  function _cadUnitMeta(unitId){
-    const key = String(unitId);
-    if(_cadMetaCache[key] !== undefined) return _cadMetaCache[key];
-    let meta = null;
-    for(const c of (window.COURSES||[])){
-      if(!c || !Array.isArray(c.modules)) continue;
-      for(const m of c.modules){
-        for(const entry of Util.unitsOfModule(m)){
-          if(String(entry.unit.id) === key){
-            meta = { subjectId:String(c._subjectId), subjectTitle:c.title||'Matéria', moduleId:String(m.id), moduleLabel:(m.label||m.number||''), moduleTitle:(m.title||''), chapterId: entry.chapter ? entry.chapter.id : '', unitNumber:(entry.unit.number||''), unitTitle:(entry.unit.title||'Unidade') };
-            break;
-          }
-        }
-        if(meta) break;
-      }
-      if(meta) break;
-    }
-    _cadMetaCache[key] = meta;
-    return meta;
-  }
-  const cadFSub = route.query.cadSubject || '';
-  const cadFMod = route.query.cadModule || '';
-  const cadFUnit = route.query.cadUnit || '';
-  const cadSort = route.query.cadSort || 'date-desc';
-  // Universo: cadernos com conteúdo, unidade reconhecida e dentro do concurso ativo.
-  const cadUniverse = (Store.listCadernos()||[]).map(c => {
-    const meta = _cadUnitMeta(c.unitId);
-    const text = _cadStrip(c.body);
-    return { unitId:String(c.unitId), body:c.body, updatedAt:c.updatedAt, meta, text };
-  }).filter(c => c.meta && c.text && _concursoSubjIds.has(c.meta.subjectId));
-  const cadTotal = cadUniverse.length;
-  // Opções de filtro derivadas do universo de cadernos (espelha o filtro das notas).
-  const cadSubjIds = [...new Set(cadUniverse.map(c => c.meta.subjectId))]
-    .sort((a,b) => String(_subjTitleById[a]||a).localeCompare(String(_subjTitleById[b]||b),'pt-BR'));
-  const cadSubjectOpts = `<div class="fb-group"><span class="fb-label">Matéria</span>
-    <select class="fb-select" data-cad-filter="cadSubject"><option value="">Todas</option>
-      ${cadSubjIds.map(id => `<option value="${Util.attr(id)}" ${cadFSub===id?'selected':''}>${Util.esc(_subjTitleById[id]||('#'+id))}</option>`).join('')}
-    </select></div>`;
-  const cadAfterSub = cadUniverse.filter(c => !cadFSub || c.meta.subjectId === cadFSub);
-  const cadModIds = [...new Set(cadAfterSub.map(c => c.meta.moduleId))];
-  const cadModuleOpts = `<div class="fb-group"><span class="fb-label">Módulo</span>
-    <select class="fb-select" data-cad-filter="cadModule"><option value="">Todos</option>
-      ${cadModIds.map(id => { const mm = Util.findModule(id); return mm ? `<option value="${Util.attr(id)}" ${cadFMod===id?'selected':''}>${Util.esc(mm.label+' · '+mm.title)}</option>` : ''; }).join('')}
-    </select></div>`;
-  const cadUnitIds = [...new Set(cadAfterSub.filter(c => !cadFMod || c.meta.moduleId===cadFMod).map(c => c.unitId))];
-  const cadUnitOpts = `<div class="fb-group"><span class="fb-label">Unidade</span>
-    <select class="fb-select" data-cad-filter="cadUnit"><option value="">Todas</option>
-      ${cadUnitIds.map(uid => { const mt = _cadUnitMeta(uid); return `<option value="${Util.attr(uid)}" ${String(cadFUnit)===String(uid)?'selected':''}>${Util.esc(mt ? ('Unid. '+(mt.unitNumber||'')+' · '+mt.unitTitle) : uid)}</option>`; }).join('')}
-    </select></div>`;
-  // Aplica filtros + busca lexical (no título da unidade e no texto do caderno).
-  let cadList = cadAfterSub.slice();
-  if(cadFMod) cadList = cadList.filter(c => c.meta.moduleId === cadFMod);
-  if(cadFUnit) cadList = cadList.filter(c => String(c.unitId) === String(cadFUnit));
-  if(filters.q){ const ql = filters.q.toLowerCase(); cadList = cadList.filter(c => c.text.toLowerCase().includes(ql) || (c.meta.unitTitle||'').toLowerCase().includes(ql) || (c.meta.subjectTitle||'').toLowerCase().includes(ql)); }
-  cadList.sort((a,b) => {
-    if(cadSort === 'date-asc') return (a.updatedAt||0) - (b.updatedAt||0);
-    if(cadSort === 'module'){ const ma=modOrder[a.meta.moduleId]??9999, mb=modOrder[b.meta.moduleId]??9999; if(ma!==mb) return ma-mb; return (unitOrder[a.unitId]??9999)-(unitOrder[b.unitId]??9999); }
-    return (b.updatedAt||0) - (a.updatedAt||0);
-  });
-  const cadCardsHtml = cadList.length ? `<div class="notes-grid">${cadList.map(c => {
-    const m = c.meta;
-    const words = c.text ? c.text.split(/\s+/).filter(Boolean).length : 0;
-    const refs = _cadRefCount(c.body);
-    const preview = c.text.length > 320 ? (c.text.slice(0,320)+'…') : c.text;
-    const ctxAttr = Util.attr(JSON.stringify({ unitId:c.unitId, unitTitle:(m.unitNumber?('Unid. '+m.unitNumber+' · '):'')+m.unitTitle, moduleId:m.moduleId, chapterId:m.chapterId, subjectId:m.subjectId }));
-    return `<article class="note-card cad-card" data-cad-unit="${Util.attr(c.unitId)}" data-cad-ctx="${ctxAttr}">
-      <div class="note-card-source"><strong>${Util.esc(m.subjectTitle)}</strong>${m.unitNumber?(' · UNID. '+Util.esc(m.unitNumber)):''}</div>
-      <div class="cad-card-title">${Util.esc(m.unitTitle||'Unidade')}</div>
-      <div class="note-card-body cad-card-preview">${Util.esc(preview)}</div>
-      <div class="cad-chips">${m.moduleTitle?`<span class="cad-chip">${Util.esc((m.moduleLabel?m.moduleLabel+' · ':'')+m.moduleTitle)}</span>`:''}</div>
-      <div class="note-card-foot">
-        <span class="note-card-date">${fmtDate(c.updatedAt)}</span>
-        <div class="cad-metrics">
-          <span class="cad-metric" title="Palavras">${words} palavra${words===1?'':'s'}</span>
-          ${refs?`<button type="button" class="cad-metric cad-metric-link" data-cad-conex title="Ver no mapa de conexões">${refs} conex${refs===1?'ão':'ões'}</button>`:''}
-        </div>
-      </div>
-    </article>`;
-  }).join('')}</div>` : `<div class="empty"><div class="empty-title">Você ainda não tem cadernos</div><div class="empty-body">Abra uma unidade, toque em <strong>Caderno</strong> e comece a escrever. Use <strong>[[</strong> para linkar outras unidades — elas viram conexões no mapa.</div></div>`;
-
   return `<div class="hero">
     <span class="s-label" data-a="1">Notas e destaques</span>
     <h1 class="s-title hero" data-a="2">Minhas anotações</h1>
@@ -69150,8 +68901,6 @@ Renderers.notes = function(route){
     <button class="ntb-btn" data-view="flashcards">Flashcards</button>
     <span class="ntb-sep"></span>
     <button class="ntb-btn" data-view="highlights">Destaques</button>
-    <span class="ntb-sep"></span>
-    <button class="ntb-btn" data-view="cadernos">Cadernos</button>
     <span class="ntb-sep"></span>
     <button class="ntb-btn" data-view="relatorios">Relatórios</button>
     ${window.Vocabulario ? Vocabulario.abaBotao() : ''}
@@ -69194,22 +68943,6 @@ Renderers.notes = function(route){
       <span class="fb-count">${hlFiltered.length} destaque${hlFiltered.length===1?'':'s'}</span>
     </div>
     ${hlContent}
-  </div>
-  <div class="notes-view-content" data-view="cadernos" style="display:none">
-    <div class="filter-bar">
-      ${cadSubjectOpts}${cadModuleOpts}${cadUnitOpts}
-      <div class="fb-group"><span class="fb-label">Ordenar</span>
-        <select class="fb-select" data-cad-filter="cadSort">
-          <option value="date-desc" ${cadSort==='date-desc'?'selected':''}>Mais recentes</option>
-          <option value="date-asc" ${cadSort==='date-asc'?'selected':''}>Mais antigos</option>
-          <option value="module" ${cadSort==='module'?'selected':''}>Módulo / unidade</option>
-        </select>
-      </div>
-      <button class="fb-clear" id="cadClear">Limpar</button>
-      <button class="fb-action-btn" id="cadCompileBtn" ${cadList.length?'':'disabled'} title="Juntar os cadernos filtrados num documento de estudo">${Icons.download} Compilar cadernos</button>
-      <span class="fb-count">${cadList.length} caderno${cadList.length===1?'':'s'}</span>
-    </div>
-    ${cadCardsHtml}
   </div>
   <div class="notes-view-content" data-view="relatorios" style="display:none">
     <div id="notesRelatorios"><div class="loading">Carregando…</div></div>
@@ -69368,78 +69101,6 @@ Renderers.notes.mount = function(stageEl, route){
     stageEl.querySelectorAll('.ntb-btn').forEach(b => b.classList.toggle('active', b.getAttribute('data-view') === 'highlights'));
     stageEl.querySelectorAll('.notes-view-content').forEach(s => { s.style.display = s.getAttribute('data-view') === 'highlights' ? '' : 'none'; });
   }
-  // ── Aba "Cadernos" ──
-  // Filtros próprios (cadSubject/cadModule/cadUnit/cadSort) — preservam a aba ativa
-  // num re-render, igual flashcards/destaques.
-  stageEl.querySelectorAll('[data-cad-filter]').forEach(el => {
-    const key = el.getAttribute('data-cad-filter');
-    el.addEventListener('change', () => {
-      const q = Object.assign({}, route.query); q[key] = el.value; if(!q[key]) delete q[key];
-      if(key === 'cadSubject'){ delete q.cadModule; delete q.cadUnit; }
-      if(key === 'cadModule'){ delete q.cadUnit; }
-      if(q.cadSort === 'date-desc') delete q.cadSort;
-      Router.go(`/notes${Router.querystring(q)}`);
-    });
-  });
-  const cadClear = stageEl.querySelector('#cadClear');
-  if(cadClear) cadClear.addEventListener('click', () => {
-    const q = Object.assign({}, route.query);
-    delete q.cadSubject; delete q.cadModule; delete q.cadUnit; delete q.cadSort;
-    Router.go(`/notes${Router.querystring(q)}`);
-  });
-  // Clicar no card → abre o caderno num MODAL (edita ali mesmo, salva no banco).
-  stageEl.querySelectorAll('.cad-card').forEach(card => {
-    card.addEventListener('click', e => {
-      if(e.target.closest('[data-cad-conex]')) return;
-      let ctx = {}; try { ctx = JSON.parse(card.getAttribute('data-cad-ctx') || '{}'); } catch(_){}
-      if(window.TutorIA && TutorIA.openCadernoModal) TutorIA.openCadernoModal(ctx);
-    });
-  });
-  // Deep-link do tutor ("Suas anotações"): abre direto o caderno pedido (modal),
-  // reaproveitando o ctx já montado no card correspondente.
-  if(route.query && route.query.openCaderno){
-    const _oc = String(route.query.openCaderno).replace(/["\\]/g, '');
-    const _card = stageEl.querySelector('.cad-card[data-cad-unit="' + _oc + '"]');
-    if(_card && window.TutorIA && TutorIA.openCadernoModal){
-      let _ctx = {}; try { _ctx = JSON.parse(_card.getAttribute('data-cad-ctx') || '{}'); } catch(_){}
-      TutorIA.openCadernoModal(_ctx);
-    }
-  }
-  // Métrica de conexões → mapa Conexões filtrado na matéria do caderno.
-  stageEl.querySelectorAll('[data-cad-conex]').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      const card = btn.closest('.cad-card'); if(!card) return;
-      let ctx = {}; try { ctx = JSON.parse(card.getAttribute('data-cad-ctx') || '{}'); } catch(_){}
-      if(window.TutorIA && TutorIA.openConexoesFor) TutorIA.openConexoesFor(ctx, ctx.subjectId);
-    });
-  });
-  // Compilar cadernos filtrados num documento de estudo (HTML para baixar).
-  const cadCompile = stageEl.querySelector('#cadCompileBtn');
-  if(cadCompile) cadCompile.addEventListener('click', async () => {
-    if(!CompileLicenca.exigeCpf()) return;
-    const cards = Array.from(stageEl.querySelectorAll('.cad-card'));
-    if(!cards.length){ alert('Nenhum caderno para compilar. Ajuste os filtros.'); return; }
-    const byUnit = {}; (Store.listCadernos()||[]).forEach(c => { byUnit[String(c.unitId)] = c; });
-    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const sections = cards.map(card => {
-      const uid = card.getAttribute('data-cad-unit'); const c = byUnit[uid]; if(!c) return '';
-      const title = (card.querySelector('.cad-card-title') ? card.querySelector('.cad-card-title').textContent : '') || 'Unidade';
-      const sub = (card.querySelector('.note-card-source') ? card.querySelector('.note-card-source').textContent : '') || '';
-      return `<section class="cad-sec"><div class="cad-sec-sub">${esc(sub)}</div><h2>${esc(title)}</h2><div class="cad-sec-body">${c.body||''}</div></section>`;
-    }).join('');
-    const now = new Date(); const dateStr = now.toLocaleDateString('pt-BR',{day:'2-digit',month:'long',year:'numeric'});
-    // Nome, e-mail e CPF registrados no servidor (CompileLicenca, 09/10/2026).
-    const lic = CompileLicenca.montar(await _compileIdentity('cadernos', 'notas', sections));
-    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">${lic.metaTags}<title>Meus cadernos</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;max-width:780px;margin:0 auto;padding:2.5rem;color:#1a1712}h1{font-size:28px;margin-bottom:.3rem}p.sub{color:#8a7e68;margin-bottom:2.4rem;font-size:13px}.cad-sec{margin-bottom:2.2rem;padding-bottom:1.6rem;border-bottom:1px solid #e7e0d4}.cad-sec-sub{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#a08e6a;margin-bottom:.3rem}.cad-sec h2{font-size:20px;margin-bottom:.7rem}.cad-sec-body{font-size:15px;line-height:1.7}.cad-sec-body .tutor-ref{background:#efe7d6;border-radius:4px;padding:0 .25em;font-style:normal;color:#7a5b1e}.cad-sec-body h3{font-size:16px;margin:1rem 0 .4rem}.cad-sec-body ul,.cad-sec-body ol{margin:.5rem 0 .5rem 1.4rem}${lic.css}</style></head><body><!-- ${lic.forense} -->${lic.marca}<h1>Meus cadernos</h1><p class="sub">Compilado em ${dateStr} · ${cards.length} caderno${cards.length===1?'':'s'}</p><p class="lic" style="margin:-1.6rem 0 2rem;font-family:Arial,sans-serif;font-size:10px;color:#8a7e68">${Util.esc(lic.linha)}</p>${sections}</body></html>`;
-    CompileLicenca.baixar(html, `cadernos-${new Date().toISOString().slice(0,10)}.html`);
-  });
-  // Auto-ativa a aba Cadernos se houver filtro de caderno na URL — ou um
-  // deep-link openCaderno (vindo do card "Suas anotações" do tutor).
-  if(route.query && (route.query.cadSubject || route.query.cadModule || route.query.cadUnit || route.query.cadSort || route.query.openCaderno)){
-    stageEl.querySelectorAll('.ntb-btn').forEach(b => b.classList.toggle('active', b.getAttribute('data-view') === 'cadernos'));
-    stageEl.querySelectorAll('.notes-view-content').forEach(s => { s.style.display = s.getAttribute('data-view') === 'cadernos' ? '' : 'none'; });
-  }
   function applyFilter(key, val){
     const q = Object.assign({}, route.query); delete q.__item;
     q[key] = val;
@@ -69458,7 +69119,7 @@ Renderers.notes.mount = function(stageEl, route){
       });
     }
   });
-  stageEl.querySelector('#fbClear').addEventListener('click', () => Router.go('/notes'));
+  stageEl.querySelector('#fbClear').addEventListener('click', () => Router.go('/notes?subject=all'));
   // Sort dropdown
   const sortSel = stageEl.querySelector('#notesSortBy');
   if(sortSel){
@@ -69744,9 +69405,8 @@ Renderers.reading = function(route){
   // Filtros — matéria: ?subject= (dropdown) tem prioridade; senão a matéria ativa
   // da topbar. Matéria fora do concurso é ignorada.
   const _activeSubj = activeSubject();
-  let filterSubjId = (route.query.subject != null && route.query.subject !== '')
-    ? String(route.query.subject)
-    : (_activeSubj ? String(_activeSubj._subjectId) : '');
+  let filterSubjId = route.query.subject === 'all' ? ''
+    : (route.query.subject ? String(route.query.subject) : (_activeSubj ? String(_activeSubj._subjectId) : ''));
   if(filterSubjId && !_concursoSubjIds.has(filterSubjId)) filterSubjId = '';
   const fModule = route.query.module || '';
   const fUnit   = route.query.unit   || '';
@@ -69762,7 +69422,7 @@ Renderers.reading = function(route){
 
   // Universo das opções (cascata: módulo/unidade/tópico/tag escopados pela matéria).
   const base = filterSubjId ? _allExam.filter(r => rowSubj(r) === filterSubjId) : _allExam.slice();
-  const subjectIds = [...new Set(_allExam.map(rowSubj).filter(Boolean))].sort((a,b) => String(_subjTitleById[a]||a).localeCompare(String(_subjTitleById[b]||b), 'pt-BR'));
+  const subjectIds = [...new Set(_allExam.map(rowSubj).filter(Boolean).concat(filterSubjId ? [filterSubjId] : []))].sort((a,b) => String(_subjTitleById[a]||a).localeCompare(String(_subjTitleById[b]||b), 'pt-BR'));
   const moduleIds  = [...new Set(base.map(r => String(r.m.id)))];
   const unitIds    = [...new Set(base.filter(r => !fModule || String(r.m.id)===String(fModule)).map(r => String(r.unit.id)))];
   const topicIds   = [...new Set(base.flatMap(r => (r.block.topics||[]).map(String)))];
@@ -69839,7 +69499,7 @@ Renderers.reading = function(route){
     <div class="empty-body">${_allExam.length ? 'Ajuste os filtros para ver mais itens da sua lista.' : 'Abra qualquer bloco de aprendizado e clique em <strong>Ver depois</strong> para adicionar aqui. A lista mantém a ordem em que você salvou cada item, como uma playlist de estudo.'}</div></div>`;
 
   // Barra de filtros (mesmo CSS .filter-bar/.fb-* das Notas)
-  const subjOpts = `<div class="fb-group"><span class="fb-label">Matéria</span><select class="fb-select" data-filter="subject"><option value="">Todas</option>${subjectIds.map(id => `<option value="${Util.attr(id)}" ${String(filterSubjId)===String(id)?'selected':''}>${Util.esc(_subjTitleById[id]||('#'+id))}</option>`).join('')}</select></div>`;
+  const subjOpts = `<div class="fb-group"><span class="fb-label">Matéria</span><select class="fb-select" data-filter="subject"><option value="all">Todas</option>${subjectIds.map(id => `<option value="${Util.attr(id)}" ${String(filterSubjId)===String(id)?'selected':''}>${Util.esc(_subjTitleById[id]||('#'+id))}</option>`).join('')}</select></div>`;
   const modOpts = `<div class="fb-group"><span class="fb-label">Módulo</span><select class="fb-select" data-filter="module"><option value="">Todos</option>${moduleIds.map(id => { const m = Util.findModule(id); return m ? `<option value="${Util.attr(id)}" ${String(fModule)===String(id)?'selected':''}>${Util.esc(m.label+' · '+m.title)}</option>` : ''; }).join('')}</select></div>`;
   const uOpts = `<div class="fb-group"><span class="fb-label">Unidade</span><select class="fb-select" data-filter="unit"><option value="">Todas</option>${unitIds.map(id => { const r = base.find(x => String(x.unit.id)===String(id)); const u = r ? r.unit : null; return u ? `<option value="${Util.attr(id)}" ${String(fUnit)===String(id)?'selected':''}>${Util.esc('Unid. '+u.number+' · '+u.title)}</option>` : ''; }).join('')}</select></div>`;
   const tOpts = `<div class="fb-group"><span class="fb-label">Tópico</span><select class="fb-select" data-filter="topic"><option value="">Todos</option>${topicIds.map(id => `<option value="${Util.attr(id)}" ${String(fTopic)===String(id)?'selected':''}>${Util.esc(topicDisplay(id))}</option>`).join('')}</select></div>`;
@@ -69940,7 +69600,7 @@ Renderers.reading.mount = function(stageEl, route){
   const groupSel = stageEl.querySelector('#rlGroupBy');
   if(groupSel) groupSel.addEventListener('change', () => applyFilter('group', groupSel.value));
   const clear = stageEl.querySelector('#rlClear');
-  if(clear) clear.addEventListener('click', () => Router.go('/reading'));
+  if(clear) clear.addEventListener('click', () => Router.go('/reading?subject=all'));
   stageEl.querySelectorAll('.rl-row').forEach(row => {
     const bid = row.getAttribute('data-block-id');
     const uid = row.getAttribute('data-unit-id');
@@ -78295,6 +77955,29 @@ const CadernosPage = (function(){
       return cab + g.docs.map(function(d){ return _linhaDoc(d, ativoD); }).join('');
     }).join('');
   }
+  // Junta num documento de estudo os cadernos das unidades das matérias que a barra está mostrando.
+  async function _compilarCadernosUnidades(){
+    if(!CompileLicenca.exigeCpf()) return;
+    const filtro = _ordPrefs().filtro;
+    const porUnit = {};
+    (Store.listCadernos() || []).forEach(function(c){ porUnit[String(c.unitId)] = c; });
+    const secoes = [];
+    _materias().forEach(function(m){
+      if(filtro.length && filtro.indexOf(m.subjectId) === -1) return;
+      m.unidades.forEach(function(u){
+        const c = porUnit[u.unitId] || (u.storeId != null ? porUnit['u' + u.storeId] : null);
+        if(!c || !_txt(c.body)) return;
+        secoes.push('<section class="cad-sec"><div class="cad-sec-sub">' + Util.esc(m.nome + (u.number ? ' · Unid. ' + u.number : '')) + '</div><h2>' + Util.esc(u.title || 'Unidade') + '</h2><div class="cad-sec-body">' + c.body + '</div></section>');
+      });
+    });
+    if(!secoes.length){ if(window.ueToast) ueToast('Nenhum caderno de unidade com texto nas matérias mostradas.', 'warn'); return; }
+    const corpo = secoes.join('');
+    const dataStr = new Date().toLocaleDateString('pt-BR', { day:'2-digit', month:'long', year:'numeric' });
+    // Nome, e-mail e CPF registrados no servidor (CompileLicenca, 09/10/2026).
+    const lic = CompileLicenca.montar(await _compileIdentity('cadernos', 'cadernos', corpo));
+    const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">${lic.metaTags}<title>Meus cadernos</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Georgia,serif;max-width:780px;margin:0 auto;padding:2.5rem;color:#1a1712}h1{font-size:28px;margin-bottom:.3rem}p.sub{color:#8a7e68;margin-bottom:2.4rem;font-size:13px}.cad-sec{margin-bottom:2.2rem;padding-bottom:1.6rem;border-bottom:1px solid #e7e0d4}.cad-sec-sub{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#a08e6a;margin-bottom:.3rem}.cad-sec h2{font-size:20px;margin-bottom:.7rem}.cad-sec-body{font-size:15px;line-height:1.7}.cad-sec-body .tutor-ref{background:#efe7d6;border-radius:4px;padding:0 .25em;font-style:normal;color:#7a5b1e}.cad-sec-body h3{font-size:16px;margin:1rem 0 .4rem}.cad-sec-body ul,.cad-sec-body ol{margin:.5rem 0 .5rem 1.4rem}${lic.css}</style></head><body><!-- ${lic.forense} -->${lic.marca}<h1>Meus cadernos</h1><p class="sub">Compilado em ${dataStr} · ${secoes.length} caderno${secoes.length === 1 ? '' : 's'}</p><p class="lic" style="margin:-1.6rem 0 2rem;font-family:Arial,sans-serif;font-size:10px;color:#8a7e68">${Util.esc(lic.linha)}</p>${corpo}</body></html>`;
+    CompileLicenca.baixar(html, `cadernos-${new Date().toISOString().slice(0,10)}.html`);
+  }
   function _sidebarHtml(route){
     const olho = _olho();
     const arq = _arquivadas();
@@ -78326,6 +78009,8 @@ const CadernosPage = (function(){
               + '<span class="cadp-dot" data-mat-dot="' + Util.attr(m.subjectId) + '"></span> ' + Util.esc(m.sigla || m.nome) + '</label>';
           }).join('')
         + (_ordPrefs().filtro.length ? '<button type="button" class="cadp-mini" data-ord-limpar>mostrar todas</button>' : '')
+        + '<div class="cadp-ord-sep">Documento de estudo</div>'
+        + '<button type="button" class="cadp-mini" data-ord-compilar data-tip="Junta num arquivo os cadernos das unidades das matérias mostradas">Compilar cadernos das unidades</button>'
       + '</div></span>'
       + '<button type="button" class="icon-btn cadp-tool cadp-ico" id="cadpSideFechar" data-tip="Recolher a barra" aria-label="Recolher a barra">&#171;</button>'
       + '</div>'
@@ -79291,6 +78976,8 @@ const CadernosPage = (function(){
       });
       const limpar = ordMenu.querySelector('[data-ord-limpar]');
       if(limpar) limpar.addEventListener('click', function(){ _ordSet({ filtro: [] }); _bindSidebar(stageEl, route); });
+      const compilar = ordMenu.querySelector('[data-ord-compilar]');
+      if(compilar) compilar.addEventListener('click', function(){ ordMenu.hidden = true; _compilarCadernosUnidades(); });
     }
     const olhoBtn = side.querySelector('#cadpOlho'), olhoMenu = side.querySelector('#cadpOlhoMenu');
     if(olhoBtn && olhoMenu){
@@ -85119,14 +84806,14 @@ function bindEssayItems(stageEl, items){
     if(prior){
       ta.value = prior.text||'';
       counter.textContent = ta.value.length;
-      injectEssayEvaluation(itemEl, item, prior);
+      if(prior.score != null) injectEssayEvaluation(itemEl, item, _essayCorrecaoParaMostrar(prior, item));
     }
     ta.addEventListener('input', () => { counter.textContent = ta.value.length; });
-    itemEl.querySelector('.essay-submit').addEventListener('click', () => {
+    const submitBtn = itemEl.querySelector('.essay-submit');
+    submitBtn.addEventListener('click', () => {
+      if(window.Visitante && Visitante.ativo()){ Visitante.convite('discursiva'); return; }
       const text = ta.value.trim(); if(!text){ ta.focus(); return; }
-      const payload = generateMockEssayFeedback(item, text);
-      Store.updateEssay(unitId, blockId, itemId, payload);
-      injectEssayEvaluation(itemEl, item, payload);
+      _essayEnviarParaCorrecao({ item, text, submitBtn, itemEl, store: Store, unitId, blockId, itemId });
     });
   });
 }
