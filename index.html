@@ -11781,7 +11781,7 @@ a.pr-crumb:hover{color:var(--accent)}
 /* a 3ª opção (em branco) é a mesma bolinha, com um traço no lugar da letra */
 .pf-options .q-option.pf-option-branco .q-option-mark{ font-size:.9em; opacity:.75; }
 .pf-options .q-option.pf-option-branco.selected{ border-color:var(--border-strong); background:var(--bg-elevated); color:var(--text-mute); }
-.q-item.pf-flash{ animation:cadRefFlash 1.4s var(--ease); }
+.q-item.pf-flash,.edital-topic-head.pf-flash{ animation:cadRefFlash 1.4s var(--ease); }
 
 /* coluna direita: satélite (gabarito) + rascunho recolhível */
 .pf-lado{ position:sticky; top:calc(var(--nav-h, 60px) + .8rem); display:flex; flex-direction:column; gap:.8rem; max-height:calc(100vh - 6rem); }
@@ -23741,7 +23741,7 @@ function itemBadges(it, norm){
   // ANULADA: selo explicando por que a questão não pesa no desempenho. Ela
   // continua respondível e com gabarito/comentário (serve de estudo).
   const anulada = !!(it.anulada || (window._isAnnulledItem && window._isAnnulledItem(it.id)));
-  const anuladaBadge = anulada
+  const anuladaBadge = (anulada && !(ctx && ctx.simuladoMode))   // em andamento, o selo entregaria quais são as anuladas
     ? `<span class="q-badge q-badge-anulada" data-tip="Questão anulada na prova original — não conta como acerto nem como erro no seu desempenho">Anulada · não conta</span>`
     : '';
   // Fase 3.2: a distribuição de % NÃO aparece mais no estado inicial (enviesa
@@ -29555,8 +29555,14 @@ const Banco = {
     if(filters.q){
       const q = filters.q.toLowerCase();
       items = items.filter(it => {
-        const txt = [it.assertion, it.term, it.name, it.title, it.text, it.body, it.summary, it.description, it.command, it.citation, it.definition, it.caption]
-          .filter(Boolean).join(' ').toLowerCase();
+        // Verbete do glossário: o texto mora no cadastro, o item só aponta para ele.
+        let doCadastro = '';
+        if(cardKey === 'glossary' && typeof _resolveGlossaryItem === 'function'){
+          const r = _resolveGlossaryItem(it, it.__unitId);
+          if(r) doCadastro = String(r.term || '') + ' ' + ((r.definitions || []).map(d => d.html || '').join(' ')) + ' ' + String(r.definition || '');
+        }
+        const txt = [it.assertion, it.term, it.name, it.title, it.text, it.body, it.summary, it.description, it.command, it.citation, it.definition, it.caption, doCadastro]
+          .filter(Boolean).join(' ').replace(/<[^>]*>/g, ' ').toLowerCase();
         return txt.indexOf(q) >= 0;
       });
     }
@@ -40542,7 +40548,7 @@ Renderers.edital = function(route){
   // existe onde há dado; nas demais a pílula mostra "—".
   const _unitAgg = {};
   try {
-    const _perf = buildPerformanceReport();
+    const _perf = buildPerformanceReport({ concursoInteiro: true });   // o Edital é do concurso, não da matéria aberta
     Object.values(_perf.perUnit || {}).forEach(pu => { if(pu && pu.storeUnitId != null && pu.agg) _unitAgg[String(pu.storeUnitId)] = pu.agg; });
   } catch(_){}
   // Unidades do tópico + descendentes, como Set DISTINTO (memoizado). O conjunto
@@ -40621,6 +40627,17 @@ Renderers.edital = function(route){
   // Recursiva = as MESMAS unidades que a contagem representa. `ordena` = por
   // número (no edital as unidades vêm de matérias diferentes); na estrutura
   // curricular a ordem do curso já vem certa.
+  // A mesma régua das unidades: unidade grátis, matéria comprada ou liberada pelo mentor.
+  // Unidade de matéria que não está na conta aparece trancada.
+  const _uCurso = {};
+  ((window.COURSES_ALL || window.COURSES || []).filter(Boolean)).forEach(c => (c.modules || []).forEach(m => Util.unitsOfModule(m).forEach(e => {
+    if(e.unit && e.unit._storeId != null) _uCurso[String(e.unit._storeId)] = { unit: e.unit, courseId: c.id };
+  })));
+  function _unidadeLivre(u){
+    const x = _uCurso[String(u.id)];
+    if(!x) return false;
+    return !(window.Commerce && Commerce.unitUnlocked) || Commerce.unitUnlocked(x.unit, x.courseId);
+  }
   function _unitsListHtml(listId, unitSet, ordena){
     if(!unitSet.size) return '';
     let us = [...unitSet].map(uid => _unitsById[uid]).filter(Boolean);
@@ -40629,7 +40646,7 @@ Renderers.edital = function(route){
       us.map(u => {
         // Matéria não comprada: título trancado (a contagem continua cheia).
         // Mostra só o número (não é o título) pra distinguir as linhas.
-        if(!_subjectOwned(_subjectOfUnit(String(u.id)))){
+        if(!_unidadeLivre(u)){
           const _n = (u.number != null && u.number !== '') ? Util.esc(String(u.number)) : '';
           return `<span class="edital-unit-link edital-unit-link--locked" title="Disponível ao adquirir a matéria">${_lockSvg}Unidade${_n ? ' ' + _n : ''} · bloqueada</span>`;
         }
@@ -40737,7 +40754,7 @@ Renderers.edital = function(route){
   const _estResumo = _estTot ? `<p class="edital-progresso"><strong>${Math.round(_estFeitas / _estTot * 100)}%</strong> concluído · ${_estFeitas} de ${_estTot} ${_estTot === 1 ? 'unidade' : 'unidades'} das suas matérias</p>` : '';
   // quanto do edital já foi marcado (a mesma conta do card "Progresso no edital" da Rotina)
   const _edFeitos = topics.filter(t => myProgress.has(t.id)).length;
-  const _edResumo = topics.length ? `<p class="edital-progresso"><strong>${Math.round(_edFeitos / topics.length * 100)}%</strong> concluído · ${_edFeitos} de ${topics.length} ${topics.length === 1 ? 'tópico marcado' : 'tópicos marcados'}</p>` : '';
+  const _edResumo = topics.length ? `<p class="edital-progresso" data-edital-progresso><strong>${Math.round(_edFeitos / topics.length * 100)}%</strong> concluído · ${_edFeitos} de ${topics.length} ${topics.length === 1 ? 'tópico marcado' : 'tópicos marcados'}</p>` : '';
   const topicsCount = topics.length;
   const heroSubtitle = `${topicsCount} ${topicsCount === 1 ? 'tópico' : 'tópicos'}${e.year ? ' · ' + Util.esc(String(e.year)) : ''}`;
 
@@ -40797,8 +40814,30 @@ Renderers.edital.mount = function(stage){
     _epPai[id] = pai;
     if(pai) (_epFilhos[pai] = _epFilhos[pai] || []).push(id);
   });
+  // Veio de "Ver no edital" (?topico=id): abre o caminho até o tópico, rola até ele e destaca.
+  const _tpAlvo = ((window.Router && Router.parse().query) || {}).topico;
+  if(_tpAlvo){
+    let _p = _epPai[String(_tpAlvo)];
+    while(_p){
+      const ch = stage.querySelector('[data-children="' + _p + '"]'); if(ch) ch.classList.add('is-open');
+      const cv = stage.querySelector('[data-chevron="' + _p + '"]'); if(cv) cv.textContent = '▾';
+      _p = _epPai[_p];
+    }
+    const _cab = stage.querySelector('[data-toggle="' + String(_tpAlvo).replace(/"/g, '') + '"]');
+    if(_cab) setTimeout(function(){ _cab.scrollIntoView({ block: 'center' }); _cab.classList.add('pf-flash'); setTimeout(function(){ _cab.classList.remove('pf-flash'); }, 1600); }, 80);
+  }
+  // "X% concluído": conta o que está marcado na tela, a cada marcação.
+  function _edProgressoPinta(){
+    const lin = stage.querySelector('[data-edital-progresso]'); if(!lin) return;
+    const cbs = stage.querySelectorAll('[data-progress]'), tot = cbs.length;
+    if(!tot) return;
+    const feitos = Array.from(cbs).filter(x => x.checked).length;
+    lin.innerHTML = '<strong>' + Math.round(feitos / tot * 100) + '%</strong> concluído · ' + feitos + ' de ' + tot + ' ' + (tot === 1 ? 'tópico marcado' : 'tópicos marcados');
+  }
   stage.querySelectorAll('[data-progress]').forEach(cb => {
     cb.addEventListener('change', async e => {
+      // Visitante: a marcação não fica guardada; em vez de fingir que marcou, convida.
+      if(window.Visitante && Visitante.ativo()){ cb.checked = !cb.checked; Visitante.convite('geral'); return; }
       // ⚠️ tid é UUID string (topic_id em concursos.edital_topics é UUID)
       const tid = String(cb.getAttribute('data-progress'));
       const userId = window.MOCK_USER ? window.MOCK_USER.id : 'guest';
@@ -40841,6 +40880,7 @@ Renderers.edital.mount = function(stage){
         const el2 = stage.querySelector('[data-progress="' + id + '"]');
         if(el2) el2.checked = alvo;
       });
+      _edProgressoPinta();
       // sync Supabase em LOTE (só UUIDs válidos)
       const okU = typeof userId === 'string' && /^[0-9a-f-]{36}$/i.test(userId);
       const soUuid = (arr) => arr.filter(id => /^[0-9a-f-]{36}$/i.test(id));
@@ -40862,6 +40902,7 @@ Renderers.edital.mount = function(stage){
             St.edital_progress.add({ user_id: userId, topic_id: id, viewed_at: new Date().toISOString() });
             const el2 = stage.querySelector('[data-progress="' + id + '"]'); if(el2) el2.checked = true;
           });
+          _edProgressoPinta();
           if(window.ueToast) ueToast('Não consegui gravar sua marcação. Confira a conexão e tente de novo.', 'error');
         }
       }
@@ -41729,6 +41770,7 @@ window.EvolucaoProvas = (function(){
         atualiza(d);
       }
       bk.querySelectorAll('[data-evo-solta]').forEach(b => b.addEventListener('click', async function(){
+        if(!confirm('Tirar esta nota, que veio das respostas do dia da prova? As respostas continuam guardadas na folha.')) return;
         const pid = b.getAttribute('data-evo-solta'); b.disabled = true;
         const r = await _apagar(pid);
         if(!r.ok){ b.disabled = false; return; }
@@ -42192,7 +42234,7 @@ function _pfPlacar(id, itens){
 function _pfGabTxt(g){ return g === 'C' ? 'Certo' : (g === 'E' ? 'Errado' : 'Anulada'); }
 /* O gabarito NÃO aparece dentro do card (era o que espremia a questão e fugia
    do padrão do app): ele vive no SATÉLITE lateral, como nas unidades. */
-function _pfDetalheHtml(it, r){
+function _pfDetalheHtml(it, r, crit){
   if(!it) return '<div class="qz-sat-empty">Selecione uma resposta para ver os detalhes do item.</div>';
   if(!r || r.selected == null){
     return '<div class="qz-sat-empty">Item ' + Util.esc(it.numero) + ' — marque C, E ou “em branco” para ver o gabarito.</div>';
@@ -42200,7 +42242,7 @@ function _pfDetalheHtml(it, r){
   const com = it.comentario ? '<div class="qz-sat-com">' + it.comentario + '</div>' : '';
   let cab;
   if(it.gab === 'anulada'){
-    cab = '<div class="qz-sat-veredito is-anulada"><strong>Item anulado pela banca.</strong> Pelo critério do Cebraspe, ele vale ponto para todos — inclusive para você.</div>';
+    cab = '<div class="qz-sat-veredito is-anulada"><strong>Item anulado pela banca.</strong> ' + ((crit && crit.annulled !== 'ponto') ? 'Nesta prova, ele não conta na nota.' : 'Nesta prova, ele vale ponto para todos, inclusive para você.') + '</div>';
   } else if(r.selected === PF_BRANCO){
     cab = '<div class="qz-sat-veredito is-branco"><strong>Em branco.</strong> Sem ponto e sem desconto — o gabarito é <strong>'
         + _pfGabTxt(it.gab) + '</strong>.</div>';
@@ -42610,7 +42652,7 @@ function _pfBarraTentativasHtml(id, tents, ativa, ondeVoltar){
   return '<div class="pf-tent" data-pf-volta="' + Util.attr(ondeVoltar || 'folha') + '">'
     + '<span class="pf-tent-lbl">Tentativas</span>'
     + '<div class="perf-view-toggle pf-tent-pills">' + pil + '</div>'
-    + '<button type="button" class="btn-ghost pf-tent-novo" data-pf-tent-novo="1">Responder de novo</button>'
+    + ((_pfEhProva(id) || ((_simOuProva(id) || {}).attemptMode === 'estudo')) ? '<button type="button" class="btn-ghost pf-tent-novo" data-pf-tent-novo="1">Responder de novo</button>' : '')
     + '</div>';
 }
 /* A folha e o desempenho servem à prova passada (#/provas/<id>) e ao simulado de itens próprios
@@ -42630,6 +42672,19 @@ async function _pfNovaTentativa(id){
      marcações da anterior). Começar por aqui deixava a seleção da tentativa velha ir junto no envio. */
   if(!_pfEhProva(id) && typeof _openRefazerModal === 'function'){ _openRefazerModal(id); return; }
   const tents = await _pfTentativasLer(id, true);
+  // Tentativa aberta e sem nenhuma marcação serve: não acumula tentativas vazias "em andamento".
+  const aberta = (tents || []).filter(function(t){ return !t.submitted_at; }).pop();
+  if(aberta){
+    await _pfHidratar(id, aberta.attempt_number);
+    const itensProva = (await _provaItensLer(id) || []).filter(function(x){ return x.tipo !== 'discursiva'; });
+    const usada = itensProva.some(function(it){ const r = _pfResposta(id, it.numero); return !!(r && r.selected != null); });
+    if(!usada){
+      window._pfTentativas[id] = null; _pfSetAtiva(id, aberta.attempt_number);
+      location.hash = _pfRota(id, 'folha') + '?t=' + aberta.attempt_number;
+      return;
+    }
+  }
+  if(!confirm('Começar uma nova tentativa desta prova? A tentativa atual fica guardada.')) return;
   const prox = _pfProxTentativa(tents);
   try{ if(window.Store && Store.startSimulado) Store.startSimulado(id, prox, null); }catch(e){ console.warn('[prova nova tentativa]', e); }
   window._pfTentativas[id] = null;
@@ -42700,7 +42755,7 @@ function _pfSatPintar(stageEl, id, itens, itemAtivo, emAndamento){
   if(c) c.textContent = p.certos + ' / ' + p.total + ' corretas';
   if(b) b.style.width = (p.total ? Math.round(p.certos / p.total * 100) : 0) + '%';
   if(nums) nums.innerHTML = _pfNumerosHtml(id, itens);
-  if(d) d.innerHTML = _pfDetalheHtml(itemAtivo, itemAtivo ? _pfResposta(id, itemAtivo.numero) : null);
+  if(d) d.innerHTML = _pfDetalheHtml(itemAtivo, itemAtivo ? _pfResposta(id, itemAtivo.numero) : null, _pfCrit(id));
 }
 /* Liga o satélite num simulado por JSON: ele se repinta quando qualquer
    resposta muda (Store.subscribe) e mostra o gabarito do item em que o aluno
@@ -42885,6 +42940,7 @@ Renderers.provaFolha.mount = async function(stageEl, route){
       return;
     }
     const fim = ev.target.closest ? ev.target.closest('[data-pf-fim]') : null;
+    if(fim && travada){ location.hash = _pfRota(id, 'resultado') + '?t=' + _pfAtiva(id); return; }
     if(fim){
       const pl = _pfPlacar(id, itens);
       const validos = pl.total;
@@ -43350,7 +43406,7 @@ function _pfTemaItensHtml(provaId, t){
     return (parseInt(a.numero, 10) || 0) - (parseInt(b.numero, 10) || 0);
   }).map(function(it){
     const r = _pfRespTxt(it.sel, it.gab);
-    return '<a class="pf-ti ' + r.c + '" href="' + Util.attr(_pfRota(provaId, 'folha')) + '?item=' + Util.attr(it.numero) + '">'
+    return '<a class="pf-ti ' + r.c + '" href="' + Util.attr(_pfRota(provaId, 'folha')) + '?item=' + Util.attr(it.numero) + '&t=' + Util.attr(_pfAtiva(provaId)) + '">'
       + '<span class="pf-ti-n">' + Util.esc(it.numero) + '</span>'
       + '<span class="pf-ti-r">' + r.t + '</span>'
       + '<span class="pf-ti-g">' + r.d + '</span></a>';
@@ -43627,6 +43683,10 @@ Renderers.provaResultado = function(route){
   const p = _simOuProva(route.params.provaId);
   if(!p) return `<div class="empty"><div class="empty-title">Não encontrado</div>
     <div class="empty-sub"><a href="#/provas">Voltar para as provas</a>.</div></div>`;
+  if(_simAccessState(p).locked){
+    return `<div class="empty"><div class="empty-title">${Util.esc(p.name)}</div>
+      <div class="empty-sub">Você ainda não tem acesso a esta prova. <a href="#/provas">Voltar</a>.</div></div>`;
+  }
   const T = _rankTermos(p);
   /* Mesma casca das outras telas de desempenho: hero + seções .perf-*. Antes
      era um HTML próprio, encostado à esquerda e fora do padrão. */
@@ -43652,7 +43712,7 @@ Renderers.provaResultado.mount = async function(stageEl, route){
   const id = String(route.params.provaId);
   const p = _simOuProva(id);
   const host = stageEl.querySelector('#pfRes');
-  if(!host) return;
+  if(!host || !p || _simAccessState(p).locked) return;
   const todos = await _provaItensLer(id);
   const itens = (todos || []).filter(function(x){ return x.tipo !== 'discursiva'; });
   if(!itens || !itens.length){
@@ -43957,7 +44017,7 @@ function _showSimPdfModal(sim){
   const fileSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
   bk.innerHTML = '<div class="sim-pdf-modal">' +
     '<div class="sim-pdf-modal-head">' +
-      '<span class="s-label">Materiais do simulado</span>' +
+      '<span class="s-label">' + (sim.kind === 'prova' ? 'Materiais da prova' : 'Materiais do simulado') + '</span>' +
       '<button class="sim-pdf-close" id="simPdfClose" aria-label="Fechar">×</button>' +
     '</div>' +
     '<h3 class="sim-pdf-title">' + Util.esc(sim.name) + '</h3>' +
@@ -44732,9 +44792,20 @@ Renderers.simuladoDetail.mount = function(stageEl, route){
     if(_its.length) stageEl.__pfSatOff = _pfSatLigarNoSimulado(stageEl, sim.id, _its.filter(function(x){ return x.tipo !== 'discursiva'; }), !submitted);
   }
 
+  // Veio do link de um tema (?item=57): rola até o item.
+  if(submitted && route.query && route.query.item != null){
+    const _alvoEl = stageEl.querySelector('.q-item[data-item-id="' + CSS.escape(String(route.query.item)) + '"]');
+    if(_alvoEl) setTimeout(function(){ _alvoEl.scrollIntoView({ block: 'center' }); }, 60);
+  }
   // S7 A2 — Tela "Antes de começar": wire do botão Iniciar
   const startBtn = document.getElementById('simStartBtn');
   if(startBtn){
+    const _voltar = stageEl.querySelector('.sss-back');
+    if(_voltar) _voltar.addEventListener('click', () => {   // desistiu de refazer: "Revisar" volta a abrir a tentativa enviada
+      try{ sessionStorage.removeItem('simRefazerIntent:' + sim.id); }catch(_){}
+      if(window._simRefazerIntent) window._simRefazerIntent[sim.id] = false;
+      sim._respHidratada = null;
+    });
     startBtn.addEventListener('click', () => {
       startBtn.disabled = true;
       startBtn.textContent = 'Iniciando…';
@@ -45466,7 +45537,7 @@ Renderers.simuladoPerformance = function(route){
      vez de redirecionar: a URL continua sendo a do simulado e não há duas
      telas para manter. A tela antiga fica para o simulado montado do banco,
      que agrega por seção de blocos. */
-  if(sim.kind === 'prova' || sim.temItensProprios){
+  if((sim.kind === 'prova' || sim.temItensProprios) && _simGabaritoLiberado(sim)){
     return Renderers.provaResultado({ params: { provaId: sim.id }, query: route.query || {} });
   }
 
@@ -45506,7 +45577,7 @@ Renderers.simuladoPerformance = function(route){
       const anulada = _anuladas.has(String(it.id));
       const answered = anulada || (!!prior && prior.selected != null);
       const correct = anulada || (answered && prior.correct);
-      const doubt = prior && !!prior.doubt;
+      const doubt = !!(prior && prior.doubt) || _isSimDoubt(sim.id, _simMapAttempt(sim), it.id);
       a.total++;
       if(!answered) a.pending++;
       else if(correct && doubt){ a.answered++; a.correct++; a.correctDoubt++; }
@@ -45547,12 +45618,15 @@ Renderers.simuladoPerformance = function(route){
   // ─────────────────────────────────────────────────────────────────
   const essayEntries = [];
   let essayScoreSum = 0, essayMaxSum = 0, essayCorrectedCount = 0, essayPendingCount = 0;
+  let _essayItensTotal = 0;
   (sim.blocks||[]).forEach(b => {
     if(b.type !== 'essay') return;
     (b.items||[]).forEach((rawIt, idx) => {
       const it = (typeof _resolveEssayItem === 'function') ? (_resolveEssayItem(rawIt) || rawIt) : rawIt;
       const itemId = it._bank_id || it.id;
       const ans = Store.getEssayAnswer(unitId, b.id, itemId);
+      _essayItensTotal++;
+      const _numReal = _essayItensTotal;
       if(!ans) return; // discursiva não respondida não entra
       const hasIa = typeof ans.score === 'number' && typeof ans.maxScore === 'number';
       const hasHuman = !!ans.humanReviewedAt;
@@ -45563,7 +45637,7 @@ Renderers.simuladoPerformance = function(route){
       } else {
         essayPendingCount++;
       }
-      essayEntries.push({ block: b, item: it, itemId, ans, hasIa, hasHuman, index: essayEntries.length + 1 });
+      essayEntries.push({ block: b, item: it, itemId, ans, hasIa, hasHuman, index: _numReal });
     });
   });
   const hasEssays = essayEntries.length > 0;
@@ -45659,7 +45733,7 @@ Renderers.simuladoPerformance = function(route){
         keyDisplay: keyIdx >= 0 ? norm.display[keyIdx] : null,
         answered,
         correct: anulada || (answered && !!prior.correct),
-        doubt: prior && !!prior.doubt
+        doubt: !!(prior && prior.doubt) || _isSimDoubt(sim.id, _simMapAttempt(sim), it.id)
       });
     }));
   });
@@ -45773,14 +45847,14 @@ Renderers.simuladoPerformance = function(route){
       <button class="perf-tab" data-perf-tab="ess">Discursivas <span class="perf-tab-count">${essayEntries.length}</span></button>
     </div>
     <div class="perf-tab-pane" data-perf-pane="obj">${objCards}</div>
-    <div class="perf-tab-pane" data-perf-pane="ess" style="display:none">${hasEssays ? essayCards : '<p class="perf-empty" style="text-align:center;padding:2rem;color:var(--text-mute)">Este simulado não tem discursivas.</p>'}</div>
+    <div class="perf-tab-pane" data-perf-pane="ess" style="display:none">${hasEssays ? essayCards : '<p class="perf-empty" style="text-align:center;padding:2rem;color:var(--text-mute)">${_essayItensTotal ? 'Você não respondeu as discursivas deste simulado.' : 'Este simulado não tem discursivas.'}</p>'}</div>
   </section>`;
 };
 
 // S7 Bloco D — mount da página de desempenho: abas + média da turma (RPC).
 Renderers.simuladoPerformance.mount = function(stageEl, route){
   const _s = _simOuProva(route.params.simuladoId);
-  if(_s && (_s.kind === 'prova' || _s.temItensProprios)){
+  if(_s && (_s.kind === 'prova' || _s.temItensProprios) && _simGabaritoLiberado(_s)){
     return Renderers.provaResultado.mount(stageEl, { params: { provaId: _s.id }, query: route.query || {} });
   }
   const sim = _simOuProva(route.params.simuladoId);
@@ -62668,7 +62742,7 @@ function _unitHeroCapaHtml(unit, m, chapter, groups, prog, acoesHtml){
   // frequência do tema nas provas anteriores (só com o banco completo; tema que nunca caiu não ganha ficha)
   const fqTema = (topico && window._QBank && window._QBank.completo) ? _freqDoTema(topico.id) : null;
   const icoFreq = '<svg viewBox="0 0 24 24"><line x1="5" y1="20" x2="5" y2="12"/><line x1="12" y1="20" x2="12" y2="6"/><line x1="19" y1="20" x2="19" y2="14"/></svg>';
-  if(topico) fichas.push('<a class="unit-capa-ficha" href="#/edital" data-tip="Ver no edital">' + icoEdital + E((topico.code ? topico.code + ' · ' : '') + topico.title + (topico.mais > 0 ? ' +' + topico.mais : '')) + '</a>');
+  if(topico) fichas.push('<a class="unit-capa-ficha" href="#/edital?topico=' + encodeURIComponent(topico.id) + '" data-tip="Ver no edital">' + icoEdital + E((topico.code ? topico.code + ' · ' : '') + topico.title + (topico.mais > 0 ? ' +' + topico.mais : '')) + '</a>');
   if(fqTema) fichas.push('<a class="unit-capa-ficha" href="#/banco/questions' + A(Router.querystring(fqTema.query)) + '" data-tip="Ver as questões deste tema no Banco">' + icoFreq + 'caiu em ' + fqTema.provas + ' de ' + fqTema.totalProvas + ' provas · ' + fqTema.n + (fqTema.n === 1 ? ' item' : ' itens') + '</a>');
   if(atualizada) fichas.push('<span class="unit-capa-ficha" data-tip="Última edição do conteúdo pela equipe">Atualizada em ' + E(atualizada) + '</span>');
   if(nBlocos) fichas.push('<span class="unit-capa-ficha">' + (nSecoes ? nSecoes + (nSecoes === 1 ? ' seção · ' : ' seções · ') : '') + nBlocos + (nBlocos === 1 ? ' bloco' : ' blocos') + '</span>');
@@ -63960,6 +64034,7 @@ Renderers.courseBancoDetail.mount = function(stageEl, route){
   // itens vêm de vários módulos, então getModuleId lê o módulo gravado em
   // cada item (__moduleId) pra o link "Abrir na unidade" apontar certo.
   const filters = {
+    subject: route.query.subject || '',
     module: route.query.module || '', chapter: route.query.chapter || '',
     unit: route.query.unit || '', topic: route.query.topic || '',
     tag: route.query.tag || '', q: route.query.q || ''
@@ -66288,7 +66363,13 @@ function _bankApplyFilters(items, f, opts){
   const _selNodes = [];
   const _matInteiraSubj = new Set();   // matérias marcadas SEM ramo: a matéria inteira
   (f.materias || []).forEach(function(mid){
-    const subs = ((f.mtopics && f.mtopics[mid]) || []).concat((f.msubs && f.msubs[mid]) || []);
+    // Subtópico afunila: tópico com subtópico marcado vale só pelos subtópicos.
+    const _sbs = (f.msubs && f.msubs[mid]) || [];
+    const _sbsSet = new Set(_sbs.map(String));
+    const _tps = ((f.mtopics && f.mtopics[mid]) || []).filter(function(t){
+      return !_editalChildren(t).some(function(s){ return _sbsSet.has(String(s.id)); });
+    });
+    const subs = _tps.concat(_sbs);
     if(subs.length){ subs.forEach(function(n){ _selNodes.push(n); }); }
     // Mesma razão da matéria TRAVADA: quando o recorte de unidades já restringe
     // (aba Estrutura), aplicar o nó-matéria por cima descartaria as questões da
@@ -66953,6 +67034,8 @@ Renderers.questionBank = function(route){
     resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Buscando com IA…</div><div class="empty-body">Entendendo o significado da sua busca e achando as questões mais relevantes.</div></div>';
   } else if(_aiErr){
     resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Não consegui buscar com IA agora</div><div class="empty-body">Tente de novo, ou use o "Buscar" por palavra.</div><button type="button" class="btn-ghost" data-bf-ai-retry style="margin-top:1rem">Tentar de novo</button></div>';
+  } else if(!results.length && !(window._QBank && window._QBank.completo)){
+    resultsHtml = '<div class="sem-map-loading" style="margin-top:2rem">Carregando o banco de questões…</div>';
   } else if(!results.length){
     resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">'+(f.aiSearch?'Nenhuma questão relevante encontrada':'Nenhuma questão bateu com os filtros')+'</div><div class="empty-body">Tente afrouxar os critérios ou limpar e refazer.</div></div>';
   } else if(typeof Blocks !== 'undefined' && Blocks.quiz && Blocks.quiz.render){
@@ -66976,6 +67059,7 @@ Renderers.questionBank = function(route){
       '<div class="bf-results-head">'+
         '<span class="bf-results-count">'+results.length+' '+(results.length===1?'questão':'questões')+'</span>'+
         '<span class="bf-results-meta">Mostrando '+shown.length+' de '+results.length+' · página '+page+'</span>'+
+        (f.quantidade > 0 ? '<span class="bf-chip">'+f.quantidade+(f.prioridade === 'ant' ? ' mais antigas' : ' mais recentes')+' <button type="button" class="bf-chip-x" data-bf-tirar-limite aria-label="Tirar o limite">&times;</button></span>' : '')+
         (results.length && !f.sel ? '<button type="button" class="btn-ghost bf-save-sel" id="bfSalvarSel" title="Guardar esta seleção com um nome, para reabrir depois">'+Icons.bookmark+' Salvar seleção</button>' : '')+
         (results.length ? '<button type="button" class="btn-ghost bf-compile" id="bfCompile" title="Gerar um arquivo de prova imprimível (questões + folha de respostas + gabarito e comentários)">'+Icons.download+' Compilar prova</button>' : '')+
         '<span class="bf-cota" id="bfCota"'+(_cotaTxt ? '' : ' hidden')+'>'+Util.esc(_cotaTxt)+'</span>'+
@@ -68203,7 +68287,7 @@ async function _bankCompileEssayProva(route){
   if(!CompileLicenca.exigeCpf()) return;
   const f = _bankApplyLockContext(_bankParseFilters(route.query));
   const bankItems = _bankItemsForEssays();
-  const results = _bankApplyFilters(bankItems, f, { isEssay:true });
+  const results = _bankApplyFilters(bankItems, f, { isEssay:true }).filter(function(it){ return _bankItemLivre(it); });
   if(!results.length){ alert('Nenhuma discursiva para compilar. Ajuste os filtros e busque primeiro.'); return; }
   const sections = _bankBuildEssaySections(results, f.org || 'secao');
   const exams = (window.BankFilters && BankFilters.availableExams) ? BankFilters.availableExams() : [];
@@ -68218,6 +68302,12 @@ async function _bankCompileEssayProva(route){
     concursoName: examObj ? examObj.name : concursoSigla, materias: materias, anos: anos });
 }
 
+// Etiqueta do limite criado pelo "Peça ao banco": o × tira o limite e mantém o resto dos filtros.
+document.addEventListener('click', function(e){
+  if(!e.target.closest || !e.target.closest('[data-bf-tirar-limite]')) return;
+  const r = Router.parse(); const q = Object.assign({}, r.query); delete q.n;
+  Router.go(location.hash.replace(/^#/, '').split('?')[0] + Router.querystring(q));
+});
 /* Parte comum das provas compiladas (Banco e blocos de questões da unidade):
    identidade VERIFICÁVEL do servidor (registra a compilação e assina o código),
    licença com CPF e marca d'água, cabeçalho, e o download. Impressão digital do
@@ -68375,6 +68465,8 @@ Renderers.essayBank = function(route){
     resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Buscando com IA…</div><div class="empty-body">Entendendo o significado da sua busca e achando as discursivas mais relevantes.</div></div>';
   } else if(_aiErr){
     resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">Não consegui buscar com IA agora</div><div class="empty-body">Tente de novo, ou use o "Buscar" por palavra.</div><button type="button" class="btn-ghost" data-bf-ai-retry style="margin-top:1rem">Tentar de novo</button></div>';
+  } else if(!results.length && !(window._QBank && window._QBank.completo)){
+    resultsHtml = '<div class="sem-map-loading" style="margin-top:2rem">Carregando o banco de discursivas…</div>';
   } else if(!results.length){
     resultsHtml = '<div class="empty" style="margin-top:2rem"><div class="empty-title">'+(f.aiSearch?'Nenhuma discursiva relevante encontrada':'Nenhuma discursiva bateu com os filtros')+'</div><div class="empty-body">Tente afrouxar os critérios ou limpar e refazer.</div></div>';
   } else if(typeof Blocks !== 'undefined' && Blocks.essay && Blocks.essay.render){
@@ -68398,6 +68490,7 @@ Renderers.essayBank = function(route){
       '<div class="bf-results-head">'+
         '<span class="bf-results-count">'+results.length+' '+(results.length===1?'discursiva':'discursivas')+'</span>'+
         '<span class="bf-results-meta">Mostrando '+shown.length+' de '+results.length+' · página '+page+'</span>'+
+        (f.quantidade > 0 ? '<span class="bf-chip">'+f.quantidade+(f.prioridade === 'ant' ? ' mais antigas' : ' mais recentes')+' <button type="button" class="bf-chip-x" data-bf-tirar-limite aria-label="Tirar o limite">&times;</button></span>' : '')+
         (results.length && !f.sel ? '<button type="button" class="btn-ghost bf-save-sel" id="bfSalvarSel" title="Guardar esta seleção com um nome, para reabrir depois">'+Icons.bookmark+' Salvar seleção</button>' : '')+
         (results.length ? '<button type="button" class="btn-ghost bf-compile" id="bfCompile" title="Gerar um arquivo de prova discursiva imprimível (textos-base + comando + linhas para resposta + espelho de correção)">'+Icons.download+' Compilar prova</button>' : '')+
       '</div>'+
@@ -68980,7 +69073,8 @@ Renderers.bancoDetail = function(route){
     (item.tags||[]).forEach(t => tagsUsed.add(t));
   }
   allEntries.forEach(e => {
-    (e.unit.groups||[]).forEach(g => (g.blocks||[]).forEach(b => {
+    const _uBlocos = (typeof _unitWithStoreOverride === 'function') ? _unitWithStoreOverride(e.unit) : e.unit;
+    (_uBlocos.groups||[]).forEach(g => (g.blocks||[]).forEach(b => {
       collect(b);
       (b.items||[]).forEach(collect);
       (b.concepts||[]).forEach(collect);
@@ -75092,13 +75186,14 @@ function renderPerfBreakdown(rows, parentKind){
 }
 
 window.buildPerformanceReport = buildPerformanceReport;   // exposto para medir no console (16/10/2026)
-function buildPerformanceReport(){
+function buildPerformanceReport(opts){
   // Walk course → aggregate stats per topic id and per tag id, also per module/chapter/unit.
   // For each quiz item count against its topics/tags. For essays, add its scored score/max.
   // For completion we use a weighted combo: blocks completed (bookmarks), flashcards mastered, units completed.
   // Escopo: matéria ativa → só os módulos dela; catálogo (global) →
   // módulos de TODAS as matérias.
-  const scopeCourses = (window.Banco && Banco.scopeCourses) ? Banco.scopeCourses() : [window.COURSE].filter(Boolean);
+  const scopeCourses = (opts && opts.concursoInteiro) ? (window.COURSES || []).filter(Boolean)
+    : ((window.Banco && Banco.scopeCourses) ? Banco.scopeCourses() : [window.COURSE].filter(Boolean));
   const scopeMods = scopeCourses.reduce((a,c) => a.concat(c.modules||[]), []);
   const state = Store.get();
   // Memo (16/10/2026): esta conta custava ~1,6 s e rodava inteira a cada abertura do Início e do Edital (2 s de
