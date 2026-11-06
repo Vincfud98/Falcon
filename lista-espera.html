@@ -60,7 +60,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
   /* ── Palco ── */
   #exp{position:relative;height:640vh}
   .stage{position:sticky;top:0;height:100vh;height:100svh;overflow:hidden;background:var(--bg)}
-  #gl{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:pan-y;will-change:filter}
+  #gl{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:pan-y}
   #gl.drag{cursor:grabbing}
   .flash{position:absolute;inset:0;pointer-events:none;opacity:0;background:radial-gradient(ellipse 55% 65% at 50% 52%,rgba(255,252,240,1),rgba(255,236,200,.55) 42%,rgba(255,236,200,0) 76%)}
   .vig{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 120% 90% at 50% 45%,rgba(0,0,0,0) 55%,rgba(0,0,0,.35) 100%),linear-gradient(180deg,rgba(0,0,0,.25),rgba(0,0,0,0) 18%,rgba(0,0,0,0) 78%,rgba(0,0,0,.35))}
@@ -299,8 +299,8 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
       else window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
-    var exp = document.getElementById('exp');
-    window.scrollTo({ top: exp.offsetTop + ALVO[alvo] * (exp.offsetHeight - innerHeight), behavior: 'smooth' });
+    var exp = document.getElementById('exp'), y = exp.offsetTop + ALVO[alvo] * (exp.offsetHeight - innerHeight);
+    if(window.__lenis) window.__lenis.scrollTo(y, { duration: 2.2 }); else window.scrollTo({ top: y, behavior: 'smooth' });
   }
   [].forEach.call(document.querySelectorAll('[data-goto]'), function(el){
     el.addEventListener('click', function(e){ e.preventDefault(); irPara(el.dataset.goto); });
@@ -421,6 +421,7 @@ height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
 <script type="module">
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import Lenis from 'https://cdn.jsdelivr.net/npm/lenis@1.1.13/dist/lenis.mjs';
 
 const root = document.documentElement;
 if(!root.classList.contains('no3d')){
@@ -431,10 +432,13 @@ function boot(){
   const $ = id => document.getElementById(id);
   const exp = $('exp'), stage = $('stage'), canvas = $('gl');
   const mobile = Math.min(innerWidth, innerHeight) < 700;
+  // Rolagem suave com inércia (o que dá o "deslizar" da referência)
+  let lenis = null;
+  try { lenis = new Lenis({ lerp: 0.075, wheelMultiplier: 0.85, smoothWheel: true, syncTouch: false }); window.__lenis = lenis; } catch(_){ }
 
   // ── Renderer / câmera ──
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, mobile ? 1.5 : 2));
+  renderer.setPixelRatio(Math.min(devicePixelRatio, mobile ? 1.35 : 1.6));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.05;
@@ -443,6 +447,40 @@ function boot(){
   const pmrem = new THREE.PMREMGenerator(renderer);
   scene.environment = pmrem.fromScene(new RoomEnvironment(renderer), 0.04).texture;
   const camera = new THREE.PerspectiveCamera(54, 1, 0.05, 100);
+  const rt = new THREE.WebGLRenderTarget(2, 2, { type: THREE.HalfFloatType, samples: 4 });
+  const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const postMat = new THREE.ShaderMaterial({
+    uniforms: { tScene: { value: rt.texture }, uStrength: { value: 0 }, uTime: { value: 0 } },
+    vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0., 1.); }',
+    fragmentShader: `uniform sampler2D tScene; uniform float uStrength, uTime; varying vec2 vUv;
+      void main(){
+        vec2 c = vec2(.5, .52), d = vUv - c;
+        vec3 col;
+        if(uStrength < .002){ col = texture2D(tScene, vUv).rgb; }
+        else {
+          float ch = .012 * uStrength; col = vec3(0.); float tw = 0.;
+          for(int i = 0; i < 20; i++){
+            float t = float(i) / 19.;
+            float sc = 1. - uStrength * .32 * t;
+            float w = 1. - t * .55;
+            col.r += texture2D(tScene, c + d * (sc + ch)).r * w;
+            col.g += texture2D(tScene, c + d * sc).g * w;
+            col.b += texture2D(tScene, c + d * (sc - ch)).b * w;
+            tw += w;
+          }
+          col /= tw;
+          col += uStrength * .18 * (1. - length(d) * 1.4);
+        }
+        float v = smoothstep(1.15, .35, length((vUv - .5) * vec2(1.25, 1.)));
+        col *= mix(.78, 1., v);
+        gl_FragColor = vec4(col, 1.);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+    depthTest: false, depthWrite: false
+  });
+  const postScene = new THREE.Scene();
+  postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMat));
   const loader = new THREE.TextureLoader();
   const tex = url => new Promise((ok, no) => loader.load(url, t => { t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; ok(t); }, undefined, no));
 
@@ -531,19 +569,20 @@ function boot(){
     mirror.position.copy(POS[k].p); mirror.rotation.y = POS[k].ry; mirror.scale.setScalar(POS[k].s);
   }
 
-  function resize(){ const w = stage.clientWidth, h = stage.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+  function resize(){ const w = stage.clientWidth, h = stage.clientHeight; renderer.setSize(w, h, false); const pr = renderer.getPixelRatio(); rt.setSize(Math.round(w * pr), Math.round(h * pr)); camera.aspect = w / h; camera.updateProjectionMatrix(); }
   addEventListener('resize', resize); resize();
 
   // ── Arrastar para olhar ──
-  let yaw = 0, pitch = 0, tYaw = 0, tPitch = 0, dragging = false, lx = 0, ly = 0;
+  let yaw = 0, pitch = 0, tYaw = 0, tPitch = 0, dragging = false, lx = 0, ly = 0, vYaw = 0, vPitch = 0;
   const maxYaw = () => Math.max(0.05, ARC / 2 - THREE.MathUtils.degToRad(camera.fov) * camera.aspect / 2 * 0.92);
   canvas.addEventListener('pointerdown', e => { dragging = true; lx = e.clientX; ly = e.clientY; canvas.classList.add('drag'); });
   addEventListener('pointerup', () => { dragging = false; canvas.classList.remove('drag'); });
   addEventListener('pointercancel', () => { dragging = false; canvas.classList.remove('drag'); });
   addEventListener('pointermove', e => {
     if(!dragging) return; const dx = e.clientX - lx, dy = e.clientY - ly; lx = e.clientX; ly = e.clientY;
-    tYaw = THREE.MathUtils.clamp(tYaw + dx * 0.0032, -maxYaw(), maxYaw());
-    tPitch = THREE.MathUtils.clamp(tPitch + dy * 0.0022, -0.14, 0.14);
+    vYaw = dx * 0.0032; vPitch = dy * 0.0022;
+    tYaw = THREE.MathUtils.clamp(tYaw + vYaw, -maxYaw(), maxYaw());
+    tPitch = THREE.MathUtils.clamp(tPitch + vPitch, -0.14, 0.14);
   });
 
   // ── Rolagem ──
@@ -563,15 +602,21 @@ function boot(){
 
   function frame(now){
     requestAnimationFrame(frame);
+    if(lenis) lenis.raf(now);
     if(!visible) return;
-    pv += (p - pv) * 0.1;
+    pv += (p - pv) * (lenis ? 0.22 : 0.1);
+    if(!dragging && (Math.abs(vYaw) > 1e-5 || Math.abs(vPitch) > 1e-5)){
+      tYaw = THREE.MathUtils.clamp(tYaw + vYaw, -maxYaw(), maxYaw());
+      tPitch = THREE.MathUtils.clamp(tPitch + vPitch, -0.14, 0.14);
+      vYaw *= 0.93; vPitch *= 0.9;
+    }
     const t = (now - t0) / 1000;
     const dollyIn = ss(0.06, 0.3, pv), into = ss(0.26, 0.34, pv);
     const dollyOut = ss(0.58, 0.72, pv);
     const state = pv < 0.32 ? 'A' : (pv < 0.68 ? 'B' : 'C');
     setState(state);
 
-    yaw += (tYaw - yaw) * 0.08; pitch += (tPitch - pitch) * 0.08;
+    yaw += (tYaw - yaw) * 0.1; pitch += (tPitch - pitch) * 0.1;
     const idle = dragging ? 0 : Math.sin(t * 0.18) * 0.035;
     let blur = 0;
     if(state === 'A'){
@@ -614,8 +659,10 @@ function boot(){
     camera.updateProjectionMatrix();
     glassMat.uniforms.uTime.value = t;
     mirror.position.y = POS[state].p.y + Math.sin(t * 0.9) * 0.012;
-    renderer.render(scene, camera);
-    canvas.style.filter = blur > 0.3 ? `blur(${blur.toFixed(1)}px) saturate(${(1 + blur * 0.03).toFixed(2)})` : 'none';
+    renderer.setRenderTarget(rt); renderer.render(scene, camera);
+    renderer.setRenderTarget(null);
+    postMat.uniforms.uStrength.value = Math.min(1, blur / 14); postMat.uniforms.uTime.value = t;
+    renderer.render(postScene, postCam);
     flash.style.opacity = (bell(0.27, 0.32, 0.38, pv) * 0.9 + bell(0.63, 0.68, 0.74, pv) * 0.9).toFixed(3);
 
     // textos
