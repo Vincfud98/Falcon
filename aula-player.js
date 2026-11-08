@@ -2,7 +2,7 @@
    Falcon · Aula em slides · painel da unidade + player (Fase 4)
    - window.AulasUnidade: botão "Aula em slides" na unidade → painel com a
      lista das aulas do aluno nesta unidade e a caixa "Gerar aula" (tipo,
-     seção, pedido especial, voz, preço em ⓤ). A cobrança acontece no servidor
+     seção, pedido especial, voz, preço em ƒ). A cobrança acontece no servidor
      (aluno.pedir_aula, via Edge Function gerar-aula).
    - window.AulaPlayer: player em tela cheia = slides da Fase 2 (AulaSlides)
      + narração da Fase 3: um áudio por slide, linha do tempo da aula inteira,
@@ -32,7 +32,7 @@
   var ERROS = {
     sem_acesso: 'Você não tem acesso a esta unidade.',
     teto_diario: 'Você já pediu o máximo de aulas de hoje. Amanhã libera de novo.',
-    saldo_insuficiente: 'Saldo de UbiTokens insuficiente. Adicione mais na sua Carteira, em Minha Conta.',
+    saldo_insuficiente: 'Saldo de Falcoins insuficiente. Adicione mais na sua Carteira, em Minha Conta.',
     secao_obrigatoria: 'Escolha a seção da aula.',
     secao_invalida: 'Essa seção não pertence a esta unidade.',
     comando_longo: 'O pedido especial pode ter no máximo 600 letras.',
@@ -338,7 +338,7 @@
               ? '<form class="au-ren" data-id="' + esc(a.id) + '"><input type="text" class="au-in" name="titulo" maxlength="90" value="' + esc(a.titulo_aluno || a.titulo || '') + '" aria-label="Nome da aula" placeholder="Nome da aula">'
                 + '<button type="submit" class="btn-primary">Salvar</button><button type="button" class="icon-btn" data-au="ren-cancelar">Cancelar</button></form>'
               : '<div class="au-card-t">' + esc(nomeDaAula(a) || (pendente(a) ? 'Preparando a aula…' : presetNome(a.preset))) + (a.titulo_aluno && a.titulo ? '<span class="au-card-orig" title="Título gerado">' + esc(a.titulo) + '</span>' : '') + '</div>')
-          + '<div class="au-card-m">' + esc(presetNome(a.preset)) + (a.secao_id && a.preset === 'secao' ? ' · ' + esc(nomeSecao(a.secao_id)) : '') + ' · ' + esc(fmtData(a.created_at)) + (a.custo_ubt ? ' · ' + fmtUbt(a.custo_ubt) + ' ⓤ' : '') + '</div>'
+          + '<div class="au-card-m">' + esc(presetNome(a.preset)) + (a.secao_id && a.preset === 'secao' ? ' · ' + esc(nomeSecao(a.secao_id)) : '') + ' · ' + esc(fmtData(a.created_at)) + (a.custo_ubt ? ' · ' + fmtUbt(a.custo_ubt) + ' ƒ' : '') + '</div>'
           + (a.comando ? '<div class="au-card-c">"' + esc(a.comando) + '"</div>' : '')
           + '<div class="au-pill is-' + e.cls + '">' + (e.cls === 'andamento' ? '<span class="au-dot"></span>' : '') + esc(e.txt) + '</div>'
           + (a.status === 'erro' && a.erro ? '<div class="au-card-e">' + esc(String(a.erro).slice(0, 160)) + '</div>' : '')
@@ -352,7 +352,7 @@
           + '</div>';
       }).join('');
       box.innerHTML = '<div class="au-topo"><button type="button" class="btn-primary" data-au="nova">' + ICO.slides + ' Gerar aula</button>'
-        + '<span class="au-topo-s">Cada aula é sua: gerada sob medida, narrada pelo professor, a partir de ' + fmtUbt(menorPreco()) + ' ⓤ.</span></div>'
+        + '<span class="au-topo-s">Cada aula é sua: gerada sob medida, narrada pelo professor, a partir de ' + fmtUbt(menorPreco()) + ' ƒ.</span></div>'
         + (cards ? '<div class="au-cards">' + cards + '</div>' : '<div class="au-vazio">Você ainda não gerou nenhuma aula desta unidade.</div>');
       atualizarProgresso();
     }
@@ -362,17 +362,17 @@
       var tipos = PRESETS.map(function (p, i) {
         var id = p.variantes ? variante : p.id, preco = precos[id];
         return '<label class="au-tipo' + (i === 0 ? ' is-on' : '') + '"><input type="radio" name="preset" value="' + id + '"' + (i === 0 ? ' checked' : '') + (p.variantes ? ' data-fam="1"' : '') + '>'
-          + '<span class="au-tipo-n">' + esc(p.nome) + '</span><span class="au-tipo-p">' + (preco != null ? fmtUbt(preco) + ' ⓤ' : '') + '</span>'
+          + '<span class="au-tipo-n">' + esc(p.nome) + '</span><span class="au-tipo-p">' + (preco != null ? fmtUbt(preco) + ' ƒ' : '') + '</span>'
           + '<span class="au-tipo-d">' + esc(descDe(p)) + '</span></label>';
       }).join('');
       var pilulas = FAMILIA ? FAMILIA.variantes.map(function (v) {
         return '<button type="button" class="au-var' + (v.id === variante ? ' is-on' : '') + '" data-var="' + v.id + '">'
-          + '<span class="au-var-n">' + esc(v.nome) + '</span><span class="au-var-p">' + (precos[v.id] != null ? fmtUbt(precos[v.id]) + ' ⓤ' : '') + '</span>'
+          + '<span class="au-var-n">' + esc(v.nome) + '</span><span class="au-var-p">' + (precos[v.id] != null ? fmtUbt(precos[v.id]) + ' ƒ' : '') + '</span>'
           + '<span class="au-var-d">' + esc(descVar(v)) + '</span></button>';
       }).join('') : '';
       var secOpts = secoes.map(function (s) { return '<option value="' + esc(s.id) + '">' + esc(s.titulo) + '</option>'; }).join('');
       var vozOpts = vozes.map(function (v) { return '<option value="' + esc(v.voice_id) + '"' + (v.voice_id === vozPadrao ? ' selected' : '') + '>' + esc(v.nome) + (v.voice_id === vozPadrao ? ' (padrão)' : '') + '</option>'; }).join('');
-      var saldoTxt = conta ? (conta.ilimitado ? 'Saldo ilimitado' : 'Saldo: ' + fmtUbt(conta.saldo) + ' ⓤ') : '';
+      var saldoTxt = conta ? (conta.ilimitado ? 'Saldo ilimitado' : 'Saldo: ' + fmtUbt(conta.saldo) + ' ƒ') : '';
       var inicial = PRESETS[0].variantes ? variante : PRESETS[0].id;   // o preco do botao segue o cartao ja selecionado
       return '<form class="au-form" novalidate>'
         + '<div class="au-f-k">Tipo da aula</div><div class="au-tipos">' + tipos + '</div>'
@@ -382,7 +382,7 @@
         + '<textarea id="auComando" name="comando" class="au-in" maxlength="600" rows="2" placeholder="Ex.: foque nas causas econômicas e traga as questões de 2019."></textarea>'
         + (vozOpts ? '<label class="au-f-k" for="auVoz">Voz</label><select id="auVoz" name="voice_id" class="au-in">' + vozOpts + '</select>' : '')
         + '<div class="au-f-foot"><span class="au-saldo">' + esc(saldoTxt) + '</span>'
-        + '<div class="au-f-acts">' + (aulas.length ? '<button type="button" class="icon-btn" data-au="lista">Minhas aulas</button>' : '') + '<button type="submit" class="btn-primary au-enviar">' + ICO.slides + ' Gerar aula · <span class="au-enviar-p">' + fmtUbt(precos[inicial] != null ? precos[inicial] : 1) + ' ⓤ</span></button></div></div>'
+        + '<div class="au-f-acts">' + (aulas.length ? '<button type="button" class="icon-btn" data-au="lista">Minhas aulas</button>' : '') + '<button type="submit" class="btn-primary au-enviar">' + ICO.slides + ' Gerar aula · <span class="au-enviar-p">' + fmtUbt(precos[inicial] != null ? precos[inicial] : 1) + ' ƒ</span></button></div></div>'
         + '<div class="au-f-msg" aria-live="polite"></div></form>';
     }
     function aoMudar(ev) {
@@ -394,7 +394,7 @@
     }
     function pintarPreco() {
       var v = (el.querySelector('input[name=preset]:checked') || {}).value;
-      var p = el.querySelector('.au-enviar-p'); if (p) p.textContent = fmtUbt(precos[v] != null ? precos[v] : '?') + ' ⓤ';
+      var p = el.querySelector('.au-enviar-p'); if (p) p.textContent = fmtUbt(precos[v] != null ? precos[v] : '?') + ' ƒ';
     }
     // pílulas Curto e Padrão: trocam o tipo dentro do cartão do resumo
     function escolherVariante(id) {
@@ -404,7 +404,7 @@
       el.querySelectorAll('.au-var').forEach(function (b) { b.classList.toggle('is-on', b.getAttribute('data-var') === id); });
       el.querySelectorAll('.au-tipo').forEach(function (l) { l.classList.toggle('is-on', l.querySelector('input').checked); });
       var card = radio && radio.closest('.au-tipo'), pp = card && card.querySelector('.au-tipo-p');
-      if (pp) pp.textContent = precos[id] != null ? fmtUbt(precos[id]) + ' ⓤ' : '';
+      if (pp) pp.textContent = precos[id] != null ? fmtUbt(precos[id]) + ' ƒ' : '';
       var sec = el.querySelector('.au-f-secao'); if (sec) sec.hidden = true;
       var vb = el.querySelector('.au-f-var'); if (vb) vb.hidden = false;
       pintarPreco();
@@ -435,7 +435,7 @@
         var est = Number(d.estornado) || 0;
         if (conta && est) conta.saldo = Number(conta.saldo || 0) + est;
         aulas = aulas.filter(function (x) { return x.id !== id; }); pintarLista();
-        toast('Aula parada.' + (est ? ' ' + fmtUbt(est) + ' ⓤ voltaram para a sua carteira.' : ''), 'success');
+        toast('Aula parada.' + (est ? ' ' + fmtUbt(est) + ' ƒ voltaram para a sua carteira.' : ''), 'success');
       }).catch(function () { if (btn) btn.disabled = false; toast(ERROS.rede, 'error'); });
     }
     // excluir: some da lista do aluno (o registro fica no banco para diagnóstico)
@@ -481,7 +481,7 @@
         pedindo = false; if (!el) return;
         btn.disabled = false;
         if (!d || d.ok === false) { msg.textContent = msgErro(d && d.error, d); return; }
-        toast('Aula pedida' + (d.custo ? ' por ' + fmtUbt(d.custo) + ' ⓤ' : '') + '. Pode continuar estudando: eu aviso quando ficar pronta.', 'success');
+        toast('Aula pedida' + (d.custo ? ' por ' + fmtUbt(d.custo) + ' ƒ' : '') + '. Pode continuar estudando: eu aviso quando ficar pronta.', 'success');
         if (conta && d.saldo != null) conta.saldo = d.saldo;
         carregarAulas(dbId).then(function (rows) { if (!el) return; aulas = rows || aulas; vista('lista'); Vigia.vigiar(dbId, aulas, aoAtualizar); });
       });
