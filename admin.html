@@ -47775,9 +47775,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     const endISO = _win.endISO;
     let rows = [];
     try{
-      const { data, error } = await supabase.schema('carteira').from('lancamentos')
+      // Paginado (armadilha nº 3): com .limit() o servidor devolvia no máximo
+      // 1.000 lançamentos e o painel subestimava o consumo em silêncio.
+      const { data, error } = await _fetchAllRowsAdm(() => supabase.schema('carteira').from('lancamentos')
         .select('user_id, delta, acao, criado_em')
-        .lt('delta', 0).gte('criado_em', cutoffISO).lte('criado_em', endISO).limit(20000);
+        .lt('delta', 0).gte('criado_em', cutoffISO).lte('criado_em', endISO), ['criado_em', 'id'], 'carteira.lancamentos (painel de IA)');
       if(error) console.warn('[dashboard tokens]', error.message);
       rows = data || [];
     }catch(e){ console.warn('[dashboard tokens ex]', e); }
@@ -47836,13 +47838,21 @@ tr.ral-online .ral-pres{ display:inline-flex; }
     // ── Custo REAL de API (ia.uso_ia) + margem (Fase B) ──
     const costBrlEl = document.getElementById('kpi-tokens-cost-brl');
     if(costBrlEl){
-      // Preços por 1 MILHÃO de tokens (US$) [entrada, saída]. Ajuste ao seu contrato.
+      // Preços por 1 MILHÃO de tokens (US$): entrada, saída e leitura de cache.
+      // Conferidos na tabela da Anthropic em 08/11/2026. Antes faltavam os modelos
+      // 5.5 (os que as funções usam hoje) e eles entravam como custo ZERO, o que
+      // mostrava lucro maior que o real. Modelo novo sem preço aqui NÃO vira zero
+      // em silêncio: aparece como "sem preço" no painel.
       const PRECOS = {
-        'claude-haiku-4-5':           { i: 1,    o: 5 },
-        'claude-sonnet-4-5-20250929': { i: 3,    o: 15 },
-        'claude-opus-4-8':            { i: 5,    o: 25 },
-        'text-embedding-3-small':     { i: 0.02, o: 0 },
+        'claude-opus-5-5':            { i: 4,    o: 20,   cr: 0.20 },
+        'claude-sonnet-5-5':          { i: 2,    o: 10,   cr: 0.20 },
+        'claude-haiku-5-5':           { i: 0.10, o: 0.50, cr: 0.01 },
+        'claude-opus-4-8':            { i: 5,    o: 25,   cr: 0.50 },
+        'claude-sonnet-4-5-20250929': { i: 3,    o: 15,   cr: 0.30 },
+        'claude-haiku-4-5':           { i: 1,    o: 5,    cr: 0.10 },
+        'text-embedding-3-small':     { i: 0.02, o: 0,    cr: 0.02 },
       };
+      const USD_POR_BUSCA = 0.01;   // busca na internet: US$ 10 por 1.000 buscas
       // US$ por minuto de voz (ElevenLabs Conv AI). Padrão 0,10 (derivado do
       // dashboard da ElevenLabs: ~US$0,14 numa chamada de 1:28 ≈ US$0,095/min);
       // editável via platform_config.voz_usd_min quando montarmos Configurações.
@@ -47851,18 +47861,40 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       const usdBrl = (typeof platformConfigCache !== 'undefined' && platformConfigCache && Number(platformConfigCache.usd_brl)) || 5.20;
       let uso = [];
       try{
-        const { data, error } = await supabase.schema('ia').from('uso_ia')
+        // Paginado: o .limit(50000) de antes parava em 1.000 registros sem avisar.
+        const { data, error } = await _fetchAllRowsAdm(() => supabase.schema('ia').from('uso_ia')
           .select('modelo, provider, acao, tokens_in, tokens_out, unidades, meta, criado_em')
-          .gte('criado_em', cutoffISO).lte('criado_em', endISO).limit(50000);
+          .gte('criado_em', cutoffISO).lte('criado_em', endISO), ['criado_em', 'id'], 'ia.uso_ia (painel de IA)');
         if(error) console.warn('[dashboard uso_ia]', error.message);
         uso = data || [];
       }catch(e){ console.warn('[dashboard uso_ia ex]', e); }
+      // Custo de um registro. Ordem de confiança:
+      //  1) meta.usd: a própria função do servidor já mediu o custo exato
+      //     (entrada, saída, cache e buscas) — usa esse;
+      //  2) tabela PRECOS: tokens de cache lidos (meta.cache_leitura) saem da
+      //     entrada e pagam o preço de leitura; buscas (meta.buscas) somam;
+      //  3) preço por unidade (voz);
+      //  4) nada disso: custo desconhecido, contado em semPreco (nunca zero calado).
+      const semPreco = {};
+      const _custoDoRegistro = (r) => {
+        const m = r.meta || {};
+        if(m.usd != null && m.usd !== '' && isFinite(Number(m.usd))) return Number(m.usd);
+        const p = PRECOS[r.modelo];
+        if(p){
+          const lidos = Math.max(0, Number(m.cache_leitura || 0));
+          const entrada = Math.max(0, Number(r.tokens_in || 0) - lidos);
+          return (entrada/1e6)*p.i + (lidos/1e6)*p.cr + (Number(r.tokens_out||0)/1e6)*p.o
+               + Math.max(0, Number(m.buscas || 0)) * USD_POR_BUSCA;
+        }
+        const pu = PRECOS_UNID[(r.provider||'')+':'+(r.modelo||'')];
+        if(pu) return Number(r.unidades||0)*pu;
+        const k = r.modelo || r.provider || '?';
+        semPreco[k] = (semPreco[k] || 0) + 1;
+        return 0;
+      };
       let custoUsd = 0; const byModelUsd = {}; const custoUsdByLabel = {};
       uso.forEach(r => {
-        let c = 0;
-        const p = PRECOS[r.modelo];
-        if(p){ c = (Number(r.tokens_in||0)/1e6)*p.i + (Number(r.tokens_out||0)/1e6)*p.o; }
-        else { const pu = PRECOS_UNID[(r.provider||'')+':'+(r.modelo||'')]; if(pu) c = Number(r.unidades||0)*pu; }
+        const c = _custoDoRegistro(r);
         custoUsd += c;
         const k = r.modelo || (r.provider || '?');
         byModelUsd[k] = (byModelUsd[k] || 0) + c;
@@ -47936,7 +47968,9 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
       costBrlEl.textContent = temCusto ? fmtBRL(custoBrl) : '—';
       const costUsdEl = document.getElementById('kpi-tokens-cost-usd');
-      if(costUsdEl) costUsdEl.textContent = temCusto ? ('US$ ' + custoUsd.toFixed(2) + ' · câmbio ' + usdBrl.toFixed(2) + ' · desde ' + desdeTxt) : 'sem registro ainda';
+      const _nSemPreco = Object.values(semPreco).reduce((a, b) => a + b, 0);
+      if(costUsdEl) costUsdEl.textContent = temCusto ? ('US$ ' + custoUsd.toFixed(2) + ' · câmbio ' + usdBrl.toFixed(2) + ' · desde ' + desdeTxt
+        + (_nSemPreco ? ' · ATENÇÃO: ' + _nSemPreco + ' uso(s) de modelo sem preço, fora da conta' : '')) : 'sem registro ainda';
       const marginEl = document.getElementById('kpi-tokens-margin');
       const marginSub = document.getElementById('kpi-tokens-margin-sub');
       if(marginEl) marginEl.textContent = temCusto ? fmtBRL(lucroAlinhadoBrl) : '—';
@@ -47946,9 +47980,12 @@ tr.ral-online .ral-pres{ display:inline-flex; }
       }
       const bmEl = document.getElementById('dash-tokens-cost-bymodel');
       if(bmEl){
-        const items = Object.entries(byModelUsd).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
-        bmEl.innerHTML = items.length ? items.map(([m, v]) =>
+        const items = Object.entries(byModelUsd).filter(([m, v]) => v > 0 && !semPreco[m]).sort((a, b) => b[1] - a[1]);
+        const semItems = Object.entries(semPreco).sort((a, b) => b[1] - a[1]);
+        bmEl.innerHTML = (items.length || semItems.length) ? items.map(([m, v]) =>
           '<div style="display:flex;justify-content:space-between;gap:.4rem;padding:.12rem 0"><span style="color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(m) + '</span><span style="color:var(--text-mute);font-family:var(--mono);white-space:nowrap">' + fmtBRL(v * usdBrl) + '</span></div>'
+        ).join('') + semItems.map(([m, n]) =>
+          '<div style="display:flex;justify-content:space-between;gap:.4rem;padding:.12rem 0" title="Este modelo não está na tabela de preços do painel: o custo dele não entrou na conta."><span style="color:var(--red);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(m) + '</span><span style="color:var(--red);font-family:var(--mono);white-space:nowrap">sem preço · ' + n + ' uso' + (n === 1 ? '' : 's') + '</span></div>'
         ).join('') : '<span style="color:var(--text-mute)">sem registro ainda</span>';
       }
     }
