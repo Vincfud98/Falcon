@@ -3443,7 +3443,8 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
   border-radius:3px;padding:.18rem .55rem;
 }
 .study-recommendations{margin-top:2.4rem}
-.study-recommendations .rail-items{grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr))}
+/* até 3 por linha (a equipe pode escolher até 6: viram 2 linhas de 3) */
+.study-recommendations .rail-items{grid-template-columns:repeat(auto-fit,minmax(min(max(220px,calc((100% - 2rem) / 3)),100%),1fr))}
 
 /* Simulados store page */
 .sim-hero{
@@ -14627,9 +14628,15 @@ window.TAG_REGISTRY = {
       const _secoesP = sb.from('subject_sections').select('id,nome,position')
         .then(r => { window.__SUBJ_SECTIONS = (r && !r.error && r.data) || []; })
         .catch(() => { window.__SUBJ_SECTIONS = []; });
+      // Recomendações escolhidas pela equipe para o fim de cada unidade (SQL 141). Pequena;
+      // o portão espera por ela, para o fim da unidade já nascer com os cards certos.
+      const _recsP = sb.from('unit_recomendacoes').select('unit_id,alvo_unit_id,alvo_subject_id,motivo,position')
+        .then(r => { window.__UNIT_RECS = (r && !r.error && r.data) || []; })
+        .catch(() => { window.__UNIT_RECS = []; });
       const _pacotesP = Promise.all([
         _professoresP,
         _secoesP,
+        _recsP,
         (async () => {
         // Fase 4n — hidrata catálogo de tags (admin gerencia, aluno usa pra renderizar chips)
         try {
@@ -46537,6 +46544,70 @@ document.addEventListener('click', function(e){
   if(window.FSModal) FSModal.open([prof], 0, renderPresenterBioModal);
 });
 
+/* Recomendações escolhidas pela equipe (conteudo.unit_recomendacoes, SQL 141): unidade de qualquer
+   matéria ou matéria inteira, na ordem escolhida. Sem escolha (ou nada visível para o aluno) → ''
+   e o fim da unidade fica com as automáticas de recommendedUnitsFor. */
+function _cursosTodos(){
+  const lista = (Array.isArray(window.COURSES_ALL) && window.COURSES_ALL.length) ? window.COURSES_ALL : (window.COURSES || []);
+  return lista.filter(Boolean);
+}
+function _unidadeAppPorDb(dbId){
+  for(const c of _cursosTodos()){
+    for(const md of (c.modules || [])){
+      const e = (Util.unitsOfModule(md) || []).find(x => x && x.unit && String(Util.unitDbId(x.unit)) === String(dbId));
+      if(e) return { course: c, m: md, chapter: e.chapter || null, unit: e.unit };
+    }
+  }
+  return null;
+}
+function _recomendacoesEscolhidasHtml(unit, m){
+  const uid = Util.unitDbId(unit);
+  const recs = (window.__UNIT_RECS || []).filter(r => String(r.unit_id) === String(uid))
+    .sort((a, b) => (a.position || 0) - (b.position || 0));
+  if(!recs.length) return '';
+  const user = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  const ehAdmin = !!(user && user.role === 'admin');
+  const cursoAtual = _cursosTodos().find(c => (c.modules || []).some(x => x && x.id === m.id)) || null;
+  let temMateria = false;
+  const cards = recs.map(r => {
+    const frase = String(r.motivo || '').trim();
+    if(r.alvo_subject_id != null){
+      const c = _cursosTodos().find(x => String(x._subjectId) === String(r.alvo_subject_id));
+      if(!c || (c.status === 'draft' && !ehAdmin)) return '';
+      temMateria = true;
+      const temConteudo = !!(c.modules && c.modules.length);
+      const emBreve = c.status === 'scheduled' || c.status === 'coming-soon';
+      const abre = temConteudo && !emBreve;
+      const tag = abre ? 'a' : 'div';
+      return `<${tag} class="rail-card"${abre ? ` href="#/course?c=${encodeURIComponent(c.id)}"` : ''}>
+        <div class="rail-card-body">
+          <div class="rail-card-crumb">Matéria${abre ? '' : ' · em breve'}</div>
+          <div class="rail-card-title">${Util.esc(c.title || '')}</div>
+          <div class="catalog-release-note">${Util.esc(frase || c.description || '')}</div>
+        </div>
+        ${c.cover ? `<div class="rail-card-thumb" style="background-image:url('${Util.attr(c.cover)}')"></div>` : ''}
+      </${tag}>`;
+    }
+    const hit = _unidadeAppPorDb(r.alvo_unit_id);
+    if(!hit || (hit.unit.status === 'draft' && !ehAdmin)) return '';
+    const u = hit.unit;
+    const href = `#/m/${hit.m.id}${hit.chapter ? `/c/${hit.chapter.id}` : ''}/u/${u.id}`;
+    const outra = !cursoAtual || String(hit.course._subjectId) !== String(cursoAtual._subjectId);
+    return `<a class="rail-card" href="${href}">
+        <div class="rail-card-body">
+          <div class="rail-card-crumb">${outra ? Util.esc(hit.course.title || 'Outra matéria') : 'Recomendada'}</div>
+          <div class="rail-card-title">${Util.esc((u.number ? u.number + ' · ' : '') + (u.title || ''))}</div>
+          <div class="catalog-release-note">${Util.esc(frase || u.subtitle || u.description || '')}</div>
+        </div>
+        ${u.cover ? `<div class="rail-card-thumb" style="background-image:url('${Util.attr(u.cover)}')"></div>` : ''}
+      </a>`;
+  }).filter(Boolean);
+  if(!cards.length) return '';
+  return `<section class="rail study-recommendations">
+    <div class="rail-label">${temMateria ? 'Recomendações' : 'Unidades recomendadas'}</div>
+    <div class="rail-items">${cards.join('')}</div>
+  </section>`;
+}
 function recommendedUnitsFor(unit, moduleRef){
   const sameModule = (Util.unitsOfModule(moduleRef) || []).map(entry => entry.unit).filter(candidate => candidate.id !== unit.id);
   const related = sameModule.filter(candidate => {
@@ -63555,8 +63626,9 @@ Renderers.unit = function(route){
   const initialBlockId = (route.query && route.query.b) || '';
   const prog = Store.unitProgress(unit);
   const _unitNoteCount = ((Store.get() && Store.get().notes) || []).filter(n => String(n.unitId) === String(unit.id)).length;
-  const recommendations = recommendedUnitsFor(unit, m);
-  const recommendationsHtml = recommendations.length ? `<section class="rail study-recommendations">
+  const _recsEscolhidas = _recomendacoesEscolhidasHtml(unit, m);
+  const recommendations = _recsEscolhidas ? [] : recommendedUnitsFor(unit, m);
+  const recommendationsHtml = _recsEscolhidas || (recommendations.length ? `<section class="rail study-recommendations">
     <div class="rail-label">Unidades recomendadas</div>
     <div class="rail-items">${recommendations.map(nextUnit => {
       const entry = Util.unitsOfModule(m).find(item => item.unit.id === nextUnit.id);
@@ -63570,7 +63642,7 @@ Renderers.unit = function(route){
         ${nextUnit.cover ? `<div class="rail-card-thumb" style="background-image:url('${Util.attr(nextUnit.cover)}')"></div>` : ''}
       </a>`;
     }).join('')}</div>
-  </section>` : '';
+  </section>` : '');
 
   // Faixa de rascunho no topo (de novo: só admin abre unidade rascunho).
   // O Publicar aqui evita a viagem de volta ao admin só pra publicar.

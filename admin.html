@@ -9053,6 +9053,28 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 
 /* Modal da matéria: professores da matéria (lista do cadastro, na ordem do card) */
 .cs-profs-list{display:flex;flex-direction:column;gap:.45rem;margin:0 0 .6rem}
+/* Editor da unidade: recomendações no fim (SQL 141) */
+.ue-recs-ajuda{font-family:var(--sans);font-weight:300;font-size:.74rem;color:var(--text-mute);line-height:1.5;margin:0 0 .6rem}
+.ue-recs-list{display:flex;flex-direction:column;gap:.45rem}
+.ue-recs-vazio{font-family:var(--sans);font-weight:300;font-style:italic;font-size:.78rem;color:var(--text-mute);margin:0;padding:.2rem 0}
+.ue-rec{border:1px solid var(--accent-border-soft);border-radius:var(--radius);padding:.5rem;display:flex;flex-direction:column;gap:.4rem}
+.ue-rec-top{display:flex;align-items:center;gap:.55rem;min-width:0}
+.ue-rec-capa{width:38px;height:38px;flex:none;border-radius:3px;background:var(--accent-lo) center/cover}
+.ue-rec-txt{display:flex;flex-direction:column;gap:.1rem;min-width:0}
+.ue-rec-kicker{font-family:var(--sans);font-size:.55rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+.ue-rec-titulo{font-family:var(--serif);font-size:.92rem;color:var(--text);line-height:1.25}
+.ue-rec-acoes{display:flex;gap:.25rem;align-items:center}
+.ue-rec-acoes .ue-rec-motivo{flex:1;min-width:0;font-size:.74rem;padding:.3rem .45rem}
+.ue-rec-acoes .btn svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:-1px}
+.ue-recs-add{display:flex;gap:.4rem;margin-top:.5rem}
+.ue-recs-add .btn{flex:1;justify-content:center}
+.ue-recs-busca{margin-top:.5rem;display:flex;flex-direction:column;gap:.35rem}
+.ue-recs-busca[hidden]{display:none}
+.ue-recs-res{display:flex;flex-direction:column;gap:.2rem;max-height:240px;overflow-y:auto}
+.ue-recs-item{display:flex;flex-direction:column;gap:.1rem;text-align:left;background:none;border:1px solid transparent;border-radius:3px;padding:.4rem .5rem;cursor:pointer;font-family:var(--serif);font-size:.88rem;color:var(--text)}
+.ue-recs-item:hover{border-color:var(--accent-border-soft);background:var(--accent-xlo)}
+.ue-recs-msg{font-family:var(--sans);font-weight:300;font-size:.74rem;color:var(--red);margin-top:.4rem;min-height:1em}
+.ue-recs-msg.is-ok{color:var(--text-mute)}
 /* Sala dos professores (modo professor do painel) */
 body[data-modo="professor"] [data-so-equipe],
 body[data-modo="professor"] .adm-bell-wrap{display:none !important}
@@ -61687,7 +61709,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     ueRenderSidebar();
     ueRenderBlockTypeButtons();
     document.getElementById('ueBlocksList').innerHTML = '<div class="loading">Carregando blocos…</div>';
-    await Promise.all([ ueLoadSections(), ueLoadBlocks(), ueLoadDownloads(), loadSources(), loadAuthors(), loadSourceAuthors() ]);
+    await Promise.all([ ueLoadSections(), ueLoadBlocks(), ueLoadDownloads(), loadSources(), loadAuthors(), loadSourceAuthors(), ueRecsCarregar() ]);
     // Referências: re-sincroniza o snapshot (autor etc.) com o banco de obras
     // (ex.: autor linkado DEPOIS de a obra ser adicionada ao bloco). Aqui só
     // atualiza o que o editor mostra; a gravação no banco acontece ao "salvar".
@@ -61991,6 +62013,144 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
         .sort((a,b) => (a.position||0) - (b.position||0));
     }
   }
+
+  // ── Recomendações no fim da unidade (SQL 141) ──
+  // Lista escolhida pela equipe (ou pelo professor da matéria): unidade de qualquer matéria
+  // ou matéria inteira, até 6, na ordem da lista. Cada mudança grava a lista inteira pela
+  // função conteudo.recomendacoes_salvar (confere a permissão e valida no servidor).
+  let ueRecsState = [];          // [{alvo_unit_id | alvo_subject_id, motivo}]
+  let _ueRecsTipo = null;        // busca aberta: 'unidade' | 'materia'
+  const UE_RECS_MAX = 6;
+  const UE_RECS_ERROS = {
+    sem_permissao: 'Você não pode mudar as recomendações desta unidade.',
+    no_maximo_6: 'São no máximo 6 recomendações.',
+    unidade_nao_encontrada: 'Unidade não encontrada. Feche e abra o editor de novo.',
+  };
+  function _ueRecsNorm(s){ return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+  function _ueRecsMateriaDaUnidade(u){
+    if(!u) return null;
+    const ch = (courseChaptersCache || []).find(function(c){ return String(c.id) === String(u.chapter_id); });
+    const modId = ch ? ch.module_id : u.module_id;
+    const mod = (modulesCache || []).find(function(m){ return String(m.id) === String(modId); });
+    return mod ? (subjectsCache || []).find(function(sj){ return String(sj.id) === String(mod.subject_id); }) || null : null;
+  }
+  function _ueRecsInfo(it){
+    if(it.alvo_subject_id != null){
+      const sj = (subjectsCache || []).find(function(x){ return String(x.id) === String(it.alvo_subject_id); });
+      return { kicker: 'Matéria', titulo: sj ? (sj.subject || ('Matéria ' + sj.id)) : ('Matéria ' + it.alvo_subject_id), capa: sj ? sj.cover : '' };
+    }
+    const u = (unitsCache || []).find(function(x){ return String(x.id) === String(it.alvo_unit_id); });
+    const sj = _ueRecsMateriaDaUnidade(u);
+    return { kicker: 'Unidade' + (sj ? ' · ' + (sj.sigla || sj.subject) : ''), titulo: u ? (u.title || ('Unidade ' + u.id)) + (u.status === 'draft' ? ' (rascunho)' : '') : ('Unidade ' + it.alvo_unit_id), capa: u ? u.cover_url : '' };
+  }
+  function ueRecsMsg(txt, ok){
+    const el = document.getElementById('ueRecsMsg'); if(!el) return;
+    el.textContent = txt || ''; el.classList.toggle('is-ok', !!ok);
+  }
+  async function ueRecsCarregar(){
+    ueRecsState = []; _ueRecsTipo = null;
+    const uid = ueCurrentUnitId;
+    ueRecsMsg('');
+    try{
+      const { data, error } = await conteudo().from('unit_recomendacoes')
+        .select('alvo_unit_id,alvo_subject_id,motivo,position').eq('unit_id', uid).order('position');
+      if(String(uid) !== String(ueCurrentUnitId)) return;
+      if(error) ueRecsMsg('Não deu para ler as recomendações: ' + error.message);
+      else ueRecsState = (data || []).map(function(r){ return { alvo_unit_id: r.alvo_unit_id, alvo_subject_id: r.alvo_subject_id, motivo: r.motivo || '' }; });
+    }catch(e){ ueRecsMsg('Não deu para ler as recomendações.'); }
+    ueRecsRender();
+  }
+  function ueRecsRender(){
+    const box = document.getElementById('ueRecsList'); if(!box) return;
+    const n = ueRecsState.length;
+    box.innerHTML = n ? ueRecsState.map(function(it, i){
+      const inf = _ueRecsInfo(it);
+      const capa = inf.capa ? driveImg(inf.capa) : '';
+      return '<div class="ue-rec">'
+        + '<div class="ue-rec-top">'
+          + '<span class="ue-rec-capa"' + (capa ? ' style="background-image:url(\'' + esc(capa) + '\')"' : '') + '></span>'
+          + '<span class="ue-rec-txt"><span class="ue-rec-kicker">' + esc(inf.kicker) + '</span><span class="ue-rec-titulo">' + esc(inf.titulo) + '</span></span>'
+        + '</div>'
+        + '<div class="ue-rec-acoes">'
+          + '<input class="field-input ue-rec-motivo" maxlength="160" placeholder="frase opcional (aparece no card)" value="' + esc(it.motivo || '') + '" onchange="ueRecsMotivo(' + i + ', this.value)">'
+          + '<button type="button" class="btn btn-ghost btn-sm" title="Subir" aria-label="Subir" onclick="ueRecsMover(' + i + ',-1)"' + (i === 0 ? ' disabled' : '') + '>' + CS_SETA_CIMA + '</button>'
+          + '<button type="button" class="btn btn-ghost btn-sm" title="Descer" aria-label="Descer" onclick="ueRecsMover(' + i + ',1)"' + (i === n - 1 ? ' disabled' : '') + '>' + CS_SETA_BAIXO + '</button>'
+          + '<button type="button" class="btn btn-ghost btn-sm" onclick="ueRecsTirar(' + i + ')">tirar</button>'
+        + '</div></div>';
+    }).join('') : '<p class="ue-recs-vazio">Nenhuma escolhida: o aluno vê as automáticas.</p>';
+    const add = document.getElementById('ueRecsAdd');
+    if(add) add.querySelectorAll('button').forEach(function(b){ b.disabled = n >= UE_RECS_MAX; });
+  }
+  async function ueRecsSalvar(){
+    const uid = ueCurrentUnitId; if(!uid) return;
+    ueRecsMsg('Salvando…', true);
+    const itens = ueRecsState.map(function(it){
+      return it.alvo_subject_id != null
+        ? { alvo_subject_id: Number(it.alvo_subject_id), motivo: (it.motivo || '').trim() }
+        : { alvo_unit_id: Number(it.alvo_unit_id), motivo: (it.motivo || '').trim() };
+    });
+    const { error } = await conteudo().rpc('recomendacoes_salvar', { p_unit: Number(uid), p_itens: itens });
+    if(String(uid) !== String(ueCurrentUnitId)) return;
+    if(error){
+      const chave = Object.keys(UE_RECS_ERROS).find(function(k){ return String(error.message || '').indexOf(k) >= 0; });
+      ueRecsMsg(chave ? UE_RECS_ERROS[chave] : ('Não salvou: ' + error.message));
+      await ueRecsCarregar();   // volta a mostrar o que está gravado
+      return;
+    }
+    ueRecsMsg(ueRecsState.length ? 'Salvo. Já aparece para os alunos.' : 'Salvo. O aluno volta a ver as automáticas.', true);
+  }
+  window.ueRecsMover = function(i, d){
+    const j = i + d; if(j < 0 || j >= ueRecsState.length) return;
+    const t = ueRecsState[i]; ueRecsState[i] = ueRecsState[j]; ueRecsState[j] = t;
+    ueRecsRender(); ueRecsSalvar();
+  };
+  window.ueRecsTirar = function(i){ ueRecsState.splice(i, 1); ueRecsRender(); ueRecsSalvar(); };
+  window.ueRecsMotivo = function(i, v){ if(!ueRecsState[i]) return; ueRecsState[i].motivo = String(v || '').slice(0, 160); ueRecsSalvar(); };
+  window.ueRecsAbrirBusca = function(tipo){
+    if(ueRecsState.length >= UE_RECS_MAX){ ueRecsMsg(UE_RECS_ERROS.no_maximo_6); return; }
+    _ueRecsTipo = tipo;
+    const box = document.getElementById('ueRecsBusca'); if(box) box.hidden = false;
+    const inp = document.getElementById('ueRecsBuscaInput');
+    if(inp){ inp.value = ''; inp.placeholder = tipo === 'materia' ? 'buscar matéria (nome ou sigla)' : 'buscar unidade (título, matéria ou sigla)'; inp.focus(); }
+    window.ueRecsBuscar();
+  };
+  window.ueRecsFecharBusca = function(){
+    _ueRecsTipo = null;
+    const box = document.getElementById('ueRecsBusca'); if(box) box.hidden = true;
+  };
+  window.ueRecsBuscar = function(){
+    const res = document.getElementById('ueRecsBuscaRes'); if(!res || !_ueRecsTipo) return;
+    const q = _ueRecsNorm((document.getElementById('ueRecsBuscaInput') || {}).value).trim();
+    let html = '';
+    if(_ueRecsTipo === 'materia'){
+      const ja = new Set(ueRecsState.filter(function(it){ return it.alvo_subject_id != null; }).map(function(it){ return String(it.alvo_subject_id); }));
+      const lista = (subjectsCache || []).filter(function(sj){ return !ja.has(String(sj.id)) && (!q || _ueRecsNorm(sj.subject + ' ' + (sj.sigla || '')).indexOf(q) >= 0); }).slice(0, 30);
+      html = lista.map(function(sj){
+        return '<button type="button" class="ue-recs-item" onclick="ueRecsEscolher(\'materia\',' + JSON.stringify(String(sj.id)).replace(/"/g, '&quot;') + ')">'
+          + '<span class="ue-rec-kicker">' + esc(sj.sigla || 'Matéria') + '</span><span>' + esc(sj.subject || '') + '</span></button>';
+      }).join('');
+    } else {
+      const ja = new Set(ueRecsState.filter(function(it){ return it.alvo_unit_id != null; }).map(function(it){ return String(it.alvo_unit_id); }));
+      const lista = (unitsCache || []).filter(function(u){
+        if(String(u.id) === String(ueCurrentUnitId) || ja.has(String(u.id))) return false;
+        if(!q) return true;
+        const sj = _ueRecsMateriaDaUnidade(u);
+        return _ueRecsNorm((u.title || '') + ' ' + (sj ? sj.subject + ' ' + (sj.sigla || '') : '')).indexOf(q) >= 0;
+      }).slice(0, 30);
+      html = lista.map(function(u){
+        const sj = _ueRecsMateriaDaUnidade(u);
+        return '<button type="button" class="ue-recs-item" onclick="ueRecsEscolher(\'unidade\',' + JSON.stringify(String(u.id)).replace(/"/g, '&quot;') + ')">'
+          + '<span class="ue-rec-kicker">' + esc(sj ? (sj.sigla || sj.subject) : 'Sem matéria') + (u.status === 'draft' ? ' · rascunho' : '') + '</span><span>' + esc(u.title || ('Unidade ' + u.id)) + '</span></button>';
+      }).join('');
+    }
+    res.innerHTML = html || '<p class="ue-recs-vazio">Nada encontrado.</p>';
+  };
+  window.ueRecsEscolher = function(tipo, id){
+    if(ueRecsState.length >= UE_RECS_MAX){ ueRecsMsg(UE_RECS_ERROS.no_maximo_6); return; }
+    ueRecsState.push(tipo === 'materia' ? { alvo_subject_id: Number(id), motivo: '' } : { alvo_unit_id: Number(id), motivo: '' });
+    window.ueRecsFecharBusca();
+    ueRecsRender(); ueRecsSalvar();
+  };
 
   function ueRenderDownloads(){
     const el = document.getElementById('ueDownloadsList');
@@ -73991,6 +74151,25 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
           <div class="sub-h"><span class="sub-h-text">Downloads da unidade</span><span class="sub-h-rule"></span></div>
           <div id="ueDownloadsList" style="display:flex;flex-direction:column;gap:.4rem"></div>
           <button class="btn btn-ghost btn-sm" style="margin-top:.5rem;width:100%" onclick="ueAddDownload()">+ Adicionar arquivo</button>
+        </div>
+
+        <!-- Recomendações no fim da unidade (conteudo.unit_recomendacoes, SQL 141) -->
+        <div>
+          <div class="sub-h"><span class="sub-h-text">Recomendações no fim</span><span class="sub-h-rule"></span></div>
+          <p class="ue-recs-ajuda">O que o aluno vê no fim de cada seção e da unidade: unidades de qualquer matéria ou uma matéria inteira, até 6. Vazio: o automático (unidades do mesmo módulo e tema).</p>
+          <div id="ueRecsList" class="ue-recs-list"></div>
+          <div class="ue-recs-add" id="ueRecsAdd">
+            <button type="button" class="btn btn-ghost btn-sm" onclick="ueRecsAbrirBusca('unidade')">+ Unidade</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="ueRecsAbrirBusca('materia')">+ Matéria</button>
+          </div>
+          <div id="ueRecsBusca" class="ue-recs-busca" hidden>
+            <div style="display:flex;gap:.3rem;align-items:center">
+              <input class="field-input" id="ueRecsBuscaInput" autocomplete="off" oninput="ueRecsBuscar()" onkeydown="if(event.key==='Escape') ueRecsFecharBusca()">
+              <button type="button" class="btn btn-ghost btn-sm" onclick="ueRecsFecharBusca()" aria-label="Fechar a busca">×</button>
+            </div>
+            <div id="ueRecsBuscaRes" class="ue-recs-res"></div>
+          </div>
+          <div id="ueRecsMsg" class="ue-recs-msg"></div>
         </div>
       </aside>
 
