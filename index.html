@@ -4366,12 +4366,14 @@ html[data-theme="light"] .bf-select{color-scheme:light}
 .bf-org.is-on{border-color:var(--accent);background:var(--accent-glow);color:var(--text)}
 .bf-org input{accent-color:var(--accent);margin:0;cursor:pointer}
 /* Cabeçalho de seção por matéria nos resultados (caramelo + divider) */
-.bf-msection{display:flex;align-items:center;gap:.9rem;margin:1.9rem 0 .5rem}
-.bf-msection-label{
+.bf-msection,.cat-secao{display:flex;align-items:center;gap:.9rem;margin:1.9rem 0 .5rem}
+.bf-msection-label,.cat-secao-label{
   font-family:var(--serif);font-size:1.2rem;color:var(--accent);
   letter-spacing:.01em;white-space:nowrap;
 }
-.bf-msection-rule{flex:1;height:1px;background:linear-gradient(90deg,var(--accent),transparent);opacity:.55}
+.bf-msection-rule,.cat-secao-rule{flex:1;height:1px;background:linear-gradient(90deg,var(--accent),transparent);opacity:.55}
+/* Seções da lista de matérias (Loja e Suas matérias): o mesmo divisor, ocupando a linha toda do grid */
+.catalog-grid > .cat-secao{grid-column:1/-1;margin:.8rem 0 -.4rem}
 /* Footer */
 .bf-panel-foot{
   display:flex;align-items:center;justify-content:flex-end;gap:.6rem;
@@ -13471,6 +13473,8 @@ window.TAG_REGISTRY = {
       _subjectId: subject.id,
       _professorId: subject.professor_id != null ? subject.professor_id : null, // vínculo com o catálogo de professores
       _position: (subject.position != null ? subject.position : null), // ordem manual do admin
+      _secaoId: (subject.secao_id != null ? subject.secao_id : null),   // seção da lista de matérias (SQL 139)
+      _profsOrdemFixa: subject.profs_ordem_fixa === true,               // fotos dos professores na ordem da lista
       _createdAt: subject.created_at || null,                          // "lançamento" (p/ grupo Obter)
     };
   }
@@ -14105,7 +14109,7 @@ window.TAG_REGISTRY = {
      tabela (as pequenas). É acelerador, nunca dependência: sem IndexedDB
      (modo privado, erro, cota) tudo segue pela rede. Desliga com ?semcache=1
      ou localStorage.falcon_semcache = '1'. Some no logout. */
-  const CACHE_ESQUEMA = 2;   // suba quando uma tabela guardada ganhar coluna/formato novo (2 = cifrada)
+  const CACHE_ESQUEMA = 3;   // suba quando uma tabela guardada ganhar coluna/formato novo (2 = cifrada; 3 = subjects.secao_id e profs_ordem_fixa, SQL 139)
   /* Cifra em repouso (AES-GCM, chave por usuário guardada no aparelho): quem copiar
      os arquivos do navegador sem a chave não lê nada. Não protege do próprio aluno
      logado — nenhuma cifra no navegador protege — e por isso é barata e silenciosa:
@@ -14602,12 +14606,12 @@ window.TAG_REGISTRY = {
       // _pacotesP abaixo), para o card da matéria já nascer com as fotos certas.
       const _professoresP = Promise.all([
         sb.from('professors').select('id,name,role,photo_url,quote,bio,author_id'),
-        sb.from('professor_subjects').select('professor_id,subject_id'),
+        sb.from('professor_subjects').select('*'),                  // professor_id, subject_id, ordem (SQL 139)
         sb.from('professor_works').select('*'),
         sb.from('source_author_links').select('*'),
       ]).then(([pr, ps, pw, sal]) => {
         window.__PROFESSORS = (pr && pr.data) || [];
-        window.__PROF_SUBJECTS = (ps && ps.data) || [];             // {professor_id, subject_id}
+        window.__PROF_SUBJECTS = (ps && ps.data) || [];             // {professor_id, subject_id, ordem}
         window.__PROF_WORKS = (pw && pw.data) || [];               // {professor_id, source_id, title, ...}
         window.__SOURCE_AUTHOR_LINKS = (sal && sal.data) || [];    // {source_id, author_id, author_name, professor_id}
         const bm = {}; (window.__PROF_WORKS).forEach(r => { if(!bm[r.source_id]) bm[r.source_id] = r; });
@@ -14617,8 +14621,14 @@ window.TAG_REGISTRY = {
       // admins, edital, concursos): disparam JÁ, em paralelo com a estrutura.
       // O portão do Início espera por eles (são leves) — o corpo de cada bloco
       // está intacto, com o try/catch próprio.
+      // Seções da lista de matérias (conteudo.subject_sections, SQL 139): os títulos que
+      // agrupam os cards na Loja (ex.: "Extensivos"). Pequena; o portão espera por ela.
+      const _secoesP = sb.from('subject_sections').select('id,nome,position')
+        .then(r => { window.__SUBJ_SECTIONS = (r && !r.error && r.data) || []; })
+        .catch(() => { window.__SUBJ_SECTIONS = []; });
       const _pacotesP = Promise.all([
         _professoresP,
+        _secoesP,
         (async () => {
         // Fase 4n — hidrata catálogo de tags (admin gerencia, aluno usa pra renderizar chips)
         try {
@@ -46364,19 +46374,19 @@ function renderPresenterBioModal(prof){
 function _profById(id){ if(id == null || id === '') return null; return (window.__PROFESSORS||[]).find(p => String(p.id)===String(id)) || null; }
 
 // ── Professores no card da matéria (sala dos professores, lote 2) ──
-// Vêm do cadastro (conteudo.professor_subjects). A ordem gira a cada abertura da página, para
-// nenhum professor ficar sempre na frente: a semente é sorteada uma vez por carga, então a
-// ordem fica estável enquanto a página está aberta.
+// Vêm do cadastro (conteudo.professor_subjects), na ordem da lista da matéria (coluna ordem;
+// sem ordem vai para o fim). Se a matéria não fixou a ordem (subjects.profs_ordem_fixa), a ordem
+// gira a cada abertura da página, para nenhum professor ficar sempre na frente: a semente é
+// sorteada uma vez por carga, então a ordem fica estável enquanto a página está aberta.
 const _PROF_SEMENTE = Math.random();
-function _profsDaMateria(subjectId){
+function _profsDaMateria(subjectId, ordemFixa){
   if(subjectId == null || subjectId === '') return [];
+  const linhas = (window.__PROF_SUBJECTS || []).filter(r => String(r.subject_id) === String(subjectId))
+    .sort((a, b) => ((a.ordem != null ? a.ordem : 1e9) - (b.ordem != null ? b.ordem : 1e9)) || (Number(a.professor_id) - Number(b.professor_id)));
   const ids = [];
-  (window.__PROF_SUBJECTS || []).forEach(r => {
-    const id = String(r.professor_id);
-    if(String(r.subject_id) === String(subjectId) && ids.indexOf(id) < 0) ids.push(id);
-  });
-  const lista = ids.map(_profById).filter(Boolean).sort((a, b) => Number(a.id) - Number(b.id));
-  if(lista.length < 2) return lista;
+  linhas.forEach(r => { const id = String(r.professor_id); if(ids.indexOf(id) < 0) ids.push(id); });
+  const lista = ids.map(_profById).filter(Boolean);
+  if(lista.length < 2 || ordemFixa) return lista;
   const k = Math.floor(_PROF_SEMENTE * lista.length) % lista.length;
   return lista.slice(k).concat(lista.slice(0, k));
 }
@@ -46388,7 +46398,7 @@ function _nomesEmFrase(nomes){
    pequenas, com a lista para escolher de quem ver a bio. Sem professor no cadastro → como antes
    (foto e nome de coordenação da matéria). */
 function _cardProfs(c){
-  const profs = _profsDaMateria(c && c._subjectId);
+  const profs = _profsDaMateria(c && c._subjectId, !!(c && c._profsOrdemFixa));
   const img = (p, cls) => {
     const u = _dImg(p.photo_url || '');
     return u ? `<img src="${Util.attr(u)}" alt="${Util.attr(p.name || '')}" loading="lazy"${cls ? ` class="${cls}"` : ''}>`
@@ -47933,12 +47943,24 @@ Renderers.catalog = function(route){
     return canOpen ? 0 : (canBuy ? 1 : 2);
   };
   const _catPos = c => (c._position != null ? c._position : Number.MAX_SAFE_INTEGER);
+  // Seções da lista (SQL 139): as matérias sem seção vêm primeiro, sem título, como sempre;
+  // depois cada seção, na ordem do painel, com o seu título. Dentro de cada grupo vale a regra
+  // de antes (tem acesso, à venda, em breve; e a ordem manual do admin).
+  const _secoes = (window.__SUBJ_SECTIONS || []).slice().sort((a, b) =>
+    ((a.position != null ? a.position : 1e9) - (b.position != null ? b.position : 1e9)) || (Number(a.id) - Number(b.id)));
+  const _secaoRank = c => {
+    if(c._secaoId == null) return -1;
+    const k = _secoes.findIndex(s => String(s.id) === String(c._secaoId));
+    return k;                                                  // seção que não existe mais = topo (-1)
+  };
   courses = courses.slice().sort((a,b) => {
+    const ra = _secaoRank(a), rb = _secaoRank(b);
+    if(ra !== rb) return ra - rb;
     const ba = _catBucket(a), bb = _catBucket(b);
     if(ba !== bb) return ba - bb;
     return _catPos(a) - _catPos(b) || String(a.id).localeCompare(String(b.id));
   });
-  const cards = courses.map((c,i) => {
+  const _cardsHtml = courses.map((c,i) => {
     const hasContent = c.modules && c.modules.length > 0;
     const owned = Commerce.temAcesso(c.id);
     const releaseCountdown = formatReleaseCountdown(c.releaseAt);
@@ -48021,6 +48043,15 @@ Renderers.catalog = function(route){
         ${footerCta}
       </div>
     </${canOpen?'a':'div'}>`;
+  });
+  // Título da seção antes do 1º card dela (seção sem card visível não aparece).
+  let _secaoAtual = -1;
+  const cards = _cardsHtml.map((h, i) => {
+    if(!h) return '';
+    const k = _secaoRank(courses[i]);
+    if(k === _secaoAtual || k < 0) return h;
+    _secaoAtual = k;
+    return `<div class="cat-secao" data-a="${i+2}"><span class="cat-secao-label">${Util.esc(_secoes[k].nome || '')}</span><span class="cat-secao-rule"></span></div>` + h;
   }).join('');
   const bancoHtml = (_isStore && !_orgCards) ? _lojaBancoHtml(courses) : '';
   // caminho de volta: dentro de uma empresa → as empresas do concurso; no concurso → a Loja (só se há mais de um concurso)
