@@ -20742,6 +20742,27 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     updateGroupCounts();
   }
 
+  // Contagens no escopo de matérias (professor ou pedagógico de algumas matérias): os menus
+  // e as abas mostram o que a pessoa vê, não o total da plataforma. null = sem escopo.
+  function _questoesNoEscopo(){
+    const e = _escopoMaterias();
+    if(!e) return questionsCache || [];
+    return (questionsCache || []).filter(function(q){ for(const x of _qSubjectsOf(q.id)){ if(e.has(x)) return true; } return false; });
+  }
+  function _textosNoEscopo(){
+    const e = _escopoMaterias();
+    if(!e) return referenceTextsCache || [];
+    const qs = new Set(_questoesNoEscopo().map(function(q){ return String(q.id); }));
+    const ids = new Set((questionRefsCache || []).filter(function(l){ return qs.has(String(l.question_id)); }).map(function(l){ return String(l.reference_text_id); }));
+    return (referenceTextsCache || []).filter(function(t){ return ids.has(String(t.id)); });
+  }
+  function _unidadesNoEscopo(){
+    const e = _escopoMaterias();
+    if(!e || typeof window.unitsOfSubjectInOrder !== 'function') return null;
+    let n = 0;
+    e.forEach(function(sid){ n += window.unitsOfSubjectInOrder(sid).length; });
+    return n;
+  }
   function updateGroupCounts(){
     // Faxina 2026-06-07 — o grupo "Taxonomia" (count-group-conteudo) foi
     // removido; suas tabs (Tags + Estrutura curricular) migraram pro
@@ -20749,7 +20770,13 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     // + tags pra refletir o escopo expandido. O elemento legacy
     // `#count-group-conteudo` não existe mais — não atualizamos.
     const cntGer = document.getElementById('count-group-gerenciar');
-    if(cntGer) cntGer.textContent = subjectsCache.length + tagsCache.length + mockExamsCache.length;
+    if(cntGer){
+      const _esc = _escopoMaterias();
+      // professor: o grupo só tem Unidades; pedagógico de algumas matérias: as matérias dele
+      cntGer.textContent = !_esc ? (subjectsCache.length + tagsCache.length + mockExamsCache.length)
+        : _modoProfessor() ? (_unidadesNoEscopo() || 0)
+        : subjectsCache.filter(function(r){ return _naMinhaMateria(r.id); }).length;
+    }
     const cntGrpBib = document.getElementById('count-group-bibliografia');
     if(cntGrpBib) cntGrpBib.textContent = authorsCache.length + sourcesCache.length;
     const cntGrpIa = document.getElementById('count-group-ia-rag');
@@ -20759,7 +20786,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     document.getElementById('count-group-concursos').textContent =
       bancasCache.length + examsCache.length;
     document.getElementById('count-group-questoes').textContent =
-      referenceTextsCache.length + questionsCache.length;
+      _textosNoEscopo().length + _questoesNoEscopo().length;
     const commEl1 = document.getElementById('count-group-crm');
     const commEl2 = document.getElementById('count-group-catalogo');
     const commEl3 = document.getElementById('count-group-vendas');
@@ -20990,7 +21017,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
       || (Number(a.id) - Number(b.id)));
     document.getElementById('count-subjects').textContent = rows.length;
     const countGer = document.getElementById('count-group-gerenciar');
-    if(countGer) countGer.textContent = rows.length;
+    if(countGer && !_modoProfessor()) countGer.textContent = rows.length;
     const _fEx = window._subjExamFilter || '';
     if(_fEx){
       const exSubs = (typeof examSubjectsCache !== 'undefined' && Array.isArray(examSubjectsCache)) ? examSubjectsCache : [];
@@ -25326,7 +25353,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
 
   function renderQuestionsList(){
     const all = getFilteredQuestions();
-    document.getElementById('count-questions').textContent = questionsCache.length;
+    document.getElementById('count-questions').textContent = _questoesNoEscopo().length;
     document.getElementById('questions-count').textContent =
       `${all.length} ${all.length === 1 ? 'registro' : 'registros'}` +
       (all.length !== questionsCache.length ? ' (filtrado)' : '');
@@ -29607,7 +29634,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     populateReftextsFilters();
 
     const box = document.getElementById('reftextsList');
-    document.getElementById('count-reftexts').textContent = referenceTextsCache.length;
+    document.getElementById('count-reftexts').textContent = _textosNoEscopo().length;
 
     const f = reftextsFilter.trim().toLowerCase();
     let list = referenceTextsCache;
@@ -51849,6 +51876,23 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
       return '#/m/m' + un.modulo_id + (un.capitulo_id != null ? '/c/c' + un.capitulo_id : '') + '/u/u' + un.id + (q.length ? '?' + q.join('&') : '');
     }
     function ytId(url){ const m = /(?:youtu\.be\/|youtube(?:-nocookie)?\.com\/(?:embed\/|watch\?v=|shorts\/))([\w-]{11})/.exec(String(url || '')); return m ? m[1] : ''; }
+    // Vimeo não tem endereço fixo de miniatura (o YouTube tem): pergunta ao oEmbed público
+    // dele, com o h= dos vídeos não listados, e guarda a resposta enquanto a página está aberta.
+    function vimeoUrl(url){
+      const s = String(url || '').replace(/&amp;/g, '&');
+      const m = /(?:player\.vimeo\.com\/video\/|vimeo\.com\/)(\d+)(?:\/([0-9a-f]{6,}))?/.exec(s);
+      if(!m) return '';
+      const h = m[2] || ((/[?&]h=([0-9a-f]{6,})/.exec(s) || [])[1]) || '';
+      return 'https://player.vimeo.com/video/' + m[1] + (h ? '?h=' + h : '');
+    }
+    const _vimeoThumbs = new Map();
+    function vimeoThumb(u){
+      if(!_vimeoThumbs.has(u)){
+        _vimeoThumbs.set(u, fetch('https://vimeo.com/api/oembed.json?width=640&url=' + encodeURIComponent(u))
+          .then(function(r){ return r.ok ? r.json() : null; }).then(function(j){ return (j && j.thumbnail_url) || ''; }).catch(function(){ return ''; }));
+      }
+      return _vimeoThumbs.get(u);
+    }
     async function carregar(){
       if(!_modoProfessor()) return;
       try{
@@ -51877,7 +51921,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
         const yt = ytId(c.url);
         return '<div class="sm-ctx sm-ctx-video">'
           + (yt ? '<img class="sm-thumb" src="https://img.youtube.com/vi/' + esc(yt) + '/mqdefault.jpg" alt="" loading="lazy">'
-                : '<div class="sm-thumb sm-thumb-vazio"><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="7 4 20 12 7 20 7 4"/></svg></div>')
+                : '<div class="sm-thumb sm-thumb-vazio"' + (vimeoUrl(c.url) ? ' data-sm-vimeo="' + esc(vimeoUrl(c.url)) + '"' : '') + '><svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polygon points="7 4 20 12 7 20 7 4"/></svg></div>')
           + '<div class="sm-ctx-txt"><span class="sd-ctx-lab">Seu vídeo' + (unRot ? ' · ' + esc(unRot) : '') + '</span>'
           + '<h3 class="sm-ctx-tit">' + esc(c.titulo || 'Vídeo') + '</h3>'
           + (c.descricao ? '<p class="sd-nota">' + esc(String(c.descricao).replace(/<[^>]+>/g, ' ').slice(0, 220)) + '</p>' : '')
@@ -51923,6 +51967,13 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
           + (t.respondida ? '<p class="sd-nota" style="margin-top:.4rem">Você já respondeu.</p>' : '')
           + '</article>';
       }).join('');
+      el.querySelectorAll('[data-sm-vimeo]').forEach(function(box){
+        vimeoThumb(box.getAttribute('data-sm-vimeo')).then(function(src){
+          if(!src || !box.isConnected) return;
+          const img = document.createElement('img'); img.className = 'sm-thumb'; img.alt = ''; img.loading = 'lazy'; img.src = src;
+          box.replaceWith(img);
+        });
+      });
       el.querySelectorAll('[data-sm-av]').forEach(function(av){
         const card = av.closest('[data-sm-raiz]');
         const t = lista.find(function(x){ return x.raiz === card.getAttribute('data-sm-raiz'); });
