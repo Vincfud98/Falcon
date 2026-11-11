@@ -5303,6 +5303,13 @@ body.gallery-detail-open{overflow:hidden}
 .qz-sat-gab{display:flex;align-items:baseline;gap:.5rem;margin-bottom:.45rem;font-family:var(--sans)}
 .qz-sat-gab-rot{font-size:.52rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
 .qz-sat-gab strong{font-weight:500;font-size:calc(.82rem * var(--gabfs,1));color:var(--accent)}
+.qz-sat-prov{
+  display:inline-flex;align-items:center;gap:.45rem;margin-bottom:.45rem;
+  padding:.28rem .6rem;border:1px solid var(--amber-border);border-radius:2px;background:var(--amber-lo);
+  font-family:var(--sans);font-weight:400;font-size:.56rem;letter-spacing:.1em;text-transform:uppercase;line-height:1.4;color:var(--amber);
+}
+.qz-sat-prov::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:currentColor}
+.qz-sat-prov.is-conf{color:var(--accent);border-color:var(--accent-border);background:var(--accent-lo)}
 .qz-sat-prep{
   font-family:var(--sans);font-weight:300;font-size:calc(.7rem * var(--gabfs,1));
   color:var(--text-mute);line-height:1.5;
@@ -14579,6 +14586,8 @@ window.TAG_REGISTRY = {
     reg('questoes.questions',        { monta: () => qsb.from(_vq('questions')).select('*'), ordem: 'id', banco: true });
     reg('questoes.tf_items',         { monta: () => qsb.from(_vq('tf_items')).select('*'), ordem: 'id', banco: true });
     reg('questoes.tf_item_comments', { monta: () => qsb.from('tf_item_comments').select('*'), ordem: 'id', banco: true });
+    // comentário provisório (SQL 149): aparece só quando o item não tem o definitivo
+    reg('questoes.comentarios_provisorios', { monta: () => qsb.from('comentarios_provisorios').select('id, tf_item_id, texto, confirmado_por, confirmado_em, updated_at'), ordem: 'id', banco: true });
     reg('questoes.mc_options',       { monta: () => qsb.from('mc_options').select('*'), ordem: 'id', banco: true });
     reg('questoes.reference_texts',  { monta: () => qsb.from('reference_texts').select('*'), ordem: 'id', banco: true });
     reg('questoes.question_reference_texts', { monta: () => qsb.from('question_reference_texts').select('*'), ordem: ['question_id', 'reference_text_id'], banco: true });
@@ -14891,7 +14900,7 @@ window.TAG_REGISTRY = {
         window.__qbankVisitante = _vis;   // quem entrar depois recarrega o banco com gabarito
         const _vq = n => _vis ? ('v_visitante_' + n) : n;
         const _vazio = () => Promise.resolve({ data: [], error: null });
-        const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR, qetR, tietR, qsR, qtgR, ttgR] = await Promise.all([
+        const [qR, tfR, tfcR, mcR, rtR, qrtR, ecR, eamR, qetR, tietR, qsR, qtgR, ttgR, cpR] = await Promise.all([
           _carregarTabela('questoes.questions', () => qsb.from(_vq('questions')).select('*'), 'id', 'questions'),
           _carregarTabela('questoes.tf_items', () => qsb.from(_vq('tf_items')).select('*'), 'id', 'tf_items'),
           _vis ? _vazio() : _carregarTabela('questoes.tf_item_comments', () => qsb.from('tf_item_comments').select('*'), 'id', 'tf_item_comments'),
@@ -14919,6 +14928,8 @@ window.TAG_REGISTRY = {
           // questão do banco chegava sem etiqueta e marcar uma tag no filtro esvaziava o resultado.
           _carregarTabela('questoes.question_tags', () => qsb.from(_vq('question_tags')).select('question_id, tag_id'), ['question_id', 'tag_id'], 'question_tags'),
           _carregarTabela('questoes.tf_item_tags', () => qsb.from(_vq('tf_item_tags')).select('tf_item_id, tag_id'), ['tf_item_id', 'tag_id'], 'tf_item_tags'),
+          // O comentário PROVISÓRIO (SQL 149): curto, para o item de prova sem comentário. O definitivo, quando chega, toma o lugar.
+          _vis ? _vazio() : _carregarTabela('questoes.comentarios_provisorios', () => qsb.from('comentarios_provisorios').select('id, tf_item_id, texto, confirmado_por, confirmado_em, updated_at'), 'id', 'comentarios_provisorios'),
         ]);
         // tf_item_comments, essay_criteria e essay_answer_models são EXTRAS:
         // se falharem, NÃO derrubam o banco — só ficam sem os dados extras.
@@ -14933,6 +14944,7 @@ window.TAG_REGISTRY = {
         if(qsR.error) console.warn('[hydrate qbank] question_subjects (extra) falhou:', qsR.error.message);
         if(qtgR.error) console.warn('[hydrate qbank] question_tags (extra) falhou:', qtgR.error.message);
         if(ttgR.error) console.warn('[hydrate qbank] tf_item_tags (extra) falhou:', ttgR.error.message);
+        if(cpR.error) console.warn('[hydrate qbank] comentarios_provisorios (extra) falhou:', cpR.error.message);
         // Tabelas essenciais para resolver as questões:
         const qErrs = [qR.error, tfR.error, mcR.error, rtR.error, qrtR.error].filter(Boolean);
         if(qErrs.length){
@@ -14953,6 +14965,7 @@ window.TAG_REGISTRY = {
           questionSubjects:     qsR.data || [],
           questionTags:         qtgR.data || [],
           tfItemTags:           ttgR.data || [],
+          provisorios:          cpR.data || [],
         };
         // Índice questão → tópicos (a etiqueta), pronto pro filtro consultar em
         // O(1). Montado UMA vez por hidratação, não a cada tecla no filtro.
@@ -15133,18 +15146,19 @@ window.TAG_REGISTRY = {
           // filtrar depois de saber os itens. Puxar a tabela toda aqui (149 kB)
           // desfaria metade do ganho.
           const itemIds = (tfR.data || []).map(function(t){ return String(t && t.id); }).filter(Boolean);
-          const [rtR, tfcR, tietR, ttgR] = await Promise.all([
+          const [rtR, tfcR, tietR, ttgR, cpR] = await Promise.all([
             rtIds.length ? qsb.from('reference_texts').select('*').in('id', rtIds) : Promise.resolve({ data: [], error: null }),
             itemIds.length ? qsb.from('tf_item_comments').select('*').in('tf_item_id', itemIds) : Promise.resolve({ data: [], error: null }),
             itemIds.length ? qsb.from('tf_item_edital_topics').select('tf_item_id, edital_topic_id, from_manual').in('tf_item_id', itemIds) : Promise.resolve({ data: [], error: null }),
             itemIds.length ? qsb.from('tf_item_tags').select('tf_item_id, tag_id').in('tf_item_id', itemIds) : Promise.resolve({ data: [], error: null }),
+            itemIds.length ? qsb.from('comentarios_provisorios').select('id, tf_item_id, texto, confirmado_por, confirmado_em, updated_at').in('tf_item_id', itemIds) : Promise.resolve({ data: [], error: null }),
           ]);
           // Se o banco completo chegou enquanto buscávamos, ele manda — não
           // sobrescrevemos o todo com o pedaço.
           if(window._QBank && window._QBank.completo) return false;
           const base = window._QBank || {
             questions:[], tfItems:[], tfItemComments:[], mcOptions:[], referenceTexts:[],
-            questionRefTexts:[], essayCriteria:[], essayAnswerModels:[], questionEditalTopics:[], tfItemEditalTopics:[], questionSubjects:[], questionTags:[], tfItemTags:[],
+            questionRefTexts:[], essayCriteria:[], essayAnswerModels:[], questionEditalTopics:[], tfItemEditalTopics:[], questionSubjects:[], questionTags:[], tfItemTags:[], provisorios:[],
             topicsByQuestion:{}, topicsByItem:{}, subjectsByQuestion:{}, completo:false
           };
           function junta(atual, novos, chaveDe){
@@ -15168,6 +15182,7 @@ window.TAG_REGISTRY = {
             questionSubjects:     junta(base.questionSubjects, qsR.data, function(x){ return String(x.question_id)+'|'+String(x.subject_id); }),
             questionTags:         junta(base.questionTags, qtgR && qtgR.data, function(x){ return String(x.question_id)+'|'+String(x.tag_id); }),
             tfItemTags:           junta(base.tfItemTags, ttgR && ttgR.data, function(x){ return String(x.tf_item_id)+'|'+String(x.tag_id); }),
+            provisorios:          junta(base.provisorios, cpR && cpR.data, porId),
             completo: false                     // PARCIAL — a trava depende disto
           };
           const tbq = {}, tbqM = {};
@@ -23984,6 +23999,15 @@ function itemBadges(it, norm, ctx){
 // que o comentário ainda vem: as questões de prova entram no banco antes dos
 // fascículos, e o comentário chega com eles. "Em preparação" é o ESTADO de não
 // ter comentário, não um texto gravado: o primeiro comentário que entrar toma o lugar.
+// Selo do comentário PROVISÓRIO (SQL 149): sem "IA" e sem explicação (decisão do dono, 11/11/2026).
+// Confirmado pelo professor continua provisório: só ganha o nome de quem confirmou.
+function _qzSeloProvisorio(p){
+  if(!p) return '';
+  if(p.confirmado_por == null) return '<div class="qz-sat-prov">Comentário provisório, à espera do professor</div>';
+  const prof = (Array.isArray(window.__PROFESSORS) ? window.__PROFESSORS : []).find(function(x){ return String(x.id) === String(p.confirmado_por); });
+  return '<div class="qz-sat-prov is-conf">' + Util.esc(prof && prof.name ? ('Comentário provisório, confirmado por ' + prof.name) : 'Comentário provisório, confirmado pelo professor') + '</div>';
+}
+window._qzSeloProvisorio = _qzSeloProvisorio;
 function _qzSatGabaritoHTML(it){
   if(!it) return '';
   const opts = Array.isArray(it.options) ? it.options : [];
@@ -24449,7 +24473,7 @@ Blocks.quiz = {
           detailEl.innerHTML = `<div class="qz-sat-item">
             ${activeItem.difficulty ? `<div class="qz-sat-diff">${Util.esc(diffLabel[activeItem.difficulty]||activeItem.difficulty)}</div>` : ''}
             ${(revealItem && activeItem.reference) ? `<div class="qz-sat-ref">${Util.esc(activeItem.reference)}</div>` : ''}
-            ${(revealItem && activeItem.comments) ? `<div class="qz-sat-comments">${_san(String(activeItem.comments))}</div>` : (revealItem ? _qzSatGabaritoHTML(activeItem) : '')}
+            ${(revealItem && activeItem.comments) ? `${activeItem.comentarioProvisorio ? _qzSeloProvisorio(activeItem.comentarioProvisorio) : ''}<div class="qz-sat-comments">${_san(String(activeItem.comments))}</div>` : (revealItem ? _qzSatGabaritoHTML(activeItem) : '')}
             ${(revealItem && activeItem.recommendation) ? `<div class="qz-sat-reco">${Util.esc(activeItem.recommendation)}</div>` : ''}
             ${(topicChips||tagChips) ? `<div class="q-topics-tags" style="margin-top:.6rem">${topicChips}${tagChips}</div>` : ''}
             ${(revealItem && window.Duvidas) ? Duvidas.itemExtrasHtml(activeItem) : ''}
@@ -46769,6 +46793,7 @@ Renderers.simuladoPerformance = function(route){
         assertion: it.assertion || '',
         origin: it.origin || '',
         comments: it.comments || '',
+        comentarioProvisorio: it.comentarioProvisorio || null,
         selectedDisplay: selIdx >= 0 ? norm.display[selIdx] : null,
         keyDisplay: keyIdx >= 0 ? norm.display[keyIdx] : null,
         answered,
@@ -46803,6 +46828,7 @@ Renderers.simuladoPerformance = function(route){
       <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:${o.comments?'.7rem':'0'}">${respChip}${keyChip}</div>
       ${o.comments ? `<details style="margin-top:.2rem">
         <summary style="cursor:pointer;font-family:var(--mono);font-size:.68rem;color:var(--accent);padding:.3rem 0;user-select:none;text-transform:uppercase;letter-spacing:.08em">Gabarito comentado</summary>
+        ${o.comentarioProvisorio ? `<div style="margin-top:.5rem">${_qzSeloProvisorio(o.comentarioProvisorio)}</div>` : ''}
         <div style="padding:.7rem .85rem;margin-top:.4rem;border-left:2px solid var(--accent-border);background:rgba(0,0,0,.1);border-radius:0 var(--radius) var(--radius) 0;font-family:var(--serif);font-size:.88rem;line-height:1.6;color:var(--text)">${sanPerf(String(o.comments))}</div>
       </details>` : ''}
     </article>`;
@@ -49415,6 +49441,7 @@ function _qbankIndex(){
     tfByQuestion: new Map(),
     mcByQuestion: new Map(),
     commentsByItem: new Map(),
+    provisorioByItem: new Map(),
     refTextByQuestion: new Map(),
     tagIdsByQuestion: new Map(),
     tagIdsByItem: new Map(),
@@ -49451,6 +49478,7 @@ function _qbankIndex(){
     l.push(c);
   });
   idx.commentsByItem.forEach(function(l){ l.sort(function(a, b){ return (a.position || 0) - (b.position || 0); }); });
+  (bank.provisorios || []).forEach(function(c){ if(c && c.tf_item_id != null) idx.provisorioByItem.set(String(c.tf_item_id), c); });
   const rtById = new Map();
   (bank.referenceTexts || []).forEach(function(r){ if(r) rtById.set(String(r.id), r); });
   (bank.questionRefTexts || []).forEach(function(l){
@@ -49522,7 +49550,14 @@ function resolveBankGroup(questionId, itemIds, commentChoice){
       }
       if(chosen && (chosen.text || '').trim()) gab = chosen.text;
       else if(cs.length && (cs[0].text || '').trim()) gab = cs[0].text;
+      // Sem comentário definitivo: o PROVISÓRIO (SQL 149), com o selo. O definitivo, quando chega, toma o lugar.
+      let provisorio = null;
+      if(!String(gab || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim()){
+        const pv = idx.provisorioByItem.get(String(t.id));
+        if(pv && String(pv.texto || '').trim()){ gab = pv.texto; provisorio = { confirmado_por: pv.confirmado_por || null, confirmado_em: pv.confirmado_em || null }; }
+      }
       return {
+        comentarioProvisorio: provisorio,
         id: t.id,
         assertion: t.assertiva || '',
         comments: gab,
