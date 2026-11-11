@@ -254,3 +254,120 @@
   console.log('[UbiqueStore] pronto · in-memory · aguardando hidratação do Supabase');
 
 })(typeof window !== 'undefined' ? window : this);
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Avisos no celular e no computador (web push · Sala dos professores, etapa 5,
+   SQL 145). Usado pela Conta (app do aluno) e pelo Meu perfil (Sala). Cada
+   aparelho que a pessoa ativa vira uma inscrição no servidor; todo aviso novo
+   do sino chega também como notificação do aparelho (sw.js mostra e abre).
+   No iPhone só funciona com a Falcon na Tela de Início (exigência da Apple).
+   ═══════════════════════════════════════════════════════════════════════ */
+(function(global){
+  'use strict';
+  function suporta(){ return 'serviceWorker' in navigator && 'PushManager' in global && 'Notification' in global; }
+  function ehIOS(){ return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
+  function instalado(){ return !!((global.matchMedia && global.matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true); }
+  function bytes(b64){
+    const s = String(b64 || '').replace(/-/g, '+').replace(/_/g, '/');
+    const bin = atob(s + '='.repeat((4 - s.length % 4) % 4));
+    const out = new Uint8Array(bin.length);
+    for(let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function aparelho(){
+    const ua = navigator.userAgent;
+    const so = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows' : 'outro';
+    const nav = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'navegador';
+    return nav + ' · ' + so;
+  }
+  async function registro(){
+    let r = await navigator.serviceWorker.getRegistration();
+    if(!r) r = await navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' });
+    await navigator.serviceWorker.ready;
+    return r;
+  }
+  async function inscricao(){
+    if(!suporta()) return null;
+    const r = await navigator.serviceWorker.getRegistration();
+    return r ? r.pushManager.getSubscription() : null;
+  }
+  async function estado(){
+    if(!suporta()) return { suporta: false, ios: ehIOS(), instalado: instalado() };
+    const s = await inscricao();
+    return { suporta: true, permissao: Notification.permission, ativo: !!s, ios: ehIOS(), instalado: instalado() };
+  }
+  async function ativar(){
+    if(!suporta()) throw new Error('sem_suporte');
+    const perm = await Notification.requestPermission();
+    if(perm !== 'granted') throw new Error('sem_permissao');
+    const r = await registro();
+    const sb = global._sb;
+    let chave = (await sb.schema('aluno').rpc('push_chave_publica')).data;
+    if(!chave){ const f = await sb.functions.invoke('enviar-push', { body: {} }); chave = f && f.data && f.data.publica; }
+    if(!chave) throw new Error('sem_chave');
+    let s = await r.pushManager.getSubscription();
+    if(!s) s = await r.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: bytes(chave) });
+    const j = s.toJSON();
+    const res = await sb.schema('aluno').rpc('push_inscrever', { p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth, p_aparelho: aparelho() });
+    if(res.error) throw new Error(res.error.message);
+    return true;
+  }
+  async function desativar(){
+    const s = await inscricao();
+    if(!s) return;
+    try{ await global._sb.schema('aluno').rpc('push_cancelar', { p_endpoint: s.endpoint }); }catch(_){}
+    await s.unsubscribe();
+  }
+  // aviso de teste: entra no sino da própria pessoa e, com o aparelho ativado, chega no aparelho
+  async function testar(){
+    const sb = global._sb;
+    const u = (await sb.auth.getUser()).data.user;
+    if(!u) throw new Error('sem_sessao');
+    const id = (global.crypto && crypto.randomUUID) ? crypto.randomUUID() : null;
+    const r = await sb.schema('aluno').from('notifications').insert({ id: id, user_id: u.id, type: 'teste_push', read: false,
+      payload: { text_excerpt: 'Os avisos no celular estão funcionando.' } });
+    if(r.error) throw new Error(r.error.message);
+  }
+  function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  // desenha o quadro (texto + botões) dentro de box; o: { btn: 'classe do botão principal', btnGhost: 'classe do secundário' }
+  async function pintar(box, o){
+    if(!box) return;
+    o = o || {};
+    const B = o.btn || 'btn', G = o.btnGhost || 'btn-ghost';
+    const e = await estado();
+    let txt = '', botoes = '';
+    if(!e.suporta){
+      txt = e.ios && !e.instalado
+        ? 'No iPhone, os avisos só chegam com a Falcon na Tela de Início: no Safari, toque em Compartilhar e em "Adicionar à Tela de Início"; depois abra a Falcon por lá e ative aqui.'
+        : 'Este navegador não recebe avisos. Use o Chrome, o Edge, o Firefox ou o Safari atualizados.';
+    } else if(e.permissao === 'denied'){
+      txt = 'Os avisos estão bloqueados neste navegador. Libere nas permissões do site (o cadeado ao lado do endereço) e volte aqui.';
+    } else if(e.ativo){
+      txt = 'Ativos neste aparelho: o que chega no sino aparece também como aviso do aparelho.';
+      botoes = '<button type="button" class="' + esc(G) + '" data-push="testar">Mandar um aviso de teste</button><button type="button" class="' + esc(G) + '" data-push="desativar">Desativar neste aparelho</button>';
+    } else {
+      txt = 'Receba no celular ou no computador o que chega no sino: respostas, menções, dúvidas e avisos da equipe.';
+      botoes = '<button type="button" class="' + esc(B) + '" data-push="ativar">Ativar avisos neste aparelho</button>';
+    }
+    box.innerHTML = '<p class="push-txt" style="margin:0 0 .6rem;font-size:.86rem;line-height:1.6;opacity:.85">' + esc(txt) + '</p>'
+      + (botoes ? '<div class="push-acoes" style="display:flex;gap:.5rem;flex-wrap:wrap">' + botoes + '</div>' : '')
+      + '<p class="push-msg" data-push-msg style="margin:.5rem 0 0;font-size:.8rem;opacity:.8"></p>';
+    if(box.__pushLigado) return;
+    box.__pushLigado = true;
+    box.addEventListener('click', async function(ev){
+      const b = ev.target.closest('[data-push]'); if(!b) return;
+      const acao = b.getAttribute('data-push');
+      const msg = function(t){ const m = box.querySelector('[data-push-msg]'); if(m) m.textContent = t; };
+      b.disabled = true;
+      try{
+        if(acao === 'ativar'){ await ativar(); await pintar(box, o); msg('Pronto. Toque em "Mandar um aviso de teste" para conferir.'); return; }
+        if(acao === 'desativar'){ await desativar(); await pintar(box, o); msg('Desativado neste aparelho.'); return; }
+        if(acao === 'testar'){ await testar(); msg('Aviso de teste enviado. Deve chegar em alguns segundos.'); }
+      }catch(err){
+        const m = String((err && err.message) || err);
+        msg(m === 'sem_permissao' ? 'Sem permissão: o navegador não deixou mostrar avisos.' : m === 'sem_suporte' ? 'Este navegador não recebe avisos.' : 'Não deu certo agora: ' + m);
+      }finally{ b.disabled = false; }
+    });
+  }
+  global.FalconPush = { suporta: suporta, estado: estado, ativar: ativar, desativar: desativar, testar: testar, pintar: pintar };
+})(typeof window !== 'undefined' ? window : this);

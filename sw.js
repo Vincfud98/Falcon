@@ -154,3 +154,28 @@ self.addEventListener('fetch', function(ev){
   if(CDN_HOSTS.indexOf(u.hostname) >= 0 && (dest === 'script' || dest === 'style' || dest === 'font' || dest === '')){ ev.respondWith(copiaPrimeiro(ev, C_LIBS)); return; }
   if(dest === 'image' && imagemGuardavel(u)){ ev.respondWith(imagem(ev)); return; }
 });
+
+/* Avisos no celular e no computador (web push, SQL 145). O servidor manda
+   { titulo, texto, link, tag }; o toque abre (ou traz para frente) a Falcon no link. */
+self.addEventListener('push', function(ev){
+  let d = {};
+  try{ d = ev.data ? ev.data.json() : {}; }catch(_){ d = { texto: ev.data ? ev.data.text() : '' }; }
+  ev.waitUntil(self.registration.showNotification(d.titulo || 'Falcon', {
+    body: d.texto || '',
+    tag: d.tag || undefined,
+    data: { link: d.link || './' }
+  }));
+});
+self.addEventListener('notificationclick', function(ev){
+  ev.notification.close();
+  const alvo = new URL((ev.notification.data && ev.notification.data.link) || './', RAIZ).href;
+  ev.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(lista){
+    const pagina = alvo.split('#')[0];
+    for(const c of lista){
+      if(c.url.split('#')[0] === pagina && 'focus' in c){
+        return c.focus().then(function(cc){ return (cc && 'navigate' in cc) ? cc.navigate(alvo) : cc; });
+      }
+    }
+    return self.clients.openWindow(alvo);
+  }));
+});
