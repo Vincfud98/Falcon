@@ -23220,6 +23220,7 @@ Blocks.video = {
     const pseudo = { id: 'v' + block.id, type: 'comments', title: '' };
     const cctx = { unitId: ctx && ctx.unitId, store: Store, bare: true,
                    videoTempo: tempo ? tempo.tempo : null,
+                   videoAtualizar: (tempo && tempo.atualizar) ? tempo.atualizar : null,
                    videoIr: tempo ? function(t){ tempo.ir(t); const fr = sec.querySelector('.vb-frame'); if(fr) fr.scrollIntoView({ behavior: 'smooth', block: 'center' }); } : null };
     Blocks.comments.mount(box, pseudo, cctx);
   }
@@ -29382,6 +29383,11 @@ Blocks.comments = {
       const t = (ctx && typeof ctx.videoTempo === 'function') ? ctx.videoTempo() : null;
       return t != null ? { video_t: t } : null;
     }
+    // ao escrever, pergunta ao player em que minuto o vídeo está (a resposta chega antes do Publicar)
+    if(ctx && typeof ctx.videoAtualizar === 'function'){
+      wrap.addEventListener('focusin', e => { if(e.target.matches && e.target.matches('.cmt-textarea')) ctx.videoAtualizar(); });
+      wrap.addEventListener('input', e => { if(e.target.matches && e.target.matches('.cmt-textarea')) ctx.videoAtualizar(); });
+    }
     wrap.addEventListener('click', e => {
       const vt = e.target.closest('[data-video-t]');
       if(vt && ctx && typeof ctx.videoIr === 'function'){ e.preventDefault(); ctx.videoIr(Number(vt.getAttribute('data-video-t')) || 0); }
@@ -32551,16 +32557,26 @@ const VideoTempo = (function(){
     let t = null;
     if(/youtube(-nocookie)?\.com\/embed\//.test(src)){
       if(!/[?&]enablejsapi=1/.test(src)) f.setAttribute('src', src + (src.indexOf('?') >= 0 ? '&' : '?') + 'enablejsapi=1&origin=' + encodeURIComponent(location.origin));
-      f.addEventListener('load', () => _enviar(f, { event: 'listening', id: 1, channel: 'widget' }));
-      _escutar(f, d => { if(d.event === 'infoDelivery' && d.info && typeof d.info.currentTime === 'number') t = d.info.currentTime; });
-      return { tempo: () => (t != null && t >= 1 ? t : null),
+      // o player só passa a mandar o tempo depois de ouvir o "listening" já pronto: insiste até responder
+      let vivo = false, n = 0;
+      const ping = () => { if(vivo || n++ > 20 || !f.isConnected) return; _enviar(f, { event: 'listening', id: 1, channel: 'widget' }); setTimeout(ping, 1000); };
+      f.addEventListener('load', () => { n = 0; ping(); });
+      ping();
+      _escutar(f, d => { vivo = true; if(d.event === 'infoDelivery' && d.info && typeof d.info.currentTime === 'number') t = d.info.currentTime; });
+      return { tempo: () => (t != null && t >= 1 ? t : null), atualizar: () => { if(!vivo){ n = 0; ping(); } },
                ir: s => { _enviar(f, { event: 'command', func: 'seekTo', args: [s, true] }); _enviar(f, { event: 'command', func: 'playVideo', args: [] }); } };
     }
     if(/player\.vimeo\.com\/video\//.test(src)){
-      const ouvir = () => _enviar(f, { method: 'addEventListener', value: 'timeupdate' });
-      f.addEventListener('load', ouvir); ouvir();
-      _escutar(f, d => { if(d.event === 'timeupdate' && d.data && typeof d.data.seconds === 'number') t = d.data.seconds; });
-      return { tempo: () => (t != null && t >= 1 ? t : null),
+      // pergunta o minuto quando o aluno escreve (getCurrentTime) e assina o timeupdate quando o player fica pronto
+      const assinar = () => _enviar(f, { method: 'addEventListener', value: 'timeupdate' });
+      f.addEventListener('load', assinar);
+      _escutar(f, d => {
+        if(d.event === 'ready') assinar();
+        if(d.event === 'timeupdate' && d.data && typeof d.data.seconds === 'number') t = d.data.seconds;
+        if(d.method === 'getCurrentTime' && typeof d.value === 'number') t = d.value;
+      });
+      assinar();
+      return { tempo: () => (t != null && t >= 1 ? t : null), atualizar: () => _enviar(f, { method: 'getCurrentTime' }),
                ir: s => { _enviar(f, { method: 'setCurrentTime', value: s }); _enviar(f, { method: 'play' }); } };
     }
     return null;
