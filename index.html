@@ -65768,6 +65768,12 @@ function _freqLinhas(d, est){
     c.conj.forEach(function(k){
       const it = d.itens[k]; if(!it || !anosSet.has(it.ano)) return;
       n++; provas.add(it.ano); if(busca) uniaoSet.add(k);
+      if(window.__FREQ_ALUNOS){
+        // Sala dos professores (SQL 147): respostas dos alunos que têm a matéria, item por item
+        const al = window.__FREQ_ALUNOS[String(it.resp)];
+        if(al){ resp += Number(al[0]) || 0; certas += Number(al[1]) || 0; }
+        return;
+      }
       const st = (typeof _bankQuestionStatus === 'function') ? _bankQuestionStatus(it.resp) : 'unanswered';
       if(st !== 'unanswered'){ resp++; if(st === 'right' || st === 'guess_right') certas++; }
     });
@@ -65917,9 +65923,10 @@ function _freqEst(chave){
 }
 function _freqPct(n){ return (typeof _pfPctTxt === 'function') ? _pfPctTxt(n) : (Math.round(n * 10) / 10).toFixed(1).replace('.', ',') + '%'; }
 function _freqAcHtml(r){
-  if(!r.resp) return '<span class="fq-ac is-vazio" title="Você ainda não respondeu questões deste tema">—</span>';
+  const _al = !!window.__FREQ_ALUNOS;
+  if(!r.resp) return '<span class="fq-ac is-vazio" title="' + (_al ? 'Nenhum aluno respondeu questões deste tema' : 'Você ainda não respondeu questões deste tema') + '">—</span>';
   const t = r.certas / r.resp, cor = (typeof gradient3 === 'function') ? gradient3(t) : 'var(--text)';
-  return '<span class="fq-ac" style="color:' + cor + '" title="Você acertou ' + r.certas + ' de ' + r.resp + ' respondidas deste tema">' + Math.round(t * 100) + '% · ' + r.certas + '/' + r.resp + '</span>';
+  return '<span class="fq-ac" style="color:' + cor + '" title="' + (_al ? 'Os alunos acertaram ' + r.certas + ' de ' + r.resp + ' respostas deste tema' : 'Você acertou ' + r.certas + ' de ' + r.resp + ' respondidas deste tema') + '">' + Math.round(t * 100) + '% · ' + r.certas + '/' + r.resp + '</span>';
 }
 function _freqHref(d, r, est, examId){
   const q = _freqQueryBanco(d, r, est, examId); if(!q) return '#/banco/questions';
@@ -65935,7 +65942,7 @@ function _freqLinhaHtml(d, r, i, est, examId, maior){
     + _freqAcHtml(r) + '</a>';
 }
 function _freqCabecaLista(){
-  return '<div class="fq-row fq-row-h"><span></span><span>Tema</span><span></span><span class="fq-n">Itens</span><span class="fq-pct">% da prova</span><span class="fq-ac">Seu acerto</span></div>';
+  return '<div class="fq-row fq-row-h"><span></span><span>Tema</span><span></span><span class="fq-n">Itens</span><span class="fq-pct">% da prova</span><span class="fq-ac">' + (window.__FREQ_ALUNOS ? 'Acerto dos alunos' : 'Seu acerto') + '</span></div>';
 }
 function _freqCorpoHtml(d, est, examId){
   const L = _freqLinhas(d, est);
@@ -75688,6 +75695,46 @@ const RaioX = (function(){
   return { open: open };
 })();
 window.RaioX = RaioX;
+
+/* "O que mais cai na prova" para a Sala dos professores (?embed=mais-cai&materia=N):
+   a página mostra só o cartão do Desempenho daquela matéria, com o acerto dos
+   alunos que têm a matéria no lugar do "Seu acerto" (SQL 147). O resto do app
+   carrega escondido; clicar num tema abre o Banco numa aba nova. A altura vai
+   para a Sala (postMessage) para a janela não ter rolagem própria. */
+(function(){
+  const q = new URLSearchParams(location.search);
+  if(q.get('embed') !== 'mais-cai') return;
+  const sid = q.get('materia');
+  document.documentElement.classList.add('embed-mais-cai');
+  const estilo = document.createElement('style');
+  estilo.textContent = 'html.embed-mais-cai body > *:not(#embedMaisCai){display:none !important}'
+    + 'html.embed-mais-cai body{background:var(--bg);min-height:0;overflow:auto}'
+    + '#embedMaisCai{padding:.2rem .2rem 1rem}#embedMaisCai .fq-card{margin:0}';
+  document.head.appendChild(estilo);
+  const altura = function(box){ try{ parent.postMessage({ tipo: 'mais-cai-altura', h: box.scrollHeight + 20 }, location.origin); }catch(_){} };
+  const espera = function(cond, ms){ return new Promise(function(ok){ const t0 = Date.now(); (function v(){ if(cond() || Date.now() - t0 > ms) ok(cond()); else setTimeout(v, 300); })(); }); };
+  window.addEventListener('DOMContentLoaded', async function(){
+    const box = document.createElement('div'); box.id = 'embedMaisCai';
+    box.innerHTML = '<div class="ini-loading"><span class="ini-spinner"></span><span class="ini-loading-t">Carregando o cartão da matéria…</span></div>';
+    document.body.appendChild(box);
+    const pronto = await espera(function(){ return !!(window._sb && window.Auth && Auth.getUser && Auth.getUser() && (window.COURSES_ALL || []).length); }, 40000);
+    if(!pronto){ box.innerHTML = '<p class="fq-vazio">Não deu para abrir: entre na Falcon e tente de novo.</p>'; altura(box); return; }
+    const r = await window._sb.schema('aluno').rpc('sala_respostas_por_item', { p_materia: Number(sid) });
+    window.__FREQ_ALUNOS = (r && !r.error && r.data) ? r.data : {};
+    if(typeof window._ensureQBank === 'function') await window._ensureQBank();
+    const c = (window.COURSES_ALL || []).find(function(x){ return String(x._subjectId) === String(sid); });
+    const examId = c && Array.isArray(c.concurso_ids) && c.concurso_ids.length ? String(c.concurso_ids[0]) : (typeof activeExamId === 'function' ? activeExamId() : '');
+    const html = c ? _freqCardHtml(c, examId) : '';
+    box.innerHTML = html || '<p class="fq-vazio">Esta matéria ainda não tem tópicos do edital ligados às questões de provas anteriores.</p>';
+    if(html) _freqWire(box);
+    box.addEventListener('click', function(e){
+      const a = e.target.closest('a[href^="#/"]');
+      if(a){ e.preventDefault(); e.stopPropagation(); window.open(location.pathname + a.getAttribute('href'), '_blank', 'noopener'); }
+    }, true);
+    altura(box);
+    if(window.ResizeObserver) new ResizeObserver(function(){ altura(box); }).observe(box);
+  });
+})();
 
 Renderers.performance = function(route){
   // Esta página soma blocos de todas as unidades: com a carga completa ainda
