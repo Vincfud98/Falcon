@@ -26,7 +26,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
      Line/Bar) e no RotinaTab. Quem usa a biblioteca é o admin.html, que tem a
      própria tag. NÃO reintroduzir aqui sem antes checar se há uso real. -->
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=135"></script>
+<script src="ubique-shared.js?v=136"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=83"></script>
 <script src="raiox-render.js?v=4"></script>
@@ -3728,6 +3728,14 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .duv-ok p{margin:0}
 .duv-ok strong{color:var(--text);font-weight:500}
 .qz-sat-acoes{display:flex;flex-direction:column;gap:.45rem;margin-top:.9rem}
+/* Comentários embaixo do vídeo e etiqueta do professor (SQL 143) */
+.vb-comments{margin-top:1.4rem;padding-top:1.2rem;border-top:1px solid var(--border)}
+.vb-comments-head{display:flex;align-items:baseline;gap:.8rem;flex-wrap:wrap;margin-bottom:.9rem}
+.vb-comments-title{font-family:var(--sans);font-size:.6rem;letter-spacing:.18em;text-transform:uppercase;color:var(--accent)}
+.vb-comments-hint{font-family:var(--sans);font-weight:300;font-size:.74rem;color:var(--text-mute)}
+.cmt-prof-tag{display:inline-block;margin-left:.4rem;padding:.12rem .4rem;border:1px solid var(--accent);border-radius:2px;font-family:var(--sans);font-size:.5rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);vertical-align:middle;line-height:1.4}
+.cmt-video-t{padding:0;margin-left:.5rem;background:none;border:0;font-family:var(--mono);font-size:.6rem;color:var(--accent);cursor:pointer;text-decoration:underline;text-decoration-color:var(--accent-border-soft)}
+.cmt-video-t:hover{text-decoration-color:var(--accent)}
 .qz-sat-acoes .icon-btn{justify-content:center}
 .qz-sat-pub{margin-top:.9rem;padding:.8rem .9rem;border:1px solid var(--accent-border-soft);border-radius:3px;background:var(--accent-xlo)}
 .qz-sat-pub-lab{font-family:var(--sans);font-size:.55rem;letter-spacing:.16em;text-transform:uppercase;color:var(--accent)}
@@ -14674,10 +14682,13 @@ window.TAG_REGISTRY = {
       const _duvidasP = Promise.all([
         window._sb.schema('aluno').rpc('professores_para_duvidas'),
         window._sb.schema('aluno').from('duvidas_publicas').select('id,thread_id,professor_id,question_id,tf_item_id,pergunta,resposta,updated_at'),
-      ]).then(([pd, dp]) => {
+        // Contas de professor (SQL 143): etiqueta "Professora" no comentário e os professores primeiro no @
+        window._sb.schema('aluno').rpc('contas_professores'),
+      ]).then(([pd, dp, cp]) => {
         window.__PROFS_DUVIDAS = (pd && !pd.error && Array.isArray(pd.data)) ? pd.data : [];
         window.__DUVIDAS_PUBLICAS = (dp && !dp.error && dp.data) || [];
-      }).catch(() => { window.__PROFS_DUVIDAS = []; window.__DUVIDAS_PUBLICAS = []; });
+        window.__CONTAS_PROFS = (cp && !cp.error && Array.isArray(cp.data)) ? cp.data : [];
+      }).catch(() => { window.__PROFS_DUVIDAS = []; window.__DUVIDAS_PUBLICAS = []; window.__CONTAS_PROFS = []; });
       const _pacotesP = Promise.all([
         _professoresP,
         _secoesP,
@@ -15646,6 +15657,14 @@ window._hydrateDirectory = async function(){
           const { data: profs, error } = await window._sb.schema('crm').from(_vis ? 'v_visitante_autores' : 'user_directory')
             .select(_vis ? 'user_id, display_name, nickname, handle, photo_url, photo_transform' : 'user_id, display_name, nickname, full_name_public, handle, bio, photo_url, photo_transform');
           if(!error && Array.isArray(profs) && UbiqueStore.user_profiles){
+            // Perfis com o MESMO id (criados no mesmo milissegundo, antes do conserto em
+            // ubique-shared): o update caía no perfil errado e nomes se trocavam no @.
+            const _l0 = UbiqueStore.user_profiles.list() || [];
+            const _vis0 = new Set(); let _dup = false;
+            _l0.forEach(x => { const k = String(x && x.id); if(_vis0.has(k)) _dup = true; _vis0.add(k); });
+            if(_dup && typeof UbiqueStore.user_profiles.replaceAll === 'function'){
+              UbiqueStore.user_profiles.replaceAll(_l0.map((x, i) => Object.assign({}, x, { id: 'perfil-' + (x.user_id || ('sem-' + i)) })));
+            }
             const list = UbiqueStore.user_profiles.list() || [];
             profs.forEach(p => {
               if(!p || !p.user_id) return;
@@ -18007,20 +18026,24 @@ const Store = (function(){
         block_id: String(blockId||''),
         parent_id: (comment.parentId && _UUID_RE.test(comment.parentId)) ? comment.parentId : null,
         text: String(comment.text||''),
-        metadata: { mentions: comment.mentions || [], author: comment.author || null }
+        metadata: Object.assign({ mentions: comment.mentions || [], author: comment.author || null },
+                                comment.videoT != null ? { video_t: comment.videoT } : {})
       };
       const { error } = await window._sb.schema('aluno').from('discussion_comments').insert(row);
       if(error) console.warn('[comment sync insert]', error);
     }catch(e){ console.warn('[comment sync exception]', e); }
   }
 
-  async function _syncCommentEditToSupabase(commentId, newText){
+  async function _syncCommentEditToSupabase(commentId, newText, comment){
     const userId = _currentSupaUserId();
     if(!userId || !window._sb) return;
     if(!_UUID_RE.test(String(commentId||''))) return;
     try{
+      const patch = { text: String(newText||''), edited_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      if(comment) patch.metadata = Object.assign({ mentions: comment.mentions || [], author: comment.author || null },
+                                                 comment.videoT != null ? { video_t: comment.videoT } : {});
       const { error } = await window._sb.schema('aluno').from('discussion_comments')
-        .update({ text: String(newText||''), edited_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .update(patch)
         .eq('id', commentId).eq('user_id', userId);
       if(error) console.warn('[comment edit sync]', error);
     }catch(e){ console.warn('[comment edit sync exception]', e); }
@@ -18119,7 +18142,8 @@ const Store = (function(){
           mentions: (meta.mentions && Array.isArray(meta.mentions)) ? meta.mentions : [],
           parentId: row.parent_id || null,
           createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
-          editedAt: row.edited_at ? new Date(row.edited_at).getTime() : null
+          editedAt: row.edited_at ? new Date(row.edited_at).getTime() : null,
+          videoT: (meta.video_t != null && isFinite(meta.video_t)) ? Number(meta.video_t) : null
         };
       });
       // Preserva comentários LOCAIS (UUID) que ainda não chegaram ao banco
@@ -20711,7 +20735,7 @@ const Store = (function(){
       // Fase 4e — fire-and-forget sync Supabase
       _syncHighlightDeleteToSupabase(id).catch(()=>{});
     },
-    addComment(blockId, text, parentId, unitId){
+    addComment(blockId, text, parentId, unitId, extra){
       if(!_state.comments) _state.comments = {};
       if(!_state.comments[blockId]) _state.comments[blockId] = [];
       // Resolve menções no texto pra notificar destinatários
@@ -20729,7 +20753,9 @@ const Store = (function(){
         text,
         mentions: mentions.map(m => ({ handle: m.handle, user_id: m.user_id })),
         parentId: parentId || null,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        // minuto do vídeo (comentários embaixo do vídeo, SQL 143)
+        videoT: (extra && extra.video_t != null && isFinite(extra.video_t)) ? Math.round(Number(extra.video_t)) : null
       };
       _state.comments[blockId].push(comment);
       _persist(); _emit();
@@ -20795,6 +20821,24 @@ const Store = (function(){
             }
           }).catch(()=>{});
         }
+        // Comentário embaixo de um vídeo (block_id "v<id>", SQL 143): avisa o professor
+        // que apresenta o vídeo (a conta ligada a ele), mesmo sem @.
+        try{
+          const _mv = /^v(\d+)$/.exec(String(blockId || ''));
+          if(_mv && window.UbiqueStore && UbiqueStore.unit_blocks){
+            const blk = (UbiqueStore.unit_blocks.list() || []).find(b => b && String(b.id) === _mv[1]);
+            const pres = blk ? (blk.presenters || (blk.content && blk.content.presenters) || []) : [];
+            const ids = new Set((Array.isArray(pres) ? pres : []).map(p => String(p && p.id)));
+            (window.__CONTAS_PROFS || []).forEach(cp => {
+              if(!ids.has(String(cp.professor_id)) || cp.user_id === authorId || notified.has(cp.user_id)) return;
+              notified.add(cp.user_id);
+              Notifications.create(cp.user_id, 'video_comment', Object.assign({
+                video_title: (blk && (blk.title || (blk.content && blk.content.title))) || '',
+                video_t: comment.videoT
+              }, _basePayload));
+            });
+          }
+        }catch(e){ console.warn('[aviso do vídeo]', e); }
         // Contato — menções a ADMINS vão pra caixa de entrada do painel
         // (aluno.admin_mentions). Dois casos:
         //  • @handle de um admin específico → registra com mentioned_admin_id
@@ -20854,9 +20898,21 @@ const Store = (function(){
       if(!_state.comments || !_state.comments[blockId]) return;
       const c = _state.comments[blockId].find(c => c.id === commentId);
       if(c){
-        c.text = newText; c.editedAt = Date.now(); _persist(); _emit();
+        // Relê as menções do texto novo e avisa só quem entrou agora.
+        const antes = new Set((c.mentions || []).map(m => String(m.user_id)));
+        const novas = (typeof window.parseMentions === 'function') ? window.parseMentions(newText).mentions : [];
+        c.text = newText; c.editedAt = Date.now();
+        c.mentions = novas.map(m => ({ handle: m.handle, user_id: m.user_id }));
+        _persist(); _emit();
         // Fase 4d — fire-and-forget sync Supabase
-        _syncCommentEditToSupabase(commentId, newText).catch(()=>{});
+        _syncCommentEditToSupabase(commentId, newText, c).catch(()=>{});
+        const meId = window.MOCK_USER && window.MOCK_USER.id;
+        if(window.Notifications) novas.forEach(m => {
+          if(!m.user_id || m.user_id === meId || antes.has(String(m.user_id))) return;
+          antes.add(String(m.user_id));
+          Notifications.create(m.user_id, 'mention', { from_user_id: meId, comment_id: c.id, block_id: blockId,
+            text_excerpt: String(newText || '').slice(0, 160), target_hash: (location.hash || '') });
+        });
       }
     },
     hydrateCommentsForBlock(unitId, blockId){
@@ -23152,10 +23208,35 @@ Blocks.video = {
           ${Util.chips(block.topics, block.tags)}
         </div>
       </div>
+      ${_vbComentariosHtml(block, ctx)}
     </section>`;
   },
-  mount(){}
+  mount(stageEl, block, ctx){
+    // Comentários embaixo do vídeo (SQL 143): o mesmo quadro das questões, com o minuto.
+    const box = _vbComentariosEl(stageEl, block);
+    if(!box || !Blocks.comments.mount) return;
+    const sec = box.closest('.video-block');
+    const tempo = (window.VideoTempo && sec) ? VideoTempo.ligar(sec.querySelector('.vb-frame')) : null;
+    const pseudo = { id: 'v' + block.id, type: 'comments', title: '' };
+    const cctx = { unitId: ctx && ctx.unitId, store: Store, bare: true,
+                   videoTempo: tempo ? tempo.tempo : null,
+                   videoIr: tempo ? function(t){ tempo.ir(t); const fr = sec.querySelector('.vb-frame'); if(fr) fr.scrollIntoView({ behavior: 'smooth', block: 'center' }); } : null };
+    Blocks.comments.mount(box, pseudo, cctx);
+  }
 };
+// Só nas unidades (bloco salvo no banco, com id numérico); na prévia do painel e nas aulas, não.
+function _vbComentariosHtml(block, ctx){
+  if(!ctx || !ctx.unitId || ctx.suppressActions || !/^\d+$/.test(String(block && block.id))) return '';
+  const pseudo = { id: 'v' + block.id, type: 'comments', title: '' };
+  return `<div class="vb-comments" data-vb-comments="${Util.attr(block.id)}">
+      <div class="vb-comments-head"><span class="vb-comments-title">Comentários do vídeo</span><span class="vb-comments-hint">quem tem a unidade vê e comenta; use @ para chamar alguém</span></div>
+      ${Blocks.comments.render(pseudo, { unitId: ctx.unitId, store: Store, bare: true })}
+    </div>`;
+}
+function _vbComentariosEl(stageEl, block){
+  if(!stageEl || !block || !/^\d+$/.test(String(block.id))) return null;
+  return stageEl.querySelector('.vb-comments[data-vb-comments="' + CSS.escape(String(block.id)) + '"]');
+}
 
 /* QUIZ */
 function normalizeOptions(opts){
@@ -29186,12 +29267,15 @@ function _buildCommentThread(block, ctx){
     const isOwn = c.authorId === (window.MOCK_USER&&window.MOCK_USER.id);
     // o administrador apaga qualquer comentário (moderação; pedido do dono 16/10, com o nível visitante lendo os comentários)
     const podeApagar = isOwn || !!(window.Auth && Auth.isAdmin && Auth.isAdmin());
-    return `<div class="cmt-item" data-comment-id="${Util.attr(c.id)}">
+    const _pf = window._profDaConta ? window._profDaConta(c.authorId) : null;   // comentário de professor (SQL 143)
+    return `<div class="cmt-item${_pf ? ' cmt-item-prof' : ''}" data-comment-id="${Util.attr(c.id)}">
       <div class="cmt-avatar cmt-author-link" data-cmt-avatar-uid="${Util.attr(c.authorId||'')}" data-user-id="${Util.attr(c.authorId||'')}" title="Ver perfil">${Util.esc(Util.initials(c.author||''))}</div>
       <div class="cmt-item-body">
         <div class="cmt-item-head">
-          <button type="button" class="cmt-author cmt-author-link" data-user-id="${Util.attr(c.authorId||'')}" title="Ver perfil">${Util.esc(c.author||'Anônimo')}</button>
+          <button type="button" class="cmt-author cmt-author-link" data-user-id="${Util.attr(c.authorId||'')}" title="Ver perfil">${Util.esc(_pf ? (_pf.nome || c.author || '') : (c.author||'Anônimo'))}</button>
+          ${_pf ? `<span class="cmt-prof-tag">${Util.esc(window._rotuloProf(_pf))}</span>` : ''}
           <span class="cmt-date">${fmtDate(c.createdAt)}</span>
+          ${(c.videoT != null && window.VideoTempo) ? `<button type="button" class="cmt-video-t" data-video-t="${Util.attr(c.videoT)}" title="Ir para este ponto do vídeo">aos ${Util.esc(VideoTempo.fmt(c.videoT))} do vídeo</button>` : ''}
           ${c.editedAt ? '<span class="cmt-edited-tag">editado</span>' : ''}
         </div>
         <div class="cmt-text">${(typeof window.linkifyMentions === 'function') ? window.linkifyMentions(c.text||'', c.mentions) : Util.esc(c.text||'')}</div>
@@ -29248,6 +29332,14 @@ Blocks.comments = {
         const uid = el.getAttribute('data-cmt-avatar-uid');
         if(!uid) return;
         const u = (typeof UserDirectory !== 'undefined') ? UserDirectory.getById(uid) : null;
+        // Professor: a foto do cadastro (a mesma do card da matéria e do vídeo)
+        const _pfA = window._profDaConta ? window._profDaConta(uid) : null;
+        if(_pfA && _pfA.foto && !(u && u.photoUrl)){
+          el.classList.add('has-photo');
+          Array.from(el.childNodes).forEach(n => { if(n.nodeType === 3) n.remove(); });
+          renderAvatarInto(el, _dImg(_pfA.foto), { x: 0, y: 0, scale: 1 });
+          return;
+        }
         if(u && u.photoUrl){
           // Limpa texto de iniciais antes de inserir img (textNode no fim
           // sobreviveria; aqui zeramos pra evitar dupla camada de texto)
@@ -29284,6 +29376,16 @@ Blocks.comments = {
       hydrateCmtAvatars(wrap);
     }
 
+    // Comentário embaixo do vídeo: guarda o minuto (quando o player informa) e o
+    // "aos 12:05 do vídeo" leva o player até lá.
+    function _extraDoComentario(){
+      const t = (ctx && typeof ctx.videoTempo === 'function') ? ctx.videoTempo() : null;
+      return t != null ? { video_t: t } : null;
+    }
+    wrap.addEventListener('click', e => {
+      const vt = e.target.closest('[data-video-t]');
+      if(vt && ctx && typeof ctx.videoIr === 'function'){ e.preventDefault(); ctx.videoIr(Number(vt.getAttribute('data-video-t')) || 0); }
+    });
     // Auto-complete @ no textarea principal
     const composeTa = wrap.querySelector('.cmt-textarea');
     if(composeTa && typeof window.attachMentionAutocomplete === 'function'){
@@ -29321,7 +29423,7 @@ Blocks.comments = {
       const textarea = wrap.querySelector('.cmt-textarea');
       const text = textarea.value.trim();
       if(!text) return;
-      Store.addComment(block.id, text, null, ctx && ctx.unitId);
+      Store.addComment(block.id, text, null, ctx && ctx.unitId, _extraDoComentario());
       const fcb = wrap.querySelector('.cmt-forum-cb');
       if(fcb && fcb.checked && ctx && ctx.question && typeof window._forumPublishQuestionComment === 'function'){
         window._forumPublishQuestionComment(ctx, text);
@@ -29433,7 +29535,7 @@ Blocks.comments = {
         const form = submitReply.closest('.cmt-reply-compose');
         const text = form.querySelector('.cmt-textarea').value.trim();
         if(!text) return;
-        Store.addComment(block.id, text, parentId, ctx && ctx.unitId);
+        Store.addComment(block.id, text, parentId, ctx && ctx.unitId, _extraDoComentario());
         refreshThread();
       }
     });
@@ -29934,10 +30036,12 @@ function attachMentionAutocomplete(textareaEl){
     dd.innerHTML = candidates.map((u, i) => {
       const init = Util.esc(Util.initials(u.nickname || u.handle || '?'));
       const cls = 'mention-item' + (i === activeIndex ? ' is-active' : '');
+      const _pfM = window._profDaConta ? window._profDaConta(u.id) : null;
       return '<button type="button" class="' + cls + '" data-idx="' + i + '">' +
         '<span class="mention-avatar">' + init + '</span>' +
         '<span class="mention-stack">' +
-          '<span class="mention-name">' + Util.esc(u.nickname || u.handle || '(sem apelido)') + '</span>' +
+          '<span class="mention-name">' + Util.esc(_pfM ? (_pfM.nome || u.nickname || '') : (u.nickname || u.handle || '(sem apelido)'))
+            + (_pfM ? ' <span class="cmt-prof-tag">' + Util.esc(window._rotuloProf(_pfM)) + '</span>' : '') + '</span>' +
           '<span class="mention-handle">@' + Util.esc(u.handle || '?') + '</span>' +
         '</span>' +
       '</button>';
@@ -29996,14 +30100,14 @@ function attachMentionAutocomplete(textareaEl){
       const ch = val[i];
       if(ch === '@'){ foundAt = i; break; }
       if(/\s/.test(ch)) break;
-      if(!/[a-z0-9_.]/i.test(ch)) break;
+      if(!/[\p{L}\p{N}_.]/u.test(ch)) break;   // letras com acento também (busca pelo apelido)
       i--;
     }
     if(foundAt < 0) return null;
-    // O @ precisa ser início ou ter espaço antes
-    if(foundAt > 0 && !/\s/.test(val[foundAt-1])) return null;
+    // O @ precisa ser início, ou ter espaço ou pontuação antes ("(@ana", "—@ana")
+    if(foundAt > 0 && !/[\s(\[{"'“‘,;:—–-]/.test(val[foundAt-1])) return null;
     const q = val.slice(foundAt + 1, pos);
-    if(!/^[a-z0-9_.]*$/i.test(q)) return null;
+    if(!/^[\p{L}\p{N}_.]*$/u.test(q)) return null;
     return { start: foundAt, end: pos, query: q };
   }
   textareaEl.addEventListener('input', () => {
@@ -30017,7 +30121,27 @@ function attachMentionAutocomplete(textareaEl){
     const rawCands = rawQ
       ? UserDirectory.search(rawQ, { excludeUserId: me && me.id, limit: 24 })
       : (UserDirectory.all() || []).filter(u => !me || u.id !== me.id);
-    candidates = rawCands.filter(u => u && u.handle && String(u.handle).trim()).slice(0, 8);
+    candidates = rawCands.filter(u => u && u.handleReal);
+    // Professores primeiro (SQL 143), com o nome do cadastro: quem tem a conta ligada
+    const _qn = String(rawQ).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const _profs = (window.__CONTAS_PROFS || []).filter(cp => {
+      if(me && cp.user_id === me.id) return false;
+      if(!_qn) return true;
+      const u = UserDirectory.getById(cp.user_id);
+      const hay = (String(cp.nome || '') + ' ' + ((u && u.handle) || '')).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      return hay.indexOf(_qn) >= 0;
+    }).map(cp => UserDirectory.getById(cp.user_id)).filter(u => u && u.handleReal);
+    const _jaProf = new Set(_profs.map(u => u.id));
+    candidates = _profs.concat(candidates.filter(u => !_jaProf.has(u.id))).slice(0, 8);
+    // Diretório ainda vazio (a sessão voltou depois do boot): carrega e tenta de novo
+    if(!candidates.length && !textareaEl.__dirCarregando && typeof window._hydrateDirectory === 'function'
+       && ((UbiqueStore.user_profiles && UbiqueStore.user_profiles.list()) || []).length < 3){
+      textareaEl.__dirCarregando = true;
+      window._hydrateDirectory().catch(() => {}).then(() => {
+        textareaEl.__dirCarregando = false;
+        if(document.activeElement === textareaEl) textareaEl.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    }
     // Contato — item especial "@admin": chama TODOS os administradores
     // (handle reservado, nunca pertence a um usuário). Aparece quando o
     // que foi digitado é prefixo de "admin".
@@ -30394,6 +30518,9 @@ const UserDirectory = (function(){
       nickname:    p.nickname    || authUser.nickname || '',
       namePublic:  p.namePublic !== false,
       handle:      p.handle      || _fallbackHandle(authUser),
+      // @ escolhido pela pessoa (o de cima pode ser inventado a partir do nome ou do id,
+      // e um @ inventado não resolve no aparelho dos outros: a menção se perdia)
+      handleReal:  !!(p.handle && String(p.handle).trim()),
       bio:         p.bio         || '',
       photoUrl:    p.photoUrl    || '',
       photoTransform: p.photoTransform || { x:0, y:0, scale:1 },
@@ -31567,6 +31694,12 @@ async function initUserSession(user){
   //      como anônima (42501) se a sessão ainda não tinha restaurado; aqui a
   //      sessão JÁ existe, então esta chamada nunca volta vazia por corrida.
   if(typeof window._hydrateDirectory === 'function') _prontos.push(window._hydrateDirectory().catch(()=>{}));
+  // 3.6) Lista da equipe para o @admin: o boot pode ter lido sem sessão (lista vazia)
+  if(window._sb && !(window._ADMINS || []).length){
+    _prontos.push(Promise.resolve(window._sb.rpc('list_admins')).then(r => {
+      if(r && !r.error && Array.isArray(r.data)) window._ADMINS = r.data;
+    }).catch(() => {}));
+  }
   // 4) Follows
   if(window.Follows && typeof Follows.hydrate === 'function') _prontos.push(Follows.hydrate(user.id).catch(()=>{}));
   // 5) Acesso do dia (entrou na plataforma — conta mesmo que só leia um texto)
@@ -32253,7 +32386,7 @@ const Duvidas = (function(){
     const sid = _materiaDaQuestao(q);
     const c = sid != null ? _cursoDaMateria(sid) : null;
     const k = (_ctxUnidade && /\/u\//.test(location.hash) && String(_ctxUnidade.sid) === String(sid)) ? _ctxUnidade : null;
-    const cod = q.origem || 'do Banco';
+    const cod = q.origem || 'Ubique';
     const rotItem = q.numero != null ? 'item ' + q.numero : '';
     const equipe = para === 'equipe';
     abrir({
@@ -32387,6 +32520,59 @@ const Duvidas = (function(){
            professores: professores, temMateria: temMateria, fem: _fem, erro: erro };
 })();
 window.Duvidas = Duvidas;
+
+// Conta de professor (SQL 143): user_id → professor do cadastro (nome, cargo, foto).
+window._profDaConta = function(uid){
+  if(!uid) return null;
+  return (window.__CONTAS_PROFS || []).find(p => String(p.user_id) === String(uid)) || null;
+};
+window._rotuloProf = function(p){ return (window.Duvidas && Duvidas.fem(p)) ? 'Professora' : 'Professor'; };
+
+// Minuto do vídeo para o comentário: <video> direto; YouTube e Vimeo pelas mensagens
+// dos próprios players (sem script de fora). Sem player que informe, devolve null.
+const VideoTempo = (function(){
+  function _escutar(f, ler){
+    const h = function(e){
+      if(!f.isConnected){ window.removeEventListener('message', h); return; }
+      if(e.source !== f.contentWindow) return;
+      let d = e.data;
+      if(typeof d === 'string'){ try{ d = JSON.parse(d); }catch(_){ return; } }
+      if(d) ler(d);
+    };
+    window.addEventListener('message', h);
+  }
+  function _enviar(f, msg){ try{ f.contentWindow.postMessage(JSON.stringify(msg), '*'); }catch(_){} }
+  function ligar(root){
+    if(!root) return null;
+    const v = root.querySelector('video');
+    if(v) return { tempo: () => (v.currentTime >= 1 ? v.currentTime : null), ir: t => { try{ v.currentTime = t; v.play(); }catch(_){} } };
+    const f = root.querySelector('iframe'); if(!f) return null;
+    const src = f.getAttribute('src') || '';
+    let t = null;
+    if(/youtube(-nocookie)?\.com\/embed\//.test(src)){
+      if(!/[?&]enablejsapi=1/.test(src)) f.setAttribute('src', src + (src.indexOf('?') >= 0 ? '&' : '?') + 'enablejsapi=1&origin=' + encodeURIComponent(location.origin));
+      f.addEventListener('load', () => _enviar(f, { event: 'listening', id: 1, channel: 'widget' }));
+      _escutar(f, d => { if(d.event === 'infoDelivery' && d.info && typeof d.info.currentTime === 'number') t = d.info.currentTime; });
+      return { tempo: () => (t != null && t >= 1 ? t : null),
+               ir: s => { _enviar(f, { event: 'command', func: 'seekTo', args: [s, true] }); _enviar(f, { event: 'command', func: 'playVideo', args: [] }); } };
+    }
+    if(/player\.vimeo\.com\/video\//.test(src)){
+      const ouvir = () => _enviar(f, { method: 'addEventListener', value: 'timeupdate' });
+      f.addEventListener('load', ouvir); ouvir();
+      _escutar(f, d => { if(d.event === 'timeupdate' && d.data && typeof d.data.seconds === 'number') t = d.data.seconds; });
+      return { tempo: () => (t != null && t >= 1 ? t : null),
+               ir: s => { _enviar(f, { method: 'setCurrentTime', value: s }); _enviar(f, { method: 'play' }); } };
+    }
+    return null;
+  }
+  function fmt(s){
+    s = Math.max(0, Math.round(Number(s) || 0));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(ss).padStart(2, '0');
+  }
+  return { ligar: ligar, fmt: fmt };
+})();
+window.VideoTempo = VideoTempo;
 
 // Modal de boas-vindas: aparece UMA vez por conta (marca em display_prefs, no
 // banco), quando a conta tem Falcoins de boas-vindas valendo. Não tem X e não
@@ -34474,6 +34660,12 @@ function _notifRenderItem(n){
     if(p.thread_id){
       actions = `<div class="notif-actions"><a class="btn-ghost" href="#/suporte/${encodeURIComponent(p.thread_id)}" data-notif-id="${Util.attr(n.id)}">Abrir conversa →</a></div>`;
     }
+  } else if(n.type === 'video_comment'){
+    // SQL 143 — comentário embaixo de um vídeo que o professor desta conta apresenta
+    const excerpt = p.text_excerpt ? ` <span class="notif-excerpt">"${Util.esc(p.text_excerpt)}"</span>` : '';
+    line = `<strong>${Util.esc(fromName)}</strong> comentou no seu vídeo${p.video_title ? ' <strong>' + Util.esc(p.video_title) + '</strong>' : ''}${(p.video_t != null && window.VideoTempo) ? ' (aos ' + Util.esc(VideoTempo.fmt(p.video_t)) + ')' : ''}.${excerpt}`;
+    const _hv = _resolveNotifTargetHash(p);
+    actions = `<div class="notif-actions">${_hv ? `<a class="btn-ghost" href="${Util.attr(_hv)}" data-notif-id="${Util.attr(n.id)}">Abrir o vídeo →</a>` : ''}<a class="btn-ghost" href="admin.html#sala-mencoes" data-notif-id="${Util.attr(n.id)}">Responder na Sala →</a></div>`;
   } else if(n.type === 'duvida_professor'){
     // SQL 142 — dúvida nova (ou mensagem nova) de um aluno para o professor desta conta
     const excerpt = p.text_excerpt ? ` <span class="notif-excerpt">"${Util.esc(p.text_excerpt)}"</span>` : '';
@@ -36432,7 +36624,7 @@ function _supContextoHtml(t){
     partes.push('resposta até ' + Util.esc(d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })));
   }
   let de = '';
-  if(c.tipo === 'questao') de = 'Da questão ' + (c.origem || 'do Banco') + (c.item_numero != null ? ', item ' + c.item_numero : '');
+  if(c.tipo === 'questao') de = 'Da questão ' + (c.origem || 'Ubique') + (c.item_numero != null ? ', item ' + c.item_numero : '');
   else if(c.tipo === 'unidade') de = 'Da ' + (c.unidade_rotulo || 'unidade') + (c.unidade ? ' · ' + c.unidade : '') + (c.secao ? ' · seção ' + c.secao : '');
   else if(c.tipo === 'video') de = 'Do vídeo ' + (c.video || '');
   if(de) partes.push(Util.esc(de) + (c.href && /^#\//.test(c.href) ? ' · <a href="' + Util.attr(c.href) + '">abrir</a>' : ''));
@@ -38738,6 +38930,18 @@ function _forumCommentsTreeHTML(rows, authors){
   if(!top.length) return '<p class="forum-cm-empty">Nenhum comentário ainda. Comece a conversa!</p>';
   return top.map(c => one(c, false)).join('');
 }
+// Fórum: quem foi mencionado com @ recebe o aviso no sino (o fórum não tinha @).
+function _forumAvisarMencoes(text, uid){
+  try{
+    if(!window.Notifications || typeof window.parseMentions !== 'function') return;
+    const vistos = new Set([String(uid)]);
+    window.parseMentions(text).mentions.forEach(m => {
+      if(!m.user_id || vistos.has(String(m.user_id))) return;
+      vistos.add(String(m.user_id));
+      Notifications.create(m.user_id, 'mention', { from_user_id: uid, text_excerpt: String(text || '').slice(0, 160), target_hash: '#/forum' });
+    });
+  }catch(e){ console.warn('[fórum menções]', e); }
+}
 async function _forumRenderCommentsPanel(panelEl){
   const postId = panelEl.dataset.post;
   panelEl.innerHTML = `<div class="forum-cm-compose">
@@ -38746,6 +38950,8 @@ async function _forumRenderCommentsPanel(panelEl){
     </div>
     <div class="forum-cm-list"><p class="forum-cm-empty">Carregando…</p></div>`;
   const listEl = panelEl.querySelector('.forum-cm-list');
+  const _cmTa = panelEl.querySelector('.forum-cm-compose .forum-cm-input');
+  if(_cmTa && typeof window.attachMentionAutocomplete === 'function') attachMentionAutocomplete(_cmTa);
   const rows = await _forumLoadComments(postId);
   const authors = await _forumResolveAuthors(rows.map(r => r.user_id));
   listEl.innerHTML = _forumCommentsTreeHTML(rows, authors);
@@ -38765,6 +38971,7 @@ async function _forumInsertComment(postId, parentId, text){
     const { error } = await window._sb.schema('aluno').from('forum_comments')
       .insert({ post_id:postId, user_id:uid, parent_id: parentId || null, body: text.trim() });
     if(error){ console.warn('[forum comment insert]', error.message); return false; }
+    _forumAvisarMencoes(text, uid);
     return true;
   }catch(e){ console.warn('[forum comment insert ex]', e); return false; }
 }
@@ -39160,6 +39367,7 @@ const ForumCompose = (function(){
     const err = el.querySelector('#fcErr'); err.hidden = true; err.textContent = '';
     el.classList.add('open');
     setTimeout(() => { try{ el.querySelector('#fcBody').focus(); }catch(_){} }, 30);
+    if(typeof window.attachMentionAutocomplete === 'function') attachMentionAutocomplete(el.querySelector('#fcBody'));
     // Carrega a enquete existente (se houver) pra permitir editá-la
     if(post.kind !== 'question' && typeof _forumLoadPolls === 'function'){
       try{
@@ -39215,6 +39423,7 @@ const ForumCompose = (function(){
         .insert({ user_id: uid, exam_id: ((typeof activeExamId === 'function') ? (activeExamId() || null) : null), subject_id, unit_id, title, subtitle: subtitle || null, body })
         .select('id').single();
       if(error){ err.textContent = 'Erro ao publicar: ' + error.message; err.hidden = false; btn.disabled = false; btn.textContent = 'Publicar'; return; }
+      _forumAvisarMencoes(title + ' ' + body, uid);
       // Enquete (opcional)
       const pollOn = el.querySelector('#fcPollOn');
       if(pollOn && pollOn.checked && ins && ins.id){
@@ -39381,6 +39590,7 @@ Renderers.forum.mount = function(stageEl, route){
         <div class="forum-cm-replybox-actions"><button type="button" class="forum-cm-cancel-reply">Cancelar</button><button type="button" class="forum-cm-send-reply" data-parent="${Util.attr(parentId)}">Responder</button></div>`;
       acts.insertAdjacentElement('afterend', box);
       try{ box.querySelector('textarea').focus(); }catch(_){}
+      if(typeof window.attachMentionAutocomplete === 'function') attachMentionAutocomplete(box.querySelector('textarea'));
       return;
     }
     const cancelReply = e.target.closest('.forum-cm-cancel-reply');

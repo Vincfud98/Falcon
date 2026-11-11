@@ -128,6 +128,7 @@
   }catch(_){}
 
   // ── CRUD factory ──
+  let _seqId = 0;   // contador dos ids gerados (ver add)
   function makeCRUD(entity, idType){
     return {
       list(){
@@ -146,7 +147,10 @@
               ? crypto.randomUUID()
               : ('uuid-' + Date.now() + '-' + Math.random().toString(36).slice(2,8));
           } else if(idType === 'string'){
-            id = (data.slug || data.title || 'item-') + '-' + Date.now();
+            // Date.now() sozinho repetia dentro do mesmo milissegundo (o diretório de
+            // perfis adiciona centenas num laço): ids iguais, e o update seguinte caía
+            // no item errado. O contador garante um id por item.
+            id = (data.slug || data.title || 'item-') + '-' + Date.now() + '-' + (++_seqId);
           } else {
             const ids = (_state[entity] || []).map(x => Number(x.id) || 0);
             id = (ids.length ? Math.max(...ids) : 0) + 1;
