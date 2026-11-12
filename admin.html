@@ -4273,6 +4273,14 @@
     border-radius:3px;
   }
   .offer-product-add select{flex:1;min-width:0}
+  /* Matérias que vêm junto (SQL 154): linha mais curta — matéria, dias, tirar */
+  .offer-product-row.is-junto{grid-template-columns:minmax(0,1fr) 120px auto}
+  .of-junto-quem{
+    display:flex;align-items:center;justify-content:space-between;gap:.8rem;flex-wrap:wrap;
+    margin-top:.6rem;padding:.6rem .75rem;
+    border:1px solid rgba(200,169,126,.12);border-radius:3px;
+  }
+  .of-junto-quem[hidden]{display:none}
 
   /* Editor de bônus */
   .offer-benefits-editor{margin:.5rem 0 .5rem}
@@ -5899,6 +5907,10 @@
   .message.success{
     background:rgba(93,212,159,.06);
     border-color:var(--success);color:var(--success);
+  }
+  .message.info{
+    background:rgba(200,169,126,.05);
+    border-color:var(--accent);color:var(--text-dim);
   }
   @keyframes slideIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
 
@@ -16117,6 +16129,26 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
           </select>
         </div>
         <button class="btn btn-sm" id="of-add-product-btn">+ Adicionar</button>
+      </div>
+
+      <!-- Bloco 4b: matérias que vêm junto (SQL 154) -->
+      <h4 style="font-family:var(--sans);font-weight:400;font-size:.72rem;letter-spacing:.15em;text-transform:uppercase;color:var(--text-mute);margin:1.5rem 0 .6rem">Matérias que vêm junto</h4>
+      <p class="client-panel-hint" style="margin-bottom:.6rem">Quem compra esta oferta ganha também estas matérias, sem pagar a mais. Na Loja e no carrinho aparecem como "Vem junto". O prazo começa igual ao da matéria principal; dá para mudar em cada uma.</p>
+      <div class="offer-products-editor" id="of-junto-editor">
+        <!-- populado dinamicamente -->
+      </div>
+      <div class="offer-product-add">
+        <div class="field" style="flex:1">
+          <label class="op-label">Adicionar matéria</label>
+          <select id="of-add-junto-sel">
+            <option value="">— escolher matéria —</option>
+          </select>
+        </div>
+        <button class="btn btn-sm" id="of-add-junto-btn">+ Adicionar</button>
+      </div>
+      <div class="of-junto-quem" id="of-junto-quem" hidden>
+        <span class="client-panel-hint" style="margin:0">Quem já tem a matéria principal pode ganhar também as que vêm junto, com o mesmo prazo dela.</span>
+        <button type="button" class="btn btn-ghost btn-sm" id="of-junto-quem-btn">Dar também a quem já tem</button>
       </div>
 
       <!-- Bloco 5: bônus -->
@@ -41908,7 +41940,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
           const durationLabel = op.access_duration_days
             ? ` · ${op.access_duration_days}d`
             : (op.access_ends_at ? ' · janela fixa' : ' · vitalício');
-          return `<span class="offer-row-prod-chip">${esc(p ? p.name : `#${op.product_id}`)}${durationLabel}</span>`;
+          return `<span class="offer-row-prod-chip">${op.vem_junto ? 'Vem junto: ' : ''}${esc(p ? p.name : `#${op.product_id}`)}${durationLabel}</span>`;
         }).join('') + (more > 0 ? `<span class="offer-row-prod-chip count-only">+${more}</span>` : '');
       }
 
@@ -42042,6 +42074,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
           access_ends_at: op.access_ends_at,
           ordem: op.ordem || 0,
           item_price_snapshot: op.item_price_snapshot,
+          vem_junto: !!op.vem_junto,
         }));
       offerModalBenefits = offerBenefitsCache
         .filter(b => b.offer_id === offerId)
@@ -42128,10 +42161,11 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     const productsMap = Object.fromEntries(productsCache.map(p => [p.id, p]));
     const brandsMap = Object.fromEntries(brandsCache.map(b => [b.id, b]));
 
-    if(offerModalProducts.length === 0){
+    if(!offerModalProducts.some(op => !op.vem_junto)){
       box.innerHTML = '<p class="client-panel-hint" style="padding:.8rem 1rem;text-align:center;margin:0;border:1px dashed rgba(200,169,126,.15);border-radius:3px">Nenhum produto adicionado. Escolha abaixo.</p>';
     } else {
       box.innerHTML = offerModalProducts.map((op, idx) => {
+        if(op.vem_junto) return '';   // as que vêm junto têm a lista delas (renderOfferJunto)
         const p = productsMap[op.product_id];
         const brand = p ? brandsMap[p.brand_id] : null;
         return `
@@ -42192,7 +42226,123 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
         const brand = brandsMap[p.brand_id];
         return `<option value="${p.id}">${esc(p.name)}${brand ? ` (${esc(brand.name)})` : ''}</option>`;
       }).join('');
+    renderOfferJunto();
   }
+
+  // ── Matérias que vêm junto (SQL 154) ──
+  function _ofMateriaDoProduto(pid){
+    const p = productsCache.find(x => x.id === pid);
+    return p ? (subjectsCache || []).find(sb => String(sb.id) === String(p.subject_id)) || null : null;
+  }
+  function _ofProdutoDaMateria(sid){
+    const deCurso = productsCache.filter(p => String(p.subject_id) === String(sid) && (p.kind || 'course') === 'course');
+    return deCurso.find(p => p.active) || deCurso[0] || null;
+  }
+  // prazo inicial de uma que vem junto = o da matéria principal (vazio = sem vencimento)
+  function _ofDiasDaPrincipal(){
+    const m = offerModalProducts.find(op => !op.vem_junto);
+    return m ? (m.access_duration_days ?? null) : 365;
+  }
+  function renderOfferJunto(){
+    const box = document.getElementById('of-junto-editor');
+    if(!box) return;
+    const productsMap = Object.fromEntries(productsCache.map(p => [p.id, p]));
+    const junto = offerModalProducts.map((op, idx) => ({ op, idx })).filter(x => x.op.vem_junto);
+    box.innerHTML = junto.length ? junto.map(({ op, idx }) => {
+      const p = productsMap[op.product_id];
+      const m = _ofMateriaDoProduto(op.product_id);
+      const nome = m ? (m.subject || (p && p.name) || '') : (p ? p.name : `#${op.product_id} (removido)`);
+      return `
+        <div class="offer-product-row is-junto" data-idx="${idx}">
+          <div>
+            <span class="op-label">Matéria</span>
+            <span class="op-name">${esc(nome)}</span>
+          </div>
+          <div>
+            <span class="op-label">Dias de acesso</span>
+            <input type="number" min="1" data-field="access_duration_days" value="${op.access_duration_days ?? ''}" placeholder="sem vencimento">
+          </div>
+          <button type="button" class="op-remove" data-remove="${idx}" title="tirar">×</button>
+        </div>`;
+    }).join('') : '<p class="client-panel-hint" style="padding:.8rem 1rem;text-align:center;margin:0;border:1px dashed rgba(200,169,126,.15);border-radius:3px">Nenhuma matéria vem junto. Escolha abaixo, se quiser.</p>';
+    box.querySelectorAll('.offer-product-row.is-junto').forEach(row => {
+      const idx = parseInt(row.dataset.idx);
+      const inp = row.querySelector('[data-field="access_duration_days"]');
+      inp.addEventListener('input', (e) => { offerModalProducts[idx].access_duration_days = e.target.value ? parseInt(e.target.value) : null; });
+      row.querySelector('[data-remove]').addEventListener('click', () => { offerModalProducts.splice(idx, 1); renderOfferModalProducts(); });
+    });
+
+    // Escolha da matéria, separada pelas seções da lista (as que já estão na oferta não aparecem)
+    const ja = new Set(offerModalProducts.map(op => String(op.product_id)));
+    const materias = (subjectsCache || []).slice().sort((a, b) =>
+      ((a.position != null ? a.position : 1e9) - (b.position != null ? b.position : 1e9)) || (Number(a.id) - Number(b.id)));
+    const grupos = [{ id: '', nome: 'Sem seção' }].concat(_secoesOrdenadas().map(sc => ({ id: String(sc.id), nome: sc.nome || 'Seção' })));
+    const sel = document.getElementById('of-add-junto-sel');
+    sel.innerHTML = '<option value="">— escolher matéria —</option>' + grupos.map(g => {
+      const ops = materias.filter(m => _subjGrupo(m) === g.id).map(m => {
+        const p = _ofProdutoDaMateria(m.id);
+        if(!p || ja.has(String(p.id))) return '';
+        return `<option value="${p.id}">${esc(m.subject || p.name)}</option>`;
+      }).join('');
+      return ops ? `<optgroup label="${esc(g.nome)}">${ops}</optgroup>` : '';
+    }).join('');
+
+    // "Dar também a quem já tem": só com a oferta salva e com matérias que vêm junto salvas
+    const salvas = editingOfferId ? offerProductsCache.filter(op => op.offer_id === editingOfferId && op.vem_junto).length : 0;
+    document.getElementById('of-junto-quem').hidden = !(editingOfferId && salvas);
+  }
+
+  document.getElementById('of-add-junto-btn').addEventListener('click', () => {
+    const sel = document.getElementById('of-add-junto-sel');
+    const pid = parseInt(sel.value);
+    if(!pid){ showMsg('offerModalMessage', 'Escolha uma matéria para adicionar.'); return; }
+    if(offerModalProducts.some(op => op.product_id === pid)){ showMsg('offerModalMessage', 'Essa matéria já está na oferta.'); return; }
+    offerModalProducts.push({
+      product_id: pid,
+      access_duration_days: _ofDiasDaPrincipal(),
+      access_starts_at: null,
+      access_ends_at: null,
+      ordem: offerModalProducts.length,
+      item_price_snapshot: null,
+      vem_junto: true,
+    });
+    sel.value = '';
+    renderOfferModalProducts();
+  });
+
+  // Dá as que vêm junto a quem JÁ tem a(s) principal(is): conta antes, confirma, depois grava.
+  document.getElementById('of-junto-quem-btn').addEventListener('click', async () => {
+    if(!editingOfferId) return;
+    const assinatura = (lista) => lista.filter(op => op.vem_junto).map(op => op.product_id + ':' + (op.access_duration_days ?? '')).sort().join(',');
+    if(assinatura(offerProductsCache.filter(op => op.offer_id === editingOfferId)) !== assinatura(offerModalProducts)){
+      showMsg('offerModalMessage', 'Salve a oferta antes: este botão usa as matérias que vêm junto já salvas.');
+      return;
+    }
+    const btn = document.getElementById('of-junto-quem-btn');
+    btn.disabled = true; btn.textContent = 'Contando…';
+    const sim = await window._sb.schema('vendas').rpc('vem_junto_para_quem_tem', { p_offer: editingOfferId, p_simular: true });
+    btn.disabled = false; btn.textContent = 'Dar também a quem já tem';
+    if(sim.error){ showMsg('offerModalMessage', `Erro: ${sim.error.message}`); return; }
+    const r = sim.data || {};
+    const vao = (r.novas || 0) + (r.estendidas || 0);
+    if(!r.pessoas){ showMsg('offerModalMessage', 'Ninguém tem a matéria principal desta oferta agora.', 'info'); return; }
+    if(!vao){ showMsg('offerModalMessage', `As ${r.pessoas} pessoas que têm a matéria principal já têm todas as que vêm junto.`, 'info'); return; }
+    const msg = `${r.pessoas} ${r.pessoas === 1 ? 'pessoa tem' : 'pessoas têm'} a matéria principal desta oferta.\n\n`
+      + `Vão ganhar ${vao} ${vao === 1 ? 'acesso' : 'acessos'} às matérias que vêm junto`
+      + (r.ja_tinham ? ` (${r.ja_tinham} já ${r.ja_tinham === 1 ? 'tinha' : 'tinham'})` : '')
+      + ', com o mesmo prazo da principal de cada pessoa. Cada uma recebe um aviso no sino.\n\nConfirmar?';
+    if(!confirm(msg)) return;
+    btn.disabled = true; btn.textContent = 'Dando acesso…';
+    const res = await window._sb.schema('vendas').rpc('vem_junto_para_quem_tem', { p_offer: editingOfferId, p_simular: false });
+    btn.disabled = false; btn.textContent = 'Dar também a quem já tem';
+    if(res.error){ showMsg('offerModalMessage', `Erro: ${res.error.message}`); return; }
+    const d = res.data || {};
+    await loadEnrollments();
+    renderEnrollmentsList();
+    updateGroupCounts();
+    showMsg('offerModalMessage', `Pronto: ${d.novas || 0} ${(d.novas || 0) === 1 ? 'acesso novo' : 'acessos novos'}`
+      + (d.estendidas ? ` e ${d.estendidas} ${d.estendidas === 1 ? 'estendido' : 'estendidos'}` : '') + '.', 'success');
+  });
 
   // Botão adicionar produto
   document.getElementById('of-add-product-btn').addEventListener('click', () => {
@@ -42375,6 +42525,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
           access_ends_at: op.access_ends_at,
           ordem: op.ordem || 0,
           item_price_snapshot: op.item_price_snapshot,
+          vem_junto: !!op.vem_junto,
         };
         if(op._existingId){
           const { error } = await catalogo().from('offer_products')
@@ -43524,6 +43675,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
           unit_price: parseFloat(oi.unit_price),
           quantity: oi.quantity || 1,
           discount_amount: parseFloat(oi.discount_amount || 0),
+          vem_junto: !!(oi.metadata && oi.metadata.vem_junto),
         }));
 
       // Seção de pagamentos visível
@@ -43702,8 +43854,8 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
         return `
           <div class="order-item-row" data-idx="${idx}">
             <div>
-              <span class="oi-label">${it.offer_id != null ? 'Oferta' : 'Item'}</span>
-              <span class="oi-name">${esc(it.offer_name_snapshot || it.product_name_snapshot || (offer ? offer.name : `#${it.offer_id}`))}</span>
+              <span class="oi-label">${it.vem_junto ? 'Vem junto' : (it.offer_id != null ? 'Oferta' : 'Item')}</span>
+              <span class="oi-name">${esc(it.vem_junto ? (it.product_name_snapshot || '') : (it.offer_name_snapshot || it.product_name_snapshot || (offer ? offer.name : `#${it.offer_id}`)))}</span>
               <span class="oi-name-sub">${offer ? offer.slug : ''}</span>
             </div>
             <div>
