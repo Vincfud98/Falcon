@@ -20776,6 +20776,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     renderPaymentsList();
     populateEnrollmentFilters();
     renderEnrollmentsList();
+    TempoRealPainel.ligar();
     if(!_modoProfessor()) initOrdersRealtime();
     populateClientTagsFilters();
     renderClientTagsList();
@@ -32878,6 +32879,63 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     clearTimeout(t._timer);
     t._timer = setTimeout(() => { t.style.opacity = '0'; }, 4500);
   }
+
+  /* ══ TEMPO REAL (SQL 153) ══════════════════════════════════════════
+     O servidor avisa na hora, sem o painel perguntar de minuto em minuto.
+     Canais PRIVADOS: "u:<id>" (a própria conta: dúvidas e menções do
+     professor) e, para a equipe, "equipe" (conversas, @admin, edições de
+     professor, Atualizações). O aviso traz só números; o conteúdo é lido
+     com as regras de sempre. Se a conexão cai, ao voltar confere uma vez.
+     ════════════════════════════════════════════════════════════════════ */
+  const TempoRealPainel = (function(){
+    const EVENTOS = ['aviso', 'suporte', 'mencao', 'edicao', 'atualizacao'];
+    const _ouvintes = {}, _conferidores = [];
+    let _canais = [], _uid = null, _escondidaDesde = 0;
+    function on(ev, fn){ (_ouvintes[ev] = _ouvintes[ev] || []).push(fn); }
+    function aoConferir(fn){ _conferidores.push(fn); }
+    function _emitir(ev, dados){
+      (_ouvintes[ev] || []).forEach(function(fn){ try{ fn(dados || {}); }catch(e){ console.warn('[tempo real] ' + ev, e); } });
+    }
+    function conferir(){
+      if(!_uid) return;
+      _conferidores.forEach(function(fn){ try{ fn(); }catch(e){ console.warn('[tempo real] conferir', e); } });
+    }
+    async function ligar(){
+      if(!window._sb || typeof window._sb.channel !== 'function') return;
+      let sess = null;
+      try{ const r = await window._sb.auth.getSession(); sess = r && r.data && r.data.session; }catch(_){}
+      if(!sess || !sess.user) return;
+      if(_uid === sess.user.id && _canais.length) return;
+      desligar();
+      _uid = sess.user.id;
+      try{ if(window._sb.realtime && typeof window._sb.realtime.setAuth === 'function') await window._sb.realtime.setAuth(sess.access_token); }catch(e){ console.warn('[tempo real] crachá', e); }
+      const topicos = ['u:' + _uid];
+      if(!_modoProfessor()) topicos.push('equipe');
+      topicos.forEach(function(tp){
+        let ch = window._sb.channel(tp, { config: { private: true } });
+        EVENTOS.forEach(function(ev){ ch = ch.on('broadcast', { event: ev }, function(msg){ _emitir(ev, Object.assign({ canal: tp }, (msg && msg.payload) || {})); }); });
+        let caiu = false;
+        _canais.push(ch);
+        ch.subscribe(function(status, err){
+          if(_canais.indexOf(ch) < 0) return;
+          if(status === 'SUBSCRIBED'){ if(caiu){ caiu = false; conferir(); } console.log('%c[tempo real] ' + tp + ' ligado', 'color:#7bbf7b'); }
+          else if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED'){ caiu = true; console.warn('[tempo real] ' + tp, status, (err && err.message) || ''); }
+        });
+      });
+    }
+    function desligar(){
+      const velhos = _canais; _canais = []; _uid = null;
+      velhos.forEach(function(ch){ try{ window._sb.removeChannel(ch); }catch(_){} });
+    }
+    document.addEventListener('visibilitychange', function(){
+      if(document.visibilityState === 'hidden'){ _escondidaDesde = Date.now(); return; }
+      if(_escondidaDesde && Date.now() - _escondidaDesde > 60 * 1000) conferir();
+      _escondidaDesde = 0;
+    });
+    window.addEventListener('online', conferir);
+    return { ligar: ligar, desligar: desligar, on: on, aoConferir: aoConferir, conferir: conferir };
+  })();
+  window.TempoRealPainel = TempoRealPainel;
 
   function initOrdersRealtime(){
     if(window.__ordersRt || !window._sb || typeof window._sb.channel !== 'function') return;
@@ -51966,8 +52024,12 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
       });
       const at = document.getElementById('salaDuvAtualizar');
       if(at) at.addEventListener('click', carregar);
-      // a lista se atualiza sozinha a cada minuto (o sino do professor ainda não é ao vivo)
-      if(!timer) timer = setInterval(function(){ if(document.visibilityState === 'visible') carregar(); }, 60 * 1000);
+      // ao vivo (SQL 153): mensagem nova ou conversa encaminhada chega pelo canal da conta
+      if(!timer){
+        timer = true;
+        TempoRealPainel.on('suporte', function(d){ if(d.canal !== 'equipe') carregar(); });
+        TempoRealPainel.aoConferir(carregar);
+      }
     }
     return { carregar: carregar, ligar: ligar, abrir: abrir, esperando: function(){ return lista.filter(esperando).length; } };
   })();
@@ -52146,7 +52208,12 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
         if(b) responder(b);
       });
       const at = document.getElementById('salaMenAtualizar'); if(at) at.addEventListener('click', carregar);
-      if(!timer) timer = setInterval(function(){ if(document.visibilityState === 'visible') carregar(); }, 2 * 60 * 1000);
+      // ao vivo (SQL 153): menção, resposta ou comentário no vídeo chegam como aviso no canal da conta
+      if(!timer){
+        timer = true;
+        TempoRealPainel.on('aviso', function(d){ if(d.canal !== 'equipe' && /^(mention|reply|video_comment)$/.test(d.tipo || '')) carregar(); });
+        TempoRealPainel.aoConferir(carregar);
+      }
     }
     return { carregar: carregar, ligar: ligar, abertas: abertas };
   })();
@@ -53634,7 +53701,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
   function _falconStartPresencePoll(){
     if(_falconPresenceTimer) return;
     _falconRefreshPresence();
-    _falconPresenceTimer = setInterval(_falconRefreshPresence, 60 * 1000);
+    _falconPresenceTimer = setInterval(function(){ if(document.visibilityState === 'visible') _falconRefreshPresence(); }, 60 * 1000);
   }
   // Upload de anexo do admin → mesma pasta support/ do Storage (policy
   // support_upload). Reusa o DownloadsSync (XHR + progresso) já existente.
@@ -54067,6 +54134,55 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
       _renderAdminAvatarInto(av, p.photo_url || '', p.photo_transform, p.display_name || _contatoLabel(uid));
     });
   }
+  // Mensagens da conversa (admin vendo: respostas da equipe à direita)
+  function _ctMsgsHtml(msgs){
+    return (msgs || []).map(m => {
+      const own = !!m.sender_is_admin;
+      let when = '';
+      if(m.created_at){
+        const d = new Date(m.created_at);
+        when = d.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit' }) + ' · ' +
+               d.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
+      }
+      return `<div class="ct-msg-row${own ? ' is-own' : ''}">
+            ${own ? '' : `<div class="ct-av ct-msg-av" data-ct-msg-av="${esc(m.sender_id)}"></div>`}
+            <div class="ct-msg">
+              <span class="ct-msg-sender">${esc(m.sender_professor_id != null ? _ctNomeProfessor(m.sender_professor_id) : _contatoLabel(m.sender_id))}</span>
+              ${_ctAttachmentHtml(m.attachment)}
+              ${(m.text || '').trim() ? `<p class="ct-msg-text">${esc(m.text)}</p>` : ''}
+              <span class="ct-msg-time">${esc(when)}</span>
+            </div>
+          </div>`;
+    }).join('') || '<div class="ct-empty">Sem mensagens.</div>';
+  }
+  function _ctPintarAvatares(root){
+    root.querySelectorAll('[data-ct-msg-av]').forEach(av => {
+      const uid = av.getAttribute('data-ct-msg-av');
+      const pp = _contatoProfiles[uid] || {};
+      _renderAdminAvatarInto(av, pp.photo_url || '', pp.photo_transform, pp.display_name || _contatoLabel(uid));
+    });
+  }
+  // Mensagem nova na conversa aberta (aviso ao vivo): troca só a lista de mensagens.
+  // O que a equipe está escrevendo, o anexo escolhido e a gravação ficam como estão.
+  async function _ctAtualizarConversaAberta(){
+    const threadId = contatoActiveThreadId;
+    const msgsEl = document.getElementById('ctChatMsgs');
+    const t = contatoThreads.find(x => x.id === threadId);
+    if(!threadId || !msgsEl || !t) return;
+    const { data: msgs, error } = await window._sb.schema('aluno').from('support_messages')
+      .select('*').eq('thread_id', threadId).order('created_at', { ascending: true });
+    if(error || contatoActiveThreadId !== threadId || !msgsEl.isConnected) return;
+    await _contatoLoadProfiles((msgs || []).map(m => m.sender_id));
+    const noFim = (msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight) < 80;
+    msgsEl.innerHTML = _ctMsgsHtml(msgs);
+    if(window._signSupportMedia) window._signSupportMedia(msgsEl);
+    _ctPintarAvatares(msgsEl);
+    if(noFim) msgsEl.scrollTop = msgsEl.scrollHeight;
+    if(t.destino !== 'professor') window._sb.schema('aluno').from('support_messages')
+      .update({ read_at: new Date().toISOString() })
+      .eq('thread_id', threadId).eq('sender_is_admin', false).is('read_at', null)
+      .then(() => { delete _contatoUnreadByThread[threadId]; renderContatoThreads(); updateContatoBadges(); });
+  }
   async function openContatoThread(threadId){
     contatoActiveThreadId = threadId;
     renderContatoThreads();
@@ -54099,24 +54215,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
       </div>
       ${_ctContextoLinha(t) ? `<div class="sd-ctx"><span class="sd-nota">${_ctContextoLinha(t)}</span></div>` : ''}
       <div class="ct-chat-msgs" id="ctChatMsgs">
-        ${(msgs || []).map(m => {
-          const own = !!m.sender_is_admin; // admin vendo: respostas da equipe à direita
-          let when = '';
-          if(m.created_at){
-            const d = new Date(m.created_at);
-            when = d.toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit' }) + ' · ' +
-                   d.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
-          }
-          return `<div class="ct-msg-row${own ? ' is-own' : ''}">
-            ${own ? '' : `<div class="ct-av ct-msg-av" data-ct-msg-av="${esc(m.sender_id)}"></div>`}
-            <div class="ct-msg">
-              <span class="ct-msg-sender">${esc(m.sender_professor_id != null ? _ctNomeProfessor(m.sender_professor_id) : _contatoLabel(m.sender_id))}</span>
-              ${_ctAttachmentHtml(m.attachment)}
-              ${(m.text || '').trim() ? `<p class="ct-msg-text">${esc(m.text)}</p>` : ''}
-              <span class="ct-msg-time">${esc(when)}</span>
-            </div>
-          </div>`;
-        }).join('') || '<div class="ct-empty">Sem mensagens.</div>'}
+        ${_ctMsgsHtml(msgs)}
       </div>
       <div class="ct-attach-chip" id="ctAttachChip" hidden>
         <strong id="ctAttachName"></strong>
@@ -54157,11 +54256,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     _falconStartPresencePoll();   // mantém o "online/visto por último" do cabeçalho ao vivo
     _refreshChatHeadPresence();
     // Miniaturas das mensagens do aluno (estilo WhatsApp)
-    pane.querySelectorAll('[data-ct-msg-av]').forEach(av => {
-      const uid = av.getAttribute('data-ct-msg-av');
-      const pp = _contatoProfiles[uid] || {};
-      _renderAdminAvatarInto(av, pp.photo_url || '', pp.photo_transform, pp.display_name || _contatoLabel(uid));
-    });
+    _ctPintarAvatares(pane);
     // Marca como lidas as mensagens do aluno desta conversa. A conversa que ainda é do
     // professor (SQL 142) fica como está: quem marca é ele, na Sala; a equipe só acompanha.
     if(t.destino !== 'professor') window._sb.schema('aluno').from('support_messages')
@@ -54465,16 +54560,22 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
       if(!pop.classList.contains('open')) return;
       if(!e.target.closest('.adm-bell-wrap')) _admBellFechar();
     });
-    // Mantém o sino VIVO: as duas fontes se re-hidratam a cada 60s (o mesmo
-    // ritmo do medidor de presença). Cada load re-renderiza sua lista e
-    // atualiza os badges — inclusive o do sino.
-    setInterval(function(){
-      if(_modoProfessor()) return;   // o sino é da equipe (o do professor chega com as dúvidas)
-      try{ if(typeof loadContatoMencoes === 'function') loadContatoMencoes(); }catch(_){}
-      try{ if(typeof loadContatoThreads === 'function') loadContatoThreads(); }catch(_){}
-      _admAtuCarregar();
-      loadProfEdicoes();
-    }, 60 * 1000);
+    // Sino da equipe AO VIVO (SQL 153, canal "equipe"): cada fonte se relê quando o
+    // servidor avisa que mudou; se a conexão cair, ao voltar confere todas uma vez.
+    // (O sino do professor chega com as dúvidas, na Sala.)
+    TempoRealPainel.on('suporte', function(d){
+      if(_modoProfessor() || d.canal !== 'equipe') return;
+      loadContatoThreads();
+      if(contatoActiveThreadId && String(d.conversa) === String(contatoActiveThreadId)) _ctAtualizarConversaAberta();
+    });
+    TempoRealPainel.on('mencao', function(){ if(!_modoProfessor()) loadContatoMencoes(); });
+    TempoRealPainel.on('edicao', function(){ if(!_modoProfessor()) loadProfEdicoes(); });
+    TempoRealPainel.on('atualizacao', function(){ if(!_modoProfessor()) _admAtuCarregar(); });
+    TempoRealPainel.aoConferir(function(){
+      if(_modoProfessor()) return;
+      loadContatoMencoes(); loadContatoThreads(); _admAtuCarregar(); loadProfEdicoes();
+      if(contatoActiveThreadId) _ctAtualizarConversaAberta();
+    });
   })();
 
   // Aba Atualizações: a página se monta a cada abertura (o arquivo admin-atualizacoes.js aguenta ser chamado de novo).

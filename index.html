@@ -15559,7 +15559,7 @@ window.TAG_REGISTRY = {
         };
         window._presenceBeat = _beat;
         _beat();
-        if(!window._hbTimer) window._hbTimer = setInterval(_beat, 25 * 1000);
+        if(!window._hbTimer) window._hbTimer = setInterval(_beat, 60 * 1000);
         if(!window._hbVisBound){
           window._hbVisBound = true;
           document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible') _beat(); });
@@ -16727,6 +16727,10 @@ const Auth = (function(){
   window.__authLoadP.then(() => {
     if(current) _renderSoon();
     _refreshAccessAndRescope();
+    // Sessão que voltou do servidor DEPOIS do boot (cópia do aparelho vencida): o boot
+    // passou sem usuário e o SIGNED_IN do mesmo usuário não refaz nada — sem isto o sino,
+    // o tempo real, os colegas e o acesso do dia ficavam desligados até um F5.
+    if(current && typeof window.initUserSession === 'function') window.initUserSession(current);
   });
 
   // ─── Auth state changes (login/logout em outras abas, expiração JWT)
@@ -17214,44 +17218,118 @@ const Shop = (function(){
 })();
 window.Shop = Shop;
 
+/* ══════════════════════════════════════════════════════════════════
+   TEMPO REAL (SQL 153): o servidor avisa na hora, sem o app perguntar de
+   tempos em tempos. Cada conta ouve um canal PRIVADO só dela ("u:<id>");
+   quem escreve nele é o próprio banco (gatilhos), no instante em que:
+     aviso   → chega um aviso novo no sino
+     suporte → chega mensagem numa conversa (Fale com a equipe / professor)
+     acesso  → uma matrícula é criada, renovada, pausada ou encerrada
+     sala    → chega mensagem numa sala de estudos
+   O aviso traz só números (qual conversa, qual aviso); o conteúdo é lido
+   com as regras de sempre. Se a conexão cai (aba dormindo, rede), ao voltar
+   o app CONFERE uma vez (aoConferir) — nada se perde e não há relógio.
+   ══════════════════════════════════════════════════════════════════ */
+const TempoReal = (function(){
+  const EVENTOS = ['aviso', 'suporte', 'acesso', 'sala'];
+  const _ouvintes = {};
+  const _conferidores = [];
+  let _canal = null, _uid = null, _caiu = false, _ligado = false, _escondidaDesde = 0;
+
+  // Devolve a função que desliga este ouvinte.
+  function on(evento, fn){
+    (_ouvintes[evento] = _ouvintes[evento] || []).push(fn);
+    return function(){ const l = _ouvintes[evento] || []; const i = l.indexOf(fn); if(i >= 0) l.splice(i, 1); };
+  }
+  function aoConferir(fn){
+    _conferidores.push(fn);
+    return function(){ const i = _conferidores.indexOf(fn); if(i >= 0) _conferidores.splice(i, 1); };
+  }
+  function _emitir(evento, dados){
+    (_ouvintes[evento] || []).slice().forEach(function(fn){
+      try{ fn(dados || {}); }catch(e){ console.warn('[tempo real] ' + evento, e); }
+    });
+  }
+  function conferir(motivo){
+    if(!_uid) return;
+    _conferidores.slice().forEach(function(fn){ try{ fn(motivo); }catch(e){ console.warn('[tempo real] conferir', e); } });
+  }
+  async function ligar(uid){
+    if(!uid || !window._sb || typeof window._sb.channel !== 'function') return;
+    if(_uid === uid && _canal) return;
+    desligar();
+    _uid = uid;
+    // o crachá (login) vai junto: o servidor só deixa entrar no canal da própria conta
+    try{
+      const { data } = await window._sb.auth.getSession();
+      const token = data && data.session && data.session.access_token;
+      if(token && window._sb.realtime && typeof window._sb.realtime.setAuth === 'function') await window._sb.realtime.setAuth(token);
+    }catch(e){ console.warn('[tempo real] crachá', e); }
+    if(_uid !== uid) return;   // a conta trocou enquanto esperava
+    let ch = window._sb.channel('u:' + uid, { config: { private: true } });
+    EVENTOS.forEach(function(ev){
+      ch = ch.on('broadcast', { event: ev }, function(msg){ _emitir(ev, msg && msg.payload); });
+    });
+    _canal = ch;
+    ch.subscribe(function(status, err){
+      if(_canal !== ch) return;   // canal antigo, já desligado
+      if(status === 'SUBSCRIBED'){
+        if(_caiu){ _caiu = false; conferir('reconectou'); }
+        if(!_ligado){ _ligado = true; console.log('%c[tempo real] ligado', 'color:#7bbf7b'); }
+      } else if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED'){
+        _caiu = true;
+        console.warn('[tempo real]', status, (err && err.message) || '');
+      }
+    });
+  }
+  function desligar(){
+    const ch = _canal;
+    _canal = null; _uid = null; _caiu = false; _ligado = false;
+    if(ch && window._sb){ try{ window._sb.removeChannel(ch); }catch(_){} }
+  }
+  // Aba escondida por mais de 1 minuto: ao voltar, confere (o celular derruba a conexão de aba dormindo).
+  document.addEventListener('visibilitychange', function(){
+    if(document.visibilityState === 'hidden'){ _escondidaDesde = Date.now(); return; }
+    if(_escondidaDesde && Date.now() - _escondidaDesde > 60 * 1000) conferir('voltou');
+    _escondidaDesde = 0;
+  });
+  window.addEventListener('online', function(){ conferir('rede'); });
+  return { ligar, desligar, on, aoConferir, conferir, ligado: function(){ return _ligado; } };
+})();
+window.TempoReal = TempoReal;
+
 // ── FASE D: aviso em tempo real de matéria liberada ─────────────────
-// Canal nas matrículas (vendas.enrollments); o RLS garante que o aluno só
-// recebe eventos das PRÓPRIAS matrículas. Ao chegar: toast + refaz a régua
-// de acesso (a matéria destrava sem recarregar a página).
+// Evento "acesso" do canal da conta (SQL 153): o servidor só avisa as
+// PRÓPRIAS matrículas. Ao chegar: toast + refaz a régua de acesso (a
+// matéria destrava sem recarregar a página).
 function initEnrollmentsRealtime(){
   try{
     const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-    if(!u || !u.id || !window._sb || typeof window._sb.channel !== 'function') return;
+    if(!u || !u.id || !window.TempoReal) return;
     if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return;
     if(window.__enrRtUser === u.id) return;           // já ligado pra este usuário
-    if(window.__enrRtChannel){
-      try{ window._sb.removeChannel(window.__enrRtChannel); }catch(_){}
-      window.__enrRtChannel = null;
-    }
+    if(window.__enrRtOff){ window.__enrRtOff(); window.__enrRtOff = null; }
     window.__enrRtUser = u.id;
-    window.__enrRtChannel = window._sb.channel('aluno-enrollments-' + u.id)
-      .on('postgres_changes', { event: '*', schema: 'vendas', table: 'enrollments' }, (payload) => {
-        try{
-          const row = payload && payload.new;
-          if(!row || row.status !== 'active'){
-            // acesso pausado, cancelado ou apagado: só refaz a régua (sem aviso)
-            if(window.Auth && typeof Auth.refreshAccess === 'function') Auth.refreshAccess();
-            return;
-          }
-          const announce = () => {
-            const nome = (window.Shop && Shop.nameForProduct) ? Shop.nameForProduct(row.product_id) : '';
-            const msg = payload.eventType === 'UPDATE'
-              ? ('Acesso renovado' + (nome ? ': ' + nome : '') + '.')
-              : ('Matéria liberada na sua conta' + (nome ? ': ' + nome : '') + '.');
-            if(window.App && App._showAccessToast) App._showAccessToast(msg, 'success');
-          };
-          if(window.Shop && !Shop.ready()) Shop.load().then(announce); else announce();
-          // Refaz a régua de acesso e re-renderiza — destrava sem F5
+    window.__enrRtOff = TempoReal.on('acesso', (d) => {
+      try{
+        if(d.op === 'DELETE' || d.status !== 'active'){
+          // acesso pausado, cancelado ou apagado: só refaz a régua (sem aviso)
           if(window.Auth && typeof Auth.refreshAccess === 'function') Auth.refreshAccess();
-        }catch(e){ console.warn('[enr rt]', e); }
-      })
-      .subscribe();
-  }catch(e){ console.warn('[enr rt init]', e); }
+          return;
+        }
+        const announce = () => {
+          const nome = (window.Shop && Shop.nameForProduct) ? Shop.nameForProduct(d.produto) : '';
+          const msg = d.op === 'UPDATE'
+            ? ('Acesso renovado' + (nome ? ': ' + nome : '') + '.')
+            : ('Matéria liberada na sua conta' + (nome ? ': ' + nome : '') + '.');
+          if(window.App && App._showAccessToast) App._showAccessToast(msg, 'success');
+        };
+        if(window.Shop && !Shop.ready()) Shop.load().then(announce); else announce();
+        // Refaz a régua de acesso e re-renderiza — destrava sem F5
+        if(window.Auth && typeof Auth.refreshAccess === 'function') Auth.refreshAccess();
+      }catch(e){ console.warn('[acesso ao vivo]', e); }
+    });
+  }catch(e){ console.warn('[acesso ao vivo init]', e); }
 }
 
 const Cart = (function(){
@@ -30802,26 +30880,15 @@ const Notifications = (function(){
       return added;
     }catch(e){ console.warn('[notif hydrate ex]', e); return 0; }
   }
-  /* Realtime: assina INSERTs de notificações do usuário. Quando o Supabase
-   * Realtime está habilitado na tabela aluno.notifications, novas
-   * notificações chegam AO VIVO (sem reload). Se não estiver habilitado,
-   * o canal simplesmente não dispara — o polling do boot cobre. */
-  let _channel = null;
+  /* Ao vivo: o servidor avisa cada aviso novo pelo canal da conta (SQL 153,
+   * evento "aviso"); o app relê os avisos com as regras de sempre. */
+  let _desligaAviso = null;
   function subscribeRealtime(userId, cb){
-    if(!window._sb || !_isUuid(userId) || _channel) return;
-    try{
-      _channel = window._sb.channel('notif-' + userId)
-        .on('postgres_changes',
-          { event: 'INSERT', schema: 'aluno', table: 'notifications', filter: 'user_id=eq.' + userId },
-          () => { try{ cb && cb(); }catch(_){} })
-        .subscribe((status) => {
-          if(status === 'SUBSCRIBED') console.log('%c[notif] antena conectada ✅ (realtime ativo)', 'color:#7bbf7b');
-          else if(status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') console.warn('[notif] realtime indisponível:', status, '— usando fallback de 45s');
-        });
-    }catch(e){ console.warn('[notif realtime]', e); }
+    if(!window.TempoReal || !_isUuid(userId) || _desligaAviso) return;
+    _desligaAviso = TempoReal.on('aviso', function(){ try{ cb && cb(); }catch(_){} });
   }
   function unsubscribeRealtime(){
-    if(_channel && window._sb){ try{ window._sb.removeChannel(_channel); }catch(_){} _channel = null; }
+    if(_desligaAviso){ _desligaAviso(); _desligaAviso = null; }
   }
   return { create, listFor, unreadCount, markRead, markAllRead, hydrate, subscribeRealtime, unsubscribeRealtime };
 })();
@@ -31550,15 +31617,15 @@ async function _presenceFetch(userIds){
     const meId = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
     (data || []).forEach(r => {
       const seen = r.last_seen_at ? new Date(r.last_seen_at).getTime() : 0;
-      // online = visto nos últimos 75s; o próprio usuário é sempre online (ele
-      // está claramente usando o app — nunca deve se ver "offline").
-      const online = (meId && String(r.user_id) === String(meId)) || (!!seen && (now - seen) < 75 * 1000);
+      // online = visto nos últimos 150s (a batida é de 60 em 60s); o próprio usuário é
+      // sempre online (ele está claramente usando o app — nunca deve se ver "offline").
+      const online = (meId && String(r.user_id) === String(meId)) || (!!seen && (now - seen) < 150 * 1000);
       const a0 = r.current_activity || null;
       const actAt = (a0 && a0.at) ? new Date(a0.at).getTime() : 0;
-      // Só conta a atividade se for RECENTE (< 90s). O heartbeat a renova de 25s
-      // em 25s enquanto está na unidade; ao sair/recarregar fora dela, ela expira
+      // Só conta a atividade se for RECENTE (< 150s). O heartbeat a renova de 60s
+      // em 60s enquanto está na unidade; ao sair/recarregar fora dela, ela expira
       // e "estudando X" some — nunca congela na última matéria.
-      const a = (a0 && actAt && (now - actAt) < 90 * 1000) ? a0 : null;
+      const a = (a0 && actAt && (now - actAt) < 150 * 1000) ? a0 : null;
       const practicing = online && a && a.type === 'practicing';
       const hot = r.hot_streak || 0;
       out[String(r.user_id)] = {
@@ -31688,6 +31755,9 @@ if(typeof document !== 'undefined' && !window._accessVisBound){
 
 async function initUserSession(user){
   if(!user || !user.id) return;
+  // Uma vez por conta: o boot, a sessão que volta do servidor e o login chamam aqui.
+  if(window.__sessaoUid === user.id) return;
+  window.__sessaoUid = user.id;
   const _prontos = [];   // o portão do Início espera por isto (colegas, notificações)
   // Preferências de exibição (tema/tamanho/fonte) do PERFIL — cross-device.
   if(typeof window._loadUserPrefs === 'function'){
@@ -31709,6 +31779,8 @@ async function initUserSession(user){
       if(token) window._sb.realtime.setAuth(token);
     }
   }catch(e){ console.warn('[session] setAuth realtime', e); }
+  // 1.5) Tempo real: o canal privado desta conta (avisos, conversas, acesso, salas)
+  if(window.TempoReal) TempoReal.ligar(user.id);
   // 2) Store do usuário (se ainda não inicializado)
   try{ if(window.COURSE && window.Store && typeof Store.get === 'function' && !Store.get()) Store.init(user.id, window.COURSE); }catch(e){ console.warn('[session] Store.init', e); }
   // 3) Notificações: hidrata + (re)liga a antena realtime do usuário ATUAL
@@ -31728,13 +31800,7 @@ async function initUserSession(user){
         _refreshNotifsAndFollows(user.id);
       });
     }
-    // Fallback "quase ao vivo": re-hidrata a cada 30s (caso o realtime falhe).
-    if(window._notifPoll){ clearInterval(window._notifPoll); }
-    window._notifPoll = setInterval(() => {
-      if(window.Rede && Rede.offline()) return;   // sem servidor: espera a volta
-      const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-      if(u && u.id) _refreshNotifsAndFollows(u.id);
-    }, 30000);
+    // Sem relógio: se a conexão cair, o TempoReal confere ao voltar (ver aoConferir abaixo).
   }
   // 3.5) Diretório de perfis (vitrine) — a leitura do boot pode ter saído
   //      como anônima (42501) se a sessão ainda não tinha restaurado; aqui a
@@ -31769,10 +31835,19 @@ function _refreshNotifsAndFollows(userId){
   }).catch(()=>{});
 }
 window._refreshNotifsAndFollows = _refreshNotifsAndFollows;
+// Conexão do tempo real voltou (aba dormindo, rede caiu): confere o sino, os colegas e o saldo uma vez.
+if(window.TempoReal) TempoReal.aoConferir(function(){
+  if(window.Rede && Rede.offline()) return;
+  const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(!u || !u.id) return;
+  _refreshNotifsAndFollows(u.id);
+  if(window.UbtWallet && UbtWallet.load) UbtWallet.load();
+});
 
 function teardownUserSession(){
   try{ if(window.Notifications && Notifications.unsubscribeRealtime) Notifications.unsubscribeRealtime(); }catch(_){}
-  if(window._notifPoll){ clearInterval(window._notifPoll); window._notifPoll = null; }
+  try{ if(window.TempoReal) TempoReal.desligar(); }catch(_){}
+  window.__sessaoUid = null;
   window._lastNotifTotal = undefined;
   const bb = document.getElementById('tbBellBadge'); if(bb) bb.hidden = true;
 }
@@ -37042,15 +37117,21 @@ Renderers.support.mount = async function(stageEl, route){
     }
     load();
 
-    // Polling leve: enquanto a conversa estiver aberta, busca novidades a cada 30s
-    if(window._supPollTimer) clearInterval(window._supPollTimer);
-    window._supPollTimer = setInterval(() => {
-      if(!location.hash.includes('/suporte') || activeThreadId !== threadId){
-        clearInterval(window._supPollTimer); window._supPollTimer = null; return;
-      }
-      if(window.Rede && Rede.offline()) return;
-      load();
-    }, 30000);
+    // Ao vivo (SQL 153): resposta nesta conversa chega pelo evento "suporte" do canal da
+    // conta; se a conexão cair, confere uma vez ao voltar. Saiu da conversa: desliga.
+    const _supDesliga = () => {
+      if(window._supOff){ window._supOff(); window._supOff = null; }
+      if(window._supConfOff){ window._supConfOff(); window._supConfOff = null; }
+    };
+    _supDesliga();
+    if(window.TempoReal){
+      const _fora = () => !location.hash.includes('/suporte') || activeThreadId !== threadId;
+      window._supOff = TempoReal.on('suporte', (d) => {
+        if(_fora()){ _supDesliga(); return; }
+        if(d && String(d.conversa) === String(threadId)) load(); else loadList();
+      });
+      window._supConfOff = TempoReal.aoConferir(() => { if(_fora()){ _supDesliga(); return; } load(); });
+    }
 
     // Anexo: clipe abre o seletor; chip mostra o arquivo pendente com X
     let supPendingFile = null;
@@ -40879,23 +40960,32 @@ function _salasChatHydrateAvatars(msgsEl){
     else el.textContent = Util.initials(u.nickname || u.handle || '?');
   });
 }
-function _salasChatUnsubscribe(){ if(window._salasChatCh && window._sb){ try{ window._sb.removeChannel(window._salasChatCh); }catch(_){} window._salasChatCh = null; } }
+function _salasChatUnsubscribe(){
+  if(window._salasChatOff){ window._salasChatOff(); window._salasChatOff = null; }
+  if(window._salasChatConfOff){ window._salasChatConfOff(); window._salasChatConfOff = null; }
+}
+// Chat aberto: mensagem nova chega pelo evento "sala" do canal da conta (SQL 153);
+// o aviso traz só o número da mensagem, que é lida com as regras de sempre.
 function _salasChatSubscribe(pane, roomId){
   _salasChatUnsubscribe();
-  if(!window._sb || !window._sb.channel) return;
-  try{
-    window._salasChatCh = window._sb.channel('room-chat-' + roomId)
-      .on('postgres_changes', { event:'INSERT', schema:'aluno', table:'room_messages', filter:'room_id=eq.' + roomId }, (payload) => {
-        const m = payload && payload.new; if(!m) return;
-        const msgsEl = pane.querySelector('#salasChatMsgs'); if(!msgsEl) return;
-        if(msgsEl.querySelector('[data-msg-id="' + m.id + '"]')) return; // já está
-        _salasChatAppend(pane, m);
-        // Estou vendo o chat → mantém como lido (avança a última leitura) e
-        // garante que a antena não acumule não-lidas desta sala.
-        if(String(m.sender_id) !== String(_salasMyUid()) && typeof _salasMarkRoomRead === 'function') _salasMarkRoomRead(roomId);
-      })
-      .subscribe();
-  }catch(e){ console.warn('[room chat rt]', e); }
+  if(!window.TempoReal || !window._sb) return;
+  const _jaEsta = function(id){ const el = pane.querySelector('#salasChatMsgs'); return !el || !!el.querySelector('[data-msg-id="' + String(id).replace(/"/g, '') + '"]'); };
+  window._salasChatOff = TempoReal.on('sala', async (d) => {
+    try{
+      if(!d || String(d.sala) !== String(roomId) || !pane.isConnected || _jaEsta(d.mensagem)) return;
+      const { data: m } = await window._sb.schema('aluno').from('room_messages').select('*').eq('id', d.mensagem).maybeSingle();
+      if(!m || !pane.isConnected || _jaEsta(m.id)) return;
+      _salasChatAppend(pane, m);
+      // Estou vendo o chat → mantém como lido (avança a última leitura) e
+      // garante que a antena não acumule não-lidas desta sala.
+      if(String(m.sender_id) !== String(_salasMyUid()) && typeof _salasMarkRoomRead === 'function') _salasMarkRoomRead(roomId);
+    }catch(e){ console.warn('[chat da sala ao vivo]', e); }
+  });
+  // conexão voltou: recarrega as últimas mensagens da sala aberta
+  window._salasChatConfOff = TempoReal.aoConferir(function(){
+    const drawer = pane.isConnected ? pane.closest('#salasDrawer') : null;
+    if(drawer && !drawer.hidden && String(_salasCurrentId) === String(roomId)) _salasRenderChat(drawer);
+  });
 }
 async function _salasChatAppend(pane, m){
   const msgsEl = pane.querySelector('#salasChatMsgs'); if(!msgsEl) return;
@@ -41061,13 +41151,16 @@ function _salasChatVisibleRoom(){
   return _salasCurrentId || null;                      // chat aberto → sala atual
 }
 function _salasAntennaStart(){
-  if(window._salasAntennaCh && window._sb){ try{ window._sb.removeChannel(window._salasAntennaCh); }catch(_){} window._salasAntennaCh = null; }
-  if(!window._sb || !window._sb.channel) return;
+  if(window._salasAntennaOff){ window._salasAntennaOff(); window._salasAntennaOff = null; }
+  if(window._salasAntennaConfOff){ window._salasAntennaConfOff(); window._salasAntennaConfOff = null; }
+  if(!window.TempoReal) return;
   const uid = _salasMyUid(); if(!uid) return;
+  // conexão voltou: recalcula as não-lidas uma vez
+  window._salasAntennaConfOff = TempoReal.aoConferir(function(){ _salasComputeUnread(); });
   try{
-    window._salasAntennaCh = window._sb.channel('salas-antenna-' + uid)
-      .on('postgres_changes', { event:'INSERT', schema:'aluno', table:'room_messages' }, (payload) => {
-        const m = payload && payload.new; if(!m) return;
+    // O servidor avisa só os membros da sala, menos quem mandou (SQL 153, evento "sala").
+    window._salasAntennaOff = TempoReal.on('sala', (d) => {
+        const m = d ? { room_id: d.sala, id: d.mensagem, sender_id: d.de } : null; if(!m || !m.room_id) return;
         if(String(m.sender_id) === String(uid)) return; // sou eu o remetente
         const mem = window._salasMyMemberships || {};
         if(mem[m.room_id] !== 'member') return; // não sou membro dessa sala
@@ -41077,8 +41170,7 @@ function _salasAntennaStart(){
         window._salasUnread[m.room_id] = (window._salasUnread[m.room_id] || 0) + 1;
         _salasUpdateBadges();
         _salasEnsureChatNotif(m.room_id, window._salasRoomNames[m.room_id] || '', window._salasUnread[m.room_id]);
-      })
-      .subscribe();
+    });
   }catch(e){ console.warn('[salas antenna]', e); }
 }
 window._salasComputeUnread = _salasComputeUnread;
@@ -41432,9 +41524,6 @@ Renderers.salas.mount = function(stageEl){
     else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
     else if(k === 'chat'){ _salasRenderChat(drawer); }
   }
-  let _mesaMemberIds = [];              // ids dos membros da sala atual (pra filtrar o realtime)
-  let _mesaRefreshT = null;
-  const _mesaRefreshSoon = () => { if(_mesaRefreshT) return; _mesaRefreshT = setTimeout(() => { _mesaRefreshT = null; if(_salasCurrentId) renderMain(); }, 1200); };
   async function renderMain(){
     const room = _salasRooms.find(r => String(r.id) === String(_salasCurrentId));
     if(!room){ mainEl.innerHTML = '<div class="salas-main-empty"><p>Selecione uma sala ao lado, ou crie uma nova pra começar.</p></div>'; return; }
@@ -41442,7 +41531,6 @@ Renderers.salas.mount = function(stageEl){
     const isOwner = String(room.creator_id) === String(_salasMyUid());
     if(typeof _presenceInjectStyles === 'function') _presenceInjectStyles();
     const members = (await _salasFetchMembers(room.id)).filter(m => m.status === 'member');
-    _mesaMemberIds = members.map(m => String(m.user_id));
     if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(members.map(m => m.user_id));
     // Mesa ao vivo (Parte C/D): presença + matéria atual + status de cada membro
     const mesaPres = (typeof _presenceFetch === 'function') ? await _presenceFetch(members.map(m => m.user_id)) : {};
@@ -41545,34 +41633,23 @@ Renderers.salas.mount = function(stageEl){
     }
   });
   renderList();
-  // Presença AO VIVO (Parte F): heartbeat imediato ao entrar + realtime (push de
-  // quem fica online/muda de atividade) + poll curto de segurança (detecta quem
-  // ficou OFFLINE, já que "saiu" não gera evento). Limpa tudo ao sair da página.
+  // Presença na mesa: batida imediata ao entrar + releitura a cada 30 s com a aba
+  // à vista (quem ficou online, mudou de atividade ou saiu). Antes havia também uma
+  // antena que recebia TODA gravação de perfil de TODOS os alunos (cada "estou online")
+  // para filtrar aqui — com centenas de alunos, isso pesava o servidor à toa.
+  // Mensagens do chat continuam ao vivo (evento "sala" do TempoReal).
   if(typeof window._presenceBeat === 'function') try{ window._presenceBeat(); }catch(_){}
   function _salasStopLive(){
     if(window._salasPollTimer){ clearInterval(window._salasPollTimer); window._salasPollTimer = null; }
-    if(window._salasPresenceCh && window._sb){ try{ window._sb.removeChannel(window._salasPresenceCh); }catch(_){} window._salasPresenceCh = null; }
   }
   _salasStopLive();
-  // Realtime: qualquer UPDATE em crm.user_profiles de um membro da sala → refresh
-  if(window._sb && window._sb.channel){
-    try{
-      window._salasPresenceCh = window._sb.channel('salas-presence-' + (_salasMyUid() || 'x'))
-        .on('postgres_changes', { event:'UPDATE', schema:'crm', table:'user_profiles' }, (payload) => {
-          const uid = payload && payload.new && payload.new.user_id;
-          if(uid && _mesaMemberIds.some(id => String(id) === String(uid))) _mesaRefreshSoon();
-        })
-        .subscribe();
-    }catch(e){ console.warn('[salas presence rt]', e); }
-  }
-  // Poll de segurança a cada 15s (offline + fallback se o realtime cair).
   window._salasPollTimer = setInterval(() => {
     if(document.visibilityState !== 'visible') return;
     if(window.Rede && Rede.offline()) return;
     const r = (window.Router && Router.parse) ? Router.parse() : null;
     if(!r || r.view !== 'salas'){ _salasStopLive(); return; }
     if(_salasCurrentId) renderMain();
-  }, 15000);
+  }, 30000);
 };
 
 /* ═══════════ EDITAL — visualização hierárquica do edital + progresso ═══════════ */
@@ -47585,7 +47662,7 @@ async function _iniLoadColegas(rowArg, logArg){
   }catch(_){}
   const now = Date.now();
   const nameOf = function(p){ return p.nickname || p.display_name || (p.handle ? ('@' + p.handle) : 'colega'); };
-  const online = profs.filter(function(p){ return p.last_seen_at && (now - new Date(p.last_seen_at).getTime()) < 75000; })
+  const online = profs.filter(function(p){ return p.last_seen_at && (now - new Date(p.last_seen_at).getTime()) < 150000; })
     .sort(function(a, b){ return new Date(b.last_seen_at) - new Date(a.last_seen_at); });
   if(rowEl){
     rowEl.innerHTML = online.length ? online.map(function(p){
@@ -47734,7 +47811,7 @@ function _mentIniCarregar(){
       try{
         const d = await window._sb.schema('crm').from('user_directory').select('user_id, last_seen_at').in('user_id', ids);
         const ag = Date.now();
-        (d.data || []).forEach(x => { if(x.last_seen_at && ag - new Date(x.last_seen_at).getTime() < 75000) online.add(String(x.user_id)); });
+        (d.data || []).forEach(x => { if(x.last_seen_at && ag - new Date(x.last_seen_at).getTime() < 150000) online.add(String(x.user_id)); });
       }catch(_){}
     }
     return { turmaId: t.id, avisos: r[0].data || [], encontros: r[1].data || [], libs: r[2].data || [], videos: r[3].data || [],
@@ -48359,15 +48436,16 @@ Renderers.inicio = function(){
     // Tooltip (apelido no hover dos círculos): o data-tip só funciona com o
     // setupQuickTooltips ligado no container da página.
     try{ const pg = document.querySelector('.ini-page'); if(pg && typeof setupQuickTooltips === 'function') setupQuickTooltips(pg); }catch(_){}
-    // "Realtime" dos colegas: repõe a presença a cada 30s (heartbeat alheio é
-    // 25s) enquanto o Início estiver aberto; sai da página → o timer se mata.
+    // Colegas no Início: relê a presença a cada 60s (a batida de cada aluno é de 60s)
+    // enquanto o Início estiver aberto e à vista; sai da página → o timer se mata.
     try{
       if(window._iniColegasTimer) clearInterval(window._iniColegasTimer);
       window._iniColegasTimer = setInterval(function(){
         if(!document.getElementById('iniColegasRow')){ clearInterval(window._iniColegasTimer); window._iniColegasTimer = null; return; }
+        if(document.visibilityState !== 'visible') return;
         if(window.Rede && Rede.offline()) return;
         try{ if(typeof _iniLoadColegas === 'function') _iniLoadColegas(); }catch(_){}
-      }, 30000);
+      }, 60000);
     }catch(_){}
   }, 0);
 
