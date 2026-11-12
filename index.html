@@ -13568,7 +13568,6 @@ window.TAG_REGISTRY = {
       _subjectId: subject.id,
       _professorId: subject.professor_id != null ? subject.professor_id : null, // vínculo com o catálogo de professores
       _position: (subject.position != null ? subject.position : null), // ordem manual do admin
-      _secaoId: (subject.secao_id != null ? subject.secao_id : null),   // seção da lista de matérias (SQL 139)
       _profsOrdemFixa: subject.profs_ordem_fixa === true,               // fotos dos professores na ordem da lista
       _createdAt: subject.created_at || null,                          // "lançamento" (p/ grupo Obter)
     };
@@ -14204,7 +14203,7 @@ window.TAG_REGISTRY = {
      tabela (as pequenas). É acelerador, nunca dependência: sem IndexedDB
      (modo privado, erro, cota) tudo segue pela rede. Desliga com ?semcache=1
      ou localStorage.falcon_semcache = '1'. Some no logout. */
-  const CACHE_ESQUEMA = 3;   // suba quando uma tabela guardada ganhar coluna/formato novo (2 = cifrada; 3 = subjects.secao_id e profs_ordem_fixa, SQL 139)
+  const CACHE_ESQUEMA = 4;   // suba quando uma tabela guardada ganhar coluna/formato novo (2 = cifrada; 3 = subjects.secao_id e profs_ordem_fixa, SQL 139; 4 = exam_subjects.secao_id, SQL 160)
   /* Cifra em repouso (AES-GCM, chave por usuário guardada no aparelho): quem copiar
      os arquivos do navegador sem a chave não lê nada. Não protege do próprio aluno
      logado — nenhuma cifra no navegador protege — e por isso é barata e silenciosa:
@@ -14721,7 +14720,7 @@ window.TAG_REGISTRY = {
       // Seções da lista de matérias (conteudo.subject_sections, SQL 139): os títulos que
       // agrupam os cards na Loja (ex.: "Extensivos"). Pequena; o portão espera por ela.
       // SQL 150: descricao (texto embaixo do título) e so_com_acesso (curso que saiu de venda).
-      const _secoesP = sb.from('subject_sections').select('id,nome,position,descricao,so_com_acesso')
+      const _secoesP = sb.from('subject_sections').select('id,nome,position,descricao,so_com_acesso,exam_id')
         .then(r => { window.__SUBJ_SECTIONS = (r && !r.error && r.data) || []; })
         .catch(() => { window.__SUBJ_SECTIONS = []; });
       // Recomendações escolhidas pela equipe para o fim de cada unidade (SQL 141). Pequena;
@@ -48808,9 +48807,24 @@ window._secaoDaLista = function(secaoId){
   if(secaoId == null) return null;
   return (window.__SUBJ_SECTIONS || []).find(x => String(x.id) === String(secaoId)) || null;
 };
+// SEÇÕES POR CONCURSO (SQL 160, 12/11/2026): cada concurso tem as suas seções, e a seção da matéria fica na
+// ligação matéria × concurso (exam_subjects.secao_id). Sem concurso dado, vale o concurso ativo; matéria fora
+// dele (ou sem concurso ativo) usa a seção que tiver no concurso dela. Seção de outro concurso não vale.
+window._secaoIdDaMateria = function(subjectId, examId){
+  if(subjectId == null) return null;
+  const ex = examId || ((typeof activeExamId === 'function') ? activeExamId() : '') || '';
+  const rel = (window.UbiqueStore && UbiqueStore.exam_subjects && UbiqueStore.exam_subjects.list) ? (UbiqueStore.exam_subjects.list() || []) : [];
+  const minhas = rel.filter(es => es && String(es.subject_id) === String(subjectId) && es.secao_id != null);
+  const valida = es => { const sec = window._secaoDaLista(es.secao_id); return !!(sec && String(sec.exam_id) === String(es.exam_id)); };
+  const doConcurso = ex ? minhas.find(es => String(es.exam_id) === String(ex) && valida(es)) : null;
+  if(doConcurso) return doConcurso.secao_id;
+  if(ex && rel.some(es => es && String(es.subject_id) === String(subjectId) && String(es.exam_id) === String(ex))) return null;   // está no concurso, sem seção
+  const outra = minhas.find(valida);
+  return outra ? outra.secao_id : null;
+};
 window._materiaEscondida = function(c){
   if(!c) return false;
-  const sec = window._secaoDaLista(c._secaoId);
+  const sec = window._secaoDaLista(window._secaoIdDaMateria(c._subjectId));
   if(!sec || !sec.so_com_acesso) return false;
   if(window.Auth && Auth.isAdmin && Auth.isAdmin()) return false;
   return !(window.Commerce && Commerce.temMateria && Commerce.temMateria(c.id));
@@ -48820,7 +48834,7 @@ window._materiaEscondidaPorId = function(sid){
   const c = (window.COURSES_ALL || []).concat(window.COURSES || []).find(x => x && String(x._subjectId) === String(sid));
   if(c) return window._materiaEscondida(c);
   const sj = (window.UbiqueStore && UbiqueStore.subjects && UbiqueStore.subjects.list) ? (UbiqueStore.subjects.list() || []).find(x => x && String(x.id) === String(sid)) : null;
-  const sec = sj ? window._secaoDaLista(sj.secao_id) : null;
+  const sec = sj ? window._secaoDaLista(window._secaoIdDaMateria(sj.id)) : null;
   return !!(sec && sec.so_com_acesso && !(window.Auth && Auth.isAdmin && Auth.isAdmin()));
 };
 Renderers.catalog = function(route){
@@ -48912,11 +48926,14 @@ Renderers.catalog = function(route){
   // Seções da lista (SQL 139): as matérias sem seção vêm primeiro, sem título, como sempre;
   // depois cada seção, na ordem do painel, com o seu título. Dentro de cada grupo vale a regra
   // de antes (tem acesso, à venda, em breve; e a ordem manual do admin).
-  const _secoes = (window.__SUBJ_SECTIONS || []).slice().sort((a, b) =>
+  // Só as seções deste concurso (cada concurso é um universo, SQL 160).
+  const _exSec = _examId || ((typeof activeExamId === 'function') ? activeExamId() : '') || '';
+  const _secoes = (window.__SUBJ_SECTIONS || []).filter(s => !_exSec || String(s.exam_id) === String(_exSec)).slice().sort((a, b) =>
     ((a.position != null ? a.position : 1e9) - (b.position != null ? b.position : 1e9)) || (Number(a.id) - Number(b.id)));
   const _secaoRank = c => {
-    if(c._secaoId == null) return -1;
-    const k = _secoes.findIndex(s => String(s.id) === String(c._secaoId));
+    const sid = window._secaoIdDaMateria(c._subjectId, _exSec);
+    if(sid == null) return -1;
+    const k = _secoes.findIndex(s => String(s.id) === String(sid));
     return k;                                                  // seção que não existe mais = topo (-1)
   };
   courses = courses.slice().sort((a,b) => {
