@@ -32920,7 +32920,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
      com as regras de sempre. Se a conexão cai, ao voltar confere uma vez.
      ════════════════════════════════════════════════════════════════════ */
   const TempoRealPainel = (function(){
-    const EVENTOS = ['aviso', 'suporte', 'mencao', 'edicao', 'atualizacao'];
+    const EVENTOS = ['aviso', 'suporte', 'mencao', 'edicao', 'atualizacao', 'presenca'];
     const _ouvintes = {}, _conferidores = [];
     let _canais = [], _uid = null, _escondidaDesde = 0;
     function on(ev, fn){ (_ouvintes[ev] = _ouvintes[ev] || []).push(fn); }
@@ -47020,7 +47020,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
   }
 
   // Acende/apaga as bolinhas "online" e aplica o filtro "Somente online" SEM
-  // reconstruir a tabela (chamado pelo poll de presença de 60s e ao alternar o filtro).
+  // reconstruir a tabela (chamado pelos avisos de presença ao vivo e ao alternar o filtro).
   function _applyPresenceToRanking(){
     const wrap = document.getElementById('ral-table-wrap');
     if(!wrap) return;
@@ -53804,21 +53804,21 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     const d = Math.floor(h / 24);
     return 'há ' + d + ' dia' + (d > 1 ? 's' : '');
   }
-  function _ctLastSeen(ts){
+  function _ctLastSeen(ts, uid){
+    if(uid != null && _falconIsOnline(uid)) return 'online agora';
     if(!ts) return 'nunca acessou';
-    if(Date.now() - new Date(ts).getTime() < PRESENCE_ONLINE_MS) return 'online agora';
     return 'visto por último ' + _ctTimeAgo(ts);
   }
 
-  // ══ Presença "online ao vivo" — fonte única: crm.user_profiles.last_seen_at ══
-  // Alimenta o cabeçalho do chat (Contato) e o ranking de alunos. Um único poll
-  // de 60s atualiza o mapa; "online" = visto nos últimos 3 min (heartbeat de 60s).
-  const PRESENCE_ONLINE_MS = 3 * 60 * 1000;
-  let _falconPresence = {};        // user_id → last_seen_at (ms)
-  let _falconPresenceTimer = null;
+  // ══ Presença "online ao vivo" (SQL 157) ══
+  // Quem está online é o estado que o servidor anuncia (vitrine crm.user_directory, coluna online): lido
+  // UMA vez ao abrir, e depois mantido pelos avisos "presenca" do canal da equipe (entrou / saiu). Sem
+  // relógio; quando a conexão volta, relê uma vez. Alimenta o cabeçalho do chat (Contato) e o ranking.
+  let _falconPresence = {};        // user_id → visto por último (ms), de quem entrou/saiu desde que o painel abriu
+  let _falconOnline = new Set();   // user_ids online agora
+  let _falconPresenceLigada = false;
   function _falconIsOnline(uid){
-    const ts = _falconPresence[String(uid)];
-    return ts != null && (Date.now() - ts) < PRESENCE_ONLINE_MS;
+    return uid != null && _falconOnline.has(String(uid));
   }
   function _ctPresenceTs(uid, fallback){
     const p = _falconPresence[String(uid)];
@@ -53827,8 +53827,8 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     return null;
   }
   function _ctPresenceHTML(uid, fallback){
+    if(_falconIsOnline(uid)) return '<span class="ct-dot"></span>online agora';
     const ts = _ctPresenceTs(uid, fallback);
-    if(ts != null && (Date.now() - ts) < PRESENCE_ONLINE_MS) return '<span class="ct-dot"></span>online agora';
     return esc(_ctLastSeen(ts != null ? new Date(ts).toISOString() : null));
   }
   function _refreshChatHeadPresence(){
@@ -53836,24 +53836,42 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     if(!el) return;
     el.innerHTML = _ctPresenceHTML(el.dataset.uid, el.dataset.fallback || null);
   }
-  async function _falconRefreshPresence(){
-    try{
-      const { data, error } = await window._sb.schema('crm').from('user_profiles')
-        .select('user_id, last_seen_at').not('last_seen_at', 'is', null).limit(50000);
-      if(error){ console.warn('[presença admin]', error.message); }
-      else {
-        const map = {};
-        (data || []).forEach(r => { if(r.user_id && r.last_seen_at){ const t = new Date(r.last_seen_at).getTime(); if(!isNaN(t)) map[String(r.user_id)] = t; } });
-        _falconPresence = map;
-      }
-    }catch(e){ console.warn('[presença admin ex]', e); }
+  function _falconPintarPresenca(){
     try{ _applyPresenceToRanking(); }catch(_){}
     try{ _refreshChatHeadPresence(); }catch(_){}
   }
+  // Só quem está online (lista curta; a lista de todos os perfis passaria do limite de 1000 linhas).
+  async function _falconRefreshPresence(){
+    try{
+      const { data, error } = await window._sb.schema('crm').from('user_directory')
+        .select('user_id, last_seen_at').eq('online', true).limit(1000);
+      if(error){ console.warn('[presença admin]', error.message); }
+      else {
+        const on = new Set();
+        (data || []).forEach(r => {
+          if(!r.user_id) return;
+          on.add(String(r.user_id));
+          if(r.last_seen_at){ const t = new Date(r.last_seen_at).getTime(); if(!isNaN(t)) _falconPresence[String(r.user_id)] = t; }
+        });
+        _falconOnline = on;
+      }
+    }catch(e){ console.warn('[presença admin ex]', e); }
+    _falconPintarPresenca();
+  }
   function _falconStartPresencePoll(){
-    if(_falconPresenceTimer) return;
+    if(_falconPresenceLigada) return;
+    _falconPresenceLigada = true;
     _falconRefreshPresence();
-    _falconPresenceTimer = setInterval(function(){ if(document.visibilityState === 'visible') _falconRefreshPresence(); }, 60 * 1000);
+    const TR = window.TempoRealPainel;
+    if(!TR) return;
+    TR.on('presenca', function(d){
+      if(!d || d.canal !== 'equipe' || !d.de) return;
+      const id = String(d.de);
+      if(d.online) _falconOnline.add(id); else _falconOnline.delete(id);
+      if(d.visto){ const t = new Date(d.visto).getTime(); if(!isNaN(t)) _falconPresence[id] = t; }
+      _falconPintarPresenca();
+    });
+    TR.aoConferir(_falconRefreshPresence);
   }
   // Upload de anexo do admin → mesma pasta support/ do Storage (policy
   // support_upload). Reusa o DownloadsSync (XHR + progresso) já existente.
@@ -54076,7 +54094,7 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
     document.getElementById('ctUmName').textContent = p.display_name || '(sem nome)';
     document.getElementById('ctUmNickname').textContent = p.nickname ? ('Apelido: ' + p.nickname) : 'Sem apelido';
     document.getElementById('ctUmHandle').textContent = p.handle ? '@' + p.handle : '(sem @)';
-    document.getElementById('ctUmSeen').textContent = _ctLastSeen(p.last_seen_at);
+    document.getElementById('ctUmSeen').textContent = _ctLastSeen(p.last_seen_at, uid);
     _renderAdminAvatarInto(document.getElementById('ctUmPhoto'), p.photo_url || '', p.photo_transform, p.display_name || p.nickname || '?');
     modal.classList.add('active');
   }

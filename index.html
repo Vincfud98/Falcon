@@ -15566,6 +15566,49 @@ window.TAG_REGISTRY = {
             .then(({ error }) => { if(error) console.warn('[presença]', error.message); });
         };
         window._presenceBeat = _beat;
+        // "Online" ao vivo (SQL 157): ao fechar a aba, avisa o servidor que saiu, e os colegas veem na hora.
+        // Com outra aba do Falcon aberta no mesmo navegador, não avisa (a outra segue online). Internet que
+        // cai ou aparelho que apaga: o servidor percebe sozinho em cerca de 2 min (a batida para).
+        if(!window._presencaSaidaLigada){
+          window._presencaSaidaLigada = true;
+          const _abaId = Math.random().toString(36).slice(2);
+          const _outrasAbas = new Set();
+          let _bc = null;
+          try{
+            _bc = new BroadcastChannel('falcon-abas');
+            _bc.onmessage = function(e){
+              const m = (e && e.data) || {};
+              if(!m.id || m.id === _abaId) return;
+              if(m.t === 'oi'){ _outrasAbas.add(m.id); try{ _bc.postMessage({ t: 'estou', id: _abaId }); }catch(_){} }
+              else if(m.t === 'estou') _outrasAbas.add(m.id);
+              else if(m.t === 'tchau') _outrasAbas.delete(m.id);
+            };
+            _bc.postMessage({ t: 'oi', id: _abaId });
+          }catch(_){ _bc = null; }
+          // o crachá precisa estar à mão na hora de fechar (não dá para esperar o servidor)
+          let _cracha = null;
+          const _guardaCracha = function(s){ _cracha = (s && s.access_token) || null; };
+          try{ window._sb.auth.getSession().then(function(r){ _guardaCracha(r && r.data && r.data.session); }).catch(function(){}); }catch(_){}
+          try{ window._sb.auth.onAuthStateChange(function(_ev, s){ _guardaCracha(s); }); }catch(_){}
+          window.addEventListener('pagehide', function(){
+            try{ if(_bc) _bc.postMessage({ t: 'tchau', id: _abaId }); }catch(_){}
+            if(_outrasAbas.size || !_cracha) return;
+            const base = String((window._sb && window._sb.supabaseUrl) || '').replace(/\/$/, '');
+            const chave = window._sb && window._sb.supabaseKey;
+            if(!base || !chave) return;
+            try{
+              fetch(base + '/rest/v1/rpc/presenca_sair', { method: 'POST', keepalive: true, body: '{}',
+                headers: { apikey: chave, Authorization: 'Bearer ' + _cracha, 'Content-Type': 'application/json', 'Content-Profile': 'crm' } })
+                .catch(function(){});
+            }catch(_){}
+          });
+          // a página voltou do cache do navegador (não fechou de verdade): reaparece na hora
+          window.addEventListener('pageshow', function(e){
+            if(!e || !e.persisted) return;
+            try{ if(_bc) _bc.postMessage({ t: 'oi', id: _abaId }); }catch(_){}
+            if(typeof window._presenceBeat === 'function') window._presenceBeat();
+          });
+        }
         _beat();
         if(!window._hbTimer) window._hbTimer = setInterval(_beat, 60 * 1000);
         if(!window._hbVisBound){
@@ -17245,12 +17288,13 @@ window.Shop = Shop;
      suporte → chega mensagem numa conversa (Fale com a equipe / professor)
      acesso  → uma matrícula é criada, renovada, pausada ou encerrada
      sala    → chega mensagem numa sala de estudos
+     presenca → um colega (mútuo ou de sala) entrou, saiu ou mudou de atividade (SQL 157)
    O aviso traz só números (qual conversa, qual aviso); o conteúdo é lido
    com as regras de sempre. Se a conexão cai (aba dormindo, rede), ao voltar
    o app CONFERE uma vez (aoConferir) — nada se perde e não há relógio.
    ══════════════════════════════════════════════════════════════════ */
 const TempoReal = (function(){
-  const EVENTOS = ['aviso', 'suporte', 'acesso', 'sala'];
+  const EVENTOS = ['aviso', 'suporte', 'acesso', 'sala', 'presenca'];
   const _ouvintes = {};
   const _conferidores = [];
   let _canal = null, _uid = null, _caiu = false, _ligado = false, _escondidaDesde = 0;
@@ -31631,15 +31675,15 @@ async function _presenceFetch(userIds){
     // ler ela aqui devolveria vazio e o pontinho de "online" e o streak sumiriam
     // de todos os cards de colega. A vitrine expõe estas colunas de propósito.
     const { data } = await window._sb.schema('crm').from('user_directory')
-      .select('user_id, last_seen_at, current_activity, streak, streak_day, hot_streak, questions_today, questions_day').in('user_id', ids);
+      .select('user_id, last_seen_at, current_activity, streak, streak_day, hot_streak, questions_today, questions_day, online').in('user_id', ids);
     const now = Date.now();
     const today = _dayFmt(new Date());
     const meId = (window.Auth && Auth.getUser) ? (Auth.getUser() || {}).id : null;
     (data || []).forEach(r => {
       const seen = r.last_seen_at ? new Date(r.last_seen_at).getTime() : 0;
-      // online = visto nos últimos 150s (a batida é de 60 em 60s); o próprio usuário é
-      // sempre online (ele está claramente usando o app — nunca deve se ver "offline").
-      const online = (meId && String(r.user_id) === String(meId)) || (!!seen && (now - seen) < 150 * 1000);
+      // online = o estado que o servidor anuncia (SQL 157: entra na batida, sai ao fechar a aba ou
+      // quando a batida para por 150 s); o próprio usuário é sempre online (ele está usando o app).
+      const online = (meId && String(r.user_id) === String(meId)) || r.online === true;
       const a0 = r.current_activity || null;
       const actAt = (a0 && a0.at) ? new Date(a0.at).getTime() : 0;
       // Só conta a atividade se for RECENTE (< 150s). O heartbeat a renova de 60s
@@ -41544,6 +41588,7 @@ Renderers.salas.mount = function(stageEl){
     else if(k === 'meta'){ _salasRenderMeta(drawer); _salasDrawerStartPoll(drawer); }
     else if(k === 'chat'){ _salasRenderChat(drawer); }
   }
+  let _mesaMembros = new Set();       // membros da sala aberta (só os avisos de presença deles redesenham a mesa)
   async function renderMain(){
     const room = _salasRooms.find(r => String(r.id) === String(_salasCurrentId));
     if(!room){ mainEl.innerHTML = '<div class="salas-main-empty"><p>Selecione uma sala ao lado, ou crie uma nova pra começar.</p></div>'; return; }
@@ -41551,6 +41596,7 @@ Renderers.salas.mount = function(stageEl){
     const isOwner = String(room.creator_id) === String(_salasMyUid());
     if(typeof _presenceInjectStyles === 'function') _presenceInjectStyles();
     const members = (await _salasFetchMembers(room.id)).filter(m => m.status === 'member');
+    _mesaMembros = new Set(members.map(m => String(m.user_id)));
     if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(members.map(m => m.user_id));
     // Mesa ao vivo (Parte C/D): presença + matéria atual + status de cada membro
     const mesaPres = (typeof _presenceFetch === 'function') ? await _presenceFetch(members.map(m => m.user_id)) : {};
@@ -41653,23 +41699,24 @@ Renderers.salas.mount = function(stageEl){
     }
   });
   renderList();
-  // Presença na mesa: batida imediata ao entrar + releitura a cada 30 s com a aba
-  // à vista (quem ficou online, mudou de atividade ou saiu). Antes havia também uma
-  // antena que recebia TODA gravação de perfil de TODOS os alunos (cada "estou online")
-  // para filtrar aqui — com centenas de alunos, isso pesava o servidor à toa.
+  // Presença na mesa ao vivo (SQL 157): o servidor avisa quando um membro da sala entra, sai ou muda
+  // de atividade, e a mesa redesenha só nessa hora. Sem relógio; quando a conexão volta, relê uma vez.
   // Mensagens do chat continuam ao vivo (evento "sala" do TempoReal).
   if(typeof window._presenceBeat === 'function') try{ window._presenceBeat(); }catch(_){}
   function _salasStopLive(){
-    if(window._salasPollTimer){ clearInterval(window._salasPollTimer); window._salasPollTimer = null; }
+    if(window._salasPresOff){ window._salasPresOff(); window._salasPresOff = null; }
   }
   _salasStopLive();
-  window._salasPollTimer = setInterval(() => {
-    if(document.visibilityState !== 'visible') return;
-    if(window.Rede && Rede.offline()) return;
+  let _mesaT = null;
+  const _mesaRedesenhar = function(){
     const r = (window.Router && Router.parse) ? Router.parse() : null;
-    if(!r || r.view !== 'salas'){ _salasStopLive(); return; }
-    if(_salasCurrentId) renderMain();
-  }, 30000);
+    if(!r || r.view !== 'salas' || !mainEl.isConnected){ _salasStopLive(); return; }
+    if(_mesaT || !_salasCurrentId) return;
+    _mesaT = setTimeout(function(){ _mesaT = null; if(_salasCurrentId && mainEl.isConnected) renderMain(); }, 800);
+  };
+  const _offMesaPres = TempoReal.on('presenca', function(d){ if(d && d.de && _mesaMembros.has(String(d.de))) _mesaRedesenhar(); });
+  const _offMesaConf = TempoReal.aoConferir(_mesaRedesenhar);
+  window._salasPresOff = function(){ _offMesaPres(); _offMesaConf(); };
 };
 
 /* ═══════════ EDITAL — visualização hierárquica do edital + progresso ═══════════ */
@@ -47670,7 +47717,7 @@ async function _iniLoadColegas(rowArg, logArg){
   // pedidos independentes saem juntos (16/10/2026): diretório, salas e fórum; os eventos das salas vêm no 2º passo
   const _pc = function(b){ return Promise.resolve(b).catch(function(e){ return { data: null, error: e }; }); };
   const PC = {
-    dir: _pc(window._sb.schema('crm').from('user_directory').select('user_id, nickname, handle, display_name, full_name_public, photo_url, photo_transform, last_seen_at, current_activity').in('user_id', ids)),
+    dir: _pc(window._sb.schema('crm').from('user_directory').select('user_id, nickname, handle, display_name, full_name_public, photo_url, photo_transform, last_seen_at, current_activity, online').in('user_id', ids)),
     mr: _pc(window._sb.schema('aluno').from('room_members').select('room_id, status').eq('user_id', meId)),
     fp: _pc(window._sb.schema('aluno').from('forum_posts').select('id, title, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10)),
     fc: _pc(window._sb.schema('aluno').from('forum_comments').select('id, post_id, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10))
@@ -47680,9 +47727,8 @@ async function _iniLoadColegas(rowArg, logArg){
     const r = await PC.dir;
     profs = r.data || [];
   }catch(_){}
-  const now = Date.now();
   const nameOf = function(p){ return p.nickname || p.display_name || (p.handle ? ('@' + p.handle) : 'colega'); };
-  const online = profs.filter(function(p){ return p.last_seen_at && (now - new Date(p.last_seen_at).getTime()) < 150000; })
+  const online = profs.filter(function(p){ return p.online === true; })
     .sort(function(a, b){ return new Date(b.last_seen_at) - new Date(a.last_seen_at); });
   if(rowEl){
     rowEl.innerHTML = online.length ? online.map(function(p){
@@ -47829,9 +47875,8 @@ function _mentIniCarregar(){
     const ids = colegas.map(c => c.user_id).filter(Boolean);
     if(ids.length){
       try{
-        const d = await window._sb.schema('crm').from('user_directory').select('user_id, last_seen_at').in('user_id', ids);
-        const ag = Date.now();
-        (d.data || []).forEach(x => { if(x.last_seen_at && ag - new Date(x.last_seen_at).getTime() < 150000) online.add(String(x.user_id)); });
+        const d = await window._sb.schema('crm').from('user_directory').select('user_id, online').in('user_id', ids);
+        (d.data || []).forEach(x => { if(x.online === true) online.add(String(x.user_id)); });
       }catch(_){}
     }
     return { turmaId: t.id, avisos: r[0].data || [], encontros: r[1].data || [], libs: r[2].data || [], videos: r[3].data || [],
@@ -48456,16 +48501,20 @@ Renderers.inicio = function(){
     // Tooltip (apelido no hover dos círculos): o data-tip só funciona com o
     // setupQuickTooltips ligado no container da página.
     try{ const pg = document.querySelector('.ini-page'); if(pg && typeof setupQuickTooltips === 'function') setupQuickTooltips(pg); }catch(_){}
-    // Colegas no Início: relê a presença a cada 60s (a batida de cada aluno é de 60s)
-    // enquanto o Início estiver aberto e à vista; sai da página → o timer se mata.
+    // Colegas no Início ao vivo (SQL 157): o servidor avisa quando um colega mútuo ou de sala entra,
+    // sai ou muda de atividade, e só então o bloco relê (online + o que eles fizeram nas salas).
+    // Sem relógio; quando a conexão volta, relê uma vez. Sai da página → os ouvintes se desligam.
     try{
-      if(window._iniColegasTimer) clearInterval(window._iniColegasTimer);
-      window._iniColegasTimer = setInterval(function(){
-        if(!document.getElementById('iniColegasRow')){ clearInterval(window._iniColegasTimer); window._iniColegasTimer = null; return; }
-        if(document.visibilityState !== 'visible') return;
-        if(window.Rede && Rede.offline()) return;
-        try{ if(typeof _iniLoadColegas === 'function') _iniLoadColegas(); }catch(_){}
-      }, 60000);
+      if(window._iniColegasOff) window._iniColegasOff();
+      let _iniColT = null;
+      const _iniColReler = function(){
+        if(!document.getElementById('iniColegasRow')){ if(window._iniColegasOff) window._iniColegasOff(); return; }
+        if(_iniColT) return;
+        _iniColT = setTimeout(function(){ _iniColT = null; try{ if(typeof _iniLoadColegas === 'function') _iniLoadColegas(); }catch(_){} }, 1200);
+      };
+      const _offPres = TempoReal.on('presenca', _iniColReler);
+      const _offConf = TempoReal.aoConferir(_iniColReler);
+      window._iniColegasOff = function(){ _offPres(); _offConf(); window._iniColegasOff = null; };
     }catch(_){}
   }, 0);
 
