@@ -64729,6 +64729,8 @@ Renderers.unit.mount = function(stageEl, route){
   // de groups/blocks que foi renderizado.
   const unit = _unitWithStoreOverride(found.unit);
   Store.markUnitView(unit.id);
+  // estatísticas de acesso (SQL 162): a visita e o tempo ativo nesta unidade
+  if(window.VisitasUnidade) VisitasUnidade.entrar(Util.unitDbId(unit));
 
   // FASE 2: enquanto o banco COMPLETO ainda vem em 2º plano, busca só as
   // questões DESTA unidade pra elas aparecerem já (em conexão lenta é a
@@ -72786,6 +72788,91 @@ window.openPerfComparisonModal = openPerfComparisonModal;
     try{ localStorage.setItem(KEY, String(NIVEIS[i])); }catch(_){}
   });
 })();
+
+/* ══ VISITAS ÀS UNIDADES (SQL 162) ══════════════════════════════════════
+   Cada unidade aberta por um aluno vira uma visita (o servidor junta as que voltam em menos de 30 minutos e
+   ignora equipe e professores). Conta só o tempo ATIVO: aba à vista e o aluno mexendo nos últimos 3 minutos,
+   ou vídeo/áudio tocando, ou o foco num vídeo incorporado (assistir sem mexer o mouse conta). O tempo vai
+   para o servidor a cada 2 minutos, ao sair da unidade e ao esconder/fechar a aba (fetch keepalive, como a
+   presença). Alimenta as estatísticas de acesso do admin (matéria, módulo, unidade, ficha do aluno). */
+const VisitasUnidade = (function(){
+  const TICK = 15, ENVIO = 120, PARADO = 180;
+  let unidade = null, visita = null, acumulado = 0, ultimaAcao = Date.now(), ultimoEnvio = Date.now();
+  let timer = null, cracha = null, desligado = false;
+  const marcar = function(){ ultimaAcao = Date.now(); };
+  ['pointermove', 'pointerdown', 'keydown', 'wheel', 'scroll', 'touchstart'].forEach(function(ev){
+    window.addEventListener(ev, marcar, { passive: true, capture: true });
+  });
+  try{ window._sb.auth.getSession().then(function(r){ cracha = (r && r.data && r.data.session && r.data.session.access_token) || null; }).catch(function(){}); }catch(_){}
+  try{ window._sb.auth.onAuthStateChange(function(_ev, sess){ cracha = (sess && sess.access_token) || null; }); }catch(_){}
+  function tocando(){
+    const ae = document.activeElement;
+    if(ae && ae.tagName === 'IFRAME') return true;
+    return Array.prototype.some.call(document.querySelectorAll('video, audio'), function(m){ return !m.paused && !m.ended; });
+  }
+  function ativo(){ return document.visibilityState === 'visible' && (Date.now() - ultimaAcao < PARADO * 1000 || tocando()); }
+  function aluno(){ return window._sb.schema('aluno'); }
+  async function abrir(){
+    const u = unidade;
+    if(desligado || !u || !window._sb) return null;
+    try{
+      const r = await aluno().rpc('visita_abrir', { p_unidade: u });
+      if(r.error){ if(/visita_abrir|PGRST202|schema cache/i.test(String(r.error.message || '') + ' ' + String(r.error.code || ''))) desligado = true; return null; }
+      if(u !== unidade) return null;
+      visita = r.data || null; ultimoEnvio = Date.now();
+      return visita;
+    }catch(_){ return null; }
+  }
+  async function enviar(){
+    const v = visita, seg = Math.round(acumulado);
+    if(!v || seg < 1) return;
+    acumulado = 0; ultimoEnvio = Date.now();
+    try{
+      const r = await aluno().rpc('visita_pulso', { p_visita: v, p_segundos: seg });
+      if(r.error){ if(v === visita) acumulado += seg; return; }
+      // a visita esfriou (mais de 30 min sem sinal): abre outra e manda o tempo nela
+      if(r.data === false && v === visita){ visita = null; if(await abrir()) await aluno().rpc('visita_pulso', { p_visita: visita, p_segundos: seg }); }
+    }catch(_){ if(v === visita) acumulado += seg; }
+  }
+  function enviarSaindo(){
+    const seg = Math.round(acumulado);
+    if(!visita || seg < 1 || !cracha || !window._sb) return;
+    const base = String(window._sb.supabaseUrl || '').replace(/\/$/, ''), chave = window._sb.supabaseKey;
+    if(!base || !chave) return;
+    acumulado = 0; ultimoEnvio = Date.now();
+    try{
+      fetch(base + '/rest/v1/rpc/visita_pulso', { method: 'POST', keepalive: true, body: JSON.stringify({ p_visita: visita, p_segundos: seg }),
+        headers: { apikey: chave, Authorization: 'Bearer ' + cracha, 'Content-Type': 'application/json', 'Content-Profile': 'aluno' } })
+        .catch(function(){});
+    }catch(_){}
+  }
+  function tick(){
+    if(!unidade) return;
+    if(ativo()) acumulado += TICK;
+    if(Date.now() - ultimoEnvio >= ENVIO * 1000) enviar();
+  }
+  function sair(){
+    if(!unidade) return;
+    enviar();
+    unidade = null;
+  }
+  // chamado pelo mount da unidade (o mesmo lugar que marca "unidade vista")
+  function entrar(unitDb){
+    const u = unitDb != null ? Number(unitDb) : null;
+    if(!u || desligado || !window._sb) return;
+    if(!(window.Auth && Auth.getUser && Auth.getUser())) return;
+    if(u === unidade) return;
+    sair();
+    unidade = u; visita = null; acumulado = 0; ultimaAcao = Date.now(); ultimoEnvio = Date.now();
+    abrir();
+    if(!timer) timer = setInterval(tick, TICK * 1000);
+  }
+  window.addEventListener('hashchange', function(){ if(!/\/u\//.test(location.hash || '')) sair(); });
+  document.addEventListener('visibilitychange', function(){ if(document.visibilityState === 'hidden') enviarSaindo(); });
+  window.addEventListener('pagehide', enviarSaindo);
+  return { entrar: entrar, sair: sair };
+})();
+window.VisitasUnidade = VisitasUnidade;
 
 const StudyTimer = (function(){
   const LS_KEY = 'ubq_st_active_v1';
