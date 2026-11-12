@@ -3732,6 +3732,10 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .sup-thread-para{display:block;margin-top:.3rem;font-family:var(--sans);font-size:.55rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
 .duv-modal .modal-body{display:flex;flex-direction:column;gap:.9rem}
 .duv-nota{margin:0;font-family:var(--sans);font-weight:300;font-size:.76rem;color:var(--text-mute);line-height:1.6}
+/* Recado do professor que não está recebendo dúvidas (SQL 161): aparece no lugar dele, sem poder ser escolhido */
+.duv-recado{display:flex;align-items:flex-start;gap:.9rem;padding:.9rem 1rem;border:1px dashed var(--accent-border-soft);border-radius:3px;background:var(--accent-xlo)}
+.duv-recado-txt{display:block;margin-top:.5rem;padding-left:.7rem;border-left:2px solid var(--accent);font-family:var(--serif);font-size:.95rem;line-height:1.55;color:var(--text);white-space:pre-line;overflow-wrap:anywhere}
+.duv-recado-txt a{color:var(--accent)}
 .duv-nota a{color:var(--accent)}
 .duv-ok{display:flex;flex-direction:column;gap:1rem;font-size:.93rem;line-height:1.7;color:var(--text-dim)}
 .duv-ok p{margin:0}
@@ -32486,14 +32490,37 @@ const Duvidas = (function(){
     return !!(c && window.Commerce && Commerce.isOwned && Commerce.isOwned(c.id));
   }
   // os professores do módulo; sem professor marcado no módulo, os da matéria
-  function professores(sid, moduloDb){
-    const lista = (Array.isArray(window.__PROFS_DUVIDAS) ? window.__PROFS_DUVIDAS : [])
-      .filter(p => (p.materias || []).map(String).includes(String(sid)));
+  function _doModuloOuMateria(lista, moduloDb){
     if(moduloDb != null){
       const doModulo = lista.filter(p => (p.modulos || []).map(String).includes(String(moduloDb)));
       if(doModulo.length) return doModulo;
     }
     return lista;
+  }
+  function _daMateria(sid){
+    return (Array.isArray(window.__PROFS_DUVIDAS) ? window.__PROFS_DUVIDAS : [])
+      .filter(p => (p.materias || []).map(String).includes(String(sid)));
+  }
+  // quem recebe dúvidas agora
+  function professores(sid, moduloDb){
+    return _doModuloOuMateria(_daMateria(sid).filter(p => p.atende !== false), moduloDb);
+  }
+  // quem não está recebendo e deixou um recado (SQL 161): aparece na janela, sem poder ser escolhido
+  function recados(sid, moduloDb){
+    return _doModuloOuMateria(_daMateria(sid).filter(p => p.atende === false && String(p.aviso || '').trim()), moduloDb);
+  }
+  // o cartão do professor que não está recebendo, com o recado dele (não é uma opção)
+  function recadoHtml(p){
+    return '<div class="duv-recado">' + _avHtml(p)
+      + '<span><span class="sup-dest-tit">' + Util.esc(p.nome || '') + '</span>'
+      + '<span class="sup-dest-desc">' + Util.esc(p.cargo || 'Professor') + ' · não está recebendo dúvidas pela plataforma agora</span>'
+      + '<span class="duv-recado-txt">' + _avisoHtml(p.aviso) + '</span></span></div>';
+  }
+  // o recado com o e-mail e os links clicáveis
+  function _avisoHtml(txt){
+    return Util.esc(String(txt || '').trim())
+      .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
+      .replace(/(^|[\s(])([\w.+-]+@[\w-]+(?:\.[\w-]+)+)/g, '$1<a href="mailto:$2">$2</a>');
   }
   function _fem(p){ return /professora|\bdr(a\b|ª)|doutora|mestra/i.test(String((p && p.cargo) || '') + ' ' + String((p && p.nome) || '').slice(0, 5)); }
   function _rotulo(profs, verbo){
@@ -32514,11 +32541,11 @@ const Duvidas = (function(){
     if(!c || !unit || !m || c._subjectId == null || !(window.Auth && Auth.getUser && Auth.getUser())) return '';
     const sid = c._subjectId;
     if(!temMateria(sid)) return '';
-    const profs = professores(sid, _num(m.id));
-    if(!profs.length) return '';
+    const profs = professores(sid, _num(m.id)), recs = profs.length ? [] : recados(sid, _num(m.id));
+    if(!profs.length && !recs.length) return '';
     _ctxUnidade = { sid: sid, sigla: c.sigla || '', materia: c.title || '', m: m, chapter: chapter || null, unit: unit };
     return '<button class="icon-btn" id="unitPergunteBtn" type="button" data-duv-unidade="1" data-tip="Mande sua dúvida de conteúdo para quem ensina esta matéria">'
-      + ICONE + ' ' + Util.esc(_rotulo(profs)) + '</button>';
+      + ICONE + ' ' + Util.esc(_rotulo(profs.length ? profs : recs)) + '</button>';
   }
   function _abrirUnidade(){
     const k = _ctxUnidade; if(!k) return;
@@ -32561,7 +32588,7 @@ const Duvidas = (function(){
   function _materiaDaQuestao(q){
     const atual = window.COURSE && window.COURSE._subjectId != null ? String(window.COURSE._subjectId) : null;
     if(atual && q.materias.indexOf(atual) >= 0) return atual;
-    return q.materias.find(s => temMateria(s) && professores(s, null).length) || q.materias[0] || null;
+    return q.materias.find(s => temMateria(s) && (professores(s, null).length || recados(s, null).length)) || q.materias[0] || null;
   }
   function _respostasHtml(item, q){
     const lista = (Array.isArray(window.__DUVIDAS_PUBLICAS) ? window.__DUVIDAS_PUBLICAS : []).filter(d =>
@@ -32582,8 +32609,10 @@ const Duvidas = (function(){
     if(!(window.Auth && Auth.getUser && Auth.getUser())) return html;
     const sid = _materiaDaQuestao(q);
     const profs = (sid != null && temMateria(sid)) ? professores(sid, null) : [];
+    const recs = (!profs.length && sid != null && temMateria(sid)) ? recados(sid, null) : [];
+    const quem = profs.length ? profs : recs;
     html += '<div class="qz-sat-acoes">'
-      + (profs.length ? '<button type="button" class="icon-btn" data-duv-item="' + Util.attr(item.id) + '" data-duv-para="professor">' + ICONE + ' ' + Util.esc(_rotulo(profs, 'Perguntar')) + '</button>' : '')
+      + (quem.length ? '<button type="button" class="icon-btn" data-duv-item="' + Util.attr(item.id) + '" data-duv-para="professor">' + ICONE + ' ' + Util.esc(_rotulo(quem, 'Perguntar')) + '</button>' : '')
       + '<button type="button" class="icon-btn" data-duv-item="' + Util.attr(item.id) + '" data-duv-para="equipe">' + ICONE_ERRO + ' Reportar erro</button></div>';
     return html;
   }
@@ -32618,6 +32647,7 @@ const Duvidas = (function(){
     if(!user || !window._sb) return;
     const sid = o.sid != null ? o.sid : null;
     const profs = (sid != null && temMateria(sid)) ? professores(sid, o.moduloDb) : [];
+    const recs = (sid != null && temMateria(sid)) ? recados(sid, o.moduloDb) : [];
     const doModulo = o.moduloDb != null && profs.some(p => (p.modulos || []).map(String).includes(String(o.moduloDb)));
     let destino = (o.destino === 'equipe' || !profs.length) ? 'equipe' : 'professor';
     let profId = profs.length ? profs[0].id : null;
@@ -32629,13 +32659,14 @@ const Duvidas = (function(){
       + '<span class="sup-dest-mark"></span>' + _avHtml(p)
       + '<span><span class="sup-dest-tit">' + Util.esc(p.nome || '') + '</span>'
       + '<span class="sup-dest-desc">' + Util.esc((p.cargo || 'Professor') + (doModulo ? ' deste módulo' : '')) + ' · dúvida de conteúdo · responde em até ' + Util.esc(p.prazo || 3) + ' dias úteis</span></span></button>').join('')
+      + recs.map(recadoHtml).join('')
       + '<button type="button" class="sup-dest-opt" role="radio" data-duv-op="equipe">'
       + '<span class="sup-dest-mark"></span><span class="sup-dest-av">' + ICONE_EQUIPE + '</span>'
       + '<span><span class="sup-dest-tit">Equipe da Falcon</span>'
       + '<span class="sup-dest-desc">Dúvidas gerais e problemas: acesso, erro no texto, falta de imagem, gráfico que não funciona, pagamento, Falcoins.</span></span></button>';
     _el.innerHTML =
       '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="duvTit" style="max-width:620px">'
-      + '<div class="modal-header"><div><span class="s-label">' + Util.esc(destino === 'equipe' && o.destino === 'equipe' ? 'Fale com a equipe' : (profs.length ? _rotulo(profs) : 'Fale com a equipe')) + '</span>'
+      + '<div class="modal-header"><div><span class="s-label">' + Util.esc(destino === 'equipe' && o.destino === 'equipe' ? 'Fale com a equipe' : (profs.length ? _rotulo(profs) : (recs.length ? _rotulo(recs) : 'Fale com a equipe'))) + '</span>'
       + '<h2 id="duvTit">' + Util.esc(o.titulo || 'Sua mensagem') + '</h2></div>'
       + '<button type="button" class="modal-close" data-duv="fechar" aria-label="Fechar">×</button></div>'
       + '<div class="modal-body" data-duv-corpo>'
@@ -32723,7 +32754,7 @@ const Duvidas = (function(){
   // texto para o aluno a partir do erro do servidor ('' quando não é um dos conhecidos)
   function erro(msg){ const k = Object.keys(ERROS).find(x => String(msg || '').indexOf(x) >= 0); return k ? ERROS[k] : ''; }
   return { abrir: abrir, botaoUnidadeHtml: botaoUnidadeHtml, itemExtrasHtml: itemExtrasHtml,
-           professores: professores, temMateria: temMateria, fem: _fem, erro: erro };
+           professores: professores, recados: recados, recadoHtml: recadoHtml, temMateria: temMateria, fem: _fem, erro: erro };
 })();
 window.Duvidas = Duvidas;
 
@@ -36949,7 +36980,9 @@ Renderers.support.mount = async function(stageEl, route){
     if(!wrap || !box) return;
     const mv = matEl ? matEl.value : '';
     const profs = (window.Duvidas && mv && mv !== 'geral') ? Duvidas.professores(mv, null) : [];
-    if(!profs.length){ wrap.hidden = true; _para = 'equipe'; return; }
+    const recs = (window.Duvidas && mv && mv !== 'geral') ? Duvidas.recados(mv, null) : [];
+    if(!profs.length && !recs.length){ wrap.hidden = true; _para = 'equipe'; return; }
+    if(!profs.length) _para = 'equipe';
     const tem = Duvidas.temMateria(mv);
     if(!tem && _para !== 'equipe') _para = null;
     if(tem && _para != null && _para !== 'equipe' && !profs.some(p => String(p.id) === String(_para))) _para = null;
@@ -36958,6 +36991,7 @@ Renderers.support.mount = async function(stageEl, route){
         <span class="sup-dest-mark"></span>${p.foto ? `<span class="sup-dest-av"><img src="${Util.attr(p.foto)}" alt=""></span>` : `<span class="sup-dest-av">${Util.esc(Util.initials(p.nome || '?'))}</span>`}
         <span><span class="sup-dest-tit">${Util.esc(p.nome || '')}: dúvida de conteúdo</span>
         <span class="sup-dest-desc">Para entender um ponto da matéria, de uma questão ou de uma unidade. Responde em até ${Util.esc(p.prazo || 3)} dias úteis.</span></span></button>`).join('')
+      + recs.map(Duvidas.recadoHtml).join('')
       + `<button type="button" class="sup-dest-opt${_para === 'equipe' ? ' is-on' : ''}" role="radio" data-sup-para="equipe">
         <span class="sup-dest-mark"></span><span class="sup-dest-av"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
         <span><span class="sup-dest-tit">Equipe da Falcon: dúvidas gerais e problemas</span>
@@ -66285,7 +66319,7 @@ function _freqHref(d, r, est, examId){
   return '#/banco/questions' + ((window.Router && Router.querystring) ? Router.querystring(q) : '');
 }
 function _freqLinhaHtml(d, r, i, est, examId, maior){
-  return '<a class="fq-row" href="' + Util.attr(_freqHref(d, r, est, examId)) + '" data-pffat="' + i + '" data-fq-nome="' + Util.attr(r.code + ' ' + r.title) + '" title="Ver as questões deste tema no Banco">'
+  return '<a class="fq-row" href="' + Util.attr(_freqHref(d, r, est, examId)) + '" data-fq-tema="' + Util.attr(r.id) + '" data-pffat="' + i + '" data-fq-nome="' + Util.attr(r.code + ' ' + r.title) + '" title="Ver as questões deste tema no Banco">'
     + '<span class="fq-dot" style="background:' + r.cor + '"></span>'
     + '<span class="fq-nome"><b>' + Util.esc(r.code) + '</b>' + Util.esc(r.title) + '</span>'
     + '<span class="fq-bar"><i style="width:' + (r.n / (maior || 1) * 100).toFixed(1) + '%;background:' + r.cor + '"></i></span>'
@@ -66357,7 +66391,7 @@ function _freqColunasHtml(d, est, L, examId){
   const cols = L.linhas.map(function(r, i){
     const cx = ml + slot * (i + 0.5), x = cx - larg / 2, y = yOf(r.n), h = Math.max(1, (H - mb) - y);
     const ac = r.resp ? Math.round(r.certas / r.resp * 100) + '% (' + r.certas + ' de ' + r.resp + ')' : 'ainda não respondeu';
-    return '<g class="fq-col" data-fq-col="' + i + '" data-fq-href="' + Util.attr(_freqHref(d, r, est, examId)) + '"'
+    return '<g class="fq-col" data-fq-col="' + i + '" data-fq-tema="' + Util.attr(r.id) + '" data-fq-href="' + Util.attr(_freqHref(d, r, est, examId)) + '"'
       + ' data-fq-info="' + Util.attr(JSON.stringify({ nome: r.code + ' ' + r.title, n: r.n, pct: _freqPct(r.pct), provas: r.provas, ac: ac, cor: r.cor })) + '">'
       + '<rect class="fq-col-hit" x="' + (cx - slot / 2).toFixed(1) + '" y="' + mt + '" width="' + slot.toFixed(1) + '" height="' + (H - mt) + '" fill="transparent"/>'
       + '<rect class="fq-col-bar" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + larg.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="2" fill="' + r.cor + '"/>'
@@ -76207,6 +76241,33 @@ const RaioX = (function(){
 })();
 window.RaioX = RaioX;
 
+/* A página Provas para a Sala dos professores (?embed=provas#/provas): a mesma página do aluno (cards,
+   arquivo para baixar, folha de respostas e a evolução nos CACDs), sem a barra de cima, o caminho e os
+   botões flutuantes; o título fica com a Sala. A janela tem a altura da tela, então as janelas da prova
+   (escolher o PDF, folha de respostas) abrem à vista. Fora das provas e dos simulados, o link abre noutra aba. */
+(function(){
+  const q = new URLSearchParams(location.search);
+  if(q.get('embed') !== 'provas') return;
+  document.documentElement.classList.add('embed-provas');
+  const estilo = document.createElement('style');
+  // o aviso de cookies não aparece dentro da Sala (sem resposta, nada de medição: vale o "só essenciais")
+  estilo.textContent = 'html.embed-provas body > .topbar, html.embed-provas #breadcrumb, html.embed-provas .st-float,'
+    + ' html.embed-provas #ajdBtn, html.embed-provas .sim-hero, html.embed-provas .ubqc{display:none !important}';
+  document.head.appendChild(estilo);
+  const daqui = function(h){ return /^#\/(provas|simulados?)(\/|\?|$)/.test(String(h || '')); };
+  document.addEventListener('click', function(e){
+    const a = e.target.closest && e.target.closest('a[href^="#/"]');
+    if(!a || daqui(a.getAttribute('href'))) return;
+    e.preventDefault(); e.stopPropagation();
+    window.open(location.pathname + a.getAttribute('href'), '_blank', 'noopener');
+  }, true);
+  window.addEventListener('hashchange', function(){
+    if(daqui(location.hash)) return;
+    window.open(location.pathname + location.hash, '_blank', 'noopener');
+    if(window.Router && Router.go) Router.go('/provas');
+  });
+})();
+
 /* "O que mais cai na prova" para a Sala dos professores (?embed=mais-cai&materia=N):
    a página mostra só o cartão do Desempenho daquela matéria, com o acerto dos
    alunos que têm a matéria no lugar do "Seu acerto" (SQL 147). O resto do app
@@ -76238,7 +76299,13 @@ window.RaioX = RaioX;
     const html = c ? _freqCardHtml(c, examId) : '';
     box.innerHTML = html || '<p class="fq-vazio">Esta matéria ainda não tem tópicos do edital ligados às questões de provas anteriores.</p>';
     if(html) _freqWire(box);
+    // Na Sala, o tema clicado (linha, coluna ou fatia) filtra o banco da matéria na própria página do professor;
+    // os outros links do cartão abrem noutra aba.
     box.addEventListener('click', function(e){
+      let tema = e.target.closest('[data-fq-tema]');
+      const fat = e.target.closest('.pf-fatia[data-pffat]');
+      if(!tema && fat){ const card = fat.closest('.fq-card'); tema = card && card.querySelector('.fq-row[data-pffat="' + fat.getAttribute('data-pffat') + '"]'); }
+      if(tema){ e.preventDefault(); e.stopPropagation(); try{ parent.postMessage({ tipo: 'mais-cai-tema', tema: tema.getAttribute('data-fq-tema') }, location.origin); }catch(_){} return; }
       const a = e.target.closest('a[href^="#/"]');
       if(a){ e.preventDefault(); e.stopPropagation(); window.open(location.pathname + a.getAttribute('href'), '_blank', 'noopener'); }
     }, true);
