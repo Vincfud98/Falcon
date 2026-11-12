@@ -76226,6 +76226,37 @@ window.RaioX = RaioX;
   });
 })();
 
+// A matéria tem questão? No banco (questão da matéria, ou de várias matérias) ou em bloco de questões
+// de alguma unidade dela. soObjetiva = só conta objetiva (o radar). Banco ainda incompleto (falhou a
+// carga): na dúvida, a matéria fica (antes sobrar do que sumir com a de alguém).
+let _perfQuestaoCache = { bank: null, sets: null };
+function _perfMateriaTemQuestao(subjectId, perf, soObjetiva){
+  if(subjectId == null) return false;
+  const qb = window._QBank;
+  if(!(qb && qb.completo)) return true;
+  if(_perfQuestaoCache.bank !== qb || !_perfQuestaoCache.sets){
+    const todas = new Set(), objetivas = new Set();
+    const tipoDe = {};
+    (qb.questions || []).forEach(function(q){
+      if(!q || q.ativo === false) return;
+      tipoDe[String(q.id)] = q.type;
+      if(q.subject_id != null){ todas.add(String(q.subject_id)); if(q.type !== 'essay') objetivas.add(String(q.subject_id)); }
+    });
+    Object.keys(qb.subjectsByQuestion || {}).forEach(function(qid){
+      if(!(qid in tipoDe)) return;   // questão inativa ou fora do banco
+      (qb.subjectsByQuestion[qid] || []).forEach(function(sid){ todas.add(String(sid)); if(tipoDe[qid] !== 'essay') objetivas.add(String(sid)); });
+    });
+    _perfQuestaoCache = { bank: qb, sets: { todas: todas, objetivas: objetivas } };
+  }
+  const sid = String(subjectId), sets = _perfQuestaoCache.sets;
+  if((soObjetiva ? sets.objetivas : sets.todas).has(sid)) return true;
+  // questões que só existem nos blocos das unidades
+  return Object.values((perf && perf.perUnit) || {}).some(function(pu){
+    if(!pu || String(pu.subjectId) !== sid || !pu.agg) return false;
+    if(pu.agg.quiz && pu.agg.quiz.total) return true;
+    return !soObjetiva && !!(pu.agg.essay && pu.agg.essay.maxTotal);
+  });
+}
 Renderers.performance = function(route){
   // Esta página soma blocos de todas as unidades: com a carga completa ainda
   // em 2º plano, mostra o aviso em vez de números parciais (redesenha sozinha
@@ -76317,6 +76348,11 @@ Renderers.performance = function(route){
     // No Desempenho mostramos só as matérias que o aluno TEM (não o concurso
     // inteiro): compra, cortesia, turma da mentoria ou só o banco (Commerce.temMateria).
     .filter(c => (window.Commerce && Commerce.temMateria) ? Commerce.temMateria(c.id) : true)
+    // Só matérias COM questões entram nas partes que medem questões (lista por matéria, comparação,
+    // ranking e radar). Matéria só de vídeo (Temporadas Anteriores, Extensivando…) aparecia com 0% e
+    // poluía tudo (pedido do dono, 12/11/2026). Os números do topo, o tempo de estudo e a rotina
+    // continuam contando todas as matérias.
+    .filter(c => _perfMateriaTemQuestao(c._subjectId, perf, false))
     .sort((a, b) => {
       const ia = _SUBJ_ORDER.indexOf(_sigOf(a)); const ib = _SUBJ_ORDER.indexOf(_sigOf(b));
       return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
@@ -76468,8 +76504,9 @@ Renderers.performance = function(route){
   const _ruName = (_ruProf && (_ruProf.nickname || _ruProf.displayName || _ruProf.handle)) || (_ru && (_ru.nickname || _ru.name)) || 'Aluno';
   const _ruPhoto = _ruProf && _ruProf.photoUrl;
   // Radar 100% dinâmico: um eixo por matéria que o aluno tem acesso (window.COURSES,
-  // já ordenado acima). Sem lista fixa de exclusão — idiomas etc. aparecem também.
-  const _radarAxes = _courses.map(course => {
+  // já ordenado acima) e que tem questão OBJETIVA: o radar mede o acerto das objetivas, então
+  // matéria só com discursiva (ou sem questão) seria um eixo sempre em 0%.
+  const _radarAxes = _courses.filter(course => _perfMateriaTemQuestao(course._subjectId, perf, true)).map(course => {
     const sid = course._subjectId; let ans=0, corr=0;
     Object.values(perf.perUnit||{}).forEach(pu => { if(pu.subjectId === sid && pu.agg){ ans += pu.agg.quiz.answered; corr += pu.agg.quiz.correct; } });
     return { sig:(typeof subjectSigla === 'function') ? subjectSigla(course) : (course.title||'?'), full:course.title||'', value: ans ? Math.round(corr/ans*100) : 0 };
