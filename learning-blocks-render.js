@@ -540,6 +540,10 @@
   function _lbDriveId(input){
     if(!input) return null;
     const s = String(input).trim();
+    // Só link do Google (drive.google.com, docs.google.com, drive.usercontent.google.com). Imagem embutida
+    // (data:image/...;base64) tem "/d/" no meio do texto e virava um falso link do Drive: a capa sumia
+    // (capas dos concursos na Loja, 12/11/2026).
+    if(!/^(?:https?:\/\/)?(?:[\w-]+\.)*google\.com\//i.test(s)) return null;
     let m = s.match(/\/file\/d\/([a-zA-Z0-9_-]{10,})/);          if(m) return m[1];
     m = s.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);                   if(m) return m[1];
     m = s.match(/\/d\/([a-zA-Z0-9_-]{10,})/);                     if(m) return m[1];
