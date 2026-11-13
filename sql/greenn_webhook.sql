@@ -73,6 +73,7 @@ declare
   v_email   text := lower(btrim(coalesce(p#>>'{client,email}', p#>>'{customer,email}', '')));
   v_nome    text := nullif(btrim(coalesce(p#>>'{client,name}', p#>>'{customer,name}', '')), '');
   v_fone    text := nullif(btrim(coalesce(p#>>'{client,cellphone}', p#>>'{client,phone}', '')), '');
+  v_doc     text := nullif(regexp_replace(coalesce(p#>>'{client,cpf}', p#>>'{client,cpf_cnpj}', p#>>'{client,document}', p#>>'{client,document_number}', ''), '\D', '', 'g'), '');
   v_map     vendas.greenn_produtos%rowtype;
   v_marca   integer := coalesce((select x.brand_id from catalogo.products x order by x.id limit 1),
                                 (select b.id from crm.brands b order by b.id limit 1));
@@ -102,11 +103,13 @@ begin
         end if;
       end if;
       if v_cli is null then
-        insert into crm.clients (brand_id, full_name, email, phone, app_user_id, status, source, first_contact_at)
-        values (v_marca, coalesce(v_nome, split_part(v_email, '@', 1)), v_email, v_fone, v_user, 'customer', 'greenn', now())
+        insert into crm.clients (brand_id, full_name, email, phone, cpf, app_user_id, status, source, first_contact_at)
+        values (v_marca, coalesce(v_nome, split_part(v_email, '@', 1)), v_email, v_fone, v_doc, v_user, 'customer', 'greenn', now())
         returning id into v_cli;
       else
         update crm.clients set status = 'customer' where id = v_cli and status in ('lead', 'former_customer');
+        -- guarda telefone e CPF da compra (ajudam a achar a conta certa quando o e-mail é outro)
+        update crm.clients set phone = coalesce(nullif(phone, ''), v_fone), cpf = coalesce(nullif(cpf, ''), v_doc) where id = v_cli;
       end if;
 
       v_ate := now() + make_interval(months => v_map.meses);
