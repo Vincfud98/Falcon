@@ -673,8 +673,38 @@
               }).join('') +
             '</div>'
           : '';
+        const quadro = '<div style="position:relative;aspect-ratio:16/9;background:var(--bg-elev);border:1px solid var(--accent-border-soft);border-radius:var(--radius);overflow:hidden">' + player + '</div>';
+        // Arrumação "Em destaque" (c.layout = 'destaque', 13/11/2026): vídeo grande; embaixo, título, a linha do
+        // professor (foto, nome e cargo) e a descrição — como o aluno vê (index.html, .vb-destaque).
+        if(c.layout === 'destaque'){
+          let profLinha = '';
+          if(presList.length){
+            profLinha = '<div style="display:flex;flex-wrap:wrap;gap:.6rem 1.4rem;padding-bottom:.9rem;margin-bottom:.9rem;border-bottom:1px solid var(--accent-border-soft)">' +
+              presList.map(function(pr){
+                const nm = (pr && pr.name) || '';
+                const ph = (pr && pr.photo) || '';
+                const fotoHtml = ph
+                  ? '<span style="width:40px;height:40px;border-radius:50%;background:url(\'' + attrHtml(_lbDriveImageUrl(ph)) + '\') center/cover;flex-shrink:0;display:inline-block"></span>'
+                  : '<span style="width:40px;height:40px;border-radius:50%;background:var(--accent-lo);border:1px solid var(--accent-border);flex-shrink:0;display:inline-block"></span>';
+                const cargo = ((pr && pr.role) || '').trim();
+                return '<button type="button" class="lb-presenter" ' +
+                  'data-prof-id="' + attrHtml((pr && pr.id != null) ? pr.id : '') + '" data-prof-name="' + attrHtml(nm) + '" data-prof-role="' + attrHtml(cargo) + '" data-prof-photo="' + attrHtml(ph) + '" data-prof-quote="' + attrHtml((pr && pr.quote) || '') + '" data-prof-bio="' + attrHtml((pr && pr.bio) || '') + '" ' +
+                  'style="display:inline-flex;align-items:center;gap:.65rem;background:none;border:none;padding:0;cursor:pointer;font-family:inherit;text-align:left">' +
+                  fotoHtml +
+                  '<span style="display:flex;flex-direction:column;gap:.12rem"><span style="font-family:var(--serif);font-style:italic;font-size:1rem;color:var(--text);text-decoration:underline;text-decoration-color:var(--accent-border)">' + e(nm) + '</span>' +
+                  (cargo ? '<span style="font-family:var(--sans);font-size:.52rem;letter-spacing:.2em;text-transform:uppercase;color:var(--text-mute)">' + e(cargo) + '</span>' : '') + '</span>' +
+                '</button>';
+              }).join('') + '</div>';
+          } else if(c.presenter){
+            profLinha = '<div style="padding-bottom:.9rem;margin-bottom:.9rem;border-bottom:1px solid var(--accent-border-soft);font-family:var(--serif);font-style:italic;font-size:1rem;color:var(--text)">' + e(c.presenter) + '</div>';
+          }
+          const tituloGrande = block.title ? '<h4 style="font-family:var(--serif);font-size:1.45rem;line-height:1.2;color:var(--text);margin:0 0 .7rem">' + e(block.title) + '</h4>' : '';
+          return '<div style="display:grid;grid-template-columns:minmax(0,1fr);gap:1.1rem">' + quadro +
+            '<div style="max-width:46rem">' + tituloGrande + profLinha + descHtml + transHtml + '</div>' +
+          '</div>' + tagsHtml;
+        }
         return '<div style="display:grid;grid-template-columns:1.1fr 1fr;gap:1.5rem;align-items:start">' +
-          '<div style="position:relative;aspect-ratio:16/9;background:var(--bg-elev);border:1px solid var(--accent-border-soft);border-radius:var(--radius);overflow:hidden">' + player + '</div>' +
+          quadro +
           '<div>' + titleHtml + descHtml + presenter + transHtml + '</div>' +
         '</div>' + tagsHtml;
       }
