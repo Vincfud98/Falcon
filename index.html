@@ -15297,6 +15297,7 @@ window.TAG_REGISTRY = {
         return window._evoDados;
       };
       const _carregarSimulados = async function(){
+      window.__provasCarregando = true;
       // S1 — hidrata SIMULADOS reais do banco (substitui a lista fake). Cada seção
       // vira um bloco de questões que referencia o banco (resolveBankGroup monta tudo).
       try {
@@ -15482,7 +15483,20 @@ window.TAG_REGISTRY = {
             });
           }
         }catch(e){ console.warn('[sim grants]', e); window._simGrants = window._simGrants || {}; }
-      } catch(e){ console.warn('[hydrate simulados] erro:', e && e.message); if(!Array.isArray(window.SIMULADOS)) window.SIMULADOS = []; }
+        // Tudo da página Provas chegou (provas, arquivos, números das edições, notas e compras): ela troca o
+        // "Carregando as provas" pelo conteúdo, de uma vez.
+        const _provasJaNaTela = window.__provasProntas && !window.__provasErro;
+        window.__provasProntas = true; window.__provasErro = false; window.__provasCarregando = false;
+        if(!_provasJaNaTela){
+          try{ if(window.App && App.render && /^#\/(provas|simulados?)(\/|\?|$)/.test(location.hash || '')) App.render(); }catch(_){}
+        }
+      } catch(e){
+        console.warn('[hydrate simulados] erro:', e && e.message);
+        if(!Array.isArray(window.SIMULADOS)) window.SIMULADOS = [];
+        // sem resposta do servidor: a página Provas avisa em vez de ficar carregando para sempre
+        window.__provasCarregando = false;
+        if(!window.__provasProntas){ window.__provasErro = true; window.__provasProntas = true; try{ if(window.App && App.render) App.render(); }catch(_){} }
+      }
       if(window._bootMarca) _bootMarca('simulados');
       };
 
@@ -15516,7 +15530,13 @@ window.TAG_REGISTRY = {
         .then(function(){ return window._conferirVersoes('boot'); })   // cópia local: recarrega só o que mudou
         .catch(function(){});
       const _bancoP = _blocosP2.then(function(){ return _dispararBanco(); });
-      const _simP = _blocosP2.then(function(){ return _carregarSimulados(); });
+      // Provas e simulados vêm depois dos blocos (a vez é das unidades) — MENOS quando a página aberta é a
+      // das provas (no app ou na Sala dos professores): ela não usa os blocos, e esperar por eles deixava a
+      // página vazia por 3 a 10 segundos (13/11/2026). Espera só o login, para as notas da pessoa virem juntas.
+      // Os simulados se remontam sozinhos quando o banco de questões chega (rebuildSimulados).
+      const _naPaginaDeProvas = /^#\/(provas|simulados?)(\/|\?|$)/.test(location.hash || '');
+      const _simP = (_naPaginaDeProvas ? Promise.resolve(window.__authLoadP).catch(function(){}) : _blocosP2)
+        .then(function(){ return _carregarSimulados(); });
       const _alunoP = (window.Store && typeof Store.hidratacaoPronta === 'function') ? Store.hidratacaoPronta() : Promise.resolve();
       const _sessaoP = window._sessaoPronta || Promise.resolve();
       const _inicioP = (typeof window._iniPreparar === 'function') ? window._iniPreparar() : Promise.resolve();
@@ -15641,6 +15661,11 @@ window.TAG_REGISTRY = {
     }catch(e){
       console.error('[hydrate] exception:', e);
       window.__hydrating = false;
+      // caiu antes de buscar as provas: a página Provas avisa em vez de ficar carregando para sempre
+      if(!window.__provasCarregando && !window.__provasProntas){
+        window.__provasErro = true; window.__provasProntas = true;
+        try{ if(window.App && App.render && /^#\/(provas|simulados?)(\/|\?|$)/.test(location.hash || '')) App.render(); }catch(_){}
+      }
       return false;
     }
   }
@@ -43401,13 +43426,22 @@ window.ProvasPassadasTab = (function(){
 Renderers.provas = function(route){
   const aba = _provasAbaDe(route);
   const provas = (window.PROVAS || []).slice();
+  // Enquanto as provas não chegaram, a página diz que está carregando: antes ela abria com
+  // "Nenhuma prova passada ainda" por alguns segundos e quem olhava achava que não havia provas
+  // (a Sala dos professores, 13/11/2026). Os números das abas também só aparecem com tudo pronto.
+  const pronto = !!window.__provasProntas;
   const tabs = PROVAS_ABAS.map(a => {
     const n = a.k === 'passadas' ? provas.length : (window.SIMULADOS || []).length;
     return `<button type="button" class="prov-tab${aba === a.k ? ' is-on' : ''}" data-prov-aba="${a.k}">${Util.esc(a.rot)}`
-      + `<span class="prov-tab-n">${n}</span></button>`;
+      + (pronto ? `<span class="prov-tab-n">${n}</span>` : '') + `</button>`;
   }).join('');
   // provas passadas: os cards primeiro (a página é para ver as provas) e, depois, a evolução nos CACDs
-  const corpo = aba === 'passadas'
+  const corpo = !pronto
+    ? '<div class="ini-loading"><span class="ini-spinner"></span><span class="ini-loading-t">Carregando as provas…</span></div>'
+    : (window.__provasErro && !provas.length && !(window.SIMULADOS || []).length)
+    ? '<div class="empty"><div class="empty-title">Não foi possível carregar as provas agora</div>'
+      + '<div class="empty-sub">Confira a conexão e recarregue a página.</div></div>'
+    : aba === 'passadas'
     ? `<div class="sim-grid" data-a="6">${_provaCardsHtml(provas)}</div>${window.EvolucaoProvas ? EvolucaoProvas.blocoHtml() : ''}`
     : Renderers.simulados(route, { semHero: true });
   return `<div class="sim-hero">
@@ -43431,6 +43465,7 @@ Renderers.provas.mount = function(stageEl, route){
       Router.go('/provas' + Router.querystring(q));
     });
   });
+  if(!window.__provasProntas) return;   // ainda carregando: nada a ligar além das abas
   // A aba "Simulados" é a página de sempre: o mount dela também é o de sempre.
   if(aba === 'simulados'){ if(Renderers.simulados.mount) Renderers.simulados.mount(stageEl, route); return; }
   // Aba das provas passadas: o botão de PDF e o bloco da evolução nos CACDs
