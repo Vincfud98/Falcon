@@ -371,3 +371,48 @@
   }
   global.FalconPush = { suporta: suporta, estado: estado, ativar: ativar, desativar: desativar, testar: testar, pintar: pintar };
 })(typeof window !== 'undefined' ? window : this);
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Onde fica a sessão de login (Supabase) — o app do aluno e o painel usam
+   a MESMA gaveta. "Lembrar de mim" ligado (o padrão): no aparelho
+   (localStorage); desligado: só enquanto a aba estiver aberta (sessionStorage).
+   Antes o painel lia só o localStorage: com "Lembrar de mim" desligado ele não
+   achava a sessão e mandava a pessoa de volta para o app (12/11/2026).
+   ═══════════════════════════════════════════════════════════════════════ */
+(function(global){
+  'use strict';
+  const CHAVE_LEMBRAR = 'ubique.auth.lembrar';
+  const AuthLembrar = {
+    ligado: function(){ try{ return localStorage.getItem(CHAVE_LEMBRAR) !== '0'; }catch(_){ return true; } },
+    definir: function(v){ try{ localStorage.setItem(CHAVE_LEMBRAR, v ? '1' : '0'); }catch(_){} }
+  };
+  const guarda = {
+    getItem: function(k){ try{ return (AuthLembrar.ligado() ? localStorage : sessionStorage).getItem(k); }catch(_){ return null; } },
+    setItem: function(k, v){
+      try{
+        if(AuthLembrar.ligado()){ localStorage.setItem(k, v); sessionStorage.removeItem(k); }
+        else { sessionStorage.setItem(k, v); localStorage.removeItem(k); }
+      }catch(_){}
+    },
+    removeItem: function(k){ try{ localStorage.removeItem(k); sessionStorage.removeItem(k); }catch(_){} }
+  };
+  // nome da chave que o supabase-js usa: sb-<projeto>-auth-token
+  function chave(url){
+    try{ return 'sb-' + new URL(url).hostname.split('.')[0] + '-auth-token'; }catch(_){ return ''; }
+  }
+  // De quem são as chaves de login guardadas neste navegador (sem ir à rede):
+  // o id da conta; null = não há chave nenhuma (ninguém logado); undefined = não deu para ler.
+  function contaGuardada(url){
+    const k = chave(url);
+    if(!k) return undefined;
+    const raw = guarda.getItem(k);
+    if(!raw) return null;
+    try{
+      const s = JSON.parse(raw);
+      const id = s && s.user && s.user.id;
+      return id ? String(id) : undefined;
+    }catch(_){ return undefined; }
+  }
+  global.AuthLembrar = AuthLembrar;
+  global.UbiqueSessao = { guarda: guarda, chave: chave, contaGuardada: contaGuardada };
+})(typeof window !== 'undefined' ? window : this);

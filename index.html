@@ -27,7 +27,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
      Line/Bar) e no RotinaTab. Quem usa a biblioteca é o admin.html, que tem a
      própria tag. NÃO reintroduzir aqui sem antes checar se há uso real. -->
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=137"></script>
+<script src="ubique-shared.js?v=138"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=84"></script>
 <script src="raiox-render.js?v=4"></script>
@@ -12744,25 +12744,11 @@ if(typeof supabase === 'undefined'){ document.write('<script src="https://cdn.js
   window._fetchGuardado = _fetchGuardado;
   /* FETCH-GUARDADO-FIM */
   // "Lembrar de mim" na entrada: ligado (o padrão), a sessão fica guardada no aparelho; desligado,
-  // fica só enquanto a aba estiver aberta (computador compartilhado). A chave diz qual gaveta usar.
-  const _CHAVE_LEMBRAR = 'ubique.auth.lembrar';
-  window.AuthLembrar = {
-    ligado: function(){ try{ return localStorage.getItem(_CHAVE_LEMBRAR) !== '0'; }catch(_){ return true; } },
-    definir: function(v){ try{ localStorage.setItem(_CHAVE_LEMBRAR, v ? '1' : '0'); }catch(_){} }
-  };
-  const _guardaDaSessao = {
-    getItem: function(k){ try{ return (AuthLembrar.ligado() ? localStorage : sessionStorage).getItem(k); }catch(_){ return null; } },
-    setItem: function(k, v){
-      try{
-        if(AuthLembrar.ligado()){ localStorage.setItem(k, v); sessionStorage.removeItem(k); }
-        else { sessionStorage.setItem(k, v); localStorage.removeItem(k); }
-      }catch(_){}
-    },
-    removeItem: function(k){ try{ localStorage.removeItem(k); sessionStorage.removeItem(k); }catch(_){} }
-  };
+  // fica só enquanto a aba estiver aberta (computador compartilhado). A gaveta é a mesma do painel
+  // (window.AuthLembrar e window.UbiqueSessao, em ubique-shared.js).
   try {
     window._sb = supabase.createClient(URL, KEY, {
-      auth: { storage: _guardaDaSessao },
+      auth: { storage: window.UbiqueSessao.guarda },
       global: { fetch: _fetchGuardado },
       // antena do realtime: offline, tenta reconectar só a cada 60 s (em vez de 10 s)
       realtime: { reconnectAfterMs: function(tent){ return (window.Rede && Rede.offline()) ? 60000 : ([1000, 2000, 5000, 10000][tent - 1] || 10000); } }
@@ -16290,27 +16276,61 @@ const Auth = (function(){
     try{ localStorage.removeItem(USER_CACHE_KEY); sessionStorage.removeItem(USER_CACHE_KEY); }catch(_){}
   }
 
+  // A cópia do aparelho só vale para a conta cujas chaves de login estão neste navegador.
+  // Antes ela era usada sem conferir: com duas contas no mesmo navegador (ou com a sessão
+  // encerrada noutra aba), a tela mostrava uma pessoa e os pedidos saíam com outra conta,
+  // ou sem conta nenhuma. Ex.: a professora via "Sala dos professores", mas o painel abria
+  // com a conta que estava de fato no navegador (12/11/2026).
+  function _cacheDaContaLogada(c){
+    if(!c) return false;
+    if(!window.UbiqueSessao || !window._sbUrl) return true;
+    const dona = window.UbiqueSessao.contaGuardada(window._sbUrl);
+    if(dona === undefined) return true;   // não deu para ler as chaves: segue como antes
+    return dona !== null && dona === String(c.id);
+  }
+  // A página recarrega e abre inteira com a conta que está no navegador. Trocar só o
+  // usuário em memória deixava a tela, o progresso e o sino da conta anterior.
+  function _recarregarComAContaDoNavegador(aviso){
+    if(window.__recarregandoConta) return;
+    window.__recarregandoConta = true;
+    _clearCachedSession();
+    if(aviso){ try{ sessionStorage.setItem('falcon.aviso.entrada', aviso); }catch(_){} }
+    setTimeout(function(){ location.reload(); }, 60);
+  }
+
   // Revalida JWT do Supabase em background. NÃO bloqueia UI.
-  // Se sucesso, atualiza cache com dados frescos. Se falha, mantém cache atual
-  // (não desloga o user — eles podem continuar usando a app offline-ish).
+  // Se sucesso, atualiza cache com dados frescos. Queda de rede: mantém o cache
+  // (o aluno segue usando a app offline-ish). Outra conta no navegador ou sessão
+  // encerrada (o servidor respondeu): a página recarrega com a situação real.
   function _revalidateInBackground(){
     if(!window._sb) return;
+    const antes = current && current.id != null ? String(current.id) : '';
     Promise.race([
       window._sb.auth.getSession(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('background revalidate timeout 5s')), 5000))
     ])
     .then(async result => {
-      const { data } = result || {};
+      const { data, error } = result || {};
       if(data && data.session && data.session.user){
-        const fresh = await _hydrateSupabaseUser(data.session.user);
+        const u = data.session.user;
+        if(antes && String(u.id) !== antes){
+          console.warn('[auth] outra conta está logada neste navegador: recarregando com ela');
+          _recarregarComAContaDoNavegador();
+          return;
+        }
+        const fresh = await _hydrateSupabaseUser(u);
         if(fresh){
           current = fresh;
           _saveCachedSession(current);
           syncMockUser();
           console.log('[auth] sessão revalidada em background');
         }
+      } else if(error && _erroDeRede(error)){
+        console.warn('[auth] revalidação sem rede — mantendo a cópia do aparelho:', error.message);
       } else {
-        console.warn('[auth] revalidação retornou sem sessão — JWT pode estar expirado, mas cache local mantém o user logado.');
+        // o servidor respondeu (ou não há chave nenhuma): a sessão terminou — saiu noutra aba ou venceu
+        console.warn('[auth] sessão terminou: indo para a entrada');
+        _recarregarComAContaDoNavegador('Sua sessão terminou. Entre de novo.');
       }
     })
     .catch(e => {
@@ -16449,9 +16469,10 @@ const Auth = (function(){
   // timeout (3s). Em cada page refresh isso descontinuava o aluno (admin
   // sobrevivia porque tem cache próprio em ubique.admin.token).
   async function load(){
-    // 1) Cache local primeiro
+    // 1) Cache local primeiro — só se for da conta cujas chaves estão no navegador
     const cached = _loadCachedSession();
-    if(cached && !cached._stale){
+    const cacheValido = _cacheDaContaLogada(cached);
+    if(cacheValido && !cached._stale){
       current = cached;
       syncMockUser();
       // Espelha pro UbiqueStore.user_profiles — sem isso, Profile.needsOnboarding
@@ -16473,11 +16494,12 @@ const Auth = (function(){
           try{ fresco = await _comPrazo(_hydrateSupabaseUser(data.session.user), 12000, 'perfil'); }
           catch(e2){ console.warn('[auth] perfil sem resposta:', e2.message); if(window.Rede) Rede.falha('perfil'); }
           if(fresco){ current = fresco; _saveCachedSession(current); syncMockUser(); return current; }
-          // sessão válida, banco mudo: segue com o que há no aparelho
-          if(cached){ current = _semStale(cached); syncMockUser(); _mirrorProfileToLocal(current); return current; }
+          // sessão válida, banco mudo: segue com o que há no aparelho (se for desta mesma conta)
+          if(cached && String(cached.id) === String(data.session.user.id)){ current = _semStale(cached); syncMockUser(); _mirrorProfileToLocal(current); return current; }
         } else if(cached){
           // o servidor RESPONDEU sem sessão: não é lentidão — o aluno saiu ou a sessão venceu
           _clearCachedSession();
+          try{ sessionStorage.setItem('falcon.aviso.entrada', 'Sua sessão terminou. Entre de novo.'); }catch(_){}
         }
       } catch(e){
         // Sem resposta (lentidão ou queda). NADA de apagar tokens: o servidor pode ter
@@ -16485,7 +16507,7 @@ const Auth = (function(){
         // mesmo antigo, entra com ele e revalida quando der.
         console.warn('[auth] getSession sem resposta (' + e.message + ') — mantendo o que há no aparelho');
         if(window.Rede) Rede.falha('getSession');
-        if(cached){ current = _semStale(cached); syncMockUser(); _mirrorProfileToLocal(current); _revalidateInBackground(); return current; }
+        if(cacheValido){ current = _semStale(cached); syncMockUser(); _mirrorProfileToLocal(current); _revalidateInBackground(); return current; }
       }
     }
     current = null;
@@ -16834,6 +16856,11 @@ const Auth = (function(){
         // modo visitante ligado: a página recarrega, para o visitante nascer limpo (sem o banco com gabarito na memória)
         if(window.Visitante && Visitante.ligado()){ setTimeout(function(){ location.reload(); }, 80); return; }
         _renderSoon();
+      } else if((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session && session.user
+                && current && String(current.id) !== String(session.user.id)){
+        // Outra conta passou a ocupar o navegador com esta página aberta (alguém entrou
+        // com outra conta noutra aba): recarrega e abre inteira com ela, sem misturar.
+        _recarregarComAContaDoNavegador();
       } else if(event === 'SIGNED_IN' && session && session.user){
         if(!current || current.id !== session.user.id){
           // ANTI-FLICKER no login: marca "hidratando" ANTES do 1º render, pra o
