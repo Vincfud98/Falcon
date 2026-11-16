@@ -44,5 +44,29 @@ Deno.serve(async (req) => {
   const corpo = await lerCorpo(req);
   const { data, error } = await db.rpc("aplicar_venda_greenn", { p: corpo });
   if (error) return new Response("erro: " + error.message, { status: 500 });   // 500 → a Greenn tenta de novo
-  return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+
+  // Comprou e ainda não tem conta na Falcon → cria a conta e manda o convite por e-mail
+  // ("Criar minha senha"), igual ao Kajabi. Ao criar o usuário, crm.handle_new_user liga a
+  // ficha da compra à conta nova, então o acesso já aparece quando ele entra.
+  // Falha aqui nunca derruba o webhook: o acesso já foi liberado e ele ainda pode criar a conta sozinho.
+  const res = (data || {}) as Record<string, unknown>;
+  if (res.acao === "liberado" && !res.conta) {
+    const c = (corpo.client || corpo.customer || {}) as Record<string, unknown>;
+    const email = String(c.email || "").trim().toLowerCase();
+    const nome = String(c.name || "").trim();
+    if (/^[^\s@]+@[^\s@]+$/.test(email)) {
+      try {
+        const auth = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+        const { error: e } = await auth.auth.admin.inviteUserByEmail(email, {
+          redirectTo: "https://falcon.grupoubique.com/",
+          data: nome ? { full_name: nome } : {},
+        });
+        res.convite = e ? "falhou: " + e.message : "enviado";
+      } catch (ex) {
+        res.convite = "falhou: " + String((ex as Error)?.message || ex);
+      }
+      console.log("[greenn-webhook] convite", email, res.convite);
+    }
+  }
+  return new Response(JSON.stringify(res), { status: 200, headers: { "Content-Type": "application/json" } });
 });
