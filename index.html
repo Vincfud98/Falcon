@@ -3190,7 +3190,10 @@ html[data-theme="light"] .lba-backdrop{background:rgba(26,26,26,.5)}
 .ini-fcard .tt{font-family:var(--serif);font-size:1.08rem;font-weight:400;line-height:1.3}
 .ini-fcard .meta{display:flex;gap:1rem;margin-top:.45rem;font-family:var(--mono);font-size:.56rem;color:var(--text-mute)}
 /* Colegas agora — círculos com anel verde pulsante (miniatura do das Salas) */
-.ini-mates-row{display:flex;flex-wrap:wrap;gap:.75rem;margin-bottom:1rem}
+.ini-mates-row{display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;margin-bottom:1rem;min-height:38px}
+.ini-mates-row[hidden]{display:none}
+.ini-mate-espera{opacity:.3;box-shadow:none}
+.ini-tentar{width:auto;margin-top:.55rem;padding:.5rem 1.1rem}
 .ini-mate-wrap{position:relative;flex-shrink:0}
 .ini-mate{width:38px;height:38px;border-radius:50%;overflow:hidden;position:relative;background:var(--bg-elevated,#181a20);border:1px solid rgba(200,169,126,.12);display:flex;align-items:center;justify-content:center;font-family:var(--serif);color:var(--accent);font-size:.95rem}
 .ini-mate img.avatar-img{display:block;max-width:none !important;max-height:none !important}
@@ -14681,7 +14684,34 @@ window.TAG_REGISTRY = {
     const d = await Promise.race([window.__visitanteDecisaoP, new Promise(function(res){ setTimeout(function(){ res({ on: false }); }, 8000); })]);
     return !!(d && d.on);
   };
-  async function hydrateFromSupabase(){
+  /* UMA carga do conteúdo por vez (17/11/2026). Logo depois do login a carga inteira era pedida até
+     4 vezes ao mesmo tempo (o boot, a chegada da sessão, o fim do login): quatro vezes os mesmos
+     pedidos, quatro telas de espera se atropelando, e a entrada ficava lenta, sobretudo no celular.
+     Regra: pedido para a MESMA conta com uma carga em curso recebe a carga em curso. Se a conta mudou
+     no meio (a carga começou sem login e a pessoa entrou), marca-se UMA nova carga para depois dela. */
+  function _contaDaCarga(){
+    try{ return String((window.UbiqueSessao && window._sbUrl && window.UbiqueSessao.contaGuardada(window._sbUrl)) || ''); }catch(_){ return ''; }
+  }
+  let _hidAtual = null, _hidProxima = null;
+  function hydrateFromSupabase(){
+    const conta = _contaDaCarga();
+    if(!_hidAtual){
+      const reg = { conta: conta, p: null };
+      _hidAtual = reg;
+      reg.p = _hidratarDeVerdade().finally(function(){ if(_hidAtual === reg) _hidAtual = null; });
+      return reg.p;
+    }
+    if(_hidAtual.conta === conta) return _hidAtual.p;
+    if(_hidProxima && _hidProxima.conta === conta) return _hidProxima.p;
+    const prox = { conta: conta, p: null };
+    _hidProxima = prox;
+    prox.p = _hidAtual.p.catch(function(){}).then(function(){
+      if(_hidProxima === prox) _hidProxima = null;
+      return hydrateFromSupabase();
+    });
+    return prox.p;
+  }
+  async function _hidratarDeVerdade(){
     if(!window.UBIQUE_USE_SUPABASE || !window._sb){
       return false;
     }
@@ -16907,6 +16937,7 @@ const Auth = (function(){
         syncMockUser();
         // Desmonta a sessão anterior (antena realtime + polling + sino).
         try{ if(typeof window.teardownUserSession === 'function') window.teardownUserSession(); }catch(_){}
+        try{ if(window.InicioBlocos) InicioBlocos.limpar(); }catch(_){}
         // modo visitante ligado: a página recarrega, para o visitante nascer limpo (sem o banco com gabarito na memória)
         if(window.Visitante && Visitante.ligado()){ setTimeout(function(){ location.reload(); }, 80); return; }
         _renderSoon();
@@ -47728,15 +47759,33 @@ function progressBarSkeletonHTML(){
 // "Meus concursos" — tela inicial. Mesma estética de "Seus cursos", mas os
 // cards são CONCURSOS. Os do aluno abrem; os outros aparecem como "OBTER".
 // ── Avisos do admin (banner no topo do Início; vários = bolinhas) ──
-async function _iniLoadAvisos(examId, elArg){
-  const el = elArg || document.getElementById('iniAvisos'); if(!el || !window._sb) return;
-  let rows = [];
+/* Blocos do Início que vêm do servidor (Avisos, Acontecimentos, Colegas agora): cada um tem duas
+   metades (17/11/2026). BUSCAR devolve só os dados; PINTAR desenha num elemento. O mesmo desenho serve
+   à resposta do servidor e à cópia guardada no aparelho, e ninguém depende de "o que estiver na tela"
+   quando a busca termina. Quem junta as duas metades é o InicioBlocos, mais abaixo. */
+// Queda de rede ou servidor mudo num pedido do Início: diferente de "veio vazio".
+function _iniErroDeRede(r){
+  const e = r && r.error; if(!e) return false;
+  return window._ehErroPassageiro ? !!window._ehErroPassageiro(e) : /fetch|network|timeout|load failed/i.test(String(e.message || e));
+}
+async function _iniAvisosDados(examId){
+  if(!window._sb) return { rows: [] };
+  let r = null;
   try{
-    const r = await window._sb.schema('conteudo').from('avisos')
+    r = await window._sb.schema('conteudo').from('avisos')
       .select('id, titulo, corpo, link_url, link_label, image_url, exam_id, ativo, criado_em')
       .eq('ativo', true).order('criado_em', { ascending: false }).limit(10);
-    rows = (r.data || []).filter(function(a){ return a && a.titulo && (!a.exam_id || String(a.exam_id) === String(examId || '')); }).slice(0, 5);
-  }catch(_){}
+  }catch(e){ r = { data: null, error: e }; }
+  if(_iniErroDeRede(r)) return { falhou: true };
+  const rows = ((r && r.data) || [])
+    .filter(function(a){ return a && a.titulo && (!a.exam_id || String(a.exam_id) === String(examId || '')); })
+    .slice(0, 5)
+    .map(function(a){ return { titulo: a.titulo, corpo: a.corpo || '', link_url: a.link_url || '', link_label: a.link_label || '', image_url: a.image_url || '' }; });
+  return { rows: rows };
+}
+function _iniAvisosPintar(el, d){
+  if(!el) return;
+  const rows = (d && d.rows) || [];
   if(!rows.length){ el.hidden = true; el.innerHTML = ''; return; }
   let idx = 0;
   const paint = function(){
@@ -47749,20 +47798,25 @@ async function _iniLoadAvisos(examId, elArg){
       + (a.link_url ? '<a class="ini-aviso-go" href="' + Util.attr(a.link_url) + '" target="_blank" rel="noopener">' + Util.esc(a.link_label || 'Abrir') + '</a>' : '')
       + (rows.length > 1 ? ('<span class="ini-aviso-dots">' + rows.map(function(_, i){ return '<i class="' + (i === idx ? 'on' : '') + '" data-dot="' + i + '"></i>'; }).join('') + '</span>') : '')
       + '</span></div>';
-    el.querySelectorAll('[data-dot]').forEach(function(d){
-      d.addEventListener('click', function(){ idx = parseInt(d.getAttribute('data-dot'), 10) || 0; paint(); });
+    el.querySelectorAll('[data-dot]').forEach(function(dt){
+      dt.addEventListener('click', function(){ idx = parseInt(dt.getAttribute('data-dot'), 10) || 0; paint(); });
     });
   };
   el.hidden = false;
   paint();
 }
+// O Início do visitante usa só os avisos (o resto da página dele é outro).
+async function _iniLoadAvisos(examId, elArg){
+  const el = elArg || document.getElementById('iniAvisos'); if(!el || !window._sb) return;
+  const d = await _iniAvisosDados(examId);
+  if(d && !d.falhou) _iniAvisosPintar(el, d);
+}
 
 // ── Feed "Acontecimentos" (fórum em alta + novos simulados do concurso) ──
-async function _iniLoadFeed(examId, elArg){
-  const el = elArg || document.getElementById('iniFeed'); if(!el) return;
-  if(!window._sb || !examId){ el.innerHTML = '<div class="ini-ph"><span class="ini-ph-t">Sem novidades no concurso por enquanto.</span></div>'; return; }
-  const _agoT = function(ts){ const d = Math.floor((Date.now() - ts) / 86400000); if(d <= 0) return 'hoje'; if(d === 1) return 'ontem'; if(d < 30) return 'há ' + d + ' dias'; try{ return new Date(ts).toLocaleDateString('pt-BR'); }catch(_){ return ''; } };
-  const cards = [];
+// BUSCAR os Acontecimentos: só o que vem do servidor. Nada do que o app tem em memória (matérias, simulados,
+// a Loja) entra aqui, porque esta busca roda cedo na abertura, antes de isso estar pronto.
+async function _iniFeedBuscar(examId){
+  if(!window._sb || !examId) return { semConcurso: true };
   // Data de criação da conta: o feed só mostra o que aconteceu DEPOIS disso.
   let acctMs = window.__acctCreatedMs || 0;
   if(!acctMs){
@@ -47772,6 +47826,47 @@ async function _iniLoadFeed(examId, elArg){
   if(!acctMs){
     try{ const _u = await window._sb.auth.getUser(); const _ca = _u && _u.data && _u.data.user && _u.data.user.created_at; if(_ca){ acctMs = new Date(_ca).getTime(); window.__acctCreatedMs = acctMs; } }catch(_){}
   }
+  // Todos os pedidos saem JUNTOS (16/10/2026): a cadeia de 6 passos seguidos levava 1,2 s no computador e 3-5 s
+  // no 4G — era o "Acontecimentos demora para aparecer". Agora são 2 passos (posts → curtidas/comentários).
+  const _p = function(b){ return Promise.resolve(b).catch(function(e){ return { data: null, error: e }; }); };
+  const _me0 = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  const P = {
+    pr: _p(window._sb.schema('aluno').from('forum_posts').select('id, title, created_at, exam_id, subject_id').is('deleted_at', null).order('created_at', { ascending: false }).limit(80)),
+    sr: _p(window._sb.schema('conteudo').from('mock_exams').select('id, title, created_at, is_published').eq('is_published', true).order('created_at', { ascending: false }).limit(20)),
+    cr: _p(window._sb.schema('conteudo').from('unit_changelog').select('id, unit_id, note, criado_em').order('criado_em', { ascending: false }).limit(10)),
+    er: _p(window._sb.schema('vendas').from('enrollments').select('product_id, starts_at, status').eq('status', 'active').order('starts_at', { ascending: false }).limit(5)),
+    nr: (_me0 && _me0.id) ? _p(window._sb.schema('aluno').from('notifications').select('id, type, payload, created_at').eq('user_id', _me0.id).order('created_at', { ascending: false }).limit(40)) : Promise.resolve({ data: [] }),
+    shop: (window.Shop && !Shop.ready()) ? Promise.resolve().then(function(){ return Shop.load(); }).catch(function(){}) : Promise.resolve()
+  };
+  const [pr, sr, cr, er, nr] = await Promise.all([P.pr, P.sr, P.cr, P.er, P.nr]);
+  // Queda de rede em TODOS os pedidos: não é "sem novidades", é "não deu para carregar".
+  if([pr, sr, cr, er].every(_iniErroDeRede)) return { falhou: true };
+  // 2º passo: aplausos e comentários dos posts que vieram (quais são do concurso é a montagem que decide)
+  const posts = ((pr && pr.data) || []).filter(function(p){ return p && p.title; });
+  const likes = {}, coms = {};
+  if(posts.length){
+    const ids = posts.map(function(p){ return p.id; });
+    try{
+      const [lk, cm] = await Promise.all([
+        window._sb.schema('aluno').from('forum_likes').select('post_id').in('post_id', ids),
+        window._sb.schema('aluno').from('forum_comments').select('post_id').is('deleted_at', null).in('post_id', ids)
+      ]);
+      (lk.data || []).forEach(function(r){ likes[r.post_id] = (likes[r.post_id] || 0) + 1; });
+      (cm.data || []).forEach(function(r){ coms[r.post_id] = (coms[r.post_id] || 0) + 1; });
+    }catch(_){}
+  }
+  const ens = (er && er.data) || [];
+  if(ens.some(function(e){ return e && e.starts_at; })) await P.shop;   // nomes dos produtos (Loja), para "Matéria liberada"
+  return { acctMs: acctMs, posts: posts, likes: likes, coms: coms, sims: (sr && sr.data) || [], chg: (cr && cr.data) || [], ens: ens, notifs: (nr && nr.data) || [] };
+}
+// MONTAR os cartões a partir do que foi buscado. Síncrono: usa o que o app tem em memória NESTE momento
+// (matérias do concurso, simulados, nomes da Loja). O InicioBlocos monta de novo quando a carga inicial
+// termina, porque só aí "Aula atualizada" e "Novo simulado" têm de onde tirar os nomes.
+function _iniFeedMontar(cru, examId){
+  if(!cru || cru.semConcurso) return { semConcurso: true };
+  const acctMs = cru.acctMs || 0;
+  const _agoT = function(ts){ const d = Math.floor((Date.now() - ts) / 86400000); if(d <= 0) return 'hoje'; if(d === 1) return 'ontem'; if(d < 30) return 'há ' + d + ' dias'; try{ return new Date(ts).toLocaleDateString('pt-BR'); }catch(_){ return ''; } };
+  const cards = [];
   // Notificação pessoal → card do feed. Cobre menções (fórum/questão), respostas,
   // redação corrigida, gabarito, suporte, estudo em dupla e seguir — clicáveis
   // até o conteúdo. matricula_* e room_* ficam de fora (já aparecem via
@@ -47808,20 +47903,8 @@ async function _iniLoadFeed(examId, elArg){
       '<a class="ini-fcard" href="' + Util.attr(href) + '"><div class="top"><span class="ini-ftag notif">' + Util.esc(tag) + '</span><span class="when">' + _agoT(ts) + '</span></div>'
       + '<div class="tt">' + txt + '</div></a>' };
   };
-  // Todos os pedidos saem JUNTOS (16/10/2026): a cadeia de 6 passos seguidos levava 1,2 s no computador e 3-5 s
-  // no 4G — era o "Acontecimentos demora para aparecer". Agora são 2 passos (posts → curtidas/comentários).
-  const _p = function(b){ return Promise.resolve(b).catch(function(e){ return { data: null, error: e }; }); };
-  const _me0 = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-  const P = {
-    pr: _p(window._sb.schema('aluno').from('forum_posts').select('id, title, created_at, exam_id, subject_id').is('deleted_at', null).order('created_at', { ascending: false }).limit(80)),
-    sr: _p(window._sb.schema('conteudo').from('mock_exams').select('id, title, created_at, is_published').eq('is_published', true).order('created_at', { ascending: false }).limit(20)),
-    cr: _p(window._sb.schema('conteudo').from('unit_changelog').select('id, unit_id, note, criado_em').order('criado_em', { ascending: false }).limit(10)),
-    er: _p(window._sb.schema('vendas').from('enrollments').select('product_id, starts_at, status').eq('status', 'active').order('starts_at', { ascending: false }).limit(5)),
-    nr: (_me0 && _me0.id) ? _p(window._sb.schema('aluno').from('notifications').select('id, type, payload, created_at').eq('user_id', _me0.id).order('created_at', { ascending: false }).limit(40)) : Promise.resolve({ data: [] }),
-    shop: (window.Shop && !Shop.ready()) ? Promise.resolve().then(function(){ return Shop.load(); }).catch(function(){}) : Promise.resolve()
-  };
   try{
-    const pr = await P.pr;
+    const pr = { data: cru.posts || [] };
     // MESMO critério do Fórum (~24054): post novo carrega exam_id; post ANTIGO
     // (exam_id null) pertence ao concurso da sua MATÉRIA (via exam_subjects).
     // Filtrar só por exam_id no SQL escondia todos os posts antigos.
@@ -47832,16 +47915,7 @@ async function _iniLoadFeed(examId, elArg){
       return p.exam_id ? String(p.exam_id) === String(examId) : (p.subject_id ? concSubj.has(String(p.subject_id)) : false);
     });
     if(posts.length){
-      const ids = posts.map(function(p){ return p.id; });
-      const lc = {}, cc = {};
-      try{
-        const [lk, cm] = await Promise.all([
-          window._sb.schema('aluno').from('forum_likes').select('post_id').in('post_id', ids),
-          window._sb.schema('aluno').from('forum_comments').select('post_id').is('deleted_at', null).in('post_id', ids)
-        ]);
-        (lk.data || []).forEach(function(r){ lc[r.post_id] = (lc[r.post_id] || 0) + 1; });
-        (cm.data || []).forEach(function(r){ cc[r.post_id] = (cc[r.post_id] || 0) + 1; });
-      }catch(_){}
+      const lc = cru.likes || {}, cc = cru.coms || {};
       posts.forEach(function(p){ p._l = lc[p.id] || 0; p._c = cc[p.id] || 0; p._s = p._l + p._c * 2; });
       posts.sort(function(a, b){ return b._s - a._s || (new Date(b.created_at) - new Date(a.created_at)); });
       posts.slice(0, 3).forEach(function(p){
@@ -47858,7 +47932,7 @@ async function _iniLoadFeed(examId, elArg){
     // A tabela mock_exams NÃO tem coluna exam_id (o vínculo com o concurso é por
     // outra via). Filtrar por exam_id gerava erro 42703 (400) e derrubava o card
     // de simulado do feed. Mostramos os simulados publicados mais recentes.
-    const sr = await P.sr;
+    const sr = { data: cru.sims || [] };
     // Só simulado que existe na lista do aluno (prova passada fica de fora) e do concurso ativo;
     // sem matéria derivada ainda, entra (informação ausente não exclui).
     const _examIni = (typeof activeExamId === 'function') ? activeExamId() : '';
@@ -47882,7 +47956,7 @@ async function _iniLoadFeed(examId, elArg){
     // Aulas atualizadas (Fase 2): o admin registra "o que mudou" no editor da
     // unidade (conteudo.unit_changelog) e a atualização vira card no feed —
     // só de unidades do CONCURSO ativo; 1 card por unidade (o mais recente).
-    const cr = await P.cr;
+    const cr = { data: cru.chg || [] };
     const chg = (cr.data || []).filter(function(g){ return g && g.note; });
     if(chg.length){
       let cursosEx = (window.COURSES || []).filter(Boolean);
@@ -47914,10 +47988,9 @@ async function _iniLoadFeed(examId, elArg){
   try{
     // FASE D — matérias liberadas DESTE aluno (matrículas próprias via RLS):
     // evento pessoal importante, entra no feed junto das novidades do concurso.
-    const er = await P.er;
+    const er = { data: cru.ens || [] };
     const ens = (er.data || []).filter(function(e){ return e && e.starts_at; });
     if(ens.length){
-      await P.shop;
       ens.forEach(function(en){
         const nome = (window.Shop && Shop.nameForProduct) ? Shop.nameForProduct(en.product_id) : '';
         if(!nome) return;
@@ -47933,7 +48006,7 @@ async function _iniLoadFeed(examId, elArg){
   try{
     const _me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
     if(_me && _me.id){
-      const nr = await P.nr;
+      const nr = { data: cru.notifs || [] };
       (nr.data || []).forEach(function(n){ const c = _notifFeedCard(n); if(c) cards.push(c); });
     }
   }catch(_){}
@@ -47941,41 +48014,44 @@ async function _iniLoadFeed(examId, elArg){
   // Só o que aconteceu DEPOIS da criação da conta; ordena por data (mais novo 1º).
   const _all = cards.filter(function(c){ return !acctMs || (c.ts && c.ts >= acctMs); })
                     .sort(function(a, b){ return b.ts - a.ts; });
-  const _wireFeed = function(){
+  return { cards: _all.slice(0, 60).map(function(c){ return { ts: c.ts, html: c.html }; }) };
+}
+// Desenha os Acontecimentos em `el`. Máx. 5 por vez + "Ver mais" (+5), pra não empurrar a página;
+// quem já abriu "Ver mais" continua com a lista aberta quando ela se atualiza.
+function _iniFeedPintar(el, d){
+  if(!el) return;
+  if(d && d.semConcurso){ el.innerHTML = '<div class="ini-ph"><span class="ini-ph-t">Sem novidades no concurso por enquanto.</span></div>'; return; }
+  const todos = (d && d.cards) || [];
+  const pintar = function(n){
+    el._iniN = n;
+    const shown = todos.slice(0, n);
+    if(!shown.length){ el.innerHTML = '<div class="ini-ph"><span class="ini-ph-t">Sem novidades desde que você entrou.</span></div>'; return; }
+    el.innerHTML = shown.map(function(c){ return c.html; }).join('')
+      + (todos.length > n ? '<button type="button" class="ini-feed-more" id="iniFeedMore">Ver mais</button>' : '');
     el.querySelectorAll('[data-feed-course]').forEach(function(a){
       a.addEventListener('click', function(){
         const t = (window.COURSES || []).find(function(c){ return c && c.id === a.getAttribute('data-feed-course'); });
         if(t){ window.COURSE = t; try{ const rb = window._UbqRebuildCourseHierarchy; if(typeof rb === 'function' && t._subjectId) rb(window.COURSE, t._subjectId, null); }catch(_){} }
       });
     });
-  };
-  // Máx. 5 por vez + "Ver mais" que carrega mais 5, pra não empurrar a página.
-  const _renderFeed = function(nShow){
-    const shown = _all.slice(0, nShow);
-    if(!shown.length){ el.innerHTML = '<div class="ini-ph"><span class="ini-ph-t">Sem novidades desde que você entrou.</span></div>'; return; }
-    el.innerHTML = shown.map(function(c){ return c.html; }).join('')
-      + (_all.length > nShow ? '<button type="button" class="ini-feed-more" id="iniFeedMore">Ver mais</button>' : '');
-    _wireFeed();
     const mb = el.querySelector('#iniFeedMore');
-    if(mb) mb.addEventListener('click', function(){ _renderFeed(nShow + 5); });
+    if(mb) mb.addEventListener('click', function(){ pintar(n + 5); });
   };
-  _renderFeed(5);
+  pintar(Math.max(5, el._iniN || 5));
 }
 
 // ── Colegas agora (amigos ONLINE + o que estão fazendo, via presença) ──
-async function _iniLoadColegas(rowArg, logArg){
-  const rowEl = rowArg || document.getElementById('iniColegasRow');
-  const logEl = logArg || document.getElementById('iniColegasLog');
-  if(!rowEl && !logEl) return;
-  const empty = function(msg){ if(rowEl) rowEl.innerHTML = ''; if(logEl) logEl.innerHTML = '<div class="ini-mate-none">' + Util.esc(msg) + '</div>'; };
+async function _iniColegasDados(){
   const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
   const meId = me && me.id;
-  if(!meId || !window.Follows || !window._sb){ empty('Siga colegas para acompanhar a atividade deles aqui.'); return; }
+  if(!meId || !window.Follows || !window._sb) return { msg: 'Siga colegas para acompanhar a atividade deles aqui.' };
+  // A lista de colegas chega com o preparo da sessão (initUserSession): sem esperar por ela, quem abre o app
+  // do zero receberia "você ainda não tem colegas mútuos" por engano. Teto de 4 s para não prender o bloco.
+  try{ if(window._sessaoPronta) await Promise.race([window._sessaoPronta, new Promise(function(r){ setTimeout(r, 4000); })]); }catch(_){}
   let ids = [];
   try{ ids = (Follows.mutual(meId) || []).map(function(e){ return e.following_id; }).filter(function(x){ return x && String(x) !== String(meId); }); }catch(_){}
   ids = Array.from(new Set(ids));
-  if(!ids.length){ empty('Você ainda não tem colegas mútuos. Siga colegas (e eles a você) para vê-los aqui.'); return; }
-  let profs = [];
+  if(!ids.length) return { msg: 'Você ainda não tem colegas mútuos. Siga colegas (e eles a você) para vê-los aqui.' };
   // pedidos independentes saem juntos (16/10/2026): diretório, salas e fórum; os eventos das salas vêm no 2º passo
   const _pc = function(b){ return Promise.resolve(b).catch(function(e){ return { data: null, error: e }; }); };
   const PC = {
@@ -47984,81 +48060,284 @@ async function _iniLoadColegas(rowArg, logArg){
     fp: _pc(window._sb.schema('aluno').from('forum_posts').select('id, title, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10)),
     fc: _pc(window._sb.schema('aluno').from('forum_comments').select('id, post_id, created_at, user_id').in('user_id', ids).is('deleted_at', null).order('created_at', { ascending: false }).limit(10))
   };
-  try{
-    // Colegas mútuos na home (terceiros) → VITRINE.
-    const r = await PC.dir;
-    profs = r.data || [];
-  }catch(_){}
+  // Colegas mútuos na home (terceiros) → VITRINE.
+  const r = await PC.dir;
+  if(_iniErroDeRede(r)) return { falhou: true };
+  const profs = (r && r.data) || [];
   const nameOf = function(p){ return p.nickname || p.display_name || (p.handle ? ('@' + p.handle) : 'colega'); };
   const online = profs.filter(function(p){ return p.online === true; })
-    .sort(function(a, b){ return new Date(b.last_seen_at) - new Date(a.last_seen_at); });
-  if(rowEl){
-    rowEl.innerHTML = online.length ? online.map(function(p){
-      const nm = nameOf(p); const ini = String(nm).replace('@', '').charAt(0).toUpperCase();
-      return '<span class="ini-mate-wrap online" data-tip="' + Util.attr(nm) + '"><span class="ini-mate" data-mav="' + Util.attr(String(p.user_id)) + '">' + Util.esc(ini) + '</span></span>';
-    }).join('') : '<span class="ini-mate-none">Nenhum colega online agora.</span>';
-    online.forEach(function(p){
-      if(!p.photo_url) return;
-      const el = rowEl.querySelector('[data-mav="' + String(p.user_id).replace(/"/g, '') + '"]');
-      if(el && typeof renderAvatarInto === 'function') renderAvatarInto(el, p.photo_url, p.photo_transform);
-    });
-  }
+    .sort(function(a, b){ return new Date(b.last_seen_at) - new Date(a.last_seen_at); })
+    .map(function(p){ return { id: String(p.user_id), nm: nameOf(p), foto: p.photo_url || '', corte: p.photo_transform || null }; });
   // LOG persistente (como o feed do drawer das salas): eventos das SUAS salas
   // (aluno.room_events — "começou a estudar X", "acertou N seguidas"…), que
   // ficam no bloco. O snapshot current_activity expirava em 90s e sumia.
-  if(logEl){
-    const items = [];
-    // 1) Eventos das SUAS salas de estudo (aluno.room_events).
-    try{
-      const mr = await PC.mr;
-      const roomIds = (mr.data || []).filter(function(m){ return m && m.status === 'member'; }).map(function(m){ return m.room_id; });
-      if(roomIds.length){
-        const er = await window._sb.schema('aluno').from('room_events').select('*').in('room_id', roomIds).order('created_at', { ascending: false }).limit(15);
-        (er.data || []).filter(function(ev){ return ev && String(ev.user_id) !== String(meId); }).forEach(function(ev){
-          items.push({ ts: ev.created_at ? new Date(ev.created_at).getTime() : 0, uid: ev.user_id, kind: 'room', ev: ev });
-        });
-      }
-    }catch(_){}
-    // 2) Atividade dos COLEGAS mútuos no fórum (publicou / comentou) — clicável.
-    if(ids.length){
-      try{
-        const [fp, fc] = await Promise.all([PC.fp, PC.fc]);
-        (fp.data || []).forEach(function(p){ items.push({ ts: p.created_at ? new Date(p.created_at).getTime() : 0, uid: p.user_id, kind: 'post', title: p.title }); });
-        (fc.data || []).forEach(function(c){ items.push({ ts: c.created_at ? new Date(c.created_at).getTime() : 0, uid: c.user_id, kind: 'comment' }); });
-      }catch(_){}
+  const items = [];
+  // 1) Eventos das SUAS salas de estudo (aluno.room_events).
+  try{
+    const mr = await PC.mr;
+    const roomIds = (mr.data || []).filter(function(m){ return m && m.status === 'member'; }).map(function(m){ return m.room_id; });
+    if(roomIds.length){
+      const er = await window._sb.schema('aluno').from('room_events').select('*').in('room_id', roomIds).order('created_at', { ascending: false }).limit(15);
+      (er.data || []).filter(function(ev){ return ev && String(ev.user_id) !== String(meId); }).forEach(function(ev){
+        items.push({ ts: ev.created_at ? new Date(ev.created_at).getTime() : 0, uid: ev.user_id, kind: 'room', ev: ev });
+      });
     }
-    if(items.length){
-      items.sort(function(a, b){ return b.ts - a.ts; });
-      try{ if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(items.map(function(i){ return i.uid; })); }catch(_){}
-      const _li = function(it){
-        const u = (window.UserDirectory && UserDirectory.getById) ? (UserDirectory.getById(it.uid) || {}) : {};
-        const nm = u.nickname || u.handle || 'Colega';
-        const when = (typeof _relTime === 'function' && it.ts) ? _relTime(it.ts) : '';
-        const w = when ? ' <span style="font-family:var(--mono);font-size:.52rem;color:var(--text-mute)">· ' + Util.esc(when) + '</span>' : '';
-        if(it.kind === 'post'){
-          return '<div class="ini-mate-li"><a href="#/forum"><b>' + Util.esc(nm) + '</b> publicou no fórum: ' + Util.esc(String(it.title || '').slice(0, 60)) + w + '</a></div>';
-        }
-        if(it.kind === 'comment'){
-          return '<div class="ini-mate-li"><a href="#/forum"><b>' + Util.esc(nm) + '</b> comentou no fórum' + w + '</a></div>';
-        }
-        return '<div class="ini-mate-li"><b>' + Util.esc(nm) + '</b> '
-          + ((typeof _roomEventText === 'function') ? _roomEventText(it.ev) : Util.esc(it.ev.type || '')) + w + '</div>';
-      };
-      // Máx. 5 por vez + "Ver mais" (+5), pra não virar lista infinita.
-      // A atualização a cada 30 s não volta para 5: o que o aluno abriu continua aberto.
-      const _renderLog = function(){
-        const _shown = window._iniMateVisiveis || 5;
-        logEl.innerHTML = items.slice(0, _shown).map(_li).join('')
-          + (items.length > _shown ? '<button type="button" class="ini-mate-more" id="iniMateMore">Ver mais</button>' : '');
-        const mb = logEl.querySelector('#iniMateMore');
-        if(mb) mb.addEventListener('click', function(){ window._iniMateVisiveis = _shown + 5; _renderLog(); });
-      };
-      _renderLog();
+  }catch(_){}
+  // 2) Atividade dos COLEGAS mútuos no fórum (publicou / comentou) — clicável.
+  try{
+    const [fp, fc] = await Promise.all([PC.fp, PC.fc]);
+    (fp.data || []).forEach(function(p){ items.push({ ts: p.created_at ? new Date(p.created_at).getTime() : 0, uid: p.user_id, kind: 'post', title: p.title }); });
+    (fc.data || []).forEach(function(c){ items.push({ ts: c.created_at ? new Date(c.created_at).getTime() : 0, uid: c.user_id, kind: 'comment' }); });
+  }catch(_){}
+  let log = [];
+  if(items.length){
+    items.sort(function(a, b){ return b.ts - a.ts; });
+    try{ if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(items.map(function(i){ return i.uid; })); }catch(_){}
+    const _li = function(it){
+      const u = (window.UserDirectory && UserDirectory.getById) ? (UserDirectory.getById(it.uid) || {}) : {};
+      const nm = u.nickname || u.handle || 'Colega';
+      const when = (typeof _relTime === 'function' && it.ts) ? _relTime(it.ts) : '';
+      const w = when ? ' <span style="font-family:var(--mono);font-size:.52rem;color:var(--text-mute)">· ' + Util.esc(when) + '</span>' : '';
+      if(it.kind === 'post'){
+        return '<div class="ini-mate-li"><a href="#/forum"><b>' + Util.esc(nm) + '</b> publicou no fórum: ' + Util.esc(String(it.title || '').slice(0, 60)) + w + '</a></div>';
+      }
+      if(it.kind === 'comment'){
+        return '<div class="ini-mate-li"><a href="#/forum"><b>' + Util.esc(nm) + '</b> comentou no fórum' + w + '</a></div>';
+      }
+      return '<div class="ini-mate-li"><b>' + Util.esc(nm) + '</b> '
+        + ((typeof _roomEventText === 'function') ? _roomEventText(it.ev) : Util.esc(it.ev.type || '')) + w + '</div>';
+    };
+    log = items.map(_li);
+  }
+  return { online: online, log: log };
+}
+// Desenha a fileira "online agora" e a lista de atividade. `d.online` ausente = cópia do aparelho (quem
+// está online só o servidor sabe): a fileira fica com o espaço reservado até a resposta chegar.
+const _INI_ESPERA_ONLINE = '<span class="ini-mate ini-mate-espera" aria-hidden="true"></span><span class="ini-mate ini-mate-espera" aria-hidden="true"></span><span class="ini-mate ini-mate-espera" aria-hidden="true"></span>';
+function _iniColegasPintar(rowEl, logEl, d){
+  d = d || {};
+  if(d.msg){
+    if(rowEl){ rowEl.innerHTML = ''; rowEl.hidden = true; }
+    if(logEl) logEl.innerHTML = '<div class="ini-mate-none">' + Util.esc(d.msg) + '</div>';
+    return;
+  }
+  if(rowEl){
+    rowEl.hidden = false;
+    if(!Array.isArray(d.online)){
+      rowEl.innerHTML = _INI_ESPERA_ONLINE;
     } else {
-      logEl.innerHTML = '<div class="ini-mate-li" style="color:var(--text-mute)">Sem atividade recente das suas salas ou colegas.</div>';
+      rowEl.innerHTML = d.online.length ? d.online.map(function(p){
+        const ini = String(p.nm).replace('@', '').charAt(0).toUpperCase();
+        return '<span class="ini-mate-wrap online" data-tip="' + Util.attr(p.nm) + '"><span class="ini-mate" data-mav="' + Util.attr(p.id) + '">' + Util.esc(ini) + '</span></span>';
+      }).join('') : '<span class="ini-mate-none">Nenhum colega online agora.</span>';
+      d.online.forEach(function(p){
+        if(!p.foto) return;
+        const el = rowEl.querySelector('[data-mav="' + String(p.id).replace(/"/g, '') + '"]');
+        if(el && typeof renderAvatarInto === 'function') renderAvatarInto(el, p.foto, p.corte);
+      });
     }
   }
+  if(logEl){
+    const htmls = Array.isArray(d.log) ? d.log : [];
+    if(!htmls.length){ logEl.innerHTML = '<div class="ini-mate-li" style="color:var(--text-mute)">Sem atividade recente das suas salas ou colegas.</div>'; return; }
+    // Máx. 5 por vez + "Ver mais" (+5), pra não virar lista infinita. A atualização ao vivo não volta
+    // para 5: o que o aluno abriu continua aberto.
+    const pintarLog = function(){
+      const n = window._iniMateVisiveis || 5;
+      logEl.innerHTML = htmls.slice(0, n).join('')
+        + (htmls.length > n ? '<button type="button" class="ini-mate-more" id="iniMateMore">Ver mais</button>' : '');
+      const mb = logEl.querySelector('#iniMateMore');
+      if(mb) mb.addEventListener('click', function(){ window._iniMateVisiveis = n + 5; pintarLog(); });
+    };
+    pintarLog();
+  }
 }
+
+/* ── InicioBlocos: o dono único dos blocos do Início que vêm do servidor (17/11/2026) ──
+   Antes havia três peças soltas (o preparo do boot, uma marca "já encaixei" e uma memória de 5 minutos do
+   que estivesse na tela) e a combinação falhava: durante a carga inicial o Início desenha só a tela de
+   espera, mas o encaixe rodava mesmo assim, gastava os blocos prontos sem ter onde pôr e deixava a marca;
+   a pintura de verdade, logo depois, confiava na marca e não buscava nada. Resultado: "Carregando…" em
+   Colegas e Acontecimentos até a pessoa sair da página e voltar.
+   Agora:
+   · há UM conjunto de elementos por conta + concurso, que pertence a este módulo. Toda pintura do Início
+     encaixa os MESMOS elementos; quando a resposta chega, eles se atualizam onde estiverem;
+   · uma busca por vez; voltar ao Início em menos de 5 minutos não busca de novo;
+   · a última resposta fica guardada no aparelho e aparece na hora na próxima entrada. Só é trocada se
+     algo mudou (quem está online nunca vem da cópia: o lugar fica reservado até o servidor responder);
+   · servidor mudo por 10 s: "Tentar de novo" no lugar do "Carregando…" (com cópia na tela, ela fica). */
+const InicioBlocos = (function(){
+  const VALE_MS = 5 * 60 * 1000;
+  const PRAZO_MS = 10000;
+  const CHAVE = 'ubique.inicio.';          // sai no logout, como tudo que começa com "ubique."
+  const PARTES = ['feed', 'colegas', 'avisos'];
+  const ESPERA_FEED = '<div class="ini-ph"><span class="ini-ph-t">Carregando…</span></div>';
+  let cj = null;                            // o conjunto atual
+
+  function _uid(){ const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null; return (u && u.id) ? String(u.id) : ''; }
+  function _gaveta(){ try{ return (window.AuthLembrar && !AuthLembrar.ligado()) ? sessionStorage : localStorage; }catch(_){ return null; } }
+  function _lerCopia(chave){
+    try{
+      // a cópia é de UMA conta por aparelho: a de outra conta sai
+      const minha = CHAVE + chave.split('|')[0] + '|';
+      [localStorage, sessionStorage].forEach(function(g){
+        Object.keys(g).forEach(function(k){ if(k.indexOf(CHAVE) === 0 && k.indexOf(minha) !== 0) g.removeItem(k); });
+      });
+      const g = _gaveta(); if(!g) return null;
+      const v = JSON.parse(g.getItem(CHAVE + chave) || 'null');
+      return (v && v.v === 1) ? v : null;
+    }catch(_){ return null; }
+  }
+  function _guardarCopia(c){
+    try{
+      const g = _gaveta(); if(!g) return;
+      const col = c.dados.colegas ? (c.dados.colegas.msg ? { msg: c.dados.colegas.msg } : { log: (c.dados.colegas.log || []).slice(0, 30) }) : null;
+      g.setItem(CHAVE + c.chave, JSON.stringify({ v: 1, ts: Date.now(), feed: c.dados.feed || null, colegas: col, avisos: c.dados.avisos || null }));
+    }catch(_){}
+  }
+  function _no(tag, cls, id){ const el = document.createElement(tag); if(cls) el.className = cls; el.id = id; return el; }
+  function _pintar(c, parte, d){
+    try{
+      if(parte === 'feed') _iniFeedPintar(c.nos.feed, d);
+      else if(parte === 'colegas') _iniColegasPintar(c.nos.row, c.nos.log, d);
+      else _iniAvisosPintar(c.nos.avisos, d);
+    }catch(e){ console.warn('[início] pintar ' + parte + ':', e && e.message); }
+  }
+  // Sem resposta e sem nada bom na tela: avisa e oferece tentar de novo.
+  function _semResposta(c, parte){
+    if(parte === 'feed'){
+      if(!c.dados.feed) c.nos.feed.innerHTML = '<div class="ini-ph"><span class="ini-ph-t">Não foi possível carregar agora.</span><button type="button" class="ini-feed-more ini-tentar" data-ini-tentar="1">Tentar de novo</button></div>';
+    } else if(parte === 'colegas'){
+      if(!c.dados.colegas){
+        c.nos.row.hidden = false; c.nos.row.innerHTML = '<span class="ini-mate-none">Não foi possível carregar agora.</span>';
+        c.nos.log.innerHTML = '<button type="button" class="ini-mate-more" data-ini-tentar="1">Tentar de novo</button>';
+      } else if(!c.dados.colegas.msg && !Array.isArray(c.dados.colegas.online)){
+        c.nos.row.innerHTML = '<span class="ini-mate-none">Não deu para ver quem está online agora.</span>';   // a lista de atividade (cópia) fica
+      }
+    }
+    // avisos: sem resposta, o banner simplesmente não aparece (ou fica o da cópia)
+  }
+  function _emEspera(c, parte){
+    if(parte === 'feed' && !c.dados.feed) c.nos.feed.innerHTML = ESPERA_FEED;
+    if(parte === 'colegas' && !(c.dados.colegas && c.dados.colegas.msg)){
+      c.nos.row.hidden = false;
+      if(!c.dados.colegas || !Array.isArray(c.dados.colegas.online)) c.nos.row.innerHTML = _INI_ESPERA_ONLINE;
+      if(!c.dados.colegas) c.nos.log.innerHTML = '';
+    }
+  }
+  function _novo(chave, exId){
+    const c = { chave: chave, exId: String(exId || ''), ts: 0, carga: null, vez: 0, relendo: false, cruFeed: null, montadoNaCarga: false,
+      dados: { feed: null, colegas: null, avisos: null }, assin: { feed: '', colegas: '', avisos: '' },
+      nos: { feed: _no('div', 'ini-feed', 'iniFeed'), row: _no('div', 'ini-mates-row', 'iniColegasRow'), log: _no('div', 'ini-mate-log', 'iniColegasLog'), avisos: _no('div', '', 'iniAvisos') } };
+    c.nos.avisos.hidden = true;
+    // "Tentar de novo": um ouvinte por elemento, vale para qualquer conteúdo que entrar depois
+    [c.nos.feed, c.nos.row, c.nos.log].forEach(function(el){
+      el.addEventListener('click', function(e){ if(e.target.closest && e.target.closest('[data-ini-tentar]')){ e.preventDefault(); recarregar(); } });
+    });
+    const copia = _lerCopia(chave);
+    if(copia){
+      if(copia.feed){ c.dados.feed = copia.feed; c.assin.feed = JSON.stringify(copia.feed); _pintar(c, 'feed', copia.feed); }
+      if(copia.colegas){ c.dados.colegas = copia.colegas; _pintar(c, 'colegas', copia.colegas); }   // assinatura vazia: a resposta sempre repinta (traz quem está online)
+      if(copia.avisos){ c.dados.avisos = copia.avisos; c.assin.avisos = JSON.stringify(copia.avisos); _pintar(c, 'avisos', copia.avisos); }
+    }
+    PARTES.forEach(function(p){ _emEspera(c, p); });
+    return c;
+  }
+  // Monta os cartões dos Acontecimentos com o que o servidor mandou e pinta se mudou.
+  function _montarFeed(c){
+    let d = null;
+    try{ d = _iniFeedMontar(c.cruFeed, c.exId); }catch(e){ console.warn('[início] montar feed:', e && e.message); return false; }
+    c.montadoNaCarga = !!window.__hydrating;              // montado cedo demais? o encaixe monta de novo
+    const a = JSON.stringify(d);
+    if(a === c.assin.feed) return true;                    // nada mudou: a tela fica como está
+    c.assin.feed = a; c.dados.feed = d;
+    _pintar(c, 'feed', d);
+    return true;
+  }
+  function _aplicar(c, res){
+    let algumBom = false;
+    PARTES.forEach(function(parte, i){
+      const d = res && res[i];
+      if(!d || d.falhou){ _semResposta(c, parte); return; }
+      if(parte === 'feed'){ c.cruFeed = d; if(_montarFeed(c)) algumBom = true; return; }
+      algumBom = true;
+      const a = JSON.stringify(d);
+      if(a === c.assin[parte]) return;                    // nada mudou: a tela fica como está
+      c.assin[parte] = a; c.dados[parte] = d;
+      _pintar(c, parte, d);
+    });
+    if(algumBom){ c.ts = Date.now(); _guardarCopia(c); }
+  }
+  function _seguro(p){ return Promise.resolve(p).catch(function(e){ console.warn('[início] busca:', e && e.message); return { falhou: true }; }); }
+  function _carregar(c){
+    if(c.carga) return c.carga;
+    const vez = ++c.vez;
+    const trabalho = Promise.all([_seguro(_iniFeedBuscar(c.exId)), _seguro(_iniColegasDados()), _seguro(_iniAvisosDados(c.exId))]);
+    let relogio = null;
+    const prazo = new Promise(function(r){ relogio = setTimeout(function(){ r('prazo'); }, PRAZO_MS); });
+    const p = Promise.race([trabalho, prazo]).then(function(r){
+      clearTimeout(relogio);
+      if(c.carga === p) c.carga = null;
+      if(c.vez !== vez) return;                            // um "Tentar de novo" já tomou o lugar desta busca
+      if(r === 'prazo'){
+        PARTES.forEach(function(parte){ _semResposta(c, parte); });
+        // a resposta ainda pode chegar (rede lenta): se ninguém pediu outra busca, ela entra
+        trabalho.then(function(rr){ if(c.vez === vez && !c.carga) _aplicar(c, rr); });
+        return;
+      }
+      _aplicar(c, r);
+    });
+    c.carga = p;
+    return p;
+  }
+  // O conjunto da conta logada neste concurso: cria (com a cópia do aparelho, se houver) e busca se preciso.
+  function garantir(exId){
+    const uid = _uid(); if(!uid) return null;
+    const chave = uid + '|' + String(exId || '');
+    if(!cj || cj.chave !== chave) cj = _novo(chave, exId);
+    if(!cj.carga && (!cj.ts || Date.now() - cj.ts > VALE_MS)) _carregar(cj);
+    return cj;
+  }
+  // Põe os elementos do conjunto no lugar dos espaços da página recém-desenhada.
+  function encaixar(stage, exId){
+    const c = garantir(exId); if(!c || !stage) return null;
+    // A resposta chegou durante a carga inicial, quando matérias e simulados ainda não estavam na memória:
+    // monta os cartões de novo agora, no mesmo quadro da pintura (sem ir ao servidor).
+    if(c.cruFeed && c.montadoNaCarga && !window.__hydrating){ if(_montarFeed(c)) _guardarCopia(c); }
+    [['iniFeed', c.nos.feed], ['iniColegasRow', c.nos.row], ['iniColegasLog', c.nos.log], ['iniAvisos', c.nos.avisos]].forEach(function(par){
+      const alvo = stage.querySelector('#' + par[0]);
+      if(alvo && alvo !== par[1]) alvo.replaceWith(par[1]);
+    });
+    return c;
+  }
+  function recarregar(){
+    if(!cj) return Promise.resolve();
+    const c = cj;
+    c.vez++; c.carga = null;                               // a busca anterior (travada) deixa de valer
+    PARTES.forEach(function(p){ _emEspera(c, p); });
+    return _carregar(c);
+  }
+  // Só o bloco dos colegas (o servidor avisou que alguém entrou, saiu ou mudou de atividade).
+  function relerColegas(){
+    const c = cj;
+    if(!c || c.carga || c.relendo) return;
+    c.relendo = true;
+    const vez = c.vez;
+    _seguro(_iniColegasDados()).then(function(d){
+      c.relendo = false;
+      if(cj !== c || c.vez !== vez || !d || d.falhou) return;
+      const a = JSON.stringify(d);
+      if(a === c.assin.colegas) return;
+      c.assin.colegas = a; c.dados.colegas = d;
+      _pintar(c, 'colegas', d);
+      _guardarCopia(c);
+    });
+  }
+  function limpar(){ cj = null; }
+  return { garantir: garantir, encaixar: encaixar, recarregar: recarregar, relerColegas: relerColegas, limpar: limpar,
+    atual: function(){ return cj; }, _cfg: { VALE_MS: VALE_MS, PRAZO_MS: PRAZO_MS } };
+})();
+window.InicioBlocos = InicioBlocos;
 
 // ── MENTORIA no Início (M3) ─────────────────────────────────────────────────
 // Quem está numa turma ganha a chave "Geral | Mentoria" no Início. Na Mentoria:
@@ -48738,28 +49017,8 @@ Renderers.inicio = function(){
       });
     });
     _ligarProfsDoCard(document.querySelector('.ini-page'));   // fotos dos professores e a lista do card
-    // Etapa 4/5: feed, colegas e avisos. Na PRIMEIRA pintura depois do boot eles
-    // já vieram prontos (preparados antes do portão e encaixados no mount) —
-    // não se busca de novo, senão a tela mudaria na frente do aluno.
-    if(_modo === 'mentoria'){
-      _iniMentoriaFotos(_mDados);                         // a Mentoria já veio inteira
-    } else if(!window._iniPreConsumido){
-      const _u = _iniUltimoFresco(exId);
-      if(_u){
-        _iniEncaixar(document, _u);                         // carregado há menos de 5 min: entra pronto
-      } else {
-        const _g = function(p){ return Promise.resolve(p).catch(function(){}); };
-        Promise.all([
-          _g((typeof _iniLoadFeed === 'function') ? _iniLoadFeed(exId) : null),
-          _g((typeof _iniLoadColegas === 'function') ? _iniLoadColegas() : null),
-          _g((typeof _iniLoadAvisos === 'function') ? _iniLoadAvisos(exId) : null)
-        ]).then(function(){
-          const q = function(id){ return document.getElementById(id); };
-          if(q('iniFeed')) window._iniUltimo = { exId: String(exId), ts: Date.now(), feed: q('iniFeed'), row: q('iniColegasRow'), log: q('iniColegasLog'), avisos: q('iniAvisos') };
-        });
-      }
-    }
-    window._iniPreConsumido = false;
+    // Feed, colegas e avisos: quem cuida é o InicioBlocos, encaixado no mount (no mesmo quadro da pintura).
+    if(_modo === 'mentoria') _iniMentoriaFotos(_mDados);   // a Mentoria já veio inteira
     // Tooltip (apelido no hover dos círculos): o data-tip só funciona com o
     // setupQuickTooltips ligado no container da página.
     try{ const pg = document.querySelector('.ini-page'); if(pg && typeof setupQuickTooltips === 'function') setupQuickTooltips(pg); }catch(_){}
@@ -48772,7 +49031,7 @@ Renderers.inicio = function(){
       const _iniColReler = function(){
         if(!document.getElementById('iniColegasRow')){ if(window._iniColegasOff) window._iniColegasOff(); return; }
         if(_iniColT) return;
-        _iniColT = setTimeout(function(){ _iniColT = null; try{ if(typeof _iniLoadColegas === 'function') _iniLoadColegas(); }catch(_){} }, 1200);
+        _iniColT = setTimeout(function(){ _iniColT = null; try{ InicioBlocos.relerColegas(); }catch(_){} }, 1200);
       };
       const _offPres = TempoReal.on('presenca', _iniColReler);
       const _offConf = TempoReal.aoConferir(_iniColReler);
@@ -48855,37 +49114,23 @@ Renderers.inicio = function(){
    pintura — assim o Início aparece inteiro de uma vez, sem cartão brotando
    depois e empurrando o resto para baixo. */
 window._iniPreparar = function(){
-  const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-  if(!me || !me.id || !window._sb) return Promise.resolve();
-  const exId = (typeof activeExamId === 'function') ? (activeExamId() || '') : '';
-  const feed = document.createElement('div'); feed.className = 'ini-feed'; feed.id = 'iniFeed';
-  const row = document.createElement('div'); row.className = 'ini-mates-row'; row.id = 'iniColegasRow';
-  const log = document.createElement('div'); log.className = 'ini-mate-log'; log.id = 'iniColegasLog';
-  const avisos = document.createElement('div'); avisos.id = 'iniAvisos'; avisos.hidden = true;
-  const pre = { exId: String(exId), feed: feed, row: row, log: log, avisos: avisos, pronto: false };
-  window._iniPre = pre;
+  if(!window._sb) return Promise.resolve();
   const g = function(p){ return Promise.resolve(p).catch(function(e){ console.warn('[início] preparo:', e && e.message); }); };
-  return Promise.all([
-    g((typeof _iniLoadFeed === 'function') ? _iniLoadFeed(exId, feed) : null),
-    g((typeof _iniLoadColegas === 'function') ? _iniLoadColegas(row, log) : null),
-    g((typeof _iniLoadAvisos === 'function') ? _iniLoadAvisos(exId, avisos) : null),
-    g(_mentMapa() ? _mentIniCarregar() : null)            // a Mentoria também chega pronta
-  ]).then(function(){ pre.pronto = true; window._iniUltimo = { exId: pre.exId, ts: Date.now(), feed: pre.feed, row: pre.row, log: pre.log, avisos: pre.avisos }; });
-};
-// Guarda os quatro blocos carregados (nós do DOM, com os cliques) por 5 minutos: quem volta ao Início
-// nesse intervalo vê tudo na hora, sem a seção "se completar" depois da pintura.
-const _INI_CACHE_MS = 5 * 60 * 1000;
-function _iniUltimoFresco(exId){
-  const u = window._iniUltimo;
-  return (u && String(u.exId) === String(exId) && (Date.now() - u.ts) < _INI_CACHE_MS) ? u : null;
-}
-function _iniEncaixar(stage, u){
-  [['iniFeed', u.feed], ['iniColegasRow', u.row], ['iniColegasLog', u.log], ['iniAvisos', u.avisos]].forEach(function(par){
-    const alvo = stage.querySelector('#' + par[0]);
-    if(alvo && par[1] && alvo !== par[1]) alvo.replaceWith(par[1]);
+  // Espera saber quem está logado: com a cópia do aparelho vencida, a sessão ainda está voltando da rede
+  // (antes o preparo desistia aqui e o Início abria sem os blocos).
+  return g(window.__authLoadP).then(function(){
+    const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+    if(!me || !me.id) return;
+    const exId = (typeof activeExamId === 'function') ? (activeExamId() || '') : '';
+    // sem concurso ativo ainda (conta nova): o Início busca quando souber qual é
+    const c = exId ? InicioBlocos.garantir(exId) : null;
+    return Promise.all([
+      g(c && c.carga),
+      g(_mentMapa() ? _mentIniCarregar() : null)            // a Mentoria também chega pronta
+    ]);
   });
-}
-// Encaixa o que foi preparado no lugar dos espaços do Início — no mount, que
+};
+// Encaixa os blocos do servidor no lugar dos espaços do Início — no mount, que
 // roda no MESMO quadro da pintura (nada muda depois na frente do aluno).
 Renderers.inicio.mount = function(stage){
   if(window.Visitante && Visitante.ativo()){
@@ -48905,17 +49150,12 @@ Renderers.inicio.mount = function(stage){
     if(Date.now() - (window.__visIniEvento || 0) > 60000){ window.__visIniEvento = Date.now(); Visitante.evento('inicio'); }
     return;
   }
-  const pre = window._iniPre;
-  if(!pre || !pre.pronto) return;
-  if(_iniModo() === 'mentoria') return;                 // o preparo do Geral fica para quando o aluno trocar a chave
+  if(_iniModo() === 'mentoria') return;                 // a Mentoria tem os próprios blocos
+  // Tela de espera da carga inicial (ou qualquer página sem os espaços): nada a encaixar. Os blocos
+  // prontos continuam guardados no InicioBlocos para a pintura de verdade.
+  if(!stage.querySelector('#iniFeed')) return;
   const exId = (typeof activeExamId === 'function') ? (activeExamId() || '') : '';
-  window._iniPre = null;                                // serve uma vez só
-  if(String(pre.exId) !== String(exId)) return;         // concurso mudou no meio: caminho normal
-  [['iniFeed', pre.feed], ['iniColegasRow', pre.row], ['iniColegasLog', pre.log], ['iniAvisos', pre.avisos]].forEach(function(par){
-    const alvo = stage.querySelector('#' + par[0]);
-    if(alvo && par[1]) alvo.replaceWith(par[1]);
-  });
-  window._iniPreConsumido = true;
+  InicioBlocos.encaixar(stage, exId);
 };
 
 Renderers.myExams = function(){
@@ -89019,7 +89259,7 @@ if(document.readyState !== 'loading') _bootOnce();
 
   /* ── os passos ── */
   const P = [
-    { t:'Bem-vindo à Falcon', r:'#/inicio',
+    { t:'Bem-vindo à Falcon', ex:true, r:'#/inicio',
       b:'Este tour caminha com você pela plataforma de verdade. Alguns números e avaliações que você vai ver são exemplos ilustrativos, só para mostrar os recursos vivos. Aqui é o Início: estatísticas, a unidade para continuar, avisos e a atividade dos colegas.' },
     { t:'Loja', r:'#/concursos',
       b:'Os concursos disponíveis. Entrando num concurso você vê o hall de matérias, cada uma com a primeira unidade grátis para experimentar. No carrinho: cupom e parcelamento.' },
@@ -89066,27 +89306,27 @@ if(document.readyState !== 'loading') _bootOnce();
 
     { t:'Discursivas', r:function(){ return _hashBloco('essay'); }, sel:'.essay-tabs',
       b:'Toda discursiva tem duas frentes: o brainstorm, para organizar as ideias antes, e a redação em si. Vamos ver as duas, com a avaliação aberta.' },
-    { t:'Brainstorm avaliado', sel:'.essay-bs-feedback .essay-ai-feedback', topo:true, run:function(){ _demoBrainstorm(); },
+    { t:'Brainstorm avaliado', ex:true, sel:'.essay-bs-feedback .essay-ai-feedback', topo:true, run:function(){ _demoBrainstorm(); },
       b:'Você lista os tópicos e as ideias e pede a avaliação: nota, cobertura item a item (✓ o que você trouxe, + o que faltou), comentário sobre a ordem e o esqueleto ideal parágrafo a parágrafo: cinza são as suas ideias, caramelo os acréscimos. ROLE o cartão para ver tudo. Exemplo ilustrativo.' },
-    { t:'A redação corrigida', sel:'.essay-tabpane[data-essay-pane="redacao"] .essay-ai-feedback', topo:true, run:function(){ _demoRedacao(); },
+    { t:'A redação corrigida', ex:true, sel:'.essay-tabpane[data-essay-pane="redacao"] .essay-ai-feedback', topo:true, run:function(){ _demoRedacao(); },
       b:'Na aba de redação você escreve e envia: a correção volta com nota, pontos fortes e fracos por critério e os trechos que custaram nota, com a sugestão de como alcançar a nota máxima. Antes de enviar dá para ver os critérios e o padrão da banca; e dá para mandar a um colega corrigir. Exemplo ilustrativo.' },
 
     { t:'O tutor da unidade', r:function(){ return _hashUnidade(); }, sel:'.tutor-tab', run:function(){ try{ window.scrollTo(0, 0); }catch(_){ } _abrirDrawer(); },
       b:'Tire dúvidas sobre este conteúdo ou peça o aprendizado guiado, em que o tutor caminha pelo texto com você fazendo perguntas. Os botões trazem questões reais do banco, geram inéditas e abrem a conversa por voz; o seletor escolhe o modelo (Rápido, Equilibrado, Avançado).' },
-    { t:'Caderno', sel:'#cadernoInput', run:function(){ _abaDrawer('caderno'); setTimeout(_demoCaderno, 500); },
+    { t:'Caderno', ex:true, sel:'#cadernoInput', run:function(){ _abaDrawer('caderno'); setTimeout(_demoCaderno, 500); },
       b:'A sua anotação livre desta unidade, com grifo e cor de letra. Digitando [[ você cita outra unidade. Neste exemplo, a citação liga esta aula a uma unidade de História Mundial. Cada citação vira uma linha no mapa de conexões.' },
-    { t:'Conexões', sel:'#grafoStatus', run:function(){ _abaDrawer('grafo'); _demoGrafo(0); },
+    { t:'Conexões', ex:true, sel:'#grafoStatus', run:function(){ _abaDrawer('grafo'); _demoGrafo(0); },
       b:'O mapa das unidades que você ligou pelo caderno: o seu segundo cérebro. As linhas são as citações; em "ajustes" você muda as cores por matéria, a exibição e as forças. Se ainda não tem ligações, este é um exemplo de como ele cresce.' },
 
-    { t:'Banco', r:function(){ window.__tourPreviewAll = true; return '#/banco'; }, run:function(){ _fecharDrawer(); _escudo(true); },
+    { t:'Banco', r:function(){ window.__tourPreviewAll = true; return '#/banco'; }, run:function(){ _fecharDrawer(); },
       b:'Tudo da plataforma reunido por tipo: questões objetivas e discursivas, flashcards, biografias, glossário, citações, linhas do tempo, tabelas e fontes. Filtre por várias matérias, origem, ano e dificuldade. Dá para baixar um PDF com folha de respostas e gabarito. (Aqui é só uma espiada: o conteúdo completo abre com a matéria liberada.)' },
     { t:'Edital', r:'#/edital',
       b:'O edital do concurso, tópico a tópico. Cada matéria mostra sua pílula de desempenho e quantas unidades cobrem cada ponto; a caixa de concluído marca o que você já venceu; o resultado aparece no seu Desempenho.' },
     { t:'Simulados', r:'#/simulados',
       b:'Filtre por disciplina, dificuldade e acesso. Responda na plataforma ou baixe o PDF; você escolhe se entra no ranking. No fim: gabarito comentado, seu resultado comparado com a média e a sua posição. Alguns permitem refazer, com gráfico de evolução.' },
-    { t:'Desempenho', r:'#/performance',
+    { t:'Desempenho', ex:true, r:'#/performance',
       b:'Seu radar de acertos, a divisão entre certo e errado (com e sem dúvida), a comparação com a média e o ranking das unidades em que você vai melhor e pior, por unidade ou por tópico do edital. Os números desta conta nova são um exemplo ilustrativo. O Raio-X faz um diagnóstico do seu desempenho, mapeando o seu perfil de erros te deixando consciente do que pode estar te fazendo errar questões para além do conteúdo!' },
-    { t:'Rotina de estudo', sel:'#perfTabRotina', run:function(){
+    { t:'Rotina de estudo', ex:true, sel:'#perfTabRotina', run:function(){
         const tb = document.querySelector('[data-ptab="rotina"]'); if(tb) tb.click();
         // Garante a recarga COM o modo-vitrine ligado (a aba pode ter ficado
         // pronta antes do tour, com os dados vazios em cache).
@@ -89094,21 +89334,19 @@ if(document.readyState !== 'loading') _bootOnce();
       },
       b:'Registre o tempo por cronômetro, timer ou lançamento manual. Aqui ficam o mapa de constância, o calendário com as aulas agendadas no "Ver depois", as sessões recentes e as metas diária e semanal. (Preenchido com um exemplo para você ver os gráficos vivos.)' },
 
-    { t:'Meu acervo', r:function(){ try{ if(window.Store && Store._tourNotasDemo) Store._tourNotasDemo(true); }catch(_){ } return '#/notes'; },
+    { t:'Meu acervo', ex:true, r:function(){ try{ if(window.Store && Store._tourNotasDemo) Store._tourNotasDemo(true); }catch(_){ } return '#/notes'; },
       b:'Tudo o que você produziu: anotações, flashcards, destaques e relatórios. Filtre, agrupe e use o "compilar para estudo" para gerar uma página imprimível. (As notas desta conta nova são um exemplo.)' },
-    { t:'Lista de leitura', r:'#/reading',
+    { t:'Lista de leitura', ex:true, r:'#/reading',
       b:'Os blocos que você guardou no "Ver depois", na ordem em que salvou: a sua playlist. Os agendados mostram dia e hora, e "abrir" leva direto ao bloco. (Itens de exemplo nesta conta nova.)' },
     { t:'Fórum', r:'#/forum',
       b:'O fórum do concurso: publique dúvidas com enquete, aplauda e comente. Um comentário seu numa questão pode ser publicado com a questão anexada, e dá para filtrar por matéria e unidade.' },
-    { t:'Salas de estudo', r:'#/salas',
+    { t:'Salas de estudo', ex:true, r:'#/salas',
       b:'Estude em grupo com meta de questões por integrante, ranking (dia, semana, mês, ano), feed e chat. As questões enviadas ao grupo aparecem para os colegas corrigirem. (A sala desta conta nova é um exemplo.)' },
     { t:'Glossário', r:'#/glossario',
       b:'Todos os termos da plataforma, com busca e filtro por matéria e classe. A estrela salva o termo em "Minhas salvas".' },
     { t:'Pronto para começar', r:'#/inicio',
       b:'É isso. Os recursos personalizados, como tutor e correção personalizada, usam Falcoins (saldo no ƒ, no topo); ler o conteúdo e responder questões objetivas é livre. Dúvidas de uso: Tutor → "Ajuda com a plataforma". Reveja este tour quando quiser, no menu da sua foto.' }
   ];
-  // Índice do passo do Banco (usado pra ligar o escudo só nele).
-  const _PASSO_BANCO = P.findIndex(function(s){ return s.t === 'Banco'; });
   // Faixa dos passos DENTRO da unidade-vitrine. A vitrine só sai do mock AQUI
   // (pra demo de marcar não nascer respondida). Mantê-la fora o tempo todo
   // esvaziava o Desempenho: o escopo é a matéria ativa e, se o módulo 1 dela
@@ -89304,7 +89542,15 @@ if(document.readyState !== 'loading') _bootOnce();
     })();
   }
   // Passo "Estatísticas e comentários": abre os painéis reais do item.
+  function _temRespondida(){
+    return !!((_st.elA && document.contains(_st.elA) && _st.elA.classList.contains('answered')) || document.querySelector('.q-item.answered'));
+  }
   function _demoPaineis(){
+    // Entrou direto neste passo (pelos pontos, ou o tour trouxe a página de volta)? Marca e verifica antes:
+    // sem item respondido não existem os botões de estatísticas e comentários.
+    const preparou = !_temRespondida();
+    if(preparou) _demoVerificar();
+    const MAX = preparou ? 30 : 14;
     let tent = 0;
     (function tenta(){
       if(_st.idx == null) return;
@@ -89316,19 +89562,22 @@ if(document.readyState !== 'loading') _bootOnce();
       if(stats){
         try{ stats.click(); }catch(_){ }
         setTimeout(_mirar, 320);
-      } else if(++tent < 14) setTimeout(tenta, 320);
+      } else if(++tent < MAX) setTimeout(tenta, 320);
     })();
   }
   // Passo dos comentários: clica o botão de comentários do MESMO item, que
   // troca a aba do painel já aberto pelas estatísticas.
   function _demoComentarios(){
+    const preparou = !_temRespondida();
+    if(preparou) _demoVerificar();                      // mesma regra do passo das estatísticas
+    const MAX = preparou ? 30 : 14;
     let tent = 0;
     (function tenta(){
       if(_st.idx == null) return;
       const it = (_st.elA && document.contains(_st.elA)) ? _st.elA : document.querySelector('.q-item.answered');
       const com = it && it.querySelector('[data-action="q-comments"]');
       if(com){ try{ com.click(); }catch(_){ } setTimeout(_mirar, 320); }
-      else if(++tent < 14) setTimeout(tenta, 320);
+      else if(++tent < MAX) setTimeout(tenta, 320);
     })();
   }
   // DESFAZ tudo que a demo de questões marcou/verificou (limpa memória e
@@ -89345,15 +89594,53 @@ if(document.readyState !== 'loading') _bootOnce();
     _st.quizItens = [];
     _st.elA = null; _st.elB = null;          // a próxima visita re-escolhe do zero
   }
-  // Escudo de clique do passo Banco: dá pra VER (e rolar), não pra interagir.
+  // Escudo de clique do tour INTEIRO (17/11/2026; antes era só do passo Banco): dá pra VER e rolar, não
+  // pra interagir. Quem mexia no menu no meio do tour tirava a página do passo, e "Próximo"/"Anterior"
+  // passavam a trocar só o texto. As demonstrações do tour usam cliques por código, que o escudo não barra.
   function _escudo(liga){
     let el = document.getElementById('gtShield');
     if(!liga){ if(el) el.remove(); return; }
     if(el) return;
     el = document.createElement('div');
     el.id = 'gtShield';
-    el.addEventListener('wheel', function(e){ window.scrollBy(0, e.deltaY); e.preventDefault(); }, { passive:false });
+    // A roda do mouse rola o que estiver embaixo do cursor (a gaveta do tutor, a lateral da unidade…);
+    // se nada ali rola nessa direção, rola a página.
+    el.addEventListener('wheel', function(e){
+      e.preventDefault();
+      let alvo = null;
+      try{
+        const embaixo = (document.elementsFromPoint(e.clientX, e.clientY) || []).find(function(n){ return n !== el && !(_st.bar && _st.bar.contains(n)); });
+        for(let x = embaixo; x && x !== document.body && x !== document.documentElement; x = x.parentElement){
+          const oy = getComputedStyle(x).overflowY;
+          if((oy === 'auto' || oy === 'scroll') && x.scrollHeight > x.clientHeight + 1
+             && ((e.deltaY > 0 && x.scrollTop + x.clientHeight < x.scrollHeight - 1) || (e.deltaY < 0 && x.scrollTop > 0))){ alvo = x; break; }
+        }
+      }catch(_){ }
+      if(alvo) alvo.scrollTop += e.deltaY; else window.scrollBy(0, e.deltaY);
+    }, { passive:false });
     document.body.appendChild(el);
+  }
+  // Teclado durante o tour: Esc e as setas ← → são do tour; as teclas de rolagem rolam a página; o Tab
+  // só circula pelos botões da barra do tour. O resto não chega à página (nada de digitar ou acionar
+  // atalhos por baixo do escudo). Atalhos do navegador (com Ctrl/Cmd/Alt) passam.
+  function _guardaTeclado(e){
+    if(_st.idx == null || !_st.bar) return;
+    if(e.ctrlKey || e.metaKey || e.altKey) return;
+    const k = e.key;
+    if(k === 'Escape' || k === 'ArrowRight' || k === 'ArrowLeft') return;
+    if(k === 'Tab'){
+      e.preventDefault(); e.stopPropagation();
+      const bts = Array.prototype.slice.call(_st.bar.querySelectorAll('button'));
+      if(!bts.length) return;
+      const i = bts.indexOf(document.activeElement);
+      try{ bts[(i + (e.shiftKey ? -1 : 1) + bts.length) % bts.length].focus(); }catch(_){ }
+      return;
+    }
+    if(_st.bar.contains(e.target)) return;                       // Enter/Espaço nos botões do tour
+    const t = e.target || {};
+    const emCampo = /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || '') || t.isContentEditable;
+    if(!emCampo && ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].indexOf(k) >= 0) return;
+    e.preventDefault(); e.stopPropagation();
   }
 
   /* ── engine ── */
@@ -89363,7 +89650,7 @@ if(document.readyState !== 'loading') _bootOnce();
     if(document.getElementById('gtCss')) return;
     const st = document.createElement('style'); st.id = 'gtCss';
     st.textContent = [
-      '.gt-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:1rem;z-index:1600;width:min(860px,calc(100% - 1.6rem));background:var(--bg-card);border:1px solid var(--border-strong);border-radius:10px;box-shadow:0 14px 40px -12px rgba(0,0,0,.65);padding:.85rem 1.05rem}',
+      '.gt-bar{position:fixed;left:50%;transform:translateX(-50%);bottom:1rem;z-index:2147483600;width:min(860px,calc(100% - 1.6rem));background:var(--bg-card);border:1px solid var(--border-strong);border-radius:10px;box-shadow:0 14px 40px -12px rgba(0,0,0,.65);padding:.85rem 1.05rem}',
       '.gt-top{display:flex;align-items:baseline;gap:.7rem}',
       '.gt-num{font-family:var(--sans);font-size:.56rem;letter-spacing:.18em;text-transform:uppercase;color:var(--text-mute);white-space:nowrap}',
       '.gt-t{font-family:var(--serif);font-weight:300;font-size:1.05rem;color:var(--text)}',
@@ -89380,7 +89667,8 @@ if(document.readyState !== 'loading') _bootOnce();
       '.gt-ant{background:transparent;color:var(--accent);border:1px solid var(--border-strong)}',
       '.gt-ant:hover{border-color:var(--accent)}',
       '.gt-spot{outline:2px solid var(--accent) !important;outline-offset:4px;border-radius:6px;transition:outline .2s ease}',
-      '#gtShield{position:fixed;inset:0;z-index:1550;background:transparent;cursor:default}',
+      '#gtShield{position:fixed;inset:0;z-index:2147483000;background:transparent;cursor:default}',
+      '.gt-ex{font-family:var(--sans);font-size:.5rem;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);border:1px solid var(--accent-border);border-radius:999px;padding:.14rem .55rem;white-space:nowrap}',
       '@media (max-width:640px){.gt-bar{bottom:.5rem;padding:.7rem .8rem}.gt-dots{display:none}}',
     ].join('\n');
     document.head.appendChild(st);
@@ -89417,6 +89705,7 @@ if(document.readyState !== 'loading') _bootOnce();
     _st.bar.innerHTML =
       '<div class="gt-top"><span class="gt-num">Tour · ' + (_st.idx + 1) + ' de ' + P.length + '</span>' +
         '<span class="gt-t">' + s.t + '</span>' +
+        (s.ex ? '<span class="gt-ex">Exemplo ilustrativo</span>' : '') +
         '<button type="button" class="gt-x" data-gt="x" aria-label="Fechar o tour">&times;</button></div>' +
       '<div class="gt-b">' + s.b + '</div>' +
       '<div class="gt-ft">' +
@@ -89427,6 +89716,16 @@ if(document.readyState !== 'loading') _bootOnce();
       '</div>';
   }
 
+  // Página de cada passo: a rota própria ou a do passo-âncora.
+  function _ancora(n){ let k = n; while(k > 0 && !P[k].r) k--; return k; }
+  function _rotaDe(k){ const r = P[k] && P[k].r; return (typeof r === 'function') ? (r() || '') : (r || ''); }
+  // Mesma página = mesmo caminho e mesma seção da unidade (?g=); o bloco (&b=) não conta.
+  function _chavePagina(h){
+    const t = String(h || ''), i = t.indexOf('?');
+    let g = '';
+    if(i >= 0){ try{ g = new URLSearchParams(t.slice(i + 1)).get('g') || ''; }catch(_){ } }
+    return (i < 0 ? t : t.slice(0, i)) + '|' + g;
+  }
   function _ir(n){
     if(n < 0 || n >= P.length || _st.idx == null) return;
     // Notas de exemplo só existem DENTRO do passo Notas.
@@ -89436,18 +89735,27 @@ if(document.readyState !== 'loading') _bootOnce();
     const _naDemoQuiz = function(i){ return P[i] && _DEMO_QUIZ.indexOf(P[i].t) >= 0; };
     if(_st.quizItens.length && !_naDemoQuiz(n)) _limparQuiz();
     _limparSelecao();
-    if(n !== _PASSO_BANCO) _escudo(false);         // o run do passo Banco religa
     window.__tourMockSkipUnit = (n >= _P_UNIT_INI && n <= _P_UNIT_FIM && _vitrine) ? _vitrine.uid : null;
     _st.idx = n;
     const s = P[n];
-    const rota = (typeof s.r === 'function') ? s.r() : s.r;
-    if(rota && location.hash !== rota) location.hash = rota;
+    const rota = _rotaDe(n);
+    let navegou = false;
+    if(rota){
+      if(location.hash !== rota){ location.hash = rota; navegou = true; }
+    } else {
+      // Passo sem rota própria: vale a página do passo-âncora (o último antes dele que tem rota). Se a
+      // tela não está nela (o aluno pulou pelos pontos da barra ou voltou pelo navegador), o tour leva
+      // até lá antes de mostrar o passo. Antes só o texto trocava e a página ficava onde estivesse.
+      const rotaA = _rotaDe(_ancora(n));
+      if(rotaA && _chavePagina(location.hash) !== _chavePagina(rotaA)){ location.hash = rotaA; navegou = true; }
+    }
     _pintar();
+    try{ const bp = _st.bar.querySelector('.gt-prox'); if(bp) bp.focus({ preventScroll: true }); }catch(_){ }
     setTimeout(function(){
       if(_st.idx !== n) return;
       if(typeof s.run === 'function'){ try{ s.run(); }catch(_){ } }
       _mirar();
-    }, rota ? 420 : 120);
+    }, (rota || navegou) ? 420 : 120);
   }
 
   function _tecla(e){
@@ -89497,6 +89805,8 @@ if(document.readyState !== 'loading') _bootOnce();
       if(d) _ir(parseInt(d.getAttribute('data-gt-go'), 10) || 0);
     });
     document.body.appendChild(_st.bar);
+    _escudo(true);                                    // a tela fica travada do primeiro ao último passo
+    document.addEventListener('keydown', _guardaTeclado, true);
     document.addEventListener('keydown', _tecla);
     _ir(0);
   }
@@ -89516,6 +89826,7 @@ if(document.readyState !== 'loading') _bootOnce();
     if(_st.bar){ _st.bar.remove(); _st.bar = null; }
     _st.idx = null;
     document.removeEventListener('keydown', _tecla);
+    document.removeEventListener('keydown', _guardaTeclado, true);
   }
   window.GuidedTour = { open: abrir, close: fechar, passos: P.length };
 })();
