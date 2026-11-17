@@ -5,7 +5,7 @@
 (function(){ var m = /^\/q\/([^\/]+)\.html$/.exec(location.pathname); if(!m) return; var id = decodeURIComponent(m[1]).replace(/[^0-9a-zA-Z-]/g, '');
   location.replace(/^[0-9a-f-]{20,}$/i.test(id) ? '/#/banco/questions?item=' + encodeURIComponent(id) + '&exib=full&applied=1' : '/#/banco/questions'); })();</script>
 <!-- Consentimento LGPD (antes do GTM: define o Consent Mode) -->
-<script src="consent.js?v=2"></script>
+<script src="consent.js?v=3"></script>
 <!-- Google Tag Manager -->
 <script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
 new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
@@ -33377,6 +33377,116 @@ async function _loadWalletPane(stageEl, user){
 }
 window._loadWalletPane = _loadWalletPane;
 
+// ── Conta → Compras: reembolso (até 7 dias após a compra) e cancelamento do Falcon Pro ──
+// Dados e regras no servidor (sql/reembolso_cancelamento.sql). Reembolso pedido dentro do
+// prazo é garantido e corta o acesso na hora; a equipe faz o estorno na Greenn. Cancelar a
+// assinatura mantém o acesso até o fim do mês pago e para as próximas cobranças.
+async function _loadComprasPane(stageEl){
+  const box = stageEl && stageEl.querySelector('#accCompras');
+  if(!box || !window._sb) return;
+  if(!document.getElementById('cmpCss')){
+    const st = document.createElement('style'); st.id = 'cmpCss';
+    st.textContent = '.cmp-wrap{display:flex;flex-direction:column;gap:1rem;max-width:760px}'
+      + '.cmp-intro{font-size:.88rem;line-height:1.7;color:var(--text-dim);margin:0}'
+      + '.cmp-vazio{color:var(--text-dim);font-size:.9rem}'
+      + '.cmp-card{border:1px solid var(--accent-border,rgba(200,169,126,.22));border-radius:var(--radius,3px);padding:1.1rem 1.25rem;background:var(--bg-card,rgba(255,255,255,.02))}'
+      + '.cmp-top{display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap}'
+      + '.cmp-nome{font-family:var(--serif);font-size:1.25rem;line-height:1.25;color:var(--text)}'
+      + '.cmp-tag{font-size:.62rem;letter-spacing:.18em;text-transform:uppercase;padding:.25rem .55rem;border-radius:2px;border:1px solid var(--accent-border,rgba(200,169,126,.22));color:var(--accent);white-space:nowrap}'
+      + '.cmp-tag.is-off{color:var(--text-dim);border-color:rgba(240,236,228,.15)}'
+      + '.cmp-meta{margin:.5rem 0 0;font-size:.84rem;line-height:1.7;color:var(--text-dim)}'
+      + '.cmp-meta b{color:var(--text);font-weight:400}'
+      + '.cmp-acoes{display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.9rem}'
+      + '.cmp-nota{margin-top:.8rem;font-size:.82rem;line-height:1.6;color:var(--text-dim)}'
+      + '.cmp-form{margin-top:.9rem;display:flex;flex-direction:column;gap:.6rem}'
+      + '.cmp-form textarea{min-height:70px;resize:vertical}'
+      + '.cmp-aviso{font-size:.82rem;line-height:1.6;padding:.7rem .9rem;border-left:2px solid var(--accent);background:var(--accent-lo,rgba(200,169,126,.12));color:var(--text)}'
+      + '.cmp-msg{font-size:.82rem;color:var(--accent)}.cmp-msg.is-err{color:#e87878}';
+    document.head.appendChild(st);
+  }
+  const fmtD = s => { try { return new Date(s).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }); } catch(_){ return ''; } };
+  const fmtV = v => v == null ? '' : Number(v).toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+  const esc = s => Util.esc(String(s == null ? '' : s));
+  box.innerHTML = '<p class="cmp-vazio">Carregando suas compras…</p>';
+  const { data, error } = await window._sb.schema('aluno').rpc('minhas_compras');
+  if(error){ box.innerHTML = '<p class="cmp-vazio">Não consegui carregar suas compras agora. Tente de novo em instantes.</p>'; console.warn('[compras]', error.message); return; }
+  const L = Array.isArray(data) ? data : [];
+  const intro = '<p class="cmp-intro">Você pode pedir o reembolso de uma compra em até <b>7 dias após a compra</b>. Depois desse prazo não há reembolso. '
+    + 'Ao pedir o reembolso, o acesso ao conteúdo comprado é encerrado na hora e o valor é estornado pela plataforma de pagamento. '
+    + 'A assinatura do Falcon Pro pode ser cancelada a qualquer momento: você continua com acesso até o fim do mês já pago e não é cobrado de novo. '
+    + 'Dúvidas? <a href="#/suporte">Fale com o suporte</a>.</p>';
+  if(!L.length){
+    box.innerHTML = intro + '<p class="cmp-vazio">Nenhuma compra pela Greenn encontrada nesta conta. Se você comprou com outro e-mail ou por outro canal, <a href="#/suporte">fale com o suporte</a>.</p>';
+    return;
+  }
+  box.innerHTML = intro + L.map(c => {
+    let tag, tagOff = false, meta = [], acoes = '', nota = '';
+    meta.push('Comprado em <b>' + fmtD(c.comprado_em) + '</b>' + (c.valor != null ? ' · ' + fmtV(c.valor) + (c.assinatura ? '/mês' : '') : ''));
+    if(c.reembolsada || c.pedido_reembolso){ tag = 'Reembolsada'; tagOff = true;
+      nota = c.pedido_reembolso === 'pendente' ? 'Reembolso pedido. O acesso foi encerrado e o estorno está sendo feito pela plataforma de pagamento (no cartão, pode levar até 2 faturas para aparecer).' : 'Esta compra foi reembolsada.'; }
+    else if(c.assinatura && c.pedido_cancelamento){ tag = c.acesso_ativo ? 'Cancelada' : 'Encerrada'; tagOff = true;
+      nota = c.acesso_ativo ? 'Assinatura cancelada. Você tem acesso até <b>' + fmtD(c.acesso_ate) + '</b> e não será cobrado de novo.' : 'Assinatura encerrada.'; }
+    else if(c.acesso_ativo){ tag = c.assinatura ? 'Assinatura ativa' : 'Ativa';
+      if(c.acesso_ate) meta.push((c.assinatura ? 'Renova em ' : 'Acesso até ') + '<b>' + fmtD(c.acesso_ate) + '</b>'); }
+    else { tag = 'Encerrada'; tagOff = true; }
+    if(c.pode_reembolsar){
+      meta.push('Reembolso disponível até <b>' + fmtD(c.reembolso_ate) + '</b>');
+      acoes += '<button type="button" class="btn-ghost" data-cmp-acao="reembolso">Pedir reembolso</button>';
+    }
+    if(c.pode_cancelar) acoes += '<button type="button" class="btn-ghost" data-cmp-acao="cancelar">Cancelar assinatura</button>';
+    return '<div class="cmp-card" data-cmp-chave="' + Util.attr(c.chave) + '" data-cmp-ultimo="' + Util.attr(c.ultimo_pagamento || '') + '" data-cmp-assin="' + (c.assinatura ? '1' : '') + '">'
+      + '<div class="cmp-top"><div class="cmp-nome">' + esc(c.produto) + '</div><span class="cmp-tag' + (tagOff ? ' is-off' : '') + '">' + tag + '</span></div>'
+      + '<p class="cmp-meta">' + meta.join(' · ') + '</p>'
+      + (nota ? '<p class="cmp-nota">' + nota + '</p>' : '')
+      + (acoes ? '<div class="cmp-acoes">' + acoes + '</div>' : '')
+      + '<div class="cmp-form" hidden></div></div>';
+  }).join('');
+
+  if(box.__wired) return; box.__wired = true;
+  box.addEventListener('click', async e => {
+    const card = e.target.closest('[data-cmp-chave]'); if(!card) return;
+    const form = card.querySelector('.cmp-form');
+    const abrir = e.target.closest('[data-cmp-acao]');
+    if(abrir){
+      const tipo = abrir.getAttribute('data-cmp-acao');
+      let aviso;
+      if(tipo === 'reembolso'){
+        aviso = 'Ao confirmar, <b>o acesso a esta compra é encerrado na hora</b> e o valor é estornado pela plataforma de pagamento.'
+          + (card.getAttribute('data-cmp-assin') ? ' A assinatura também é cancelada.' : '') + ' Essa ação não pode ser desfeita.';
+      } else {
+        const ult = card.getAttribute('data-cmp-ultimo');
+        const fim = ult ? new Date(new Date(ult).setMonth(new Date(ult).getMonth() + 1)) : null;
+        aviso = 'Ao confirmar, a assinatura não será mais cobrada. Você continua com acesso até <b>' + (fim ? fmtD(fim) : 'o fim do mês já pago') + '</b> e depois o acesso ao Falcon Pro acaba.';
+      }
+      form.hidden = false;
+      form.innerHTML = '<div class="cmp-aviso">' + aviso + '</div>'
+        + '<textarea class="field-input" data-cmp-motivo maxlength="1000" placeholder="Se quiser, conte o motivo (opcional). Ajuda a gente a melhorar."></textarea>'
+        + '<div class="cmp-acoes"><button type="button" class="btn-primary" data-cmp-confirma="' + tipo + '">' + (tipo === 'reembolso' ? 'Confirmar reembolso' : 'Confirmar cancelamento') + '</button>'
+        + '<button type="button" class="btn-ghost" data-cmp-volta>Voltar</button></div><div class="cmp-msg" data-cmp-msg></div>';
+      return;
+    }
+    if(e.target.closest('[data-cmp-volta]')){ form.hidden = true; form.innerHTML = ''; return; }
+    const conf = e.target.closest('[data-cmp-confirma]');
+    if(conf){
+      const tipo = conf.getAttribute('data-cmp-confirma');
+      const motivo = (form.querySelector('[data-cmp-motivo]') || {}).value || '';
+      const msg = form.querySelector('[data-cmp-msg]');
+      conf.disabled = true; if(msg){ msg.className = 'cmp-msg'; msg.textContent = 'Enviando…'; }
+      const fn = tipo === 'reembolso' ? 'pedir_reembolso' : 'cancelar_assinatura';
+      const { error: err } = await window._sb.schema('aluno').rpc(fn, { p_chave: card.getAttribute('data-cmp-chave'), p_motivo: motivo });
+      if(err){ conf.disabled = false; if(msg){ msg.className = 'cmp-msg is-err'; msg.textContent = err.message || 'Não deu certo. Tente de novo.'; } return; }
+      if(tipo === 'reembolso'){
+        // o acesso mudou no servidor: recarrega para a plataforma refletir na hora
+        if(msg) msg.textContent = 'Reembolso pedido. Atualizando seu acesso…';
+        setTimeout(function(){ location.reload(); }, 1400);
+        return;
+      }
+      _loadComprasPane(stageEl);
+    }
+  });
+}
+window._loadComprasPane = _loadComprasPane;
+
 // Toast real (estava sendo chamado em todo o app via `if(window.ueToast)`, mas
 // nunca fora implementado — por isso os avisos não apareciam). Canto sup. direito.
 window.ueToast = window.ueToast || function(msg, type){
@@ -33744,6 +33854,7 @@ Renderers.account = function(route){
       <button class="account-tab${tab==='perfil'?' is-active':''}" data-acc-tab="perfil" role="tab" aria-selected="${tab==='perfil'}">Perfil</button>
       <button class="account-tab${tab==='colegas'?' is-active':''}" data-acc-tab="colegas" role="tab" aria-selected="${tab==='colegas'}">Colegas de estudo</button>
       <button class="account-tab${tab==='carteira'?' is-active':''}" data-acc-tab="carteira" role="tab" aria-selected="${tab==='carteira'}">Carteira</button>
+      <button class="account-tab${tab==='compras'?' is-active':''}" data-acc-tab="compras" role="tab" aria-selected="${tab==='compras'}">Compras</button>
       <button class="account-tab${tab==='conta'?' is-active':''}" data-acc-tab="conta" role="tab" aria-selected="${tab==='conta'}">Conta</button>
     </div>`;
 
@@ -33753,6 +33864,7 @@ Renderers.account = function(route){
       <div class="account-pane-wrap" data-pane-for="perfil" ${tab==='perfil'?'':'hidden'}>${profileTab}</div>
       <div class="account-pane-wrap" data-pane-for="colegas" ${tab==='colegas'?'':'hidden'}>${peersTab}</div>
       <div class="account-pane-wrap" data-pane-for="carteira" ${tab==='carteira'?'':'hidden'}>${walletTab}</div>
+      <div class="account-pane-wrap" data-pane-for="compras" ${tab==='compras'?'':'hidden'}><div class="account-pane" data-pane="compras"><div id="accCompras" class="cmp-wrap"><p class="cmp-vazio">Carregando suas compras…</p></div></div></div>
       <div class="account-pane-wrap" data-pane-for="conta" ${tab==='conta'?'':'hidden'}>${accTab}</div>
     </div>`;
 
@@ -33804,10 +33916,12 @@ Renderers.account.mount = function(stageEl){
       // Re-render colegas quando entra na tab (estado pode ter mudado)
       if(t === 'colegas') renderPeersAllSubpanes();
       if(t === 'carteira') _loadWalletPane(stageEl, user);
+      if(t === 'compras') _loadComprasPane(stageEl);
     });
   });
   // Se já abriu direto na Carteira, carrega de cara.
   if((window._accountState.tab || 'perfil') === 'carteira') _loadWalletPane(stageEl, user);
+  if((window._accountState.tab || 'perfil') === 'compras') _loadComprasPane(stageEl);
 
   // ── Tutor: "Permitir sempre" das fontes do aluno (ia.tutor_licencas, SQL 78); salva sozinho ──
   (function(){
@@ -38045,6 +38159,7 @@ Renderers.login = function(){
       <button type="button" id="loginFirstAccess" class="btn-primary auth-submit" style="width:100%">Criar conta grátis</button>
 
       <button type="button" id="loginReset" class="auth-reset" hidden>Resetar sessão (limpar tokens travados)</button>
+      <p style="margin:1.1rem 0 0;text-align:center;font-size:.78rem;color:var(--text-dim)">Veja como tratamos os seus dados na nossa <a href="privacidade.html" target="_blank" rel="noopener" style="color:var(--accent)">Política de privacidade</a>.</p>
     </div>
 
     <!-- Modal: Primeiro acesso (signUp) -->

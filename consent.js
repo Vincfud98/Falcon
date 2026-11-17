@@ -97,7 +97,7 @@
     el.innerHTML =
       '<div class="ubqc-txt"><span class="ubqc-k">Sua privacidade</span><p class="ubqc-p">Usamos cookies para a plataforma funcionar e, ' +
       'com a sua permissão, para medir e melhorar nossos anúncios (Meta/Facebook). ' +
-      'Você escolhe. <a href="https://www.grupoubique.com.br" target="_blank" rel="noopener">Política de privacidade</a></p></div>' +
+      'Você escolhe. <a href="https://falcon.grupoubique.com.br/privacidade.html" target="_blank" rel="noopener">Política de privacidade</a></p></div>' +
       '<div class="ubqc-btns">' +
       '<button type="button" class="ubqc-btn ubqc-no" data-ubqc="no">Só essenciais</button>' +
       '<button type="button" class="ubqc-btn ubqc-ok" data-ubqc="ok">Aceitar</button></div>';

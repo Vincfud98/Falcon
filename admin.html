@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Outfit:wght@200;300;400;500;600&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
 /* Contas: compras da Greenn sem conta */
-#greennPendentes{margin:0 0 1.6rem;border:1px solid var(--accent-border,rgba(200,169,126,.3));border-radius:8px;background:rgba(200,169,126,.05);padding:1rem 1.1rem}
+#greennPendentes,#pedidosAluno{margin:0 0 1.6rem;border:1px solid var(--accent-border,rgba(200,169,126,.3));border-radius:8px;background:rgba(200,169,126,.05);padding:1rem 1.1rem}
 .gp-head{display:flex;align-items:baseline;gap:.7rem;flex-wrap:wrap;margin-bottom:.35rem}
 .gp-head b{font-family:var(--serif,serif);font-weight:500;font-size:1.05rem;color:var(--text)}
 .gp-head span{font-family:var(--mono,monospace);font-size:.62rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
@@ -23,6 +23,9 @@
 .gp-sug em{font-style:normal;color:var(--accent);font-size:.66rem;margin-left:.3rem}
 .gp-manual{display:flex;gap:.4rem;flex-wrap:wrap}
 .gp-manual input{flex:1;min-width:180px}
+.pa-tipo{display:inline-block;font-family:var(--mono,monospace);font-size:.6rem;letter-spacing:.14em;text-transform:uppercase;padding:.15rem .45rem;border-radius:2px;margin-right:.4rem;background:rgba(232,120,120,.14);color:#e87878}
+.pa-tipo.is-cancel{background:rgba(200,169,126,.14);color:var(--accent)}
+.pa-alerta{color:#e87878;font-size:.74rem;display:block;margin-top:.2rem}
 @media (max-width:760px){.gp-item{grid-template-columns:1fr}}
 
   *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
@@ -12567,6 +12570,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
           </div>
 
           <!-- Compras da Greenn ainda sem conta (e-mail da compra ≠ e-mail da conta) -->
+          <div id="pedidosAluno" hidden></div>
           <div id="greennPendentes" hidden></div>
 
           <div class="sub-h">
@@ -63302,7 +63306,64 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     else _greennLigar(ficha, (item.querySelector('[data-gp-email]') || {}).value, man);
   });
 
+  // ── Pedidos de reembolso e cancelamento feitos pelo aluno (Conta → Compras) ──
+  // O aluno pede na Falcon; a equipe faz o estorno ou cancela a assinatura NA GREENN
+  // e marca aqui como feito. Reembolso confirmado pela Greenn se marca sozinho.
+  let pedidosAlunoCache = [];
+  async function loadPedidosAluno(){
+    const box = document.getElementById('pedidosAluno');
+    if(!box) return;
+    const { data, error } = await vendas().rpc('pedidos_aluno_abertos');
+    if(error){ console.warn('[pedidos aluno]', error.message); box.hidden = true; return; }
+    pedidosAlunoCache = Array.isArray(data) ? data : [];
+    renderPedidosAluno();
+  }
+  function renderPedidosAluno(){
+    const box = document.getElementById('pedidosAluno');
+    if(!box) return;
+    const L = pedidosAlunoCache;
+    if(!L.length){ box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    const dt = d => d ? new Date(d).toLocaleDateString('pt-BR', { day:'2-digit', month:'2-digit', year:'numeric' }) : '';
+    const dias = d => { const n = Math.floor((Date.now() - new Date(d).getTime()) / 86400000); return n <= 0 ? 'hoje' : (n === 1 ? 'há 1 dia' : 'há ' + n + ' dias'); };
+    const brl = v => v == null ? '' : Number(v).toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+    box.innerHTML = `<div class="gp-head"><b>Reembolsos e cancelamentos pedidos na Falcon</b><span>${L.length} ${L.length === 1 ? 'pedido' : 'pedidos'}</span></div>
+      <p class="gp-txt"><b>Reembolso</b> (até 7 dias após a compra): o acesso já foi cortado na hora do pedido. Faça o estorno da venda na Greenn; quando a Greenn confirmar, o pedido sai daqui sozinho. <b>Cancelamento</b> do Falcon Pro: cancele a assinatura na Greenn para não cobrar o próximo mês e marque como feito. O aluno fica com acesso até o fim do mês pago.</p>
+      ${L.map(p => `<div class="gp-item" data-pa-id="${esc(p.id)}">
+        <div class="gp-quem"><strong><span class="pa-tipo${p.tipo === 'cancelamento' ? ' is-cancel' : ''}">${p.tipo === 'reembolso' ? 'Reembolso' : 'Cancelamento'}</span>${esc(p.nome || p.email)}</strong>
+          <small>${esc(p.email || '')}</small>
+          <small>${esc(p.produto || '')}${p.valor != null ? ' · ' + brl(p.valor) : ''} · comprado em ${dt(p.comprado_em)}</small>
+          <small>Venda Greenn: <b>${esc(p.greenn_sale_id || '—')}</b>${p.subscription_id ? ' · Assinatura: ' + esc(p.subscription_id) : ''}</small>
+          <small>Pedido ${dias(p.criado_em)}${p.tipo === 'cancelamento' && p.acesso_ate ? ' · acesso até ' + dt(p.acesso_ate) : ''}${p.motivo ? ' · Motivo: “' + esc(p.motivo) + '”' : ''}</small>
+          ${p.cobrado_depois ? '<span class="pa-alerta">A Greenn cobrou de novo depois do cancelamento: estorne essa cobrança e confira se a assinatura foi cancelada.</span>' : ''}</div>
+        <div class="gp-acoes">
+          <div class="gp-manual"><button class="btn" type="button" data-pa-feito>${p.tipo === 'reembolso' ? 'Estornei na Greenn' : 'Cancelei na Greenn'}</button><button class="btn btn-ghost" type="button" data-pa-recusar>Recusar</button></div>
+        </div></div>`).join('')}`;
+  }
+  document.addEventListener('click', async e => {
+    const feito = e.target.closest('[data-pa-feito]');
+    const recusar = e.target.closest('[data-pa-recusar]');
+    if(!feito && !recusar) return;
+    const item = e.target.closest('[data-pa-id]'); if(!item) return;
+    const id = Number(item.getAttribute('data-pa-id'));
+    const p = pedidosAlunoCache.find(x => Number(x.id) === id) || {};
+    let nota = null;
+    if(recusar){
+      nota = prompt('Por que recusar este pedido? (fica registrado)');
+      if(nota === null) return;
+    } else if(!confirm(p.tipo === 'reembolso'
+        ? 'Confirma que o estorno da venda ' + (p.greenn_sale_id || '') + ' foi feito na Greenn?'
+        : 'Confirma que a assinatura foi cancelada na Greenn (não vai cobrar o próximo mês)?')) return;
+    const btn = feito || recusar; btn.disabled = true;
+    const { error } = await vendas().rpc('resolver_pedido_aluno', { p_id: id, p_status: feito ? 'feito' : 'recusado', p_nota: nota });
+    btn.disabled = false;
+    if(error){ showMsg('globalMessagePortaria', 'Não deu certo: ' + error.message); return; }
+    showMsg('globalMessagePortaria', 'Pedido atualizado.', 'success');
+    loadPedidosAluno();
+  });
+
   async function loadContas(){
+    loadPedidosAluno();
     loadGreennPendentes();
     try{
       const [auR, clR, enR, prR] = await Promise.all([
