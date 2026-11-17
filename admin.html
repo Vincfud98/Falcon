@@ -9121,6 +9121,11 @@ tr.ral-online .ral-pres{ display:inline-flex; }
 .ue-rec-txt{display:flex;flex-direction:column;gap:.1rem;min-width:0}
 .ue-rec-kicker{font-family:var(--sans);font-size:.55rem;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
 .ue-rec-titulo{font-family:var(--serif);font-size:.92rem;color:var(--text);line-height:1.25}
+/* chip e imagem do cartão (SQL 163): rótulo curto à esquerda, campo ocupando o resto */
+.ue-rec-campo{display:flex;align-items:center;gap:.35rem;min-width:0}
+.ue-rec-campo > span{flex:none;width:3.4rem;font-family:var(--sans);font-size:.55rem;letter-spacing:.14em;text-transform:uppercase;color:var(--text-mute)}
+.ue-rec-campo .field-input{flex:1;min-width:0;font-size:.74rem;padding:.3rem .45rem}
+.ue-rec-campo .btn{flex:none}
 .ue-rec-acoes{display:flex;gap:.25rem;align-items:center}
 .ue-rec-acoes .ue-rec-motivo{flex:1;min-width:0;font-size:.74rem;padding:.3rem .45rem}
 .ue-rec-acoes .btn svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;vertical-align:-1px}
@@ -65247,13 +65252,20 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
   // Lista escolhida pela equipe (ou pelo professor da matéria): unidade de qualquer matéria
   // ou matéria inteira, até 6, na ordem da lista. Cada mudança grava a lista inteira pela
   // função conteudo.recomendacoes_salvar (confere a permissão e valida no servidor).
-  let ueRecsState = [];          // [{alvo_unit_id | alvo_subject_id, motivo}]
+  let ueRecsState = [];          // [{alvo_unit_id | alvo_subject_id, motivo, chip, imagem_url}]
   let _ueRecsTipo = null;        // busca aberta: 'unidade' | 'materia'
+  // Chip e imagem do cartão (SQL 163). Antes de o SQL 163 rodar as colunas não existem: os dois
+  // campos ficam escondidos e o resto continua como era.
+  let _ueRecsTemChip = true;
   const UE_RECS_MAX = 6;
+  const UE_RECS_CHIPS = ['Videoaula', 'Leitura', 'Questões', 'Resumo', 'Revisão', 'Aprofundamento', 'Mapa mental', 'Podcast'];
+  const UE_RECS_IMG_OK = /^https:\/\/[^\s'"()\\<>]+$/;
   const UE_RECS_ERROS = {
     sem_permissao: 'Você não pode mudar as recomendações desta unidade.',
     no_maximo_6: 'São no máximo 6 recomendações.',
     unidade_nao_encontrada: 'Unidade não encontrada. Feche e abra o editor de novo.',
+    chip_longo: 'O chip tem no máximo 24 letras.',
+    imagem_invalida: 'O endereço da imagem precisa começar com https:// e não pode ter espaço, aspas nem parênteses.',
   };
   function _ueRecsNorm(s){ return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
   function _ueRecsMateriaDaUnidade(u){
@@ -65281,11 +65293,13 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     const uid = ueCurrentUnitId;
     ueRecsMsg('');
     try{
-      const { data, error } = await conteudo().from('unit_recomendacoes')
-        .select('alvo_unit_id,alvo_subject_id,motivo,position').eq('unit_id', uid).order('position');
+      const ler = function(cols){ return conteudo().from('unit_recomendacoes').select(cols).eq('unit_id', uid).order('position'); };
+      let r = await ler('alvo_unit_id,alvo_subject_id,motivo,position,chip,imagem_url');
+      _ueRecsTemChip = !(r.error && String(r.error.code) === '42703');   // coluna não existe = SQL 163 ainda não rodou
+      if(!_ueRecsTemChip) r = await ler('alvo_unit_id,alvo_subject_id,motivo,position');
       if(String(uid) !== String(ueCurrentUnitId)) return;
-      if(error) ueRecsMsg('Não deu para ler as recomendações: ' + error.message);
-      else ueRecsState = (data || []).map(function(r){ return { alvo_unit_id: r.alvo_unit_id, alvo_subject_id: r.alvo_subject_id, motivo: r.motivo || '' }; });
+      if(r.error) ueRecsMsg('Não deu para ler as recomendações: ' + r.error.message);
+      else ueRecsState = (r.data || []).map(function(x){ return { alvo_unit_id: x.alvo_unit_id, alvo_subject_id: x.alvo_subject_id, motivo: x.motivo || '', chip: x.chip || '', imagem_url: x.imagem_url || '' }; });
     }catch(e){ ueRecsMsg('Não deu para ler as recomendações.'); }
     ueRecsRender();
   }
@@ -65294,12 +65308,23 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     const n = ueRecsState.length;
     box.innerHTML = n ? ueRecsState.map(function(it, i){
       const inf = _ueRecsInfo(it);
-      const capa = inf.capa ? driveImg(inf.capa) : '';
+      // a imagem que o aluno vê no cartão: a escolhida aqui ou, sem ela, a capa
+      const escolhida = UE_RECS_IMG_OK.test(String(it.imagem_url || '').trim()) ? String(it.imagem_url).trim() : '';
+      const capa = escolhida ? driveImg(escolhida) : (inf.capa ? driveImg(inf.capa) : '');
+      const ehUnidade = it.alvo_subject_id == null;
+      const campos = !_ueRecsTemChip ? '' :
+          '<label class="ue-rec-campo"><span>Chip</span>'
+            + '<input class="field-input" list="ueRecsChips" maxlength="24" autocomplete="off" placeholder="ex.: Videoaula (vazio = sem chip)" value="' + esc(it.chip || '') + '" onchange="ueRecsChip(' + i + ', this.value)"></label>'
+        + '<label class="ue-rec-campo"><span>Imagem</span>'
+            + '<input class="field-input" maxlength="600" autocomplete="off" placeholder="' + (ehUnidade ? 'vazio = capa da unidade' : 'vazio = capa da matéria') + '" value="' + esc(it.imagem_url || '') + '" onchange="ueRecsImagem(' + i + ', this.value)">'
+            + (ehUnidade ? '<button type="button" class="btn btn-ghost btn-sm" title="Usar a miniatura do primeiro vídeo desta unidade" onclick="ueRecsImagemDoVideo(' + i + ')">do vídeo</button>' : '')
+          + '</label>';
       return '<div class="ue-rec">'
         + '<div class="ue-rec-top">'
           + '<span class="ue-rec-capa"' + (capa ? ' style="background-image:url(\'' + esc(capa) + '\')"' : '') + '></span>'
           + '<span class="ue-rec-txt"><span class="ue-rec-kicker">' + esc(inf.kicker) + '</span><span class="ue-rec-titulo">' + esc(inf.titulo) + '</span></span>'
         + '</div>'
+        + campos
         + '<div class="ue-rec-acoes">'
           + '<input class="field-input ue-rec-motivo" maxlength="160" placeholder="frase opcional (aparece no card)" value="' + esc(it.motivo || '') + '" onchange="ueRecsMotivo(' + i + ', this.value)">'
           + '<button type="button" class="btn btn-ghost btn-sm" title="Subir" aria-label="Subir" onclick="ueRecsMover(' + i + ',-1)"' + (i === 0 ? ' disabled' : '') + '>' + CS_SETA_CIMA + '</button>'
@@ -65309,24 +65334,39 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     }).join('') : '<p class="ue-recs-vazio">Nenhuma escolhida: o aluno vê as automáticas.</p>';
     const add = document.getElementById('ueRecsAdd');
     if(add) add.querySelectorAll('button').forEach(function(b){ b.disabled = n >= UE_RECS_MAX; });
+    const dl = document.getElementById('ueRecsChips');   // sugestões de chip (dá para digitar outro)
+    if(dl && !dl.childElementCount) dl.innerHTML = UE_RECS_CHIPS.map(function(c){ return '<option value="' + esc(c) + '"></option>'; }).join('');
   }
-  async function ueRecsSalvar(){
-    const uid = ueCurrentUnitId; if(!uid) return;
+  // Cada gravação troca a lista inteira no servidor. Vão uma de cada vez, na ordem em que foram
+  // pedidas (duas ao mesmo tempo para a mesma unidade se atropelam no servidor); cada uma leva a
+  // lista como estava na hora do pedido.
+  let _ueRecsFila = Promise.resolve();
+  function ueRecsSalvar(){
+    const uid = ueCurrentUnitId; if(!uid) return Promise.resolve();
     ueRecsMsg('Salvando…', true);
     const itens = ueRecsState.map(function(it){
-      return it.alvo_subject_id != null
+      const o = it.alvo_subject_id != null
         ? { alvo_subject_id: Number(it.alvo_subject_id), motivo: (it.motivo || '').trim() }
         : { alvo_unit_id: Number(it.alvo_unit_id), motivo: (it.motivo || '').trim() };
+      if(_ueRecsTemChip){ o.chip = (it.chip || '').trim(); o.imagem_url = (it.imagem_url || '').trim(); }
+      return o;
     });
-    const { error } = await conteudo().rpc('recomendacoes_salvar', { p_unit: Number(uid), p_itens: itens });
+    const roda = function(){ return _ueRecsGravar(uid, itens); };
+    _ueRecsFila = _ueRecsFila.then(roda, roda);
+    return _ueRecsFila;
+  }
+  async function _ueRecsGravar(uid, itens){
+    let error = null;
+    try{ error = (await conteudo().rpc('recomendacoes_salvar', { p_unit: Number(uid), p_itens: itens })).error; }
+    catch(e){ error = e; }
     if(String(uid) !== String(ueCurrentUnitId)) return;
     if(error){
       const chave = Object.keys(UE_RECS_ERROS).find(function(k){ return String(error.message || '').indexOf(k) >= 0; });
-      ueRecsMsg(chave ? UE_RECS_ERROS[chave] : ('Não salvou: ' + error.message));
+      ueRecsMsg(chave ? UE_RECS_ERROS[chave] : ('Não salvou: ' + (error.message || error)));
       await ueRecsCarregar();   // volta a mostrar o que está gravado
       return;
     }
-    ueRecsMsg(ueRecsState.length ? 'Salvo. Já aparece para os alunos.' : 'Salvo. O aluno volta a ver as automáticas.', true);
+    ueRecsMsg(itens.length ? 'Salvo. Já aparece para os alunos.' : 'Salvo. O aluno volta a ver as automáticas.', true);
   }
   window.ueRecsMover = function(i, d){
     const j = i + d; if(j < 0 || j >= ueRecsState.length) return;
@@ -65335,6 +65375,55 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
   };
   window.ueRecsTirar = function(i){ ueRecsState.splice(i, 1); ueRecsRender(); ueRecsSalvar(); };
   window.ueRecsMotivo = function(i, v){ if(!ueRecsState[i]) return; ueRecsState[i].motivo = String(v || '').slice(0, 160); ueRecsSalvar(); };
+  window.ueRecsChip = function(i, v){ if(!ueRecsState[i]) return; ueRecsState[i].chip = String(v || '').trim().slice(0, 24); ueRecsRender(); ueRecsSalvar(); };
+  window.ueRecsImagem = function(i, v){
+    if(!ueRecsState[i]) return;
+    const url = String(v || '').trim();
+    if(url && !UE_RECS_IMG_OK.test(url)){ ueRecsMsg(UE_RECS_ERROS.imagem_invalida); return; }   // não grava endereço que o servidor recusaria
+    ueRecsState[i].imagem_url = url;
+    ueRecsRender(); ueRecsSalvar();
+  };
+  // Miniatura do primeiro vídeo de uma unidade, para o cartão da recomendação. A do YouTube sai do
+  // próprio endereço; a do Vimeo é informada pelo serviço público dele (oEmbed). '' = unidade sem
+  // vídeo, ou vídeo cuja miniatura não deu para descobrir.
+  async function _ueRecsMiniaturaDoVideo(unitId){
+    const { data, error } = await conteudo().from('unit_blocks').select('content,position')
+      .eq('unit_id', unitId).eq('type', 'video').order('position').limit(8);
+    if(error) throw error;
+    for(const b of (data || [])){
+      const url = String((b.content && (b.content.url || b.content.video_url)) || '');
+      const yt = url.match(/(?:youtube(?:-nocookie)?\.com\/(?:embed\/|watch\?v=|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/);
+      if(yt) return 'https://img.youtube.com/vi/' + yt[1] + '/hqdefault.jpg';
+      const vm = url.match(/vimeo\.com\/(?:video\/)?(\d+)/);
+      if(vm){
+        const h = url.match(/[?&](?:amp;)?h=([0-9a-f]+)/) || url.match(/vimeo\.com\/\d+\/([0-9a-f]+)/);
+        const alvo = 'https://vimeo.com/' + vm[1] + (h ? '/' + h[1] : '');
+        try{
+          const r = await fetch('https://vimeo.com/api/oembed.json?width=640&url=' + encodeURIComponent(alvo));
+          const j = r.ok ? await r.json() : null;
+          const img = j && String(j.thumbnail_url || '');
+          if(img && UE_RECS_IMG_OK.test(img)) return img;
+        }catch(_){ /* este vídeo não informou a miniatura: tenta o próximo */ }
+      }
+    }
+    return '';
+  }
+  // calado = chamada automática (unidade sem capa recém-escolhida): sem vídeo, não diz nada.
+  window.ueRecsImagemDoVideo = async function(i, calado){
+    const it = ueRecsState[i]; if(!it || it.alvo_unit_id == null) return;
+    const uid = ueCurrentUnitId, alvo = it.alvo_unit_id;
+    if(!calado) ueRecsMsg('Procurando a miniatura do vídeo…', true);
+    let img = '';
+    try{ img = await _ueRecsMiniaturaDoVideo(alvo); }
+    catch(e){ if(!calado && String(uid) === String(ueCurrentUnitId)) ueRecsMsg('Não deu para ler os vídeos dessa unidade: ' + (e && e.message || e)); return; }
+    if(String(uid) !== String(ueCurrentUnitId)) return;
+    const atual = ueRecsState.find(function(x){ return x.alvo_unit_id != null && String(x.alvo_unit_id) === String(alvo); });
+    if(!atual) return;                       // tiraram a recomendação enquanto procurava
+    if(!img){ if(!calado) ueRecsMsg('Essa unidade não tem vídeo com miniatura. Cole o endereço de uma imagem, se quiser.'); return; }
+    if(calado && atual.imagem_url) return;   // a pessoa já escolheu uma imagem nesse meio-tempo
+    atual.imagem_url = img;
+    ueRecsRender(); ueRecsSalvar();
+  };
   window.ueRecsAbrirBusca = function(tipo){
     if(ueRecsState.length >= UE_RECS_MAX){ ueRecsMsg(UE_RECS_ERROS.no_maximo_6); return; }
     _ueRecsTipo = tipo;
@@ -65376,9 +65465,14 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
   };
   window.ueRecsEscolher = function(tipo, id){
     if(ueRecsState.length >= UE_RECS_MAX){ ueRecsMsg(UE_RECS_ERROS.no_maximo_6); return; }
-    ueRecsState.push(tipo === 'materia' ? { alvo_subject_id: Number(id), motivo: '' } : { alvo_unit_id: Number(id), motivo: '' });
+    ueRecsState.push(tipo === 'materia' ? { alvo_subject_id: Number(id), motivo: '', chip: '', imagem_url: '' } : { alvo_unit_id: Number(id), motivo: '', chip: '', imagem_url: '' });
     window.ueRecsFecharBusca();
     ueRecsRender(); ueRecsSalvar();
+    // Unidade sem capa: o cartão já nasce com a miniatura do primeiro vídeo dela, se houver.
+    if(tipo !== 'materia' && _ueRecsTemChip){
+      const u = (unitsCache || []).find(function(x){ return String(x.id) === String(id); });
+      if(u && !u.cover_url) window.ueRecsImagemDoVideo(ueRecsState.length - 1, true);
+    }
   };
 
   function ueRenderDownloads(){
@@ -77393,7 +77487,8 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
         <!-- Recomendações no fim da unidade (conteudo.unit_recomendacoes, SQL 141) -->
         <div>
           <div class="sub-h"><span class="sub-h-text">Recomendações no fim</span><span class="sub-h-rule"></span></div>
-          <p class="ue-recs-ajuda">O que o aluno vê no fim de cada seção e da unidade: unidades de qualquer matéria ou uma matéria inteira, até 6. Vazio: o automático (unidades do mesmo módulo e tema).</p>
+          <p class="ue-recs-ajuda">O que o aluno vê no fim de cada seção e da unidade: unidades de qualquer matéria ou uma matéria inteira, até 6. Vazio: o automático (unidades do mesmo módulo e tema). Cada cartão pode ter um chip (ex.: Videoaula) e uma imagem.</p>
+          <datalist id="ueRecsChips"></datalist>
           <div id="ueRecsList" class="ue-recs-list"></div>
           <div class="ue-recs-add" id="ueRecsAdd">
             <button type="button" class="btn btn-ghost btn-sm" onclick="ueRecsAbrirBusca('unidade')">+ Unidade</button>
