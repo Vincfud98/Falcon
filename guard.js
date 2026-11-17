@@ -1,6 +1,6 @@
 /* Falcon: barreira contra as ferramentas de desenvolvedor no site publicado.
-   · bloqueia F12, Ctrl+Shift+I/J/C, Cmd+Opt+I/J/C, Ctrl+U (código-fonte) e o menu do botão direito
-     (o menu continua nos campos de texto, para colar e corrigir ortografia);
+   · bloqueia F12, Ctrl+Shift+I/J/C, Cmd+Opt+I/J/C, Ctrl+U (código-fonte);
+   · o botão direito fica liberado (se usarem "Inspecionar" nele, a trava abaixo pega);
    · se o DevTools for aberto mesmo assim, a página é trocada por um aviso.
    Desligado em localhost / 127.0.0.1 / file:// para a equipe conseguir depurar localmente.
    Obs.: é uma barreira de dissuasão, não segurança. O que protege os dados é o RLS do Supabase. */
@@ -9,12 +9,6 @@
   var h = location.hostname;
   if (!h || h === 'localhost' || h === '127.0.0.1' || h === '[::1]' || /\.localhost$/.test(h)) return;
 
-  function ehCampo(el) {
-    return el && el.closest && el.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"]');
-  }
-  document.addEventListener('contextmenu', function (e) {
-    if (!ehCampo(e.target)) e.preventDefault();
-  }, true);
   document.addEventListener('keydown', function (e) {
     var c = e.code, mod = e.ctrlKey || e.metaKey;
     var dev = c === 'KeyI' || c === 'KeyJ' || c === 'KeyC';
