@@ -421,6 +421,7 @@ js_dados = ('window.LANDING_DEFAULT = ' + json.dumps(DEFAULT, ensure_ascii=False
 head = '''<!DOCTYPE html>
 <html lang="pt-BR" data-theme="dark">
 <head>
+<script src="guard.js?v=1"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Falcon · Preparação completa para o CACD · Grupo Ubique</title>
