@@ -4,6 +4,7 @@
    fontes. Regras:
    · página: REDE PRIMEIRO (4 s). A cópia só entra quando a rede falha ou
      demora — atualizações continuam chegando normalmente, sem versão presa;
+     se a página da rede chega depois e é outra, a tela mostra "Versão nova";
    · scripts e estilos locais e bibliotecas do CDN: cópia primeiro, renova em
      2º plano (os locais têm ?v=, então versão nova = URL nova = rede);
    · imagens do conteúdo já vistas: cópia primeiro, com teto de entradas
@@ -92,10 +93,30 @@ async function pagina(ev, u){
     if(resp && (resp.ok || resp.type === 'opaqueredirect')) return resp;
     return limpa(await concha.match(chave, { ignoreVary: true })) || resp;   // 404/5xx: cópia, se houver
   }catch(_){
-    ev.waitUntil(rede.catch(function(){}));                                  // a rede pode ainda chegar e renovar a cópia
     const copia = await concha.match(chave, { ignoreVary: true });
-    if(copia) return limpa(copia);
+    if(copia){
+      // A cópia saiu porque a rede passou do prazo. Se a página da rede chegar depois e for
+      // DIFERENTE da cópia (versão nova publicada), a tela é avisada: "Versão nova · Atualizar"
+      // (escolha do dono, 20/11/2026: aviso, nunca recarregar sozinho no meio do estudo).
+      const textoCopia = copia.clone().text();
+      const cliente = ev.resultingClientId || ev.clientId;
+      ev.waitUntil(rede.then(async function(resp){
+        if(!resp || !resp.ok || resp.type === 'opaqueredirect' || !cliente) return;
+        const textos = await Promise.all([resp.clone().text(), textoCopia]);
+        if(textos[0] !== textos[1]) await avisarVersaoNova(cliente);
+      }).catch(function(){}));                                              // a rede pode ainda chegar e renovar a cópia
+      return limpa(copia);
+    }
+    ev.waitUntil(rede.catch(function(){}));
     throw _;                                                                // sem cópia: o navegador mostra o erro dele
+  }
+}
+// A aba nova pode ainda estar nascendo quando a rede chega: procura por até 20 s.
+async function avisarVersaoNova(id){
+  for(let i = 0; i < 40; i++){
+    const c = await self.clients.get(id);
+    if(c){ c.postMessage({ tipo: 'falcon-versao-nova' }); return; }
+    await new Promise(function(r){ setTimeout(r, 500); });
   }
 }
 

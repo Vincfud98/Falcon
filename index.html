@@ -597,6 +597,10 @@ html[data-theme="light"] .tg{color:#8a8a8a;border-color:rgba(0,0,0,.12)}
 .rede-barra.is-offline{background:color-mix(in srgb,var(--accent) 22%,var(--bg));color:var(--accent);border-bottom:1px solid var(--accent-border)}
 .rede-barra.is-sync{background:color-mix(in srgb,#5dd49f 16%,var(--bg));color:#8fe0b8;border-bottom:1px solid rgba(93,212,159,.35)}
 .rede-barra .rede-det{opacity:.8}
+.rede-barra.is-versao{background:color-mix(in srgb,var(--accent) 14%,var(--bg));color:var(--accent);border-bottom:1px solid var(--accent-border)}
+.rede-barra .rede-acao{margin-left:.8rem;padding:.22rem .7rem;border:1px solid var(--accent);border-radius:2px;background:transparent;color:inherit;font:inherit;letter-spacing:inherit;text-transform:inherit;cursor:pointer;vertical-align:baseline}
+.rede-barra .rede-acao:hover{background:var(--accent);color:var(--bg)}
+.rede-barra .rede-acao:disabled{opacity:.6;cursor:default}
 @media (max-width:640px){.rede-barra{padding:.45rem .9rem}.rede-barra .rede-det{display:none}}
 .ini-semservidor{gap:.6rem}
 .ini-semservidor .ini-loading-s{font-family:var(--sans);font-size:.8rem;color:var(--text-mute)}
@@ -12807,6 +12811,18 @@ if('serviceWorker' in navigator){
     try{ if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(function(){}); }catch(_){ }
   });
 }
+// A concha avisa quando a tela abriu com a cópia guardada (rede lenta) e a versão nova chegou
+// depois (sw.js): a faixa do topo oferece "Atualizar" (Rede.versaoNova). Nunca recarrega sozinha.
+if('serviceWorker' in navigator){
+  try{
+    navigator.serviceWorker.addEventListener('message', function(ev){
+      if(!ev.data || ev.data.tipo !== 'falcon-versao-nova') return;
+      window.__falconVersaoNova = true;
+      if(window.Rede && window.Rede.versaoNova) window.Rede.versaoNova();
+    });
+    if(navigator.serviceWorker.startMessages) navigator.serviceWorker.startMessages();
+  }catch(_){ }
+}
 /* CONCHA-FIM */
 </script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js" crossorigin="anonymous"></script>
@@ -14214,9 +14230,26 @@ window.TAG_REGISTRY = {
       _medir();
     }
     function _esconder(){
+      if(versaoPendente){ _mostrarVersao(); return; }   // o aviso de versão nova volta quando a faixa da rede sai
       const el = document.getElementById('redeBarra'); if(el) el.hidden = true;
       document.documentElement.classList.remove('rede-barra-on', 'rede-offline');
       _medir();
+    }
+    // Versão nova (a concha abriu a cópia guardada porque a rede demorou, e a página nova chegou depois):
+    // aviso com o botão Atualizar; quem decide a hora de recarregar é o aluno (dono, 20/11/2026).
+    let versaoPendente = false;
+    function _mostrarVersao(){
+      _mostrar('Versão nova da Falcon disponível.', 'Atualize quando puder: o que você está fazendo fica salvo.', 'is-versao');
+      const el = document.getElementById('redeBarra'); if(!el) return;
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'rede-acao'; b.textContent = 'Atualizar';
+      b.addEventListener('click', function(){ b.disabled = true; b.textContent = 'Atualizando…'; location.reload(); });
+      el.appendChild(b);
+      _medir();
+    }
+    function versaoNova(){
+      versaoPendente = true;
+      if(estado === 'offline') return;   // sem rede não adianta atualizar: aparece quando a conexão voltar
+      _mostrarVersao();
     }
     // A barra empurra a topbar e tudo que fica preso abaixo dela (--nav-h):
     // mede a altura real (o texto quebra linha no celular) e publica nas variáveis.
@@ -14280,12 +14313,13 @@ window.TAG_REGISTRY = {
     }catch(_){ }
     return {
       estado: function(){ return estado; }, offline: function(){ return estado === 'offline'; }, desde: function(){ return desde; },
-      sondar: sondar, garantir: garantir, falha: falha, aguardar: aguardar,
+      sondar: sondar, garantir: garantir, falha: falha, aguardar: aguardar, versaoNova: versaoNova,
       on: function(fn){ subs.push(fn); return function(){ const i = subs.indexOf(fn); if(i >= 0) subs.splice(i, 1); }; },
       _cfg: cfg
     };
   })();
   window.Rede = Rede;
+  if(window.__falconVersaoNova) Rede.versaoNova();   // o aviso chegou antes da Rede existir
   // Ao voltar: confere o que mudou e completa os blocos que ficaram faltando.
   Rede.on(function(e){
     if(e !== 'ok') return;
@@ -14588,6 +14622,60 @@ window.TAG_REGISTRY = {
     _aplicarBlocos(rows);
     return true;
   }
+  /* Recarga só das linhas que mudaram (17/11/2026), para tabela com id numérico e updated_at. Antes,
+     uma linha editada fazia baixar a tabela inteira de novo (em 3 dias de edição, 29 dos 32 MB da
+     cópia). Agora: baixa as linhas com updated_at a partir do maior que a cópia tem, confere pela lista
+     de ids as que sumiram ou faltam, e no fim refaz a MESMA conta que o servidor usa para dizer que a
+     tabela mudou (conteudo.versoes_conteudo: sha256 de "id:updated_at" na ordem do id). Se não bater,
+     ou se a tabela não se presta (id de texto, sem updated_at, busca direta), devolve null e quem
+     chamou baixa a tabela inteira, como antes. Conferido em 17/11: a conta local bate com a do
+     servidor em units, modules, essay_criteria e comentarios_provisorios. */
+  async function _hashLinhas(rows){
+    try{
+      if(!(window.crypto && crypto.subtle)) return null;
+      const txt = rows.slice().sort(function(a, b){ return a.id - b.id; })
+        .map(function(r){ return String(r.id) + ':' + (r.updated_at == null ? '' : String(r.updated_at)); }).join(',');
+      const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(txt));
+      return Array.from(new Uint8Array(buf)).map(function(b){ return b.toString(16).padStart(2, '0'); }).join('');
+    }catch(_){ return null; }
+  }
+  async function _recarregarMudancas(nome, def, v){
+    if(!v || !v.hash || !v.max_updated_at || !def || def.direto || def.ordem !== 'id') return null;
+    const ent = window._cacheLer(nome);
+    if(!ent || !ent.rows.length) return null;
+    const temCampos = ent.rows.every(function(r){ return typeof r.id === 'number' && Object.prototype.hasOwnProperty.call(r, 'updated_at'); });
+    if(!temCampos) return null;
+    let desde = '';
+    ent.rows.forEach(function(r){ const u = r.updated_at ? String(r.updated_at) : ''; if(u > desde) desde = u; });
+    if(!desde) return null;
+    const mapa = new Map();
+    ent.rows.forEach(function(r){ mapa.set(r.id, r); });
+    const d = await window._fetchAllRows(function(o){ return def.monta(o).gte('updated_at', desde); }, 'id', nome + ' (mudanças)', { chave: 'id' });
+    if(d.error) return null;
+    (d.data || []).forEach(function(r){ mapa.set(r.id, r); });
+    const idsLocal = await _hashIds(Array.from(mapa.keys()));
+    if(!(v.hash_ids && idsLocal && idsLocal === v.hash_ids)){
+      // linhas apagadas ou que passaram a ser visíveis: a lista de ids diz quais
+      const ids = await window._fetchAllRows(function(o){ return def.monta(o).select('id'); }, 'id', nome + ' (ids)', { chave: 'id' });
+      if(ids.error) return null;
+      const noServidor = new Set((ids.data || []).map(function(r){ return r.id; }));
+      Array.from(mapa.keys()).forEach(function(id){ if(!noServidor.has(id)) mapa.delete(id); });
+      const faltam = Array.from(noServidor).filter(function(id){ return !mapa.has(id); });
+      for(let i = 0; i < faltam.length; i += 150){
+        const lote = faltam.slice(i, i + 150);
+        const r = await _tentar(function(){ return def.monta().in('id', lote); }, nome + ' (faltantes)', String(i));
+        if(r.error) return null;
+        (r.data || []).forEach(function(row){ mapa.set(row.id, row); });
+      }
+    }
+    const linhas = Array.from(mapa.values());
+    if(await _hashLinhas(linhas) !== v.hash){
+      console.warn('[versoes] ' + nome + ': a conta não bateu depois da recarga parcial; baixando a tabela inteira');
+      return null;
+    }
+    // mesma ordem da busca inteira (a das tabelas com posição vem por position e depois id)
+    return window._ordenarLinhas(linhas, Object.prototype.hasOwnProperty.call(linhas[0] || {}, 'position') ? ['position', 'id'] : ['id']);
+  }
   /* Confere as versões com o servidor e recarrega SÓ o que mudou. Roda no boot
      (depois do portão) e ao voltar para a aba após 10 minutos. Sem a função de
      versões no servidor, recarrega tudo pela rede (como antes da cópia local). */
@@ -14607,20 +14695,25 @@ window.TAG_REGISTRY = {
         if(!window._cacheOrdemConfere(ent, _registroConteudo[nome] && _registroConteudo[nome].ordem)) return true;   // cópia lida com a ordem antiga
         return !(ent && ent.meta && ent.meta.hash && ent.meta.hash === v.hash);
       });
-      // blocos por último (é a pesada)
-      mudou.sort(function(a, b){ return (a === 'conteudo.unit_blocks') - (b === 'conteudo.unit_blocks'); });
       let bancoMudou = false;
-      for(let i = 0; i < mudou.length; i++){
-        const nome = mudou[i], def = _registroConteudo[nome], v = mapa ? mapa[nome] : null;
+      const recarregar = async function(nome){
+        const def = _registroConteudo[nome], v = mapa ? mapa[nome] : null;
         try{
-          if(def.recarregar){ await def.recarregar(v); continue; }
-          const r = def.direto ? await _tentar(function(){ return def.monta(); }, nome, '') : await window._fetchAllRows(def.monta, def.ordem, nome, def.opts);
-          if(r.error) continue;
-          await window._cacheGravar(nome, r.data || [], Object.assign(_metaDe(v), { ordem: window._ordemAssinatura(def.ordem) }));
+          if(def.recarregar){ await def.recarregar(v); return; }
+          let linhas = await _recarregarMudancas(nome, def, v);   // só as linhas que mudaram (null = baixa tudo)
+          if(!linhas){
+            const r = def.direto ? await _tentar(function(){ return def.monta(); }, nome, '') : await window._fetchAllRows(def.monta, def.ordem, nome, def.opts);
+            if(r.error) return;
+            linhas = r.data || [];
+          }
+          await window._cacheGravar(nome, linhas, Object.assign(_metaDe(v), { ordem: window._ordemAssinatura(def.ordem) }));
           if(def.banco) bancoMudou = true;
-          else if(def.aplicar) def.aplicar(r.data || []);
+          else if(def.aplicar) def.aplicar(linhas);
         }catch(e){ console.warn('[versoes] recarga de ' + nome + ' falhou:', e && e.message); }
-      }
+      };
+      // as tabelas pequenas ao mesmo tempo (cada uma é 1 a 3 pedidos); os blocos por último (é a pesada)
+      await Promise.all(mudou.filter(function(n){ return n !== 'conteudo.unit_blocks'; }).map(recarregar));
+      if(mudou.indexOf('conteudo.unit_blocks') >= 0) await recarregar('conteudo.unit_blocks');
       // banco de questões: se alguma tabela dele mudou e ele já estava montado, remonta da cópia nova
       if(bancoMudou && window._QBank && window._QBank.completo && typeof window._hydrateQBank === 'function'){
         try{
@@ -14810,7 +14903,10 @@ window.TAG_REGISTRY = {
       // disso existe e a carga segue pela rede como sempre.
       await null;
       _registrarTabelasDoBoot();
-      const _uidCache = ((window.Auth && Auth.getUser && Auth.getUser()) || {}).id || null;
+      // A conta vem das chaves guardadas no aparelho (as mesmas que o cliente do Supabase usa): o Auth
+      // só nasce no script seguinte, e com Auth.getUser() aqui a cópia local nunca abria na 1ª carga
+      // (medido em 17/11/2026: 17 de 782 aberturas usaram a cópia, todas na 2ª rodada, depois do login).
+      const _uidCache = ((window.Auth && Auth.getUser && Auth.getUser()) || {}).id || _contaDaCarga() || null;
       const _copiaLocal = await window._cacheAbrir(_uidCache);
       if(_copiaLocal) window._versoesPedir();
       // Config global (tag de afiliado Amazon) — fire-and-forget, não bloqueia.
