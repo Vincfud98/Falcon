@@ -446,8 +446,7 @@
       return label(rotuloUnidade(ctx), 0) + titulo(c) + subtitulo(c)
         + '<div class="aula-art aula-anim" style="--i:2" data-art="' + esc(a.id || '') + '">'
         + '<iframe class="aula-art-f" title="' + esc(a.titulo || 'Gráfico interativo') + '" sandbox="allow-scripts" referrerpolicy="no-referrer" tabindex="-1"></iframe>'
-        + '<div class="aula-art-trava" aria-hidden="true"></div>'
-        + '<div class="aula-art-vez">Sua vez: mexa no gráfico</div></div>' + rodape(c, ctx, idx, total);
+        + '<div class="aula-art-trava" aria-hidden="true"></div></div>' + rodape(c, ctx, idx, total);   // a vez do aluno aparece no player (.ap-vez)
     },
     pergunta: function (c, ctx, idx, total) {
       return label('Pergunta', 0) + '<div class="aula-pg-q"><div class="aula-pg-mark aula-anim" style="--i:0">?</div><div>' + titulo(c) +
