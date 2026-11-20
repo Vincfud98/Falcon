@@ -26,6 +26,23 @@
   function escRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
   function curto(s, n) { s = String(s == null ? '' : s).trim(); return s.length > n ? s.slice(0, n - 1).replace(/\s+\S*$/, '') + '…' : s; }
 
+  /* Gráfico vivo (fase 8, 20/11/2026): o slide artefato mostra o gráfico interativo da unidade e a AULA mexe nele.
+     O piloto entra no HTML do gráfico e recebe as ações por postMessage (passo do próprio passo a passo, cenário,
+     barra, botão); o player manda cada ação no instante em que a narração fala o trecho dela. */
+  var PILOTO_ART = "(function(){var q=function(s){try{return document.querySelector(s)}catch(_){return null}};var clicar=function(el){if(!el)return false;el.click();return true};var animando=null;function deslizar(id,valor,dur,ja){var r=document.getElementById(id);if(!r||r.type!=='range')return false;var mn=parseFloat(r.min),mx=parseFloat(r.max),st=parseFloat(r.step)||1;var b=Math.min(mx,Math.max(mn,parseFloat(valor)));if(isNaN(b))return false;var a=parseFloat(r.value);if(isNaN(a))a=mn;var put=function(v){v=Math.round((v-mn)/st)*st+mn;r.value=String(+v.toFixed(6));r.dispatchEvent(new Event('input',{bubbles:true}))};if(animando)cancelAnimationFrame(animando);if(ja||!(dur>0)){put(b);r.dispatchEvent(new Event('change',{bubbles:true}));return true}var t0=performance.now();var f=function(t){var k=Math.min(1,(t-t0)/(dur*1000));var e=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2;put(a+(b-a)*e);if(k<1)animando=requestAnimationFrame(f);else{animando=null;r.dispatchEvent(new Event('change',{bubbles:true}))}};animando=requestAnimationFrame(f);return true}function passo(n){var d=document.querySelectorAll('.step-dot')[n-1];if(!d)return false;d.click();var s=document.getElementById('btnShow');if(s)s.click();return true}function fazer(m){if(m.fazer==='passo')return passo(parseInt(m.alvo,10));if(m.fazer==='cenario')return clicar(q('[data-v=\"'+String(m.alvo).replace(/[\"\\\\]/g,'')+'\"]'));if(m.fazer==='botao')return clicar(document.getElementById(m.alvo));if(m.fazer==='barra')return deslizar(m.alvo,m.valor,m.ja?0:1.2,m.ja);return false}window.addEventListener('message',function(e){var m=e.data||{};if(m.tipo!=='aula-acao')return;var ok=false;try{ok=fazer(m)}catch(_){ok=false}try{parent.postMessage({tipo:'aula-acao-feita',n:m.n,ok:ok},'*')}catch(_){}});try{parent.postMessage({tipo:'aula-art-pronto'},'*')}catch(_){}})();";
+  function docDoArtefato(html) {
+    var h = String(html || '');
+    if (!/<\/body\s*>/i.test(h) && !/<html\b/i.test(h)) h = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>html,body{margin:0;padding:0}</style></head><body>' + h + '</body></html>';
+    var s = '<script>' + PILOTO_ART + '<\/script>', k = h.toLowerCase().lastIndexOf('</body');
+    return k >= 0 ? h.slice(0, k) + s + h.slice(k) : h + s;
+  }
+  var _artFrames = [];   // { frame, pronto, fila } de cada gráfico aberto; um só ouvinte para todos
+  if (typeof window !== 'undefined') window.addEventListener('message', function (e) {
+    var m = e.data || {}; if (m.tipo !== 'aula-art-pronto') return;
+    _artFrames = _artFrames.filter(function (a) { return a.frame && a.frame.isConnected; });
+    _artFrames.forEach(function (a) { if (a.frame.contentWindow === e.source) { a.pronto = true; var f = a.fila; a.fila = []; f.forEach(function (x) { try { a.frame.contentWindow.postMessage(x, '*'); } catch (_) { } }); } });
+  });
+
   /* Marca-texto: envolve a primeira ocorrência de cada destaque no texto (já escapado). */
   function marcar(texto, destaques, idCena) {
     var t = esc(texto);
@@ -424,6 +441,14 @@
     /* Esquema: diagrama de caixas e linhas em sete formas (árvore, mapa mental, mnemônico, comparativo, quadros, pirâmide, quadro-resumo). */
     esquema: function (c, ctx, idx, total) { return renderEsquema(c, ctx, idx, total); },
     /* Pergunta do professor: a resposta fica escondida até o clique (ou até a narração chegar nela). */
+    artefato: function (c, ctx, idx, total) {
+      var a = c.artefato || {};
+      return label(rotuloUnidade(ctx), 0) + titulo(c) + subtitulo(c)
+        + '<div class="aula-art aula-anim" style="--i:2" data-art="' + esc(a.id || '') + '">'
+        + '<iframe class="aula-art-f" title="' + esc(a.titulo || 'Gráfico interativo') + '" sandbox="allow-scripts" referrerpolicy="no-referrer" tabindex="-1"></iframe>'
+        + '<div class="aula-art-trava" aria-hidden="true"></div>'
+        + '<div class="aula-art-vez">Sua vez: mexa no gráfico</div></div>' + rodape(c, ctx, idx, total);
+    },
     pergunta: function (c, ctx, idx, total) {
       return label('Pergunta', 0) + '<div class="aula-pg-q"><div class="aula-pg-mark aula-anim" style="--i:0">?</div><div>' + titulo(c) +
         '<button type="button" class="aula-pg-btn aula-anim" style="--i:2" data-revelar="1">Ver a resposta</button></div></div>' +
@@ -574,10 +599,21 @@
       }
       Array.prototype.forEach.call(s.querySelectorAll('img'), function (im) { im.addEventListener('load', function () { if (s.classList.contains('is-active')) ajustar(s); }); });
     });
+    // Gráfico vivo: um gráfico por slide artefato, carregado quando o slide aparece; ações esperam o gráfico ficar pronto.
+    var arts = {}, seqArt = 0;
+    function artDe(k) {
+      var s = slides[k]; if (!s || !s.classList.contains('aula-artefato')) return null;
+      if (arts[k] && arts[k].frame.isConnected) return arts[k];
+      var fr = s.querySelector('.aula-art-f'); if (!fr) return null;
+      var a = arts[k] = { frame: fr, pronto: false, fila: [] }; _artFrames.push(a);
+      fr.srcdoc = docDoArtefato((cenas[k].artefato && cenas[k].artefato.html) || '');
+      return a;
+    }
     function show(i) {
       if (i < 0 || i >= slides.length) return;
       if (atual >= 0) slides[atual].classList.remove('is-active');
       atual = i; slides[atual].classList.add('is-active');
+      artDe(i);   // gráfico vivo: carrega o gráfico do slide quando ele aparece
       ajustar(slides[atual]);
       stage.dispatchEvent(new CustomEvent('aula:slide', { detail: { index: i, id: cenas[i].id } }));
     }
@@ -611,7 +647,24 @@
       tema: function (claro) { stage.classList.toggle('is-light', !!claro); },
       visual: function (on) { if (atual < 0) return false; var s = slides[atual]; if (!s.classList.contains('has-visual')) return false; s.classList.toggle('is-visual', on == null ? !s.classList.contains('is-visual') : !!on); return s.classList.contains('is-visual'); },
       temVisual: function () { return atual >= 0 && slides[atual].classList.contains('has-visual'); },
-      layout: function () { return atual >= 0 ? slides[atual].getAttribute('data-layout') : ''; }
+      layout: function () { return atual >= 0 ? slides[atual].getAttribute('data-layout') : ''; },
+      artefato: {
+        // uma ação do roteiro ({ fazer, alvo, valor }); ja = sem animação (quando o aluno pula para a frente)
+        acao: function (k, ac, ja) {
+          var a = artDe(k); if (!a || !ac) return false;
+          var msg = { tipo: 'aula-acao', n: ++seqArt, fazer: ac.fazer, alvo: ac.alvo, valor: ac.valor, ja: !!ja };
+          if (a.pronto && a.frame.contentWindow) { try { a.frame.contentWindow.postMessage(msg, '*'); } catch (_) { } } else a.fila.push(msg);
+          return true;
+        },
+        // volta o gráfico ao começo (o aluno voltou no tempo ou reabriu o slide)
+        reiniciar: function (k) {
+          var a = artDe(k); if (!a) return;
+          a.pronto = false; a.fila = [];
+          a.frame.srcdoc = docDoArtefato((cenas[k].artefato && cenas[k].artefato.html) || '');
+        },
+        // durante a narração o gráfico é da aula; no fim do slide, é do aluno
+        liberar: function (k, on) { var s = slides[k]; if (s) s.classList.toggle('is-livre', !!on); }
+      }
     };
   }
 

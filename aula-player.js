@@ -493,6 +493,7 @@
   var Player = (function () {
     var el = null, stage = null, ctl = null, cenas = [], midia = {}, dur = [], inicio = [], total = 0, i = -1;
     var respostas = {}, julgando = null;   // questão interativa: escolha por slide de assertiva; índice do slide à espera do julgamento
+    var artFeitas = {}, artUsado = {}, artVez = null;   // gráfico vivo: ações já feitas por slide; slide já mexido; slide em que é a vez do aluno
     var audio = null, silencio = null, tocando = false, rate = 1, raf = 0, legendaOn = true, aulaId = null, tokens = [], palavraAtual = -1, cuesOn = {}, salvarT = 0, soltarFit = null, terminou = false, ultimoTxt = '';
     function abrir(resumo, unit) {
       if (el) fechar();
@@ -534,6 +535,7 @@
         + '<button type="button" class="ap-big" data-ap="play" aria-label="Reproduzir">' + ICO.play + '</button>'
         + '<div class="ap-retomar" hidden><span></span><button type="button" data-ap="inicio">Começar do início</button></div>'
         + '<div class="ap-julgar" hidden>Julgue a assertiva para continuar<small>Certo ou Errado na tela, ou as teclas C e E</small></div>'
+        + '<div class="ap-vez" hidden>Sua vez: mexa no gráfico<small>Quando quiser, aperte play para seguir a aula</small></div>'
         + '<div class="ap-carregando">Preparando a aula…</div></div>'
         + '<div class="ap-legenda" aria-live="off"></div>'
         + '<div class="ap-bar">'
@@ -577,7 +579,7 @@
     function falha(msg) { var c = el && el.querySelector('.ap-carregando'); if (c) c.textContent = msg; toast(msg, 'error'); }
     function preparar(row, unit) {
       aulaId = row.id; terminou = false;
-      i = -1; palavraAtual = -1; tokens = []; cuesOn = {}; silencio = null; tocando = false; ultimoTxt = ''; respostas = {}; julgando = null;   // estado zerado a cada abertura
+      i = -1; palavraAtual = -1; tokens = []; cuesOn = {}; silencio = null; tocando = false; ultimoTxt = ''; respostas = {}; julgando = null; artFeitas = {}; artUsado = {}; artVez = null;   // estado zerado a cada abertura
       var rot = row.roteiro, mat = row.material || {};
       cenas = rot.cenas;
       var cat = Array.isArray(mat.midia) ? mat.midia : [];
@@ -697,7 +699,9 @@
       for (var j = 0; j < k; j++) { if (pendeJulgamento(j)) { k = j; offset = 0; break; } }
       if (julgando != null && julgando !== k) sairDaEspera();
       var trocou = k !== i;
-      i = k; if (trocou) { ctl.show(k); apagarMarcas(); cuesOn = {}; montarLegenda(cenas[k]); pintarEscolha(k); }
+      // gráfico vivo: sair da vez do aluno (outro slide ou o mesmo slide antes do fim) volta a trava
+      if (artVez != null && !(artVez === k && (offset || 0) >= dur[k] - 0.05)) { var kv = artVez; sairDaVez(); if (ctl.artefato) ctl.artefato.liberar(kv, false); }
+      i = k; if (trocou) { ctl.show(k); apagarMarcas(); cuesOn = {}; montarLegenda(cenas[k]); pintarEscolha(k); prepararArtefato(k); }
       var m = fonteDe(k);
       var vis = el.querySelector('[data-ap="visual"]'); if (vis) { vis.hidden = !ctl.temVisual(); pintarVisual(); }
       el.querySelector('.ap-n').textContent = (k + 1) + ' / ' + cenas.length;
@@ -718,9 +722,22 @@
       }
       pintar();
     }
+    // Gráfico vivo: ao entrar num slide artefato, o gráfico começa do zero e travado (a aula é que mexe).
+    function prepararArtefato(k) {
+      var c = cenas[k]; if (!c || c.layout !== 'artefato' || !ctl.artefato) return;
+      if (artUsado[c.id]) ctl.artefato.reiniciar(k);
+      artUsado[c.id] = false; artFeitas[c.id] = 0; ctl.artefato.liberar(k, false);
+    }
+    function esperarVez() {
+      artVez = i; artUsado[cenas[i].id] = true; setTocando(false);
+      if (ctl.artefato) ctl.artefato.liberar(i, true);
+      el.classList.add('is-vez'); var h = el.querySelector('.ap-vez'); if (h) h.hidden = false;
+    }
+    function sairDaVez() { artVez = null; el.classList.remove('is-vez'); var h = el.querySelector('.ap-vez'); if (h) h.hidden = true; }
     function preCarregar(k) { var m = k < cenas.length && midia[cenas[k].id]; if (!m || !m.url || m._pre) return; m._pre = true; try { var a = new Audio(); a.preload = 'auto'; a.src = m.url; } catch (_) { } }
     function fimDaCena() {
       if (pendeJulgamento(i)) { esperarJulgamento(); return; }   // a aula para até o aluno julgar
+      if (cenas[i] && cenas[i].layout === 'artefato' && artVez !== i && ctl.artefato) { esperarVez(); return; }   // gráfico vivo: a vez do aluno
       if (i + 1 < cenas.length) tocarCena(i + 1, 0, true);
       else { terminou = true; setTocando(false); el.classList.add('is-fim'); ls('ubique.aula.pos.' + aulaId, null); pintar(); }
     }
@@ -735,6 +752,11 @@
     }
     function alternar() {
       if (julgando != null) { var k0 = julgando; sairDaEspera(); tocarCena(k0, 0, true); return; }   // à espera do julgamento: play repete a questão
+      if (artVez != null) {   // gráfico vivo: na vez do aluno, play segue a aula
+        var k1 = artVez; sairDaVez(); if (ctl.artefato) ctl.artefato.liberar(k1, false);
+        if (k1 + 1 < cenas.length) tocarCena(k1 + 1, 0, true); else { terminou = true; setTocando(false); el.classList.add('is-fim'); pintar(); }
+        return;
+      }
       if (terminou) { tocarCena(0, 0, true); return; }
       if (silencio) { setTocando(!tocando); return; }
       if (!audio) return;
@@ -773,6 +795,15 @@
         var on = lt >= d.inicio_s, chave = c.id + ':' + d.i;
         if (!!cuesOn[chave] !== on) { cuesOn[chave] = on; ctl.destaque(chave, on); }
       });
+      // gráfico vivo: cada ação acontece quando a narração chega ao trecho dela; voltando no tempo, o gráfico recomeça
+      // e refaz na hora o que já tinha acontecido (só a última ação anima)
+      if (c.layout === 'artefato' && ctl.artefato && artVez !== i) {
+        var acs = au.acoes || [], feitas = artFeitas[c.id] || 0, devidas = 0;
+        while (devidas < acs.length && lt >= acs[devidas].inicio_s) devidas++;
+        if (devidas < feitas) { ctl.artefato.reiniciar(i); feitas = 0; }
+        for (var qa = feitas; qa < devidas; qa++) { ctl.artefato.acao(i, acs[qa], qa < devidas - 1); artUsado[c.id] = true; }
+        artFeitas[c.id] = devidas;
+      }
       // linha do tempo
       var g = inicio[i] + lt, pct = total ? (g / total * 100) : 0;
       el.querySelector('.ap-seek-fill').style.width = pct + '%';
