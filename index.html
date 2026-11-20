@@ -22047,10 +22047,20 @@ window._signBucketUrl = async function(bucket, pathOrUrl){
 };
 // Resolve uma URL de MÍDIA (áudio/imagem/vídeo): se for do bucket unit-downloads,
 // troca pela versão assinada; senão (Google Drive, externo) devolve como está.
+// Balde privado de onde vem o arquivo, pelo endereço salvo: os anexos do suporte
+// moram em 'suporte-anexos' (SQL 165, 20/11); o resto (materiais da unidade,
+// simulados e anexos antigos do suporte) em 'unit-downloads'. null = arquivo externo.
+window._bucketDoArquivo = function(url){
+  const u = String(url || '');
+  if(u.indexOf('/suporte-anexos/') >= 0) return 'suporte-anexos';
+  if(u.indexOf('/unit-downloads/') >= 0) return 'unit-downloads';
+  return null;
+};
 window._resolveMediaUrl = async function(url){
   if(!url) return url;
-  if(String(url).indexOf('/unit-downloads/') >= 0){
-    const signed = await window._signBucketUrl('unit-downloads', url);
+  const bucket = window._bucketDoArquivo(url);
+  if(bucket){
+    const signed = await window._signBucketUrl(bucket, url);
     return signed || url;
   }
   return url;
@@ -22070,7 +22080,8 @@ if(typeof document !== 'undefined' && !document._dlFileBound){
     const a = e.target.closest('[data-dl-file]');
     if(!a) return;
     e.preventDefault();
-    window._openBucketFile('unit-downloads', a.getAttribute('data-dl-file'));
+    const arq = a.getAttribute('data-dl-file');
+    window._openBucketFile(window._bucketDoArquivo(arq) || 'unit-downloads', arq);
   });
 }
 
@@ -35557,9 +35568,10 @@ async function _supEnsureSession(){
   }
   return false;
 }
-// Upload de anexo do suporte → Storage 'unit-downloads', pasta support/<uid>/
-// (a policy support_upload libera só essa pasta pra alunos). Retorna
-// {url, name, mime, size} ou {error}.
+// Upload de anexo do suporte → balde privado 'suporte-anexos', pasta <uid>/
+// (SQL 165: o servidor garante 25 MB e só deixa o aluno enviar na própria pasta;
+// os anexos antigos ficam em unit-downloads/support/ e continuam abrindo).
+// Retorna {url, name, mime, size} ou {error}.
 async function _supUploadAttachment(file){
   if(!file) return null;
   const MAX = 25 * 1024 * 1024;
@@ -35569,12 +35581,12 @@ async function _supUploadAttachment(file){
   const safe = String(file.name || 'arquivo').toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z0-9._-]+/g, '-').slice(-80);
-  const path = 'support/' + user.id + '/' + Date.now() + '-' + safe;
+  const path = user.id + '/' + Date.now() + '-' + safe;
   try{
-    const { error } = await window._sb.storage.from('unit-downloads')
+    const { error } = await window._sb.storage.from('suporte-anexos')
       .upload(path, file, { contentType: file.type || 'application/octet-stream' });
     if(error) return { error: error.message || 'erro no upload' };
-    const { data } = window._sb.storage.from('unit-downloads').getPublicUrl(path);
+    const { data } = window._sb.storage.from('suporte-anexos').getPublicUrl(path);
     return { url: (data && data.publicUrl) || null, name: file.name || 'arquivo', mime: file.type || '', size: file.size || 0 };
   }catch(e){ return { error: String(e && e.message || e) }; }
 }
@@ -35582,7 +35594,8 @@ async function _supUploadAttachment(file){
 // resto (PDF etc.) → cartão com nome + Baixar.
 function _supAttachmentHtml(att){
   if(!att || !att.url) return '';
-  // Camada 2: o arquivo mora no bucket privado unit-downloads (pasta support/).
+  // Camada 2: o arquivo mora num balde privado (suporte-anexos; os antigos em
+  // unit-downloads/support/). _bucketDoArquivo escolhe pelo endereço.
   // Imagem/arquivo abrem por LINK ASSINADO no clique (handler data-dl-file);
   // a miniatura/vídeo são assinados no passe _signSupportMedia após o render.
   const url = Util.attr(_safeUrl(att.url));

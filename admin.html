@@ -20914,7 +20914,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
   const DownloadsSync = (function(){
     const conteudo = () => window._sb && window._sb.schema('conteudo');
     const bucket   = () => window._sb && window._sb.storage.from('unit-downloads');
-    const MAX_BYTES = 50 * 1024 * 1024; // 50 MB
+    const MAX_BYTES = 500 * 1024 * 1024; // 500 MB (SQL 165: limite do balde unit-downloads)
 
     function _slugify(s){
       return String(s||'').toLowerCase()
@@ -20941,63 +20941,133 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
       return 'file';
     }
 
-    // Upload via XHR pra ter progresso real (Supabase JS v2 não expõe progresso).
-    function uploadFile(file, unitId, onProgress){
+    // ── Envio de arquivo com progresso ─────────────────────────────────────
+    // Até 6 MB: um pedido só. Acima disso: envio em pedaços de 6 MB (protocolo TUS
+    // do Supabase; o tamanho do pedaço é o que o Supabase exige). Se a internet cair,
+    // espera voltar, pergunta ao servidor até onde chegou e continua dali.
+    const PEDACO = 6 * 1024 * 1024;
+    const TUS_URL = SUPABASE_URL.replace('.supabase.co', '.storage.supabase.co') + '/storage/v1/upload/resumable';
+    const ESPERAS = [1000, 3000, 5000, 10000, 20000, 30000]; // novas tentativas seguidas por pedaço
+
+    function _b64(s){ return btoa(unescape(encodeURIComponent(String(s)))); }
+    async function _token(){
+      const sess = await window._sb.auth.getSession();
+      return sess && sess.data && sess.data.session && sess.data.session.access_token;
+    }
+    function _pedido(method, url, headers, body, onUp){
       return new Promise(function(resolve){
-        if(!file){ resolve(null); return; }
-        if(file.size > MAX_BYTES){
-          console.warn('[downloads sync] arquivo maior que 50MB');
-          resolve({ error: 'O arquivo é maior que 50 MB. Comprima ou hospede externamente.' });
-          return;
-        }
-        if(typeof window._sb === 'undefined' || !window._sb){ resolve(null); return; }
-        (async function(){
-          try{
-            const sess = await window._sb.auth.getSession();
-            const token = sess && sess.data && sess.data.session && sess.data.session.access_token;
-            if(!token){ resolve({ error: 'Sem sessão ativa. Faça login novamente.' }); return; }
-            const ts = Date.now();
-            const safeName = _slugify(file.name);
-            const path = String(unitId) + '/' + ts + '-' + safeName;
-            const url = SUPABASE_URL + '/storage/v1/object/unit-downloads/' + encodeURI(path);
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', url);
-            xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-            xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
-            xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-            xhr.setRequestHeader('x-upsert', 'false');
-            xhr.upload.onprogress = function(evt){
-              if(evt.lengthComputable && typeof onProgress === 'function'){
-                onProgress(Math.round((evt.loaded / evt.total) * 100));
-              }
-            };
-            xhr.onload = function(){
-              if(xhr.status >= 200 && xhr.status < 300){
-                const pub = bucket().getPublicUrl(path);
-                resolve({
-                  url: (pub && pub.data && pub.data.publicUrl) || null,
-                  storage_path: path,
-                  size_bytes: file.size,
-                  mime_type: file.type || 'application/octet-stream',
-                });
-              } else {
-                console.warn('[downloads sync upload]', xhr.status, xhr.responseText);
-                let msg = 'Erro ao enviar arquivo (' + xhr.status + ').';
-                try{ const j = JSON.parse(xhr.responseText); if(j && j.message) msg = j.message; }catch(_){}
-                resolve({ error: msg });
-              }
-            };
-            xhr.onerror = function(){
-              console.warn('[downloads sync upload] network error');
-              resolve({ error: 'Erro de rede ao enviar arquivo.' });
-            };
-            xhr.send(file);
-          }catch(e){
-            console.warn('[downloads sync upload exception]', e);
-            resolve({ error: String(e && e.message || e) });
-          }
-        })();
+        const xhr = new XMLHttpRequest();
+        xhr.open(method, url);
+        Object.keys(headers).forEach(function(k){ xhr.setRequestHeader(k, headers[k]); });
+        if(onUp && xhr.upload) xhr.upload.onprogress = onUp;
+        xhr.onload = function(){ resolve(xhr); };
+        xhr.onerror = function(){ resolve(null); };
+        xhr.onabort = function(){ resolve(null); };
+        xhr.send(body == null ? null : body);
       });
+    }
+    function _esperarRede(){
+      if(navigator.onLine !== false) return Promise.resolve();
+      return new Promise(function(r){
+        window.addEventListener('online', function volta(){ window.removeEventListener('online', volta); r(); });
+      });
+    }
+    function _dormir(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+    function _msgErro(xhr, padrao){
+      if(!xhr) return 'Erro de rede ao enviar o arquivo.';
+      if(xhr.status === 413) return 'O arquivo passa do limite do servidor.';
+      if(xhr.status === 401 || xhr.status === 403) return 'Sem permissão para enviar o arquivo aqui.';
+      let msg = padrao + ' (' + xhr.status + ').';
+      try{ const j = JSON.parse(xhr.responseText); if(j && (j.message || j.error)) msg = j.message || j.error; }catch(_){}
+      return msg;
+    }
+    function _falhaPassageira(xhr){
+      return !xhr || xhr.status === 0 || xhr.status === 408 || xhr.status === 409 || xhr.status === 423
+        || xhr.status === 429 || xhr.status >= 500;
+    }
+
+    // Envia um arquivo para um balde. opts: { bucket, path, onProgress(0-100), onAviso(texto) }.
+    // Devolve { url, storage_path, size_bytes, mime_type } ou { error }.
+    async function enviar(file, opts){
+      const bucketId = opts.bucket, path = opts.path;
+      const tipo = file.type || 'application/octet-stream';
+      const avisar = function(feito){
+        if(typeof opts.onProgress === 'function') opts.onProgress(Math.min(100, Math.round(feito / Math.max(1, file.size) * 100)));
+      };
+      const aviso = function(t){ if(typeof opts.onAviso === 'function') opts.onAviso(t); };
+      const pronto = function(){
+        const pub = window._sb.storage.from(bucketId).getPublicUrl(path);
+        return { url: (pub && pub.data && pub.data.publicUrl) || null, storage_path: path, size_bytes: file.size, mime_type: tipo };
+      };
+      let token = await _token();
+      if(!token) return { error: 'Sem sessão ativa. Faça login novamente.' };
+      const cab = function(){ return { 'Authorization': 'Bearer ' + token, 'apikey': SUPABASE_ANON_KEY }; };
+
+      if(file.size <= PEDACO){
+        const xhr = await _pedido('POST', SUPABASE_URL + '/storage/v1/object/' + bucketId + '/' + encodeURI(path),
+          Object.assign(cab(), { 'Content-Type': tipo, 'x-upsert': 'false' }), file,
+          function(e){ if(e.lengthComputable) avisar(e.loaded / e.total * file.size); });
+        if(xhr && xhr.status >= 200 && xhr.status < 300){ avisar(file.size); return pronto(); }
+        console.warn('[envio]', xhr && xhr.status, xhr && xhr.responseText);
+        return { error: _msgErro(xhr, 'Erro ao enviar o arquivo') };
+      }
+
+      // 1. abre o envio no servidor
+      const criar = await _pedido('POST', TUS_URL, Object.assign(cab(), {
+        'Tus-Resumable': '1.0.0', 'Upload-Length': String(file.size), 'x-upsert': 'false',
+        'Upload-Metadata': 'bucketName ' + _b64(bucketId) + ',objectName ' + _b64(path)
+          + ',contentType ' + _b64(tipo) + ',cacheControl ' + _b64('3600'),
+      }), null);
+      const loc0 = criar && criar.status === 201 ? criar.getResponseHeader('Location') : null;
+      if(!loc0){
+        console.warn('[envio em pedaços: abrir]', criar && criar.status, criar && criar.responseText);
+        return { error: _msgErro(criar, 'Erro ao começar o envio') };
+      }
+      const loc = new URL(loc0, TUS_URL).href;
+
+      // 2. manda os pedaços; numa falha passageira, espera e retoma de onde o servidor parou
+      let feito = 0, tentativa = 0;
+      while(feito < file.size){
+        token = (await _token()) || token;
+        const inicio = feito;
+        const pedaco = file.slice(inicio, inicio + PEDACO);
+        const xhr = await _pedido('PATCH', loc, Object.assign(cab(), {
+          'Tus-Resumable': '1.0.0', 'Upload-Offset': String(inicio), 'Content-Type': 'application/offset+octet-stream',
+        }), pedaco, function(e){ avisar(inicio + e.loaded); });
+        if(xhr && xhr.status === 204){
+          feito = Number(xhr.getResponseHeader('Upload-Offset')) || (inicio + pedaco.size);
+          if(tentativa) aviso('');
+          tentativa = 0;
+          avisar(feito);
+          continue;
+        }
+        if(!_falhaPassageira(xhr) || tentativa >= ESPERAS.length){
+          console.warn('[envio em pedaços]', xhr && xhr.status, xhr && xhr.responseText);
+          return { error: _msgErro(xhr, 'Erro ao enviar o arquivo') };
+        }
+        if(navigator.onLine === false) aviso('Sem internet. O envio continua de onde parou quando a conexão voltar.');
+        else aviso('A conexão falhou. Tentando de novo…');
+        await _esperarRede();
+        await _dormir(ESPERAS[tentativa++]);
+        token = (await _token()) || token;
+        const q = await _pedido('HEAD', loc, Object.assign(cab(), { 'Tus-Resumable': '1.0.0' }), null);
+        const off = q && q.status === 200 ? Number(q.getResponseHeader('Upload-Offset')) : NaN;
+        if(!isNaN(off)) feito = off;
+      }
+      return pronto();
+    }
+
+    // Material da unidade (PDF/zip/áudio/slides) no balde unit-downloads, pasta <unitId>/.
+    function uploadFile(file, unitId, onProgress, onAviso){
+      if(!file) return Promise.resolve(null);
+      if(file.size > MAX_BYTES){
+        console.warn('[downloads sync] arquivo maior que 500 MB');
+        return Promise.resolve({ error: 'O arquivo tem ' + formatBytes(file.size) + ' e passa do limite de 500 MB.' });
+      }
+      if(typeof window._sb === 'undefined' || !window._sb) return Promise.resolve(null);
+      const path = String(unitId) + '/' + Date.now() + '-' + _slugify(file.name);
+      return enviar(file, { bucket: 'unit-downloads', path: path, onProgress: onProgress, onAviso: onAviso })
+        .catch(function(e){ console.warn('[downloads sync upload exception]', e); return { error: String(e && e.message || e) }; });
     }
 
     async function insertRow(payload){
@@ -21033,7 +21103,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
       }catch(e){ console.warn('[downloads sync delete exception]', e); return false; }
     }
 
-    return { uploadFile, insertRow, deleteRow, formatBytes, mimeToKind, MAX_BYTES };
+    return { uploadFile, enviar, insertRow, deleteRow, formatBytes, mimeToKind, MAX_BYTES };
   })();
   window.DownloadsSync = DownloadsSync;
 
@@ -34394,10 +34464,20 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
       return data.signedUrl;
     }catch(e){ console.warn('[signed url]', e); return null; }
   };
+  // Balde privado de onde vem o arquivo, pelo endereço salvo: os anexos do suporte
+  // moram em 'suporte-anexos' (SQL 165, 20/11); o resto (materiais da unidade,
+  // simulados e anexos antigos do suporte) em 'unit-downloads'. null = arquivo externo.
+  window._bucketDoArquivo = function(url){
+    const u = String(url || '');
+    if(u.indexOf('/suporte-anexos/') >= 0) return 'suporte-anexos';
+    if(u.indexOf('/unit-downloads/') >= 0) return 'unit-downloads';
+    return null;
+  };
   window._resolveMediaUrl = async function(url){
     if(!url) return url;
-    if(String(url).indexOf('/unit-downloads/') >= 0){
-      const s = await window._signBucketUrl('unit-downloads', url);
+    const bucket = window._bucketDoArquivo(url);
+    if(bucket){
+      const s = await window._signBucketUrl(bucket, url);
       return s || url;
     }
     return url;
@@ -34422,7 +34502,8 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
       const a = e.target.closest && e.target.closest('[data-dl-file]');
       if(!a) return;
       e.preventDefault();
-      window._openBucketFile('unit-downloads', a.getAttribute('data-dl-file'));
+      const arq = a.getAttribute('data-dl-file');
+      window._openBucketFile(window._bucketDoArquivo(arq) || 'unit-downloads', arq);
     });
   }
 
@@ -54557,24 +54638,26 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     });
     TR.aoConferir(_falconRefreshPresence);
   }
-  // Upload de anexo do admin → mesma pasta support/ do Storage (policy
-  // support_upload). Reusa o DownloadsSync (XHR + progresso) já existente.
+  // Upload de anexo do admin/professor → balde privado suporte-anexos (SQL 165),
+  // na pasta do ALUNO da conversa: a regra de acesso é "aluno dono + equipe +
+  // professor da dúvida", e o servidor garante os 25 MB.
   async function _ctUploadAttachment(file, studentUid){
     if(!file) return null;
     if(file.size > 25 * 1024 * 1024) return { error: 'O arquivo passa de 25 MB.' };
-    // Camada 2 (Opção A): o anexo do admin vai pra pasta do ALUNO da conversa,
-    // pra regra de acesso ficar "dono + admin" quando o bucket virar privado.
-    // A policy support_upload já libera qualquer caminho support/*.
     const folderUid = studentUid || await _contatoAdminUid();
     if(!folderUid) return { error: 'Sessão indisponível.' };
-    const res = await window.DownloadsSync.uploadFile(file, 'support/' + folderUid);
+    const nome = String(file.name || 'arquivo').toLowerCase()
+      .normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9._-]+/g, '-').slice(-80) || 'arquivo';
+    const res = await window.DownloadsSync.enviar(file, { bucket: 'suporte-anexos', path: folderUid + '/' + Date.now() + '-' + nome });
     if(!res || res.error) return { error: (res && res.error) || 'erro no upload' };
     return { url: res.url, name: file.name || 'arquivo', mime: res.mime_type || file.type || '', size: res.size_bytes || file.size || 0 };
   }
   // Render do anexo na bolha (imagem/áudio/vídeo/arquivo)
   function _ctAttachmentHtml(att){
     if(!att || !att.url) return '';
-    // Camada 2: unit-downloads privado. Imagem/arquivo abrem por LINK ASSINADO no
+    // Camada 2: balde privado (suporte-anexos; os antigos em unit-downloads/support/).
+    // Imagem/arquivo abrem por LINK ASSINADO no
     // clique (data-dl-file); miniatura/vídeo são assinados no passe _signSupportMedia.
     const url = esc(att.url);
     const mime = String(att.mime || '');
@@ -64953,13 +65036,13 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
       if(!title){ _setMsg('Informe um nome pro arquivo.', true); return; }
       if(!file){ _setMsg('Escolha um arquivo do seu computador.', true); return; }
       if(file.size > DownloadsSync.MAX_BYTES){
-        _setMsg('Arquivo maior que 50 MB. Comprima ou hospede externamente.', true);
+        _setMsg('O arquivo tem ' + DownloadsSync.formatBytes(file.size) + ' e passa do limite de 500 MB.', true);
         return;
       }
       _setMsg('');
       _setBusy(true);
       _setProgress(0);
-      const up = await DownloadsSync.uploadFile(file, _unitId, p => _setProgress(p));
+      const up = await DownloadsSync.uploadFile(file, _unitId, p => _setProgress(p), t => _setMsg(t || ''));
       if(!up || up.error){
         _setMsg((up && up.error) || 'Erro ao enviar o arquivo.', true);
         _setBusy(false);
@@ -66543,14 +66626,14 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     const setStatus = function(txt, isErr){ if(status){ status.textContent = txt; status.style.color = isErr ? 'var(--error)' : 'var(--accent)'; } };
     const isAudio = /^audio\//.test(file.type || '') || /\.(mp3|m4a|aac|ogg|wav|opus)$/i.test(file.name || '');
     if(!isAudio){ setStatus('Selecione um arquivo de áudio (MP3, M4A, etc.).', true); inputEl.value = ''; return; }
-    if(file.size > (DownloadsSync.MAX_BYTES || 50*1024*1024)){
-      setStatus('Arquivo de ' + DownloadsSync.formatBytes(file.size) + ' — passa de 50 MB. Comprima o áudio.', true);
+    if(file.size > DownloadsSync.MAX_BYTES){
+      setStatus('Arquivo de ' + DownloadsSync.formatBytes(file.size) + ': passa do limite de 500 MB. Comprima o áudio.', true);
       inputEl.value = ''; return;
     }
     setStatus('Enviando… 0%', false);
     let res;
     try{
-      res = await DownloadsSync.uploadFile(file, ueCurrentUnitId || 'audio', function(pct){ setStatus('Enviando… ' + pct + '%', false); });
+      res = await DownloadsSync.uploadFile(file, ueCurrentUnitId || 'audio', function(pct){ setStatus('Enviando… ' + pct + '%', false); }, function(t){ if(t) setStatus(t, false); });
     }catch(e){ res = { error: (e && e.message) || 'falha no upload' }; }
     inputEl.value = '';
     if(!res || res.error){ setStatus((res && res.error) || 'Falha no upload.', true); return; }
@@ -73918,7 +74001,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
               '<input type="file" id="ue-bf-audio-file-' + bid + '" accept="audio/*,.mp3,.m4a,.aac,.ogg,.wav,.opus" style="display:none" onchange="ueAudioUpload(' + bid + ', this)">',
               '<button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById(\'ue-bf-audio-file-' + bid + '\').click()" style="white-space:nowrap">Enviar áudio</button>',
             '</div>',
-            '<span class="field-help" id="ue-bf-audio-status-' + bid + '" style="font-size:.68rem;color:var(--text-mute);margin-top:.3rem;display:block">MP3, M4A, etc. até 50 MB. O arquivo fica no nosso servidor e toca sempre (o Drive não funciona pra áudio no navegador).</span>',
+            '<span class="field-help" id="ue-bf-audio-status-' + bid + '" style="font-size:.68rem;color:var(--text-mute);margin-top:.3rem;display:block">MP3, M4A, etc. até 500 MB. O arquivo fica no nosso servidor e toca sempre (o Drive não funciona pra áudio no navegador).</span>',
           '</div>',
           // Editor de parágrafos
           '<div style="margin-top:.6rem">',
@@ -77764,7 +77847,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       <div class="field">
         <label>Arquivo *</label>
         <input class="field-input" id="udlFile" type="file" accept=".pdf,.zip,.7z,.rar,.mp3,.wav,.ogg,.m4a,.aac,.ppt,.pptx,.key,.doc,.docx,.txt,.csv,.xlsx,.xls">
-        <span class="field-help">Limite: 50 MB. PDF, slides, áudio, planilha, documento ou pacote zipado.</span>
+        <span class="field-help">Limite: 500 MB. PDF, slides, áudio, planilha, documento ou pacote zipado. Arquivos grandes sobem em pedaços: se a internet cair, o envio continua de onde parou.</span>
       </div>
 
       <div id="udlFileInfo" style="display:none;font-size:.78rem;color:var(--text-mute);font-family:var(--mono);padding:.55rem .8rem;background:var(--bg-elev);border-radius:var(--radius);border:1px solid var(--accent-border-soft)"></div>
