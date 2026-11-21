@@ -89972,20 +89972,95 @@ window._marcarTourVisto = function(){
   _prefsExtra = Object.assign({}, _prefsExtra, { tour_visto: true, tour_visto_em: new Date().toISOString() });
   if(window._saveUserPrefs) window._saveUserPrefs();
 };
+// Tour novo (aprovado 21/11/2026): marca própria, para TODOS verem uma vez, inclusive quem viu o antigo.
+window._tour2Visto = function(){ return !!(_prefsExtra && _prefsExtra.tour2_visto); };
+window._marcarTour2Visto = function(como){
+  if(_prefsExtra && _prefsExtra.tour2_visto) return;
+  _prefsExtra = Object.assign({}, _prefsExtra, { tour2_visto: true, tour2_visto_em: new Date().toISOString(), tour2_como: como || '' });
+  if(window._saveUserPrefs) window._saveUserPrefs();
+};
 window._talvezAbrirTourInicial = function(){
   if(!_TOUR_AUTO_ON) return;
   if(!_prefsCarregado) return;                 // sem saber, não arrisca repetir
-  if(window._tourJaVisto()) return;
+  if(window._tour2Visto()) return;
   const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
   if(!u) return;
-  if(!window.GuidedTour) return;
-  // Deixa a tela assentar antes de abrir por cima dela.
-  setTimeout(function(){
-    if(window._tourJaVisto()) return;
-    window.GuidedTour.open();                  // com window: checamos window.GuidedTour acima
-    window._marcarTourVisto();                 // marca ao ABRIR: se ele fechar
-  }, 1200);                                    // no meio, não reabre sozinho
+  if(!window.TourFalcon) return;
+  // Espera a tela assentar e ficar livre (boas-vindas dos Falcoins, cadastro ou outra janela aberta).
+  let tentativas = 0;
+  (function quandoLivre(){
+    if(window._tour2Visto() || TourFalcon.aberto()) return;
+    const ocupada = document.querySelector('.modal-backdrop.active, .modal.open, .note-modal.open');
+    if(ocupada && ++tentativas < 120){ setTimeout(quandoLivre, 1500); return; }
+    if(ocupada) return;                         // ficou ocupada por 3 minutos: tenta na próxima entrada
+    TourFalcon.abrir({ primeira: true });       // a marca de visto entra quando o aluno conclui ou fecha
+  })();
 };
+
+/* TOUR-FALCON-INICIO */
+/* Tour da plataforma (aprovado pelo dono em 21/11/2026): a maquete aprovada roda DENTRO do app numa camada
+   por cima da tela (iframe /tour/, mesma origem). Os dados de exemplo vivem só nela; nada é gravado. Ao sair,
+   a camada some e o aluno está exatamente onde estava. Na 1ª vez começa no capítulo 1 (a lista de capítulos
+   aparece no fim dele); depois, o menu "Tour da plataforma" abre na lista de capítulos.
+   Fala com a camada por postMessage { tipo: 'falcon-tour', evento: 'pronto' | 'capitulo' | 'concluir' | 'fechar' }. */
+const TourFalcon = (function(){
+  let camada = null, timer = 0, focoAntes = null, overflowAntes = '';
+  function css(){
+    if(document.getElementById('tourFalconCss')) return;
+    const st = document.createElement('style'); st.id = 'tourFalconCss';
+    st.textContent = '.tf-camada{position:fixed;inset:0;z-index:2147483000;background:var(--bg)}'
+      + '.tf-camada iframe{position:absolute;inset:0;width:100%;height:100%;border:0;display:block;background:var(--bg)}'
+      + '.tf-carregando{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1rem;font-family:var(--sans);font-size:.7rem;letter-spacing:.18em;text-transform:uppercase;color:var(--text-dim)}'
+      + '.tf-camada.is-pronta .tf-carregando{display:none}'
+      + '.tf-falha{font-family:var(--sans);font-size:.85rem;letter-spacing:0;text-transform:none;color:var(--text);text-align:center;max-width:320px;line-height:1.5}';
+    document.head.appendChild(st);
+  }
+  function aberto(){ return !!camada; }
+  function fechar(como){
+    if(!camada) return;
+    window.removeEventListener('message', aoMsg);
+    clearTimeout(timer);
+    camada.remove(); camada = null;
+    document.body.style.overflow = overflowAntes;
+    if(como && window._marcarTour2Visto) window._marcarTour2Visto(como);
+    try{ if(focoAntes && focoAntes.focus) focoAntes.focus(); }catch(_){ }
+  }
+  function aoMsg(e){
+    if(!camada || e.origin !== location.origin) return;
+    const fr = camada.querySelector('iframe');
+    if(!fr || e.source !== fr.contentWindow) return;
+    const d = e.data; if(!d || d.tipo !== 'falcon-tour') return;
+    if(d.evento === 'pronto'){ clearTimeout(timer); camada.classList.add('is-pronta'); try{ fr.focus(); }catch(_){ } return; }
+    if(d.evento === 'concluir'){ fechar('concluiu'); return; }
+    if(d.evento === 'fechar'){ fechar('fechou'); return; }
+  }
+  function abrir(opts){
+    opts = opts || {};
+    if(camada) return;
+    css();
+    focoAntes = document.activeElement;
+    overflowAntes = document.body.style.overflow;
+    camada = document.createElement('div');
+    camada.className = 'tf-camada';
+    camada.setAttribute('role', 'dialog'); camada.setAttribute('aria-modal', 'true'); camada.setAttribute('aria-label', 'Tour da plataforma');
+    const modo = opts.primeira ? 'primeira=1' : 'lista=1';
+    camada.innerHTML = '<div class="tf-carregando"><span>Abrindo o tour…</span></div>'
+      + '<iframe title="Tour da plataforma" src="tour/index.html?embed=1&' + modo + '" allow="autoplay"></iframe>';
+    document.body.appendChild(camada);
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('message', aoMsg);
+    // não abriu em 25 s: avisa e deixa fechar (sem marcar como visto)
+    timer = setTimeout(function(){
+      if(!camada || camada.classList.contains('is-pronta')) return;
+      const c = camada.querySelector('.tf-carregando');
+      if(c) c.innerHTML = '<p class="tf-falha">Não deu para abrir o tour agora. Tente de novo pelo menu do seu nome, em "Tour da plataforma".</p><button type="button" class="btn-primary" data-tf-fechar>Fechar</button>';
+      const b = camada.querySelector('[data-tf-fechar]'); if(b) b.addEventListener('click', function(){ fechar(null); });
+    }, 25000);
+  }
+  return { abrir: abrir, fechar: fechar, aberto: aberto };
+})();
+window.TourFalcon = TourFalcon;
+/* TOUR-FALCON-FIM */
 
 /* ───────── App.boot ───────── */
 /* ─────────────────────────────────────────────────────────────────
@@ -90485,7 +90560,7 @@ const AppShell = {
               // O Tour saiu da topbar (competia com as PÁGINAS, sendo uma ação)
               // e virou item desta cortina, abaixo do Suporte.
               e.preventDefault();
-              if(window.GuidedTour) GuidedTour.open();
+              if(window.TourFalcon) TourFalcon.abrir({ primeira: !(window._tour2Visto && window._tour2Visto()) });
             } else if(_acao === 'manual'){
               e.preventDefault();
               if(window.AjudaManual) AjudaManual.abrir();
