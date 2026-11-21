@@ -33871,10 +33871,13 @@ window.VideoTempo = VideoTempo;
 // banco), quando a conta tem Falcoins de boas-vindas valendo. Não tem X e não
 // fecha por fora nem com Esc: só no "Entendi".
 const FalcoinsBoasVindas = (function(){
-  let _aberto = false;
+  let _aberto = false, _conferindo = false;
   async function talvezMostrar(){
-    if(_aberto || !window._boasVindasPodeMostrar || !window._boasVindasPodeMostrar()) return;
-    const c = await FalcoinsCarteira.ler(true);
+    if(_aberto || _conferindo || !window._boasVindasPodeMostrar || !window._boasVindasPodeMostrar()) return;
+    // enquanto confere o saldo, o tour de primeiro acesso espera (ocupado)
+    _conferindo = true;
+    let c = null;
+    try{ c = await FalcoinsCarteira.ler(true); }finally{ _conferindo = false; }
     const qtd = Number(c && c.bonus_restante) || 0;
     if(qtd <= 0 || !c.bonus_vence_em || _aberto || !window._boasVindasPodeMostrar()) return;
     _aberto = true;
@@ -33911,7 +33914,7 @@ const FalcoinsBoasVindas = (function(){
     document.body.appendChild(el);
     const ok = el.querySelector('[data-fcbv="ok"]'); if(ok) ok.focus();
   }
-  return { talvezMostrar: talvezMostrar };
+  return { talvezMostrar: talvezMostrar, ocupado: function(){ return _aberto || _conferindo; } };
 })();
 window.FalcoinsBoasVindas = FalcoinsBoasVindas;
 
@@ -89991,20 +89994,44 @@ window._marcarTour2Visto = function(como){
   _prefsExtra = Object.assign({}, _prefsExtra, { tour2_visto: true, tour2_visto_em: new Date().toISOString(), tour2_como: como || '' });
   if(window._saveUserPrefs) window._saveUserPrefs();
 };
+// O tour abre sozinho uma vez, DEPOIS do primeiro acesso (pedido do dono, 21/11/2026): com o cadastro feito
+// em Conta (nome, @ e foto), as boas-vindas dos Falcoins fechadas e fora das telas em que a pessoa está
+// preenchendo algo ou fazendo prova. É reavaliado a cada página (App.render) e quando as preferências chegam.
+const _TOUR_FORA_DAQUI = { account: 1, login: 1, novaSenha: 1, certificate: 1 };
+let _tourEsperando = false;
+// 'pagina' = a pessoa está numa tela onde o tour não entra (só a próxima página reavalia);
+// 'ocupada' = uma janela aberta ou prestes a abrir (vale esperar); '' = pode abrir.
+function _tourImpedimento(){
+  const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
+  if(!u) return 'pagina';
+  // cadastro do primeiro acesso por fazer: a mesma regra do roteador, que leva a pessoa para Conta
+  if(u.role !== 'admin' && window.Profile && Profile.needsOnboarding(u.id)) return 'pagina';
+  const r = (window.Router && Router.parse) ? Router.parse() : null;
+  if(!r || _TOUR_FORA_DAQUI[r.view]) return 'pagina';
+  if(document.body.dataset.simExam) return 'pagina';        // prova em andamento
+  if(window.FalcoinsBoasVindas && FalcoinsBoasVindas.ocupado && FalcoinsBoasVindas.ocupado()) return 'ocupada';
+  if(document.querySelector('.modal-backdrop.active, .modal.open, .note-modal.open')) return 'ocupada';
+  return '';
+}
 window._talvezAbrirTourInicial = function(){
   if(!_TOUR_AUTO_ON) return;
   if(!_prefsCarregado) return;                 // sem saber, não arrisca repetir
   if(window._tour2Visto()) return;
-  const u = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
-  if(!u) return;
-  if(!window.TourFalcon) return;
-  // Espera a tela assentar e ficar livre (boas-vindas dos Falcoins, cadastro ou outra janela aberta).
-  let tentativas = 0;
+  if(!window.TourFalcon || TourFalcon.aberto() || _tourEsperando) return;
+  if(_tourImpedimento() === 'pagina') return;
+  // Espera a tela assentar e ficar livre: duas conferências seguidas sem impedimento (1,5 s entre elas).
+  _tourEsperando = true;
+  let tentativas = 0, livres = 0;
   (function quandoLivre(){
-    if(window._tour2Visto() || TourFalcon.aberto()) return;
-    const ocupada = document.querySelector('.modal-backdrop.active, .modal.open, .note-modal.open');
-    if(ocupada && ++tentativas < 120){ setTimeout(quandoLivre, 1500); return; }
-    if(ocupada) return;                         // ficou ocupada por 3 minutos: tenta na próxima entrada
+    if(window._tour2Visto() || TourFalcon.aberto()){ _tourEsperando = false; return; }
+    const imp = _tourImpedimento();
+    if(imp === 'pagina'){ _tourEsperando = false; return; }   // a próxima página reavalia
+    livres = imp ? 0 : livres + 1;
+    if(livres < 2){
+      if(++tentativas < 120){ setTimeout(quandoLivre, 1500); return; }
+      _tourEsperando = false; return;           // ocupada por 3 minutos: a próxima página reavalia
+    }
+    _tourEsperando = false;
     TourFalcon.abrir({ primeira: true });       // a marca de visto entra quando o aluno conclui ou fecha
   })();
 };
@@ -90830,6 +90857,8 @@ const App = {
       if(renderer.mount) renderer.mount(stage, route);
       if(_prof){ const _t3 = performance.now(); (window.__profRender = window.__profRender || []).push({ view: route.view, render: Math.round(_t1 - _t0), html: Math.round(_t2 - _t1), mount: Math.round(_t3 - _t2) }); }
     }
+    // Tour de primeiro acesso: reavaliado a cada página (abre depois do cadastro, fora da Conta e de prova).
+    if(window._talvezAbrirTourInicial) window._talvezAbrirTourInicial();
     // Highlight top-bar nav links
     // ── Homepage fase 1: Início / Concursos / Minhas matérias ──
     const navInicio = document.getElementById('navInicio');
