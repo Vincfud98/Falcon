@@ -9204,6 +9204,8 @@ body[data-modo="professor"] .adm-bell-wrap{display:none !important}
 .prof-conta-msg{font-family:var(--sans);font-weight:300;font-size:.78rem;color:var(--red);margin-top:.5rem;min-height:1em}
 .prof-conta-msg.is-ok{color:var(--green)}
 .prof-conta-chip{font-family:var(--sans);font-size:.58rem;letter-spacing:.14em;text-transform:uppercase;color:var(--green);border:1px solid var(--green-border);background:var(--green-lo);border-radius:2px;padding:.2rem .45rem}
+.prof-conta-chip.is-espera{color:var(--accent);border-color:var(--accent-border);background:var(--accent-lo)}
+.prof-conta-ligada.is-espera{border-style:dashed}
 .cs-profs-vazio{font-family:var(--sans);font-weight:300;font-size:.8rem;color:var(--text-mute);font-style:italic;margin:0;padding:.2rem 0}
 .cs-prof-row{display:flex;align-items:center;gap:.8rem;padding:.55rem .7rem;border:1px solid var(--accent-border-soft);border-radius:var(--radius)}
 .cs-prof-av{width:38px;height:38px;flex:none;border-radius:50%;overflow:hidden;display:grid;place-items:center;background:var(--accent-lo);border:1px solid var(--accent-border);font-family:var(--serif);font-size:.95rem;color:var(--accent)}
@@ -15470,7 +15472,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
         </div>
       </div>
       <div class="classif-section" style="margin-top:1.4rem;display:none" id="prof-conta-sec">
-        <div class="classif-head"><h4>Conta na plataforma</h4><span class="hint">a conta vira "professor": entra na Sala dos professores e edita as unidades e as questões das matérias dele</span></div>
+        <div class="classif-head"><h4>Conta na plataforma</h4><span class="hint">a conta vira "professor": entra na Sala dos professores e edita as unidades e as questões das matérias dele. Pode pôr o e-mail antes de ele criar a conta: liga sozinha quando ele confirmar o e-mail</span></div>
         <div id="prof-conta-box"></div>
       </div>
       <div id="professorModalMessage"></div>
@@ -18931,6 +18933,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
   let professorSubjectsCache = [];
   let professorModulesCache = [];   // conteudo.professor_modules (SQL 140): módulos que o professor ensina
   let professorContasCache = {};    // professor_id → {user_id, email, nome, ligado_em} (só o superadmin vê)
+  let professorConvitesCache = {};  // professor_id → {email, criado_em}: e-mail guardado, liga sozinho quando a conta nascer e confirmar o e-mail (SQL 169)
   let sourcesCache = [];         // (linhas base da tabela sources)
   let sourceAuthorsCache = [];   // junction
   let sourceSubjectsCache = [];  // junction
@@ -30585,8 +30588,13 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
   // Contas ligadas aos professores (e-mail e nome): só o superadmin recebe linhas.
   async function loadProfessorContas(){
     professorContasCache = {};
+    professorConvitesCache = {};
     if(!currentIsSuperadmin) return;
-    const { data, error } = await supabase.rpc('professor_contas_ligadas');
+    const [{ data, error }, cv] = await Promise.all([
+      supabase.rpc('professor_contas_ligadas'),
+      conteudo().from('professor_convites').select('professor_id,email,criado_em'),   // SQL 169; antes dele, a lista vem vazia
+    ]);
+    if(cv && !cv.error) (cv.data || []).forEach(function(r){ professorConvitesCache[String(r.professor_id)] = r; });
     if(error){ console.warn('professor_contas_ligadas:', error.message); return; }
     (data || []).forEach(function(r){ professorContasCache[String(r.professor_id)] = r; });
   }
@@ -31743,7 +31751,9 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
         '<td class="mono" style="color:var(--accent);opacity:.7;font-size:.7rem">' + (mats === 0 ? '—' : (mats + (mats === 1 ? ' matéria' : ' matérias'))) + '</td>' +
         (currentIsSuperadmin ? '<td>' + (professorContasCache[String(r.id)]
             ? '<span class="prof-conta-chip" title="' + esc(professorContasCache[String(r.id)].email || '') + '">conta ligada</span>'
-            : '<span style="color:var(--text-mute)">—</span>') + '</td>' : '') +
+            : (professorConvitesCache[String(r.id)]
+              ? '<span class="prof-conta-chip is-espera" title="' + esc(professorConvitesCache[String(r.id)].email || '') + '">aguardando a conta</span>'
+              : '<span style="color:var(--text-mute)">—</span>')) + '</td>' : '') +
         '<td class="actions">' +
           '<button class="btn btn-ghost btn-sm" data-act="edit">editar</button>' +
           '<button class="btn btn-danger btn-sm" data-act="delete">apagar</button>' +
@@ -31813,6 +31823,8 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     conta_nao_encontrada: 'Não achei conta com esse e-mail. A pessoa precisa ter criado a conta na plataforma antes.',
     conta_da_equipe: 'Essa conta é da equipe (admin). Conta da equipe não vira professor.',
     conta_de_outro_professor: 'Essa conta já está ligada a outro professor do cadastro',
+    email_invalido: 'Esse e-mail não parece válido. Confira e tente de novo.',
+    email_de_outro_convite: 'Esse e-mail já está guardado para outro professor do cadastro',
   };
   function _renderProfConta(){
     const sec = document.getElementById('prof-conta-sec');
@@ -31835,8 +31847,18 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
       document.getElementById('prof-conta-desligar').addEventListener('click', _profContaDesligar);
       return;
     }
+    const cv = professorConvitesCache[String(editingProfessorId)];
+    if(cv){
+      box.innerHTML = '<div class="prof-conta-ligada is-espera">'
+        + '<div><div class="prof-conta-nome">Aguardando a conta</div>'
+        + '<div class="prof-conta-email">' + esc(cv.email || '') + ' · liga sozinha quando o professor criar a conta e confirmar o e-mail, já recebendo dúvidas</div></div>'
+        + '<button type="button" class="btn btn-ghost btn-sm" id="prof-conta-cancelar">Cancelar</button></div>'
+        + '<div class="prof-conta-msg" id="prof-conta-msg"></div>';
+      document.getElementById('prof-conta-cancelar').addEventListener('click', _profContaCancelar);
+      return;
+    }
     box.innerHTML = '<div style="display:flex;gap:.4rem;align-items:center">'
-      + '<input type="email" class="field-input" id="prof-conta-email" placeholder="e-mail da conta do professor na plataforma" style="flex:1" autocomplete="off">'
+      + '<input type="email" class="field-input" id="prof-conta-email" placeholder="e-mail do professor (pode ser antes de ele criar a conta)" style="flex:1" autocomplete="off">'
       + '<button type="button" class="btn btn-sm" id="prof-conta-ligar" style="white-space:nowrap">Ligar conta</button></div>'
       + '<div class="prof-conta-msg" id="prof-conta-msg"></div>';
     const inp = document.getElementById('prof-conta-email');
@@ -31851,9 +31873,19 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     const email = ((document.getElementById('prof-conta-email') || {}).value || '').trim();
     if(!email){ _profContaMsg('Digite o e-mail da conta.'); return; }
     const btn = document.getElementById('prof-conta-ligar'); if(btn){ btn.disabled = true; btn.textContent = 'Ligando…'; }
-    const { data, error } = await supabase.rpc('professor_ligar_conta', { p_professor: Number(editingProfessorId), p_email: email });
+    // SQL 169: liga na hora quando a conta existe e confirmou o e-mail; senão guarda o e-mail e liga sozinho depois
+    const { data, error } = await supabase.rpc('professor_convite_salvar', { p_professor: Number(editingProfessorId), p_email: email });
     if(btn){ btn.disabled = false; btn.textContent = 'Ligar conta'; }
     if(error){ _profContaMsg('Não ligou: ' + error.message); return; }
+    if(data && data.ok && !data.ligado){
+      await loadProfessorContas();
+      _renderProfConta();
+      renderProfessors();
+      _profContaMsg(data.aguardando === 'confirmacao'
+        ? 'A conta existe, mas o e-mail ainda não foi confirmado. Assim que confirmar, liga sozinha, já recebendo dúvidas.'
+        : 'Ainda não há conta com esse e-mail. Guardei: quando o professor criar a conta e confirmar o e-mail, ela liga sozinha, já recebendo dúvidas.', true);
+      return;
+    }
     if(!data || !data.ok){
       const base = PROF_CONTA_ERROS[data && data.erro] || ('Não ligou: ' + ((data && data.erro) || 'erro desconhecido'));
       _profContaMsg(base + (data && data.professor ? ': ' + data.professor + '.' : ''));
@@ -31863,6 +31895,17 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     _renderProfConta();
     renderProfessors();
     _profContaMsg('Conta ligada. Na próxima vez que ' + (data.nome || 'a pessoa') + ' entrar, cai na Sala dos professores.', true);
+  }
+  async function _profContaCancelar(){
+    const cv = professorConvitesCache[String(editingProfessorId)];
+    if(!cv) return;
+    if(!confirm('Cancelar a ligação automática de ' + (cv.email || '') + '?\n\nO e-mail deixa de ficar guardado; a conta não liga sozinha.')) return;
+    const { data, error } = await supabase.rpc('professor_convite_cancelar', { p_professor: Number(editingProfessorId) });
+    if(error || !data || !data.ok){ _profContaMsg('Não cancelou: ' + ((error && error.message) || (data && data.erro) || 'erro desconhecido')); return; }
+    await loadProfessorContas();
+    _renderProfConta();
+    renderProfessors();
+    _profContaMsg('Cancelado. O e-mail não fica mais guardado.', true);
   }
   async function _profContaDesligar(){
     const c = professorContasCache[String(editingProfessorId)];
