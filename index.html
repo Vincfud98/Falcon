@@ -10364,6 +10364,9 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .tb-tts .tb-audio-bar{flex:1;margin:0}
 .tb-tts-btn{display:inline-flex;align-items:center;gap:.4rem}
 .tb-tts-regen{padding:.35rem .55rem}
+.tb-tts-acomp{display:inline-flex;align-items:center;gap:.35rem;white-space:nowrap;font-family:var(--sans);font-size:.62rem;letter-spacing:.06em;color:var(--text-dim);cursor:pointer;user-select:none}
+.tb-tts-acomp input{accent-color:var(--accent);margin:0;cursor:pointer}
+.tb-tts-acomp:hover{color:var(--text)}
 /* 7C — dock: player flutuante embaixo, estilo Spotify. Nasce no play, fica no
    pause, some só no X. Centro pra não brigar com o cronômetro (dir.) e toasts
    (esq.). */
@@ -10661,6 +10664,9 @@ button.ufc-links:hover{border-color:var(--accent-border);color:var(--accent)}
 .cad-com-resp input:focus{outline:none;border-color:var(--accent-border)}
 .tutor-caderno-ed [data-cel].cad-com-alvo{background:var(--accent-lo);border-radius:4px}
 .cad-com-mark{background:rgba(200,169,126,.13);border-bottom:1px dashed var(--accent-border-soft);border-radius:2px}
+/* Leitura que acompanha o texto: a frase que a voz está lendo (Highlight API; sem mexer no HTML) */
+::highlight(falcon-leitura){background-color:rgba(200,169,126,.30);color:inherit}
+.is-lendo{background:var(--accent-lo);box-shadow:0 0 0 .35rem var(--accent-lo);border-radius:3px;transition:background .3s ease}
 .cad-com-mark.is-on{background:var(--accent-lo);border-bottom-color:var(--accent-border)}
 .cad-com-cit{font-family:var(--sans);font-size:.64rem;color:var(--text-mute);border-left:2px solid var(--accent-border-soft);padding:.05rem 0 .05rem .45rem;margin:.05rem 0 .25rem;font-style:italic}
 .cad-com-av{width:18px;height:18px;border-radius:50%;background:var(--accent-lo);color:var(--accent);display:inline-flex;align-items:center;justify-content:center;font-family:var(--sans);font-size:.56rem;font-weight:600;overflow:hidden;position:relative;flex-shrink:0}
@@ -22454,6 +22460,7 @@ window.LBAudio = (function(){
   function _keepPitch(){ try{ audio.preservesPitch = true; audio.mozPreservesPitch = true; audio.webkitPreservesPitch = true; }catch(_){} }
 
   function _newAudio(meta){
+    if(window.LeituraAcompanha) LeituraAcompanha.limpar();
     if(audio){ try{ audio.pause(); }catch(_){} try{ audio.removeAttribute('src'); audio.load(); }catch(_){} }
     // Reprodução de mídia de outro domínio NÃO usa CORS (igual carregar uma <img>
     // de outro site). Por isso NÃO setar crossOrigin nem usar fetch: o Google
@@ -22511,6 +22518,8 @@ window.LBAudio = (function(){
     }
     if(modalEl && !modalEl.hidden) _syncModal();
     _syncDock();
+    // leitura que acompanha o texto: a frase lida fica destacada
+    if(window.LeituraAcompanha) LeituraAcompanha.tempo(curMeta, audio ? audio.currentTime : 0, playing, !!(audio && audio.ended));
   }
 
   function _buildModal(){
@@ -22709,6 +22718,7 @@ window.LBAudio = (function(){
     if(audio){ try{ audio.pause(); }catch(_){ } try{ audio.removeAttribute('src'); audio.load(); }catch(_){ } }
     _resetBarVisual();
     audio = null; curKey = null; curMeta = null; fila = null; boundBar = null;
+    if(window.LeituraAcompanha) LeituraAcompanha.limpar();
     if(dockEl) dockEl.hidden = true;
     if(modalEl && !modalEl.hidden) close();
   }
@@ -22724,6 +22734,145 @@ window.LBAudio = (function(){
 
   return { register, toggle, expand, close, tocarFila, proxima, anterior, fecharTudo };
 })();
+
+/* LEITURA-ACOMPANHA-INICIO */
+/* Leitura que acompanha o texto (21/11/2026, pedido do dono): enquanto a leitura da unidade toca, a frase
+   que está sendo lida fica destacada no texto, e a página acompanha se o aluno estiver seguindo.
+   · Os tempos das frases vêm da gerar-leitura (escopo 'marcas', arquivo <hash>.marcas.json ao lado do mp3).
+     Leituras gravadas antes disso não têm marcas: tocam como sempre, sem destaque (regerar cria as marcas).
+   · O destaque usa a Highlight API do navegador (não mexe no HTML do texto: grifos, notas e comentários
+     ficam intactos). Quando o texto da tela não bate letra a letra com o da leitura (fórmula, quebra de
+     linha), o parágrafo inteiro é destacado.
+   · A rolagem é do aluno: a página nunca rola sozinha; só o destaque acompanha a voz (pedido do dono).
+   · Ligado por padrão; a caixinha "Acompanhar no texto", junto da leitura, desliga (preferência da conta). */
+const LeituraAcompanha = (function(){
+  const NOME = 'falcon-leitura';
+  const cache = {};        // chave → Promise(marcas | null)
+  let atual = null;        // { chave, marcas, idx, blockId, no }
+  const temHighlight = !!(window.CSS && CSS.highlights && window.Highlight);
+  function ligado(){ return !(window.Store && Store.prefsGet && Store.prefsGet('leitura_acompanhar') === false); }
+
+  function chaveDe(meta){ const l = meta && meta.leitura; return l && l.blockId ? String(l.blockId) + '|' + (l.voz || '') : null; }
+  function marcasDe(meta){
+    const k = chaveDe(meta); if(!k || !window._sb) return Promise.resolve(null);
+    if(!cache[k]){
+      cache[k] = window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'marcas', block_id: meta.leitura.blockId, voice_id: meta.leitura.voz || undefined } })
+        .then(function(r){ const d = r && r.data; return (d && d.ok && d.marcas && Array.isArray(d.marcas.frases) && d.marcas.frases.length) ? d.marcas : null; })
+        .catch(function(){ delete cache[k]; return null; });
+    }
+    return cache[k];
+  }
+  // texto visível de um elemento, com espaços normalizados, e a posição de cada letra no DOM
+  function textoDoEl(root, tipo){
+    const pos = []; let s = '', espaco = true;
+    const fora = function(n){
+      const el = n.parentElement; if(!el) return true;
+      if(el.closest('.inline-note-marker, [data-fora-do-texto], .katex-mathml')) return true;
+      if(tipo === 'texto' && el.closest('.tb-para-title, .tb-para-desc')) return true;
+      return false;
+    };
+    const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let n;
+    while((n = w.nextNode())){
+      if(fora(n)) continue;
+      const v = n.nodeValue;
+      for(let i = 0; i < v.length; i++){
+        if(/\s/.test(v[i])){ if(!espaco){ s += ' '; pos.push([n, i]); espaco = true; } }
+        else { s += v[i]; pos.push([n, i]); espaco = false; }
+      }
+    }
+    while(s.endsWith(' ')){ s = s.slice(0, -1); pos.pop(); }
+    return { s: s, pos: pos };
+  }
+  // o texto da leitura normalizado do mesmo jeito, e o mapa posição crua → posição normalizada
+  function normaliza(txt){
+    let s = '', espaco = true; const mapa = new Array(txt.length + 1);
+    for(let i = 0; i < txt.length; i++){
+      mapa[i] = s.length;
+      if(/\s/.test(txt[i])){ if(!espaco){ s += ' '; espaco = true; } }
+      else { s += txt[i]; espaco = false; }
+    }
+    mapa[txt.length] = s.length;
+    while(s.endsWith(' ')) s = s.slice(0, -1);
+    return { s: s, mapa: mapa };
+  }
+  function elDaPeca(sec, pc){
+    if(!pc.pid) return { el: sec.querySelector('.tb-body'), tipo: 'bloco' };
+    const sel = '[data-paragraph-id="' + CSS.escape(pc.pid) + '"]';
+    if(pc.tipo === 'subtitulo') return { el: sec.querySelector('.tb-section-title' + sel), tipo: 'titulo' };
+    const par = sec.querySelector('.tb-paragraph' + sel);
+    if(!par) return { el: null };
+    if(pc.tipo === 'titulo') return { el: par.querySelector('.tb-para-title'), tipo: 'titulo' };
+    return { el: par, tipo: 'texto' };
+  }
+  function apagar(){
+    if(temHighlight){ try{ CSS.highlights.delete(NOME); }catch(_){ } }
+    document.querySelectorAll('.is-lendo').forEach(function(e){ e.classList.remove('is-lendo'); });
+  }
+  function pintar(blockId, marcas, idx){
+    const sec = document.getElementById('block-' + String(blockId));
+    const fr = marcas.frases[idx];
+    if(!sec || !fr){ apagar(); return; }
+    const pc = marcas.pecas[fr.p]; if(!pc){ apagar(); return; }
+    const alvo = elDaPeca(sec, pc); if(!alvo.el){ apagar(); return; }
+    apagar();
+    let feito = false;
+    let txt = pc.txt;
+    if(alvo.tipo === 'titulo') txt = txt.replace(/\.$/, '');
+    const dom = textoDoEl(alvo.el, alvo.tipo), lei = normaliza(txt);
+    if(temHighlight && dom.s && dom.s === lei.s){
+      const a = lei.mapa[Math.min(fr.a, txt.length)], b = lei.mapa[Math.min(fr.b, txt.length)];
+      const ini = dom.pos[a], fim = dom.pos[Math.max(a, Math.min(b, dom.pos.length) - 1)];
+      if(ini && fim){
+        try{
+          const r = document.createRange(); r.setStart(ini[0], ini[1]); r.setEnd(fim[0], fim[1] + 1);
+          CSS.highlights.set(NOME, new window.Highlight(r));
+          feito = true;
+          if(atual) atual.no = ini[0];
+        }catch(_){ feito = false; }
+      }
+    }
+    if(!feito){ alvo.el.classList.add('is-lendo'); if(atual) atual.no = alvo.el; }
+  }
+  function indiceEm(frases, t){
+    let lo = 0, hi = frases.length - 1, r = -1;
+    while(lo <= hi){ const m = (lo + hi) >> 1; if(frases[m].t <= t + 0.05){ r = m; lo = m + 1; } else hi = m - 1; }
+    return r;
+  }
+  // chamado pelo player a cada atualização de tempo
+  function tempo(meta, t, tocando, acabou){
+    const k = chaveDe(meta);
+    if(!k || acabou || !ligado()){ if(atual){ apagar(); atual = null; } return; }
+    if(!atual || atual.chave !== k){
+      apagar();
+      atual = { chave: k, marcas: null, idx: -1, blockId: meta.leitura.blockId, no: null };
+      const eu = atual;
+      marcasDe(meta).then(function(m){ if(atual === eu){ eu.marcas = m; eu.idx = -1; } });
+      return;
+    }
+    if(!atual.marcas) return;
+    const idx = indiceEm(atual.marcas.frases, t);
+    if(idx === atual.idx && (idx < 0 || (atual.no && atual.no.isConnected))) return;   // mesma frase e o destaque ainda está na tela
+    atual.idx = idx;
+    if(idx < 0){ apagar(); return; }
+    pintar(atual.blockId, atual.marcas, idx);
+  }
+  function limpar(){ apagar(); atual = null; }
+  return { tempo: tempo, limpar: limpar, ligado: ligado };
+})();
+window.LeituraAcompanha = LeituraAcompanha;
+// Caixinha "Acompanhar no texto" (junto da leitura do bloco): liga e desliga o destaque, para a conta toda
+function _lbTtsAcompHTML(){
+  const on = !(window.Store && Store.prefsGet && Store.prefsGet('leitura_acompanhar') === false);
+  return '<label class="tb-tts-acomp" data-tip="A frase que a voz está lendo fica destacada no texto"><input type="checkbox" data-tts-acomp' + (on ? ' checked' : '') + '> Acompanhar no texto</label>';
+}
+document.addEventListener('change', function(e){
+  const c = e.target; if(!c || !c.matches || !c.matches('[data-tts-acomp]')) return;
+  if(window.Store && Store.prefsSet) Store.prefsSet('leitura_acompanhar', !!c.checked);
+  document.querySelectorAll('[data-tts-acomp]').forEach(function(x){ x.checked = !!c.checked; });
+  if(!c.checked && window.LeituraAcompanha) LeituraAcompanha.limpar();
+});
+/* LEITURA-ACOMPANHA-FIM */
 
 // Marcação da barra minimalista (play + tempo + expandir). Usada no LB de texto
 // e no text-gallery. O src/capa/título são ligados no mount via LBAudio.register.
@@ -22847,9 +22996,9 @@ function _lbTtsInner(block){
     const vozBtn = '<button type="button" class="icon-btn tb-tts-voz" data-tts-a="voz" data-tip="Trocar a voz desta leitura">'
       + Util.esc(_lbTtsVozNome(bid)) + ' ' + SETA + '</button>';
     const regenBtn = '<button type="button" class="icon-btn tb-tts-regen" data-tts-a="regen" data-tip="Gerar novamente (grátis)">&#8635;</button>';
-    if(cache) return vozBtn + regenBtn + _lbAudioBarHTML();
+    if(cache) return vozBtn + regenBtn + _lbTtsAcompHTML() + _lbAudioBarHTML();
     return '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="ouvir" data-tip="Leitura sua — ouvir é grátis">' + FONE + ' Ouvir leitura</button>'
-      + vozBtn + regenBtn + _lbAudioBarHTML(true);
+      + vozBtn + regenBtn + _lbTtsAcompHTML() + _lbAudioBarHTML(true);
   }
   const custo = (Math.max(chars, 1000) / 1000 * _LB_TTS_PRECO_1K).toFixed(2).replace('.', ',');
   return '<button type="button" class="icon-btn tb-tts-btn" data-tts-a="gerar" data-tip="Narração por IA — gera uma vez, é sua para sempre"><span class="ubt-sym">ƒ</span> ' + custo + ' · Gerar leitura</button>'
@@ -22872,7 +23021,8 @@ function _lbTtsLigar(bid, url, autoplay, boxOpt){
   const bar = box.querySelector('.tb-audio-bar'); if(!bar) return;
   bar.hidden = false;
   const unit = info.ctx && info.ctx.unit;
-  if(window.LBAudio) LBAudio.register(bar, { src: url, cover: (unit && unit.cover) || '', title: 'Leitura · ' + ((info.block && info.block.title) || (unit && unit.title) || '') });
+  if(window.LBAudio) LBAudio.register(bar, { src: url, cover: (unit && unit.cover) || '', title: 'Leitura · ' + ((info.block && info.block.title) || (unit && unit.title) || ''),
+    leitura: { blockId: String(bid), voz: _lbTtsVozAtual(bid) || '' } });   // marcas: a frase lida fica destacada no texto
   if(autoplay){
     const play = bar.querySelector('.tb-audio-play');
     if(play) play.click();
@@ -23067,7 +23217,8 @@ function _unitFilaItens(coleta, unit){
         return Promise.resolve({ src: src });
       }
       const cache = (window.Store && Store.leituraUrlPega) ? Store.leituraUrlPega('bloco', it.blockId, it.chars) : null;
-      if(cache) return Promise.resolve({ src: cache.url });
+      const leitura = { blockId: String(it.blockId), voz: _lbTtsVozAtual(it.blockId) || '' };   // a frase lida fica destacada no texto
+      if(cache) return Promise.resolve({ src: cache.url, leitura: leitura });
       // sem cache: replay do servidor (grátis — a fila só tem leituras possuídas)
       return _vozesLeituraCarregar().catch(function(){ return []; })
         .then(function(){ return window._sb.functions.invoke('gerar-leitura', { body: { escopo: 'bloco', block_id: it.blockId, voice_id: _lbTtsVozAtual(it.blockId) || undefined } }); })
@@ -23078,7 +23229,7 @@ function _unitFilaItens(coleta, unit){
           if(window.Store && Store.leituraMarca) Store.leituraMarca('bloco', it.blockId);
           const vozG = (window.Store && Store.leituraVoz) ? (Store.leituraVoz('bloco', it.blockId) || '') : '';
           if(window.Store && Store.leituraUrlGuarda) Store.leituraUrlGuarda('bloco', it.blockId, d.url, vozG, it.chars);
-          return { src: d.url };
+          return { src: d.url, leitura: leitura };
         })
         .catch(function(){ return { erro: 'Sem conexão para buscar "' + it.titulo.slice(0, 40) + '".' }; });
     } };
