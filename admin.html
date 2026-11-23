@@ -15956,7 +15956,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
 <!-- Ubique Shared Store — espelha CRUD do admin para a área do aluno -->
 <script src="ubique-shared.js?v=138"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com index.html) -->
-<link rel="stylesheet" href="ubique-reading.css?v=5">
+<link rel="stylesheet" href="ubique-reading.css?v=6">
 <script src="learning-blocks-render.js?v=85"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
@@ -77750,6 +77750,13 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
         <div class="decide-options" id="vbRelatedPicker" style="max-height:240px;overflow-y:auto"></div>
       </div>
 
+      <!-- Onde não marcar (pacote 1, 23/11/2026 · SQL 170) -->
+      <div id="vbNaoMarcarWrap" hidden>
+        <div class="sub-h"><span class="sub-h-text">Onde não marcar</span><span class="sub-h-rule"></span></div>
+        <p class="s-body" style="font-size:.78rem;color:var(--text-mute);margin:0 0 .6rem">O verbete é marcado sozinho em todos os textos. Aqui ficam os lugares onde a equipe mandou não marcar, pelo cartão do verbete na unidade. Tire da lista para voltar a marcar.</p>
+        <div id="vbNaoMarcarList" style="display:flex;flex-wrap:wrap;gap:.4rem"></div>
+      </div>
+
       <div id="vbModalMsg" class="form-msg"></div>
     </div>
 
@@ -78251,6 +78258,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
   let _vbImagesState = [];
   let _vbRelatedState = new Set();
   let _vbSubjectsState = new Set(); // matérias (subject_ids) do verbete
+  let _vbNaoMarcarState = null;      // onde NÃO marcar (verbetes.nao_marcar, SQL 170); null = coluna ainda não existe
 
   function _esc(s){
     if(typeof esc === 'function') return esc(s);
@@ -78343,6 +78351,7 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       _vbImagesState = (v.images || []).map(function(img){ return Object.assign({}, img); });
       _vbRelatedState = new Set(v.related_term_ids || []);
       _vbSubjectsState = new Set((v.subject_ids || []).map(String));
+      _vbNaoMarcarState = Array.isArray(v.nao_marcar) ? v.nao_marcar.map(String) : null;
       document.getElementById('btnDeleteVerbete').style.display = '';
     } else {
       document.getElementById('verbeteModalTitle').textContent = 'Novo Verbete';
@@ -78352,7 +78361,9 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       document.getElementById('vbDefinition').value = '';
       document.getElementById('vbLink').value = '';
       document.getElementById('btnDeleteVerbete').style.display = 'none';
+      _vbNaoMarcarState = null;
     }
+    renderVbNaoMarcar();
 
     renderVbImagesList();
     const _rs = document.getElementById('vbRelatedSearch'); if(_rs) _rs.value = '';
@@ -78466,6 +78477,40 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
     }).join('');
   }
 
+  // "u:<unidade>" ou "p:<bloco>:<parágrafo>" → texto que a equipe reconhece
+  function _vbNaoMarcarRotulo(chave){
+    const partes = String(chave).split(':');
+    const S = window.UbiqueStore;
+    const unidadeTxt = function(uid){
+      const u = S && S.units ? S.units.get(uid) : null;
+      return u ? ('Unidade ' + (u.number ? u.number + ' · ' : '') + (u.title || '')) : ('Unidade ' + uid);
+    };
+    if(partes[0] === 'u') return unidadeTxt(partes[1]) + ' (a unidade toda)';
+    if(partes[0] === 'p'){
+      const b = S && S.unit_blocks ? S.unit_blocks.get(partes[1]) : null;
+      if(!b) return 'Parágrafo de um bloco que não existe mais';
+      const ps = ((b.content && b.content.paragraphs) || []).filter(function(p){ return p && p.kind !== 'subtitle'; });
+      const n = ps.findIndex(function(p){ return String(p.id) === partes.slice(2).join(':'); });
+      return unidadeTxt(b.unit_id) + ' · ' + (b.title ? '"' + b.title + '" · ' : '') + (n >= 0 ? 'parágrafo ' + (n + 1) : 'parágrafo');
+    }
+    return String(chave);
+  }
+  function renderVbNaoMarcar(){
+    const wrap = document.getElementById('vbNaoMarcarWrap'), lista = document.getElementById('vbNaoMarcarList');
+    if(!wrap || !lista) return;
+    const itens = _vbNaoMarcarState || [];
+    wrap.hidden = !itens.length;
+    lista.innerHTML = itens.map(function(ch, i){
+      return '<span class="chip" style="display:inline-flex;align-items:center;gap:.4rem">' + String(_vbNaoMarcarRotulo(ch)).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }) +
+        '<button type="button" class="btn btn-ghost btn-sm" style="padding:0 .35rem;min-height:0;line-height:1.4" title="Voltar a marcar aqui" aria-label="Voltar a marcar aqui" onclick="vbNaoMarcarTira(' + i + ')">×</button></span>';
+    }).join('');
+  }
+  window.vbNaoMarcarTira = function(i){
+    if(!_vbNaoMarcarState) return;
+    _vbNaoMarcarState.splice(i, 1);
+    renderVbNaoMarcar();
+  };
+
   function saveVerbete(){
     _clearMsg('vbModalMsg');
     const term = document.getElementById('vbTerm').value.trim();
@@ -78491,6 +78536,8 @@ Tipos suportados: text, video, quiz, essay, flashcards, timeline, quote, image.<
       topics: [],
       tags: []
     };
+    // Só manda a coluna quando ela existe (SQL 170 rodado): antes disso o salvar continua igual.
+    if(_vbEditingId && Array.isArray(_vbNaoMarcarState)) payload.nao_marcar = _vbNaoMarcarState.slice();
 
     if(_vbEditingId){
       UbiqueStore.verbetes.update(_vbEditingId, payload);
