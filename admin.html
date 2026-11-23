@@ -50753,6 +50753,31 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
   // o objeto do storage e a linha em public.images).
   // ═══════════════════════════════════════════════════════════
 
+  // Apagar do Banco de imagens (23/11/2026). Antes, o arquivo não saía da pasta (faltava a regra
+  // de "ver" na pasta, SQL 174) e o erro era engolido: sumia só o registro. Agora: (1) imagem que é
+  // capa de unidade não é apagada; (2) o registro só sai depois de confirmado que o arquivo saiu.
+  // Devolve '' quando pode tirar o registro, ou o motivo para não apagar nada.
+  async function _imgApagarArquivo(img){
+    if(img.public_url){
+      const { data: capas, error: eCapa } = await conteudo().from('units').select('id,number,title').eq('cover_url', img.public_url).limit(5);
+      if(eCapa) return 'Não consegui conferir se a imagem é capa de alguma unidade (' + eCapa.message + '). Nada foi apagado.';
+      if(capas && capas.length){
+        return 'Esta imagem é a capa de ' + (capas.length === 1 ? 'uma unidade' : capas.length + ' unidades') + ': ' +
+          capas.map(function(u){ return (u.number ? u.number + ' · ' : '') + (u.title || ('unidade ' + u.id)); }).join('; ') +
+          '. Troque a capa antes de apagar. Nada foi apagado.';
+      }
+    }
+    if(!img.bucket || !img.storage_path) return '';
+    const { data, error } = await supabase.storage.from(img.bucket).remove([img.storage_path]);
+    if(error) return 'O arquivo não saiu da pasta ' + img.bucket + ' (' + error.message + '). Nada foi apagado.';
+    if(data && data.length) return '';
+    // Nada saiu: ou o arquivo já não existia, ou faltou permissão. O link público responde se ele ainda está lá.
+    const url = supabase.storage.from(img.bucket).getPublicUrl(img.storage_path).data.publicUrl;
+    let existe = false;
+    try{ existe = (await fetch(url + (url.indexOf('?') >= 0 ? '&' : '?') + 'conferir=' + Date.now(), { method: 'HEAD', cache: 'no-store' })).ok; }catch(_){ existe = true; }
+    return existe ? 'O arquivo continua na pasta ' + img.bucket + ' (faltou permissão para apagar). Nada foi apagado.' : '';
+  }
+
   function renderImagesLibrary(){
     const grid = document.getElementById('imagesGrid');
     if(!grid) return;
@@ -50871,10 +50896,9 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
         e.stopPropagation();
         if(!img) return;
         if(!confirm(`Apagar "${img.title || img.storage_path}"?\nIsso remove o arquivo do bucket ${img.bucket} E a linha em public.images.`)) return;
-        // Apaga do storage primeiro (best-effort)
-        if(img.bucket && img.storage_path){
-          await supabase.storage.from(img.bucket).remove([img.storage_path]).catch(() => {});
-        }
+        // Arquivo primeiro; o registro só sai se o arquivo saiu (e nunca se a imagem é capa de unidade)
+        const motivo = await _imgApagarArquivo(img);
+        if(motivo){ alert(motivo); return; }
         const { error } = await supabase.from('images').delete().eq('id', img.id);
         if(error){ alert(`Erro ao apagar: ${error.message}`); return; }
         await loadImagesLibrary();
@@ -51061,9 +51085,8 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     const img = imagesLibraryCache.find(x => x.id === editingImageId);
     if(!img) return;
     if(!confirm(`Apagar "${img.title || img.storage_path}"?\nIsso remove o arquivo do bucket ${img.bucket} E a linha em public.images.`)) return;
-    if(img.bucket && img.storage_path){
-      await supabase.storage.from(img.bucket).remove([img.storage_path]).catch(() => {});
-    }
+    const motivo = await _imgApagarArquivo(img);
+    if(motivo){ showMsg('editImageModalMessage', motivo); return; }
     const { error } = await supabase.from('images').delete().eq('id', img.id);
     if(error){ showMsg('editImageModalMessage', `Erro: ${error.message}`); return; }
     closeEditImageModal();
