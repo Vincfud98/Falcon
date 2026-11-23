@@ -22324,6 +22324,11 @@ function renderBreadcrumb(route){
      todas as unidades (.frag-term, o pontilhado de sempre).
    • Glossário: as palavras do bloco Glossário DESTA unidade, todas as vezes
      (.gl-term, pontos espaçados). Palavra que é as duas coisas = um cartão só.
+   • Glossário da MATÉRIA (pacote 2b, 23/11/2026): as palavras do banco da matéria da
+     unidade também marcam sozinhas, sem ninguém confirmar, mas só a 1ª vez em cada
+     parágrafo; e a que aparece em mais de 5 parágrafos da unidade, só a 1ª vez em cada
+     bloco de texto (o sistema conta sozinho; não enche o texto de "Estado", "Partido").
+     A equipe tira a marca de um parágrafo ou da unidade (glossary_terms.nao_marcar, SQL 172).
    Regras:
    • o nome mais longo vence ("Infante D. Henrique" antes de "D. Henrique");
    • nome igual em 2+ verbetes (homônimo) não marca sozinho;
@@ -22374,12 +22379,46 @@ const TextMarks = (function(){
 
   // ── caches (a lista do Store é copiada a cada list(): só recalcula quando algo muda) ──
   let _verbs = null, _porId = null, _global = null, _gloss = null, _porPar = {};
-  function zera(){ _verbs = null; _porId = null; _global = null; _gloss = null; _porPar = {}; }
+  let _porMateria = null, _materia = {}, _freq = {};
+  function zera(){ _verbs = null; _porId = null; _global = null; _gloss = null; _porPar = {}; _porMateria = null; _materia = {}; _freq = {}; }
   if(window.UbiqueStore && UbiqueStore.subscribe){
     UbiqueStore.subscribe(function(evt){
       const t = (evt && evt.type) || '';
-      if(t === 'sync' || t === 'reset' || /^(verbetes|unit_blocks|glossary_terms)/.test(t)) zera();
+      if(t === 'sync' || t === 'reset' || /^(verbetes|unit_blocks|glossary_terms|units|chapters|modules)/.test(t)) zera();
     });
+  }
+  // Matéria da unidade (unidade → capítulo → módulo → matéria), como no Banco.
+  function materiaDaUnidade(unitId){
+    if(unitId == null) return null;
+    const k = String(unitId);
+    if(k in _materia) return _materia[k];
+    const S = window.UbiqueStore;
+    let sub = null;
+    try{
+      const u = S.units.get(k) || S.units.get(Number(k));
+      const ch = u && u.chapter_id != null && S.chapters ? S.chapters.get(u.chapter_id) : null;
+      const modId = u ? (u.module_id != null ? u.module_id : (ch ? ch.module_id : null)) : null;
+      const m = modId != null && S.modules ? S.modules.get(modId) : null;
+      if(m && m.subject_id != null) sub = String(m.subject_id);
+      else if(ch && ch.subject_id != null) sub = String(ch.subject_id);
+    }catch(_){ sub = null; }
+    _materia[k] = sub;
+    return sub;
+  }
+  // Palavras do banco do glossário por matéria (uma passada pelo banco, guardada até ele mudar).
+  function bancoDaMateria(sub){
+    if(sub == null) return [];
+    if(!_porMateria){
+      _porMateria = {};
+      const S = window.UbiqueStore;
+      ((S && S.glossary_terms && S.glossary_terms.list()) || []).forEach(function(t){
+        if(!t || !t.term) return;
+        const mats = (Array.isArray(t.subject_ids) && t.subject_ids.length) ? t.subject_ids : (t.subject_id != null ? [t.subject_id] : []);
+        const item = { id: String(t.id), term: limpaNome(textoPuro(t.term)), nomes: nomesDoGlossario(t), image: t.image_url || '', fora: foraDe(t) };
+        mats.forEach(function(m){ const km = String(m); (_porMateria[km] = _porMateria[km] || []).push(item); });
+      });
+    }
+    return _porMateria[String(sub)] || [];
   }
   function verbetes(){
     if(!_verbs){
@@ -22417,7 +22456,7 @@ const TextMarks = (function(){
             const t = S.glossary_terms.get(it.bank_id);
             if(!t || !t.term) return;
             vistos[k + '|' + it.bank_id] = 1;
-            lista.push({ id: String(t.id), term: limpaNome(textoPuro(t.term)), nomes: nomesDoGlossario(t), image: String(it.image || '').trim() || t.image_url || '' });
+            lista.push({ id: String(t.id), term: limpaNome(textoPuro(t.term)), nomes: nomesDoGlossario(t), image: String(it.image || '').trim() || t.image_url || '', fora: foraDe(t) });
           });
         });
       }
@@ -22452,11 +22491,26 @@ const TextMarks = (function(){
         mapa.set(c, e);
       });
     });
+    // palavras do bloco Glossário da unidade: todas as vezes
+    const doBloco = new Set();
     glossario(unitId).forEach(function(g){
+      doBloco.add(g.id);
+      if(k && g.fora.indexOf('u:' + k) >= 0) return;
       g.nomes.forEach(function(n){
         const c = dobra(n);
         const e = mapa.get(c) || {};
-        e.g = g.id;
+        e.g = g.id; e.ga = false; e.gfora = g.fora;
+        mapa.set(c, e);
+      });
+    });
+    // palavras do banco da MATÉRIA da unidade: sozinhas, com a regra de densidade (ver marcaTexto)
+    bancoDaMateria(materiaDaUnidade(unitId)).forEach(function(g){
+      if(doBloco.has(g.id) || (k && g.fora.indexOf('u:' + k) >= 0)) return;
+      g.nomes.forEach(function(n){
+        const c = dobra(n);
+        const e = mapa.get(c) || {};
+        if(e.g) return;               // o nome já é de uma palavra do bloco da unidade
+        e.g = g.id; e.ga = true; e.gfora = g.fora;
         mapa.set(c, e);
       });
     });
@@ -22480,7 +22534,7 @@ const TextMarks = (function(){
       // sem definição (nem na ligação nem no verbete) o cartão abriria vazio: não marca
       if(!String(f.definition || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim() && !(v && temDefinicao(v))) return;
       const base = mapa.get(c) || {};
-      mapa.set(c, { v: String(f.id), vb: v ? String(v.id) : String(f.id), fixo: true, g: base.g });
+      mapa.set(c, { v: String(f.id), vb: v ? String(v.id) : String(f.id), fixo: true, g: base.g, ga: base.ga, gfora: base.gfora });
     });
     const out = monta(mapa);
     out.unitId = ind.unitId;
@@ -22500,7 +22554,9 @@ const TextMarks = (function(){
     }
     return r;
   }
-  function marcaTexto(t, ind, chaveP, achados){
+  // est = { par: palavras do glossário já marcadas neste parágrafo, bloco: idem no bloco,
+  //         freq: palavras da matéria que aparecem em mais de 5 parágrafos da unidade }
+  function marcaTexto(t, ind, chaveP, achados, est){
     const f = dobra(t), fx = formulas(t), re = ind.re;
     let out = '', k = 0, m;
     re.lastIndex = 0;
@@ -22509,24 +22565,28 @@ const TextMarks = (function(){
       if(letra(t[i - 1]) || letra(t[j]) || (fx && fx.some(function(r){ return i < r[1] && j > r[0]; }))){ re.lastIndex = i + 1; continue; }
       const e = ind.mapa.get(m[0]);
       if(!e) continue;
-      let v = e.v;
+      let v = e.v, g = e.g;
       if(v && !e.fixo && chaveP && e.fora && e.fora.indexOf(chaveP) >= 0) v = null;   // tirado deste parágrafo
-      if(!v && !e.g) continue;
+      if(g && chaveP && e.gfora && e.gfora.indexOf(chaveP) >= 0) g = null;            // idem, palavra do glossário
+      // palavra da matéria (não está no bloco da unidade): 1ª vez no parágrafo; se ela aparece
+      // em mais de 5 parágrafos da unidade, 1ª vez no bloco de texto
+      if(g && e.ga && !v && est && (est.par.has(g) || (est.freq.has(g) && est.bloco.has(g)))) g = null;
+      if(!v && !g) continue;
       const pedaco = t.slice(i, j);
       if(v){
         out += t.slice(k, i) + '<span class="frag-term" data-fragment-id="' + Util.attr(v) + '" data-vb="' + Util.attr(e.vb || v) + '"' +
-          (e.g ? ' data-gl="' + Util.attr(e.g) + '"' : '') + (e.fixo ? ' data-frag-fixo=""' : '') + '>' + pedaco + '</span>';
+          (g ? ' data-gl="' + Util.attr(g) + '"' : '') + (e.fixo ? ' data-frag-fixo=""' : '') + '>' + pedaco + '</span>';
         achados.v.push(v); achados.vb[v] = e.vb || v;
       } else {
-        out += t.slice(k, i) + '<span class="gl-term" data-gl="' + Util.attr(e.g) + '" data-fragment-id="gl:' + Util.attr(e.g) + '">' + pedaco + '</span>';
-        achados.gSo.push(e.g);
+        out += t.slice(k, i) + '<span class="gl-term" data-gl="' + Util.attr(g) + '" data-fragment-id="gl:' + Util.attr(g) + '">' + pedaco + '</span>';
+        achados.gSo.push(g);
       }
-      if(e.g) achados.g.push(e.g);
+      if(g){ achados.g.push(g); if(est){ est.par.add(g); est.bloco.add(g); } }
       k = j;
     }
     return out + t.slice(k);
   }
-  function marcaHTML(html, ind, chaveP, achados){
+  function marcaHTML(html, ind, chaveP, achados, est){
     if(!ind || !ind.re || !html) return html;
     let pula = 0, out = '';
     (html.match(/<[^>]*>|[^<]+/g) || []).forEach(function(t){
@@ -22536,9 +22596,43 @@ const TextMarks = (function(){
         out += t;
         return;
       }
-      out += pula ? t : marcaTexto(t, ind, chaveP, achados);
+      out += pula ? t : marcaTexto(t, ind, chaveP, achados, est);
     });
     return out;
+  }
+  // Antes de desenhar os blocos de uma unidade: conta em quantos parágrafos da unidade
+  // inteira cada palavra da matéria aparece (para a regra dos mais de 5). Usa os blocos
+  // que a página já tem; não copia nada do Store.
+  function prepararUnidade(unitId, grupos){
+    if(unitId == null) return;
+    const ind = indice(unitId);
+    if(!ind.re) { _freq[String(unitId)] = new Set(); return; }
+    const conta = {};
+    (grupos || []).forEach(function(g){
+      ((g && g.blocks) || []).forEach(function(b){
+        if(!b || !Array.isArray(b.paragraphs)) return;
+        b.paragraphs.forEach(function(p){
+          if(!p || p.kind === 'subtitle' || !p.content) return;
+          const t = textoPuro(p.content).normalize('NFC'), f = dobra(t), vistos = {};
+          let m;
+          ind.re.lastIndex = 0;
+          while((m = ind.re.exec(f))){
+            const i = m.index, j = i + m[0].length;
+            if(letra(t[i - 1]) || letra(t[j])){ ind.re.lastIndex = i + 1; continue; }
+            const e = ind.mapa.get(m[0]);
+            if(e && e.ga && !vistos[e.g]){ vistos[e.g] = 1; conta[e.g] = (conta[e.g] || 0) + 1; }
+          }
+        });
+      });
+    });
+    _freq[String(unitId)] = new Set(Object.keys(conta).filter(function(id){ return conta[id] > 5; }));
+  }
+  function frequentes(unitId){ return (unitId != null && _freq[String(unitId)]) || new Set(); }
+  // Palavra do glossário (do bloco da unidade ou da matéria) pelo id, para a imagem da galeria.
+  function palavra(unitId, id){
+    const k = String(id);
+    return (glossario(unitId) || []).find(function(g){ return g.id === k; }) ||
+      bancoDaMateria(materiaDaUnidade(unitId)).find(function(g){ return g.id === k; }) || null;
   }
   // Palavras (de uma lista {id, nomes}) que aparecem num texto, na ordem em que aparecem.
   // Usado pela lupa: o aluno seleciona uma frase e vê as palavras do glossário que estão nela.
@@ -22567,7 +22661,8 @@ const TextMarks = (function(){
   }
   return { indice: indice, doParagrafo: doParagrafo, marcaHTML: marcaHTML, fragDe: fragDe,
            verbetePorId: verbetePorId, glossario: glossario, zera: zera,
-           nomesDoGlossario: nomesDoGlossario, acharNoTexto: acharNoTexto, textoPuro: textoPuro };
+           nomesDoGlossario: nomesDoGlossario, acharNoTexto: acharNoTexto, textoPuro: textoPuro,
+           prepararUnidade: prepararUnidade, frequentes: frequentes, palavra: palavra };
 })();
 window.TextMarks = TextMarks;
 
@@ -22579,6 +22674,7 @@ function marcarParagrafos(paragraphs, opts){
   const blockId = opts.blockId != null ? String(opts.blockId) : null;
   const ind = TextMarks.indice(unitId);
   const achados = { v: [], vb: {}, g: [], gSo: [] };
+  const est = { par: null, bloco: new Set(), freq: TextMarks.frequentes(unitId) };
   const fragMap = {};
   paragraphs.forEach(function(p){ (p.fragments || []).forEach(function(f){ if(f && f.id) fragMap[f.id] = f; }); });
   const html = paragraphs.map(function(p){
@@ -22593,7 +22689,8 @@ function marcarParagrafos(paragraphs, opts){
     // seguintes (LearningBlocks.balanceHTML explica o mecanismo).
     let h = (window.LearningBlocks && LearningBlocks.balanceHTML) ? LearningBlocks.balanceHTML(p.content || '') : (p.content || '');
     if(typeof h.normalize === 'function') h = h.normalize('NFC');
-    h = TextMarks.marcaHTML(h, TextMarks.doParagrafo(ind, p), (blockId && p.id != null) ? ('p:' + blockId + ':' + p.id) : null, achados);
+    est.par = new Set();
+    h = TextMarks.marcaHTML(h, TextMarks.doParagrafo(ind, p), (blockId && p.id != null) ? ('p:' + blockId + ':' + p.id) : null, achados, est);
     var titleHtml = p.title
       ? '<h4 class="tb-para-title">' + Util.esc(p.title) + '</h4>'
       : '';
@@ -23989,6 +24086,7 @@ const FragmentCard = (function(){
     _currentId = chave;
     const par = anchorEl.closest('.tb-paragraph');
     _ctx = {
+      gl: glId,
       vb: anchorEl.getAttribute('data-vb') || null,
       fixo: anchorEl.hasAttribute('data-frag-fixo'),
       unidade: unidade,
@@ -24039,10 +24137,16 @@ const FragmentCard = (function(){
     h += '<div class="frag-card-pe"><a class="frag-card-google" href="https://www.google.com/search?q=' + encodeURIComponent(termo) + '" target="_blank" rel="noopener" title="Pesquisar no Google numa aba nova">' + ICON_G + 'Google</a>' +
       (gl ? '<a class="frag-card-glos" href="#/glossario?q=' + encodeURIComponent(TextMarks.textoPuro(gl.term).trim()) + '">Ver no glossário</a>' : '') + '</div>';
     // Só a equipe: tirar a marca automática (homônimos, apelido que pegou a pessoa errada)
-    if(frag && _ctx.vb && !_ctx.fixo && window.Auth && Auth.isAdmin && Auth.isAdmin() && TextMarks.verbetePorId(_ctx.vb)){
+    const equipe = !!(window.Auth && Auth.isAdmin && Auth.isAdmin());
+    if(equipe && frag && _ctx.vb && !_ctx.fixo && TextMarks.verbetePorId(_ctx.vb)){
       h += '<div class="frag-card-equipe"><span class="frag-card-equipe-rot">Só a equipe vê</span>' +
         (_ctx.bloco && _ctx.paragrafo ? '<button type="button" class="frag-card-mini" data-fc-naomarcar="p">Não marcar neste parágrafo</button>' : '') +
         (_ctx.unidade ? '<button type="button" class="frag-card-mini" data-fc-naomarcar="u">Não marcar nesta unidade</button>' : '') +
+      '</div>';
+    } else if(equipe && !frag && gl){
+      h += '<div class="frag-card-equipe"><span class="frag-card-equipe-rot">Só a equipe vê · palavra do glossário</span>' +
+        (_ctx.bloco && _ctx.paragrafo ? '<button type="button" class="frag-card-mini" data-fc-naomarcar="gp">Não marcar neste parágrafo</button>' : '') +
+        (_ctx.unidade ? '<button type="button" class="frag-card-mini" data-fc-naomarcar="gu">Não marcar nesta unidade</button>' : '') +
       '</div>';
     }
     el.querySelector('.frag-card-body').innerHTML = h;
@@ -24062,37 +24166,48 @@ const FragmentCard = (function(){
     el.classList.add('open');
   }
 
-  // "Não marcar neste parágrafo / nesta unidade" (equipe). Grava em verbetes.nao_marcar
-  // (SQL 170) e tira a marca da tela na hora, sem redesenhar a página.
+  // "Não marcar neste parágrafo / nesta unidade" (equipe). Verbete: grava em
+  // verbetes.nao_marcar (SQL 170); palavra do glossário: glossary_terms.nao_marcar (SQL 172).
+  // Tira a marca da tela na hora, sem redesenhar a página.
   async function naoMarcar(escopo, btn){
-    const c = _ctx; if(!c || !c.vb) return;
-    const v = TextMarks.verbetePorId(c.vb); if(!v) return;
-    const chave = escopo === 'u' ? ('u:' + c.unidade) : ('p:' + c.bloco + ':' + c.paragrafo);
-    const lista = Array.isArray(v.nao_marcar) ? v.nao_marcar.map(String) : [];
+    const c = _ctx; if(!c) return;
+    const ehGl = escopo.charAt(0) === 'g';
+    const tipo = ehGl ? escopo.slice(1) : escopo;
+    const item = ehGl ? (c.gl ? UbiqueStore.glossary_terms.get(c.gl) : null) : (c.vb ? TextMarks.verbetePorId(c.vb) : null);
+    if(!item) return;
+    const nome = ehGl ? TextMarks.textoPuro(item.term).trim() : item.term;
+    const chave = tipo === 'u' ? ('u:' + c.unidade) : ('p:' + c.bloco + ':' + c.paragrafo);
+    const lista = Array.isArray(item.nao_marcar) ? item.nao_marcar.map(String) : [];
     if(lista.indexOf(chave) < 0) lista.push(chave);
     const aviso = function(m, t){ if(typeof window.ueToast === 'function') window.ueToast(m, t); };
     if(btn) btn.disabled = true;
     try{
-      const r = await window._sb.schema('conteudo').from('verbetes').update({ nao_marcar: lista }).eq('id', v.id).select('id');
+      const r = await window._sb.schema('conteudo').from(ehGl ? 'glossary_terms' : 'verbetes').update({ nao_marcar: lista }).eq('id', item.id).select('id');
       if(r.error) throw r.error;
-      if(!r.data || !r.data.length){ aviso('Só quem edita a matéria deste verbete pode mudar onde ele é marcado.', 'error'); if(btn) btn.disabled = false; return; }
+      if(!r.data || !r.data.length){ aviso(ehGl ? 'Só quem edita a matéria desta palavra pode mudar onde ela é marcada.' : 'Só quem edita a matéria deste verbete pode mudar onde ele é marcado.', 'error'); if(btn) btn.disabled = false; return; }
     } catch(e){
-      console.warn('[verbete nao_marcar]', e);
+      console.warn('[nao_marcar]', e);
       aviso('Não consegui gravar. Confira a internet e tente de novo.', 'error');
       if(btn) btn.disabled = false;
       return;
     }
-    UbiqueStore.verbetes.update(v.id, { nao_marcar: lista });
+    (ehGl ? UbiqueStore.glossary_terms : UbiqueStore.verbetes).update(item.id, { nao_marcar: lista });
     let alvos = [];
-    if(escopo === 'u'){
+    if(tipo === 'u'){
       alvos = Array.from(document.querySelectorAll('.tb-body[data-unidade="' + CSS.escape(String(c.unidade)) + '"]'));
     } else {
       const corpo = document.querySelector('.tb-body[data-bloco="' + CSS.escape(String(c.bloco)) + '"]');
       const par = corpo && corpo.querySelector('.tb-paragraph[data-paragraph-id="' + CSS.escape(String(c.paragrafo)) + '"]');
       if(par) alvos = [par];
     }
-    alvos.forEach(function(raiz){
-      raiz.querySelectorAll('.frag-term[data-vb="' + CSS.escape(String(v.id)) + '"]:not([data-frag-fixo])').forEach(function(s){
+    if(ehGl){
+      alvos.forEach(function(raiz){
+        raiz.querySelectorAll('.gl-term[data-gl="' + CSS.escape(String(item.id)) + '"]').forEach(function(s){ s.replaceWith(document.createTextNode(s.textContent)); });
+        raiz.querySelectorAll('.frag-term[data-gl="' + CSS.escape(String(item.id)) + '"]').forEach(function(s){ s.removeAttribute('data-gl'); });
+        raiz.normalize();
+      });
+    } else alvos.forEach(function(raiz){
+      raiz.querySelectorAll('.frag-term[data-vb="' + CSS.escape(String(item.id)) + '"]:not([data-frag-fixo])').forEach(function(s){
         // palavra que também é do glossário continua marcada, só como glossário
         if(s.hasAttribute('data-gl')){
           s.className = 'gl-term'; s.setAttribute('data-fragment-id', 'gl:' + s.getAttribute('data-gl'));
@@ -24105,7 +24220,8 @@ const FragmentCard = (function(){
     });
     if(_el) _el.classList.remove('open');
     _currentId = null;
-    aviso(escopo === 'u' ? '"' + v.term + '" não será mais marcado nesta unidade. Para desfazer, abra o verbete no painel.' : '"' + v.term + '" não será mais marcado neste parágrafo. Para desfazer, abra o verbete no painel.', 'success');
+    const onde = tipo === 'u' ? 'nesta unidade' : 'neste parágrafo';
+    aviso('"' + nome + '" não será mais marcado ' + onde + '. Para desfazer, abra ' + (ehGl ? 'a palavra no Glossário do painel.' : 'o verbete no painel.'), 'success');
   }
 
   function close(){
@@ -24150,9 +24266,8 @@ Blocks.textgallery = {
           fragmentId:dono
         }));
       });
-      const gls = TextMarks.glossario(unidadeTG);
       marcado.soGlossario.forEach(gid => {
-        const g = gls.find(x => x.id === String(gid));
+        const g = TextMarks.palavra(unidadeTG, gid);
         if(g && g.image) fragImages.push({ url:g.image, caption:g.term, alt:g.term, fragmentId:'gl:' + g.id });
       });
     }
@@ -66984,6 +67099,9 @@ Renderers.unit = function(route){
   // cada bloco de texto SOMA os seus (setFragments faz merge), então o hover
   // resolve verbetes de QUALQUER bloco, não só do último.
   if(window.FragmentCard && FragmentCard.resetFragments) FragmentCard.resetFragments();
+  // Marcas do glossário da matéria: conta, na unidade inteira, em quantos parágrafos cada
+  // palavra aparece (regra dos mais de 5) antes de desenhar os blocos.
+  if(window.TextMarks && TextMarks.prepararUnidade) TextMarks.prepararUnidade(String(unit.id).replace(/^u/, ''), groups);
   // blockSectionHtml = card do renderer + rodapé, com o id pro deep-link. É o
   // funil único: o toggle Slides/Lista remonta o bloco pela MESMA função.
   const allBlocksHtml = groupBlocks.map(b => blockSectionHtml(b, ctx)).join('<hr class="block-divider">');
