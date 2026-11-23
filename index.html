@@ -22350,6 +22350,27 @@ const TextMarks = (function(){
   function nomesDoVerbete(v){ return [v.term].concat(Array.isArray(v.aliases) ? v.aliases : []).map(limpaNome).filter(Boolean); }
   function temDefinicao(v){ return !!String(v.definition || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim(); }
   function foraDe(v){ return Array.isArray(v.nao_marcar) ? v.nao_marcar.map(String) : []; }
+  // O termo do glossário aceita HTML (ex.: <i>uti possidetis</i>): para comparar, só o texto.
+  function textoPuro(h){
+    return String(h == null ? '' : h).replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+  }
+  // Nomes de uma palavra do glossário: o termo, os apelidos (glossary_terms.aliases, SQL 171)
+  // e o termo sem o trecho entre parênteses ("CELAC (Comunidade de Estados…)" → "CELAC").
+  function nomesDoGlossario(t){
+    if(!t) return [];
+    const termo = limpaNome(textoPuro(t.term));
+    const lista = [termo].concat(Array.isArray(t.aliases) ? t.aliases.map(function(a){ return limpaNome(textoPuro(a)); }) : []);
+    if(termo.indexOf('(') >= 0) lista.push(limpaNome(termo.replace(/\([^)]*\)/g, ' ')));
+    const vistos = {};
+    return lista.filter(function(n){
+      if(!n) return false;
+      const c = dobra(n);
+      if(vistos[c] || !TEM_LETRA.test(c)) return false;
+      vistos[c] = 1;
+      return true;
+    });
+  }
 
   // ── caches (a lista do Store é copiada a cada list(): só recalcula quando algo muda) ──
   let _verbs = null, _porId = null, _global = null, _gloss = null, _porPar = {};
@@ -22396,7 +22417,7 @@ const TextMarks = (function(){
             const t = S.glossary_terms.get(it.bank_id);
             if(!t || !t.term) return;
             vistos[k + '|' + it.bank_id] = 1;
-            lista.push({ id: String(t.id), term: limpaNome(t.term), image: String(it.image || '').trim() || t.image_url || '' });
+            lista.push({ id: String(t.id), term: limpaNome(textoPuro(t.term)), nomes: nomesDoGlossario(t), image: String(it.image || '').trim() || t.image_url || '' });
           });
         });
       }
@@ -22432,11 +22453,12 @@ const TextMarks = (function(){
       });
     });
     glossario(unitId).forEach(function(g){
-      const c = dobra(g.term);
-      if(!TEM_LETRA.test(c)) return;
-      const e = mapa.get(c) || {};
-      e.g = g.id;
-      mapa.set(c, e);
+      g.nomes.forEach(function(n){
+        const c = dobra(n);
+        const e = mapa.get(c) || {};
+        e.g = g.id;
+        mapa.set(c, e);
+      });
     });
     const ind = monta(mapa);
     ind.unitId = k;
@@ -22518,13 +22540,34 @@ const TextMarks = (function(){
     });
     return out;
   }
+  // Palavras (de uma lista {id, nomes}) que aparecem num texto, na ordem em que aparecem.
+  // Usado pela lupa: o aluno seleciona uma frase e vê as palavras do glossário que estão nela.
+  function acharNoTexto(texto, termos){
+    const t = String(texto == null ? '' : texto).normalize('NFC');
+    if(!t.trim() || !termos || !termos.length) return [];
+    const mapa = new Map();
+    termos.forEach(function(x){ (x.nomes || []).forEach(function(n){ const c = dobra(n); if(!mapa.has(c)) mapa.set(c, x); }); });
+    const re = monta(mapa).re;
+    if(!re) return [];
+    const f = dobra(t), achou = [], vistos = {};
+    let m;
+    re.lastIndex = 0;
+    while((m = re.exec(f))){
+      const i = m.index, j = i + m[0].length;
+      if(letra(t[i - 1]) || letra(t[j])){ re.lastIndex = i + 1; continue; }
+      const x = mapa.get(m[0]);
+      if(x && !vistos[x.id]){ vistos[x.id] = 1; achou.push(x); }
+    }
+    return achou;
+  }
   // Cartão de um verbete marcado sozinho (o mesmo formato das ligações feitas à mão).
   function fragDe(id){
     const v = verbetePorId(id);
     return v ? _mergeFragmentWithVerbete({ id: String(v.id), text: v.term }, v) : null;
   }
   return { indice: indice, doParagrafo: doParagrafo, marcaHTML: marcaHTML, fragDe: fragDe,
-           verbetePorId: verbetePorId, glossario: glossario, zera: zera };
+           verbetePorId: verbetePorId, glossario: glossario, zera: zera,
+           nomesDoGlossario: nomesDoGlossario, acharNoTexto: acharNoTexto, textoPuro: textoPuro };
 })();
 window.TextMarks = TextMarks;
 
@@ -23925,7 +23968,7 @@ const FragmentCard = (function(){
     const san = (window.LearningBlocks && LearningBlocks.sanitizeRichHTML) || _sanitizeInlineHTML;
     const d = (gl.definitions || [])[0];
     return '<div class="gl-card-olho">' + ICON_LIVRO + (junto ? 'Também no glossário da unidade' : 'Glossário da unidade') + '</div>' +
-      (junto ? '' : '<div class="gl-card-cab"><div class="frag-card-term">' + Util.esc(gl.term) + '</div>' + _glossBookmarkBtn(gl.id, { small: true }) + '</div>') +
+      (junto ? '' : '<div class="gl-card-cab"><div class="frag-card-term">' + san(gl.term) + '</div>' + _glossBookmarkBtn(gl.id, { small: true }) + '</div>') +
       (gl.classLabel ? '<div class="gloss-lookup-meta"><span class="gloss-lookup-tag gloss-lookup-tag-class">' + Util.esc(gl.classLabel) + '</span></div>' : '') +
       (d && d.html ? '<div class="frag-card-definition">' + san(d.html) + '</div>' : '') +
       (gl.callout ? '<aside class="gloss-lookup-callout">' + san(gl.callout) + '</aside>' : '');
@@ -23992,9 +24035,9 @@ const FragmentCard = (function(){
     } else {
       h += glossParte(gl, false);
     }
-    const termo = frag ? (frag.text || '') : gl.term;
+    const termo = TextMarks.textoPuro(frag ? (frag.text || '') : gl.term).trim();
     h += '<div class="frag-card-pe"><a class="frag-card-google" href="https://www.google.com/search?q=' + encodeURIComponent(termo) + '" target="_blank" rel="noopener" title="Pesquisar no Google numa aba nova">' + ICON_G + 'Google</a>' +
-      (gl ? '<a class="frag-card-glos" href="#/glossario?q=' + encodeURIComponent(gl.term) + '">Ver no glossário</a>' : '') + '</div>';
+      (gl ? '<a class="frag-card-glos" href="#/glossario?q=' + encodeURIComponent(TextMarks.textoPuro(gl.term).trim()) + '">Ver no glossário</a>' : '') + '</div>';
     // Só a equipe: tirar a marca automática (homônimos, apelido que pegou a pessoa errada)
     if(frag && _ctx.vb && !_ctx.fixo && window.Auth && Auth.isAdmin && Auth.isAdmin() && TextMarks.verbetePorId(_ctx.vb)){
       h += '<div class="frag-card-equipe"><span class="frag-card-equipe-rot">Só a equipe vê</span>' +
@@ -89363,8 +89406,22 @@ const GlossaryLookup = (function(){
   // evitar lixo (é isso que faz "epd" achar "...Demanda (Epd)" mas não achar
   // qualquer termo que tenha "ep" no meio).
   function _score(t, q, qWords, currentSubject){
-    const n = normalize(stripHtml(t.term));
-    if(!n) return 0;
+    // o termo e os apelidos (SQL 171): vale a melhor nota entre eles
+    const nomes = [stripHtml(t.term)].concat(Array.isArray(t.aliases) ? t.aliases : []).map(normalize).filter(Boolean);
+    if(!nomes.length) return 0;
+    let s = 0;
+    nomes.forEach(n => { s = Math.max(s, _scoreNome(n, q, qWords)); });
+    // Sem nada em comum com a busca, a palavra não entra (antes o bônus da matéria
+    // punha na lista palavras que não tinham a ver com o que o aluno selecionou).
+    if(s <= 0) return 0;
+    if(currentSubject){
+      const tIds = termSubjectIds(t);
+      if(tIds.indexOf(String(currentSubject)) >= 0) s += 50;
+    }
+    s -= normalize(stripHtml(t.term)).length * 0.01;
+    return s;
+  }
+  function _scoreNome(n, q, qWords){
     const tWords = n.split(/\s+/).filter(Boolean);
     let s = 0;
     if(n === q) s += 1000;
@@ -89376,11 +89433,6 @@ const GlossaryLookup = (function(){
     });
     if(allInside) s += 100;
     else if(qWords.some(w => w.length <= 3 ? tWords.indexOf(w) >= 0 : n.indexOf(w) >= 0)) s += 20;
-    if(currentSubject){
-      const tIds = termSubjectIds(t);
-      if(tIds.indexOf(String(currentSubject)) >= 0) s += 50;
-    }
-    s -= n.length * 0.01;
     return s;
   }
 
@@ -89443,11 +89495,27 @@ const GlossaryLookup = (function(){
     if(!modal || !titleEl || !bodyEl) return;
     const trimmed = String(selectedText || '').trim();
     titleEl.textContent = trimmed ? `“${trimmed}”` : 'Consulta';
-    const matches = findMatches(trimmed);
+    // 1º: as palavras do glossário que estão DENTRO da seleção (o aluno seleciona a frase
+    // inteira e não precisa adivinhar qual palavra está no glossário). As do glossário da
+    // unidade vêm primeiro; depois as outras, na ordem em que aparecem.
+    // 2º (se não houver nenhuma): a busca aproximada de sempre.
+    let dentro = [];
+    if(window.TextMarks && window.UbiqueStore && UbiqueStore.glossary_terms){
+      const brutos = UbiqueStore.glossary_terms.list() || [];
+      const acesso = (typeof _glossFilterByAccess === 'function') ? _glossFilterByAccess(brutos) : brutos;
+      const corpo = document.querySelector('.tb-body[data-unidade]');
+      const daUnidade = new Set((TextMarks.glossario(corpo ? corpo.getAttribute('data-unidade') : null) || []).map(g => g.id));
+      dentro = TextMarks.acharNoTexto(trimmed, acesso.map(t => ({ id: String(t.id), nomes: TextMarks.nomesDoGlossario(t), t: t })));
+      dentro = dentro.filter(x => daUnidade.has(x.id)).concat(dentro.filter(x => !daUnidade.has(x.id)));
+    }
+    const LIMITE = 12;
+    const matches = dentro.length ? dentro.slice(0, LIMITE).map(x => x.t) : findMatches(trimmed);
     // Subtitle indicando prioridade pela matéria da unidade atual, quando relevante
     const currentSubject = _currentSubjectId();
     let priorityNote = '';
-    if(currentSubject && matches.length > 1 && window.UbiqueStore){
+    if(dentro.length > 1){
+      priorityNote = `<p class="gloss-lookup-note">Na seleção há <strong>${dentro.length}</strong> palavras do glossário${dentro.length > LIMITE ? ` (mostrando as ${LIMITE} primeiras)` : ''}.</p>`;
+    } else if(!dentro.length && currentSubject && matches.length > 1 && window.UbiqueStore){
       const subj = (UbiqueStore.subjects.list() || []).find(s => String(s.id) === String(currentSubject));
       const subjName = subj ? (subj.subject || subj.title) : '';
       if(subjName){
