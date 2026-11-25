@@ -36,7 +36,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
 <script src="aula-player.js?v=9"></script>
 <link rel="stylesheet" href="quadro-tutor.css?v=1">
 <script src="quadro-tutor.js?v=6"></script>
-<link rel="stylesheet" href="tutor-imagens.css?v=3">
+<link rel="stylesheet" href="tutor-imagens.css?v=4">
 <script src="tutor-imagens.js?v=3"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
@@ -39014,6 +39014,12 @@ Renderers.tutor.mount = function(stageEl, route){
   let _lic = TutorFontes.novaLicenca();
   let _quadro = null;   // Quadro do tutor (quadro-tutor.js): o painel à direita e o botão Quadro no campo
   let _ajustes = null;  // engrenagem do tutor (tutor-imagens.js): imagens, Quadro, modelo e quanto o tutor pensa
+  let _oferta = null, _envioQ = 0;   // oferta de questões de prova da última resposta (TutorQuestions.oferta)
+  function _opQ(){
+    return { render: { shownQ: _shownQ, scroll: _scroll, commentFn: function(specs){
+      return window.TutorQuestions.commentBatch(specs, { skipEnsureStyles: true, scroll: _scroll, modelo: _modelo, ctx: { unitId:null, unitTitle:'', unitText:'' } });
+    } } };
+  }
 
   const convEl   = stageEl.querySelector('#tutorConv');
   const emptyEl  = stageEl.querySelector('#tutorEmpty');
@@ -39219,6 +39225,16 @@ Renderers.tutor.mount = function(stageEl, route){
     const text = (inputEl.value||'').trim();
     if(!text) return;
     try { if(window.ubqMarcoUnico) window.ubqMarcoUnico('UsouTutor'); } catch(_){}
+    // "sim" logo depois da oferta de questões de prova: traz as questões sem nova resposta do tutor
+    if(_mode === 'materia' && _oferta && !_oferta.usada && window.TutorQuestions && window.TutorQuestions.simQuestoes(text)){
+      const of = _oferta; _oferta = null;
+      _appendUser(text); inputEl.value=''; _autosize();
+      const bxQ = _appendAssistant(_md('Questões de prova sobre **' + (of.res.ponto || 'o tema') + '**. Responda e confira o gabarito:'));
+      window.TutorQuestions.trazerOferta(of, bxQ.parentNode);
+      _scroll();
+      return;
+    }
+    _oferta = null;   // a oferta vale para a resposta logo antes
     if(_mode==='ajuda'){
       // Modo AJUDA: responde só com base no guia de uso (platform_config.help_guide,
       // injetado pela EF quando modo==='ajuda'). Sem matéria, sem card de questão,
@@ -39281,9 +39297,10 @@ Renderers.tutor.mount = function(stageEl, route){
     // Busca de questões REAIS de prova (igual ao tutor da unidade): passa o
     // contexto pro tutor citar a questão traduzindo o código; depois renderiza
     // o card interativo abaixo da resposta. Só em mensagem de conteúdo.
-    const ctxQ = { ids: [], ctx: '' };
-    if(text.length >= 10 && window.TutorQuestions && window.TutorQuestions.autoQuestoes){
-      try{ const aq = await window.TutorQuestions.autoQuestoes(text, { shownQ: _shownQ }); ctxQ.ids = (aq && aq.ids) || []; ctxQ.ctx = (aq && aq.ctx) || ''; }catch(_){}
+    // a busca rigorosa (tutor-questoes) roda JUNTO com a resposta; a oferta entra embaixo dela
+    const ctxQ = { ids: [], ctx: '', busca: null, envio: ++_envioQ };
+    if(text.length >= 10 && window.TutorQuestions && window.TutorQuestions.buscarDoTema){
+      ctxQ.busca = window.TutorQuestions.buscarDoTema(text, window.TutorQuestions.contextoRecente(_msgs), _shownQ);
     }
     await _perguntar(text, box, ctxQ, String(subjEl.value));
   }
@@ -39367,19 +39384,15 @@ Renderers.tutor.mount = function(stageEl, route){
       _renderFu(box.parentNode, _fu(acc));
       // Card interativo de questões REAIS de prova (igual ao tutor da unidade).
       // Sem unidade (unitId:null) — o comment_mode usa só o enunciado do item.
-      if(ctxQ.ids.length && window.TutorQuestions && window.TutorQuestions.renderBankQuestions){
-        try{
-          window.TutorQuestions.renderBankQuestions(box.parentNode, ctxQ.ids, 2, {
-            shownQ: _shownQ,
-            scroll: _scroll,
-            commentFn: function(specs){
-              return window.TutorQuestions.commentBatch(specs, {
-                skipEnsureStyles: true, scroll: _scroll, modelo: _modelo,
-                ctx: { unitId:null, unitTitle:'', unitText:'' }
-              });
-            }
-          });
-        }catch(_){}
+      // "já caiu" → oferta embaixo da resposta (as questões só vêm se o aluno quiser)
+      if(ctxQ.busca && window.TutorQuestions && window.TutorQuestions.oferta){
+        const _alvoQ = box.parentNode;
+        ctxQ.busca.then(function(res){
+          if(!res || !_alvoQ.isConnected) return;
+          const of = window.TutorQuestions.oferta(_alvoQ, res, _opQ());
+          if(of && ctxQ.envio === _envioQ) _oferta = of;
+          _scroll();
+        });
       }
       _msgs.push({ role:'user', content:text }); _msgs.push({ role:'assistant', content:_clean(acc) });
       // Quadro: desenha quando o aluno pede ou, conforme o modo escolhido, quando um desenho ajuda
@@ -39430,7 +39443,7 @@ Renderers.tutor.mount = function(stageEl, route){
   async function _openConversa(id){
     if(_mode !== 'materia') _setMode('materia');   // o histórico salvo é sempre do modo matéria
     Object.keys(_shownQ).forEach(function(k){ delete _shownQ[k]; });
-    _conversaId = id; _msgs.length = 0;
+    _conversaId = id; _msgs.length = 0; _oferta = null;
     _zeraLicenca();   // a licença vale por conversa: ao reabrir, o tutor pede de novo se precisar
     convEl.innerHTML = '<div class="loading">Carregando conversa…</div>';
     try{
@@ -39463,7 +39476,7 @@ Renderers.tutor.mount = function(stageEl, route){
     _renderHistory((stageEl.querySelector('#tutorHistSearch')||{}).value||'');
   }
   function _newConversa(){
-    _conversaId = null; _msgs.length = 0;
+    _conversaId = null; _msgs.length = 0; _oferta = null;
     _zeraLicenca();
     if(_arq) _arq.limpar();
     Object.keys(_shownQ).forEach(function(k){ delete _shownQ[k]; });   // zera dedup de questões
@@ -54850,10 +54863,12 @@ window.TutorIA = (function(){
       wrap.appendChild(grp);
     }
     if(!rendered) return { rendered:0, hasMore:false };
+    // Selo dos anos (calibrado, 25/11): "recorrente" só com 3 provas diferentes ou mais e 2 delas nos últimos 10 anos;
+    // fora disso, só informa os anos. Quem já mostrou a oferta (semFaixa) não repete.
     const uniqYears = Array.from(new Set(years.map(String))).filter(Boolean).sort();
-    if(uniqYears.length >= 2){
+    if(uniqYears.length && !opts.semFaixa){
       const inc = document.createElement('div'); inc.className = 'tutor-realq-inc';
-      inc.textContent = 'Tema recorrente — já cobrado em: ' + uniqYears.join(', ') + ' (' + years.length + '×)';
+      inc.textContent = (_ehRecorrente(uniqYears) ? 'Tema recorrente na prova: CACD ' : 'Já caiu em prova: CACD ') + _textoAnos(uniqYears);
       wrap.insertBefore(inc, wrap.firstChild);
     }
     // Botão "Verificar respostas" — só revela gabarito + comenta ao clicar
@@ -54897,10 +54912,79 @@ window.TutorIA = (function(){
       return { ids: ids, ctx: ids.length ? _fmtQuestoes(ids) : '' };
     } catch(_){ return { ids:[], ctx:'' }; }
   }
+  // ── Questões de prova do tutor (tutor-questoes, 25/11): busca rigorosa que roda junto com a resposta. Só entram as
+  // questões que tratam DIRETAMENTE do ponto perguntado (nota 3 da avaliação); embaixo da resposta aparece a oferta
+  // ("Já caiu em prova… Quer que eu traga?"), não as questões de uma vez. "sim" digitado logo depois também traz.
+  function _textoAnos(anos){ const a = (anos || []).map(String); return a.length <= 1 ? a.join('') : a.slice(0, -1).join(', ') + ' e ' + a[a.length - 1]; }
+  function _ehRecorrente(anos){
+    const desde = new Date().getFullYear() - 10;
+    const a = Array.from(new Set((anos || []).map(Number).filter(Boolean)));
+    return a.length >= 3 && a.filter(function(x){ return x >= desde; }).length >= 2;
+  }
+  function _contextoRecente(msgs){
+    return (msgs || []).filter(function(m){ return m && m.role === 'user'; }).slice(-3).map(function(m){ return 'Aluno: ' + String(m.content || '').slice(0, 300); }).join('\n');
+  }
+  async function _buscarDoTema(text, contexto, shownQ){
+    try {
+      const r = await window._sb.functions.invoke('tutor-questoes', { body: { pergunta: String(text || '').slice(0, 700), contexto: contexto || '' } });
+      if(window.UbtWallet) UbtWallet.load();
+      const d = r && r.data;
+      if(!d || !Array.isArray(d.diretas) || !d.diretas.length) return null;
+      const shq = shownQ || _ctx.shownQ || {};
+      const ids = [], grupos = {};
+      d.diretas.forEach(function(x){
+        const id = String(x.id);
+        if(shq[id]) return;
+        const bg = (typeof window.resolveBankGroup === 'function') ? window.resolveBankGroup(id) : null;
+        if(!bg) return;
+        const gk = String(bg.bank_question_id || id);
+        if(grupos[gk] || shq['grp:' + gk]) return;
+        const tf = (bg.items || []).filter(function(q){ return Array.isArray(q.options) && q.options.length === 2 && !_isPlaceholderAssertion(q.assertion); });
+        if(!tf.length) return;                                  // só Certo/Errado completas (as que o card mostra)
+        grupos[gk] = 1; ids.push(id);
+      });
+      if(!ids.length) return null;
+      return { ids: ids, anos: (d.anos || []).map(Number).filter(Boolean), recorrente: !!d.recorrente, ponto: String(d.ponto || ''), total: d.diretas.length };
+    } catch(_){ return null; }
+  }
+  function _ofertaQuestoes(msgEl, res, opts){
+    if(!msgEl || !res || !res.ids || !res.ids.length) return null;
+    opts = opts || {};
+    const n = res.total || res.ids.length;
+    const box = document.createElement('div'); box.className = 'tq-oferta';
+    box.innerHTML = '<span class="tq-oferta-l">' + (res.recorrente ? 'Tema recorrente na prova' : 'Já caiu em prova') + '</span>'
+      + '<span class="tq-oferta-t">CACD ' + _esc(_textoAnos(res.anos)) + ' · ' + n + (n === 1 ? ' questão' : ' questões') + (res.ponto ? ' sobre ' + _esc(res.ponto) : '') + '</span>'
+      + '<span class="tq-oferta-p">Quer que eu traga ' + (n === 1 ? 'a questão' : 'as questões') + '?</span>'
+      + '<span class="tq-oferta-b"><button type="button" class="tq-btn tq-sim">' + (n === 1 ? 'Trazer a questão' : 'Trazer as questões') + '</button>'
+      + '<button type="button" class="tq-btn tq-nao">Agora não</button></span>';
+    msgEl.appendChild(box);
+    const estado = { res: res, box: box, msgEl: msgEl, usada: false, opts: opts };
+    box.querySelector('.tq-sim').addEventListener('click', function(){ _trazerOferta(estado, null); });
+    box.querySelector('.tq-nao').addEventListener('click', function(){ estado.usada = true; box.remove(); });
+    return estado;
+  }
+  function _trazerOferta(estado, destino){
+    if(!estado || estado.usada) return false;
+    estado.usada = true;
+    if(estado.box && estado.box.parentNode) estado.box.remove();
+    const o = estado.opts || {};
+    const r = _renderBankQuestions(destino || estado.msgEl, estado.res.ids, 3, Object.assign({ semFaixa: true }, o.render || {}));
+    if(r.hasMore) _localNote('Tem mais questões de prova sobre isso. Peça "mais questões" ou use o botão Questões.');
+    ((o.render && o.render.scroll) || _scroll)();
+    return true;
+  }
+  const _SIM_QUESTOES = /^\s*(sim|s|quero|quero sim|pode|pode sim|pode trazer|traga|traz|tr[aá]s|manda|mande|claro|ok|beleza|bora|vamos|por favor)(\s+(sim|por favor|pode|traga|quero))?[\s!.,]*((as|a)\s+quest(õ|o)es?)?[\s!.]*$/i;
+  function _simQuestoes(t){ return _SIM_QUESTOES.test(String(t || '')); }
+
   // Exposto pro TUTOR GLOBAL reusar a busca+card+comentário de questões reais.
   // As funções aceitam opts (shownQ, scroll, commentFn, ctx) → o global passa o
   // seu próprio contexto (sem unidade); o drawer segue usando o _ctx por padrão.
   window.TutorQuestions = {
+    buscarDoTema: _buscarDoTema,
+    oferta: _ofertaQuestoes,
+    trazerOferta: _trazerOferta,
+    simQuestoes: _simQuestoes,
+    contextoRecente: _contextoRecente,
     autoQuestoes: _autoQuestoes,
     renderBankQuestions: _renderBankQuestions,
     commentBatch: commentBatch,
@@ -61359,7 +61443,7 @@ window.TutorIA = (function(){
   }
 
   async function _loadHistory(){
-    _ctx.conversaId = null; _ctx.msgs = []; _ctx.shownQ = {};
+    _ctx.conversaId = null; _ctx.msgs = []; _ctx.shownQ = {}; _ctx.ofertaQ = null;
     const _anexosConv = [];
     if(_arqU) _arqU.definir([]);
     const msgsEl = document.getElementById('tutorMsgs'); if(msgsEl) msgsEl.innerHTML = '';
@@ -61475,6 +61559,18 @@ window.TutorIA = (function(){
       _inpSetPh('Pergunte ao tutor sobre esta unidade…  (use [[ para citar uma unidade)');
     }
     if(!text) return;
+    // "sim" logo depois da oferta de questões de prova: traz as questões sem nova resposta do tutor
+    if(forced == null && !extra.gerar_ce && _ctx.ofertaQ && !_ctx.ofertaQ.usada && _simQuestoes(text)){
+      const of = _ctx.ofertaQ; _ctx.ofertaQ = null;
+      _inpClear();
+      _addMsgUsuario(text);
+      const elQ = _addMsg('assistant', _md('Questões de prova sobre **' + (of.res.ponto || 'o tema') + '**. Responda e confira o gabarito:'));
+      _trazerOferta(of, elQ);
+      _scroll(true);
+      return;
+    }
+    _ctx.ofertaQ = null;   // a oferta vale para a resposta logo antes
+    const _envioQ = (_ctx.envioQ = (_ctx.envioQ || 0) + 1);
     if(forced == null && !extra.gerar_ce && _arqU && _arqU.ocupado()){
       if(window.ueToast) ueToast('Espere o arquivo terminar de carregar (ou tire da conversa) para enviar.', 'info');
       return;
@@ -61506,18 +61602,16 @@ window.TutorIA = (function(){
     const botBody = botEl.querySelector('.tutor-bubble');
     _scroll(true);   // ação do aluno → revela a pergunta + o "digitando"; daí o streaming respeita o scroll
 
-    // Ponto 2 — busca automática de questões reais (prova passada) sobre o tema.
-    // Só em mensagem de conteúdo (não na geração nem quando já veio contexto).
-    let autoQids = [];
+    // Questões de prova sobre o ponto perguntado (tutor-questoes): a busca rigorosa roda JUNTO com a resposta, sem
+    // atrasá-la; embaixo da resposta vem a oferta. Só em mensagem de conteúdo (não na geração nem com contexto pronto).
+    let buscaQ = null;
     if(!extra.gerar_ce && !extra.questoes_contexto && !extra.noAuto && text.length >= 10){
-      const aq = await _autoQuestoes(text);
-      autoQids = aq.ids;
-      if(aq.ctx) extra = Object.assign({}, extra, { questoes_contexto: aq.ctx });
+      buscaQ = _buscarDoTema(text, _contextoRecente(historico));
     }
 
     const me = (window.Auth && Auth.getUser) ? Auth.getUser() : null;
     const apelido = (me && (me.nickname || me.displayName || me.name)) || 'aluno';
-    const r = await _pedir({ text: text, botEl: botEl, botBody: botBody, historico: historico, extra: extra, autoQids: autoQids, unitText: unitTextToSend, apelido: apelido, celTrecho: celTrecho });
+    const r = await _pedir({ text: text, botEl: botEl, botBody: botBody, historico: historico, extra: extra, buscaQ: buscaQ, envioQ: _envioQ, unitText: unitTextToSend, apelido: apelido, celTrecho: celTrecho });
     _fimEnvio(r);
   }
   // Fim de um envio. Pergunta sem resposta (pedido de licença ou erro) sai do histórico da conversa;
@@ -61628,7 +61722,12 @@ window.TutorIA = (function(){
           _renderFontes(q.botEl, ragSources);
           const fp = TutorFontes.grade(TutorFontes.cartoes(ans, pessoais), 'Suas fontes'); if(fp) q.botEl.appendChild(fp);
           const fw = TutorWeb.fontesEl(fontesWeb); if(fw) q.botEl.appendChild(fw);
-          if(q.autoQids.length) _renderBankQuestions(q.botEl, q.autoQids, 2);   // "já caiu" → cards
+          if(q.buscaQ) q.buscaQ.then(function(res){   // "já caiu" → oferta (as questões só vêm se o aluno quiser)
+            if(!res || !q.botEl.isConnected) return;
+            const of = _ofertaQuestoes(q.botEl, res, {});
+            if(of && _ctx.envioQ === q.envioQ) _ctx.ofertaQ = of;
+            _scroll();
+          });
           _renderFollowups(q.botEl, _parseFu(acc));
           if(_cadT) _cadAcaoCard(q.botEl, q.text, ans, q.celTrecho || null);
           _msgFooter(q.botEl, TutorFontes.semMarcas(TutorWeb.semMarcas(ans)));
