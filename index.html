@@ -54866,9 +54866,10 @@ window.TutorIA = (function(){
     // Selo dos anos (calibrado, 25/11): "recorrente" só com 3 provas diferentes ou mais e 2 delas nos últimos 10 anos;
     // fora disso, só informa os anos. Quem já mostrou a oferta (semFaixa) não repete.
     const uniqYears = Array.from(new Set(years.map(String))).filter(Boolean).sort();
-    if(uniqYears.length && !opts.semFaixa){
+    const anosFaixa = (Array.isArray(opts.anos) && opts.anos.length) ? opts.anos.map(String) : uniqYears;   // todas as achadas, quando vêm
+    if(anosFaixa.length && !opts.semFaixa){
       const inc = document.createElement('div'); inc.className = 'tutor-realq-inc';
-      inc.textContent = (_ehRecorrente(uniqYears) ? 'Tema recorrente na prova: CACD ' : 'Já caiu em prova: CACD ') + _textoAnos(uniqYears);
+      inc.textContent = (_ehRecorrente(anosFaixa) ? 'Tema recorrente na prova: CACD ' : 'Já caiu em prova: CACD ') + _textoAnos(anosFaixa);
       wrap.insertBefore(inc, wrap.firstChild);
     }
     // Botão "Verificar respostas" — só revela gabarito + comenta ao clicar
@@ -54968,6 +54969,10 @@ window.TutorIA = (function(){
     estado.usada = true;
     if(estado.box && estado.box.parentNode) estado.box.remove();
     const o = estado.opts || {};
+    if(!o.render){   // na gaveta: "mais questões" continua desta lista, sem buscar de novo
+      _ctx.ultimaBuscaQ = estado.res.ponto || _ctx.ultimaBuscaQ;
+      _ctx.ultimaBuscaRes = { q: _ctx.ultimaBuscaQ, ponto: estado.res.ponto, provas: estado.res.ids.slice(), ineditas: [], anos: estado.res.anos || [], recorrente: !!estado.res.recorrente };
+    }
     const r = _renderBankQuestions(destino || estado.msgEl, estado.res.ids, 3, Object.assign({ semFaixa: true }, o.render || {}));
     if(r.hasMore) _localNote('Tem mais questões de prova sobre isso. Peça "mais questões" ou use o botão Questões.');
     ((o.render && o.render.scroll) || _scroll)();
@@ -54991,56 +54996,58 @@ window.TutorIA = (function(){
     fmtQuestoes: _fmtQuestoes
   };
   const _MAIS_QUESTOES = /^\s*(me\s+)?(traga|trazer|mostre|manda|quero|peço)?\s*mais\s+quest(õ|o)es\s*[.!]?\s*$/i;
+  // Botão "Questões" (e "mais questões"): a mesma busca rigorosa do tutor (tutor-questoes). Só questões de prova que
+  // tratam DIRETAMENTE do que o aluno pediu; se nenhuma prova tratou disso, oferece inéditas Ubique avaliadas do mesmo
+  // jeito. "mais questões" continua a mesma lista, sem buscar de novo e sem repetir.
   async function _buscarQuestoes(){
     if(_sending) return;
     const typed = _inpText();
-    // "mais questões" continua a busca anterior (as já mostradas não se repetem)
-    let query = (_MAIS_QUESTOES.test(typed) && _ctx.ultimaBuscaQ) ? _ctx.ultimaBuscaQ : typed;
+    const mais = !!(_MAIS_QUESTOES.test(typed) && _ctx.ultimaBuscaQ);
+    let query = mais ? _ctx.ultimaBuscaQ : typed;
     if(!query){ for(let i = _ctx.msgs.length - 1; i >= 0; i--){ if(_ctx.msgs[i].role === 'user'){ query = _ctx.msgs[i].content; break; } } }
     if(!query) query = _ctx.unitTitle || '';
     if(!query){ if(window.ueToast) ueToast('Digite o tema das questões que você quer.', 'error'); return; }
-    _ctx.ultimaBuscaQ = query;
     if(typed) _inpClear();
-    const note = _localNote('Buscando questões reais do banco sobre "' + query.slice(0, 60) + '"…');
-    let ids = [];
-    try {
-      const r = await window._sb.functions.invoke('bank-search', { body: { q: query } });
-      if(r && r.data && r.data.ubt_error){ if(note) note.textContent = 'Saldo de Falcoins insuficiente para buscar no banco.'; return; }
-      const list = (r && r.data && Array.isArray(r.data.ids)) ? r.data.ids : [];
-      ids = list.map(function(x){ return String(x.id != null ? x.id : x); });
-      if(window.UbtWallet) UbtWallet.load();
-    } catch(e){ if(note) note.textContent = 'Não consegui buscar no banco agora.'; return; }
-    if(note && note.parentNode) note.parentNode.removeChild(note);
-    // PRIORIDADE: provas passadas. Ubique é só inédita (o próprio professor
-    // gera), então só oferecemos Ubique — PERGUNTANDO antes — se não houver
-    // NENHUMA de prova passada sobre o tema.
-    const past = [], ubq = [];
-    ids.forEach(function(id){
-      const bg = (typeof window.resolveBankGroup === 'function') ? window.resolveBankGroup(id) : null;
-      const it = bg && (bg.items || [])[0];
-      if(!it) return;
-      if(it.source_type === 'ubique') ubq.push(id); else past.push(id);
-    });
+    let busca = (mais && _ctx.ultimaBuscaRes && _ctx.ultimaBuscaRes.q === query) ? _ctx.ultimaBuscaRes : null;
+    if(!busca){
+      const note = _localNote('Buscando questões de prova sobre "' + String(query).slice(0, 60) + '"…');
+      let d = null;
+      try {
+        const r = await window._sb.functions.invoke('tutor-questoes', { body: { pergunta: String(query).slice(0, 700), contexto: _contextoRecente(_ctx.msgs), ineditas: true } });
+        if(window.UbtWallet) UbtWallet.load();
+        d = r && r.data;
+        if(d && d.ubt_error){ if(note) note.textContent = 'Saldo de Falcoins insuficiente para buscar no banco.'; return; }
+        if(!d || d.error || r.error) throw new Error('busca');
+      } catch(e){ if(note) note.textContent = 'Não consegui buscar no banco agora.'; return; }
+      if(note && note.parentNode) note.parentNode.removeChild(note);
+      busca = { q: query, ponto: String(d.ponto || ''), provas: (d.diretas || []).map(function(x){ return String(x.id); }),
+        ineditas: (d.ineditas || []).map(function(x){ return String(x.id); }), anos: d.anos || [], recorrente: !!d.recorrente };
+      _ctx.ultimaBuscaRes = busca;
+    }
+    _ctx.ultimaBuscaQ = query;
+    const tema = busca.ponto || String(query).slice(0, 80);
     const el = _addMsg('assistant', _md('Buscando…'));
     const bubble = el.querySelector('.tutor-bubble');
-    const res = _renderBankQuestions(el, past, 3);
+    const res = _renderBankQuestions(el, busca.provas, 3, mais ? { semFaixa: true } : { anos: busca.anos });
     if(res.rendered){
-      bubble.innerHTML = _md('Questões reais de **provas passadas** sobre **' + query.slice(0, 80) + '**. Responda e veja o gabarito:');
-      if(res.hasMore) _localNote('Tem mais questões de prova sobre o tema. Clique em "Questões" de novo ou peça "mais questões" — trago outras, sem repetir.');
-    } else if(ubq.length){
-      bubble.innerHTML = _md('Esse tema **nunca caiu** nas provas anteriores (pelo nosso banco). Mas tenho questões **inéditas Ubique** sobre ele. Quer que eu traga?');
+      bubble.innerHTML = _md('Questões de **provas passadas** sobre **' + tema + '**. Responda e veja o gabarito:');
+      if(res.hasMore) _localNote('Tem mais questões de prova sobre isso. Clique em "Questões" de novo ou peça "mais questões": trago outras, sem repetir.');
+    } else if(busca.provas.length){
+      bubble.innerHTML = _md('Já mostrei todas as questões de prova que tratam de **' + tema + '**.');
+    } else if(busca.ineditas.length){
+      bubble.innerHTML = _md('Nenhuma questão de prova passada trata diretamente de **' + tema + '**. Mas tenho questões **inéditas Ubique** sobre isso. Quer que eu traga?');
       const offer = document.createElement('div'); offer.className = 'tutor-followups';
       const yes = document.createElement('button'); yes.type = 'button'; yes.className = 'tutor-fu'; yes.textContent = 'Sim, trazer as inéditas Ubique';
       yes.addEventListener('click', function(){
         yes.disabled = true;
-        const el2 = _addMsg('assistant', _md('Questões **inéditas Ubique** sobre o tema:'));
-        const r2 = _renderBankQuestions(el2, ubq, 3);
-        if(!r2.rendered) el2.querySelector('.tutor-bubble').innerHTML = _md('Não consegui montar as Ubique agora.');
-        else if(r2.hasMore) _localNote('Tem mais Ubique — peça "mais questões".');
+        const el2 = _addMsg('assistant', _md('Questões **inéditas Ubique** sobre **' + tema + '**:'));
+        const r2 = _renderBankQuestions(el2, busca.ineditas, 3, { semFaixa: true });
+        if(!r2.rendered) el2.querySelector('.tutor-bubble').innerHTML = _md('Não consegui montar as inéditas agora.');
+        else if(r2.hasMore) _localNote('Tem mais inéditas Ubique sobre isso: clique em "Questões" de novo.');
       });
       offer.appendChild(yes); el.appendChild(offer); _scroll();
     } else {
-      bubble.innerHTML = _md('Não encontrei questões de Certo/Errado novas sobre esse tema no banco. (Múltipla escolha ainda não entra aqui — em breve.)');
+      bubble.innerHTML = _md('Não achei questão de prova que trate diretamente de **' + tema + '**. (Múltipla escolha ainda não entra aqui.)');
     }
   }
 
