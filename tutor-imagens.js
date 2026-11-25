@@ -111,7 +111,15 @@
       a.setAttribute('aria-label', 'Quem é quem');
       a.addEventListener('click', e => {
         const b = e.target.closest('[data-ti-ir]');
-        if(b){ e.preventDefault(); e.stopPropagation(); escolher(st, Number(b.getAttribute('data-ti-ir'))); }
+        if(!b) return;
+        e.preventDefault(); e.stopPropagation();
+        // faixa compacta (conversa estreita): sem palco, o retrato abre direto no zoom
+        const palco = a.querySelector('.ti-sat-palco');
+        if(b.classList.contains('ti-sat-mini') && palco && palco.offsetParent === null && typeof window.openLightbox === 'function'){
+          const p = fotosPessoas(st)[Number(b.getAttribute('data-ti-ir'))];
+          if(p){ window.openLightbox(p.f.url, legendaZoom(p.g, p.f, p.i)); return; }
+        }
+        escolher(st, Number(b.getAttribute('data-ti-ir')));
       });
       st.sat = a;
     }
