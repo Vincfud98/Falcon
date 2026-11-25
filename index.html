@@ -36,6 +36,8 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
 <script src="aula-player.js?v=9"></script>
 <link rel="stylesheet" href="quadro-tutor.css?v=1">
 <script src="quadro-tutor.js?v=6"></script>
+<link rel="stylesheet" href="tutor-imagens.css?v=1">
+<script src="tutor-imagens.js?v=1"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════
      1 · TOKENS — design system variables (copied from style guide §1)
@@ -39001,7 +39003,8 @@ Renderers.tutor.mount = function(stageEl, route){
   let _mode = 'materia';
   let _paginaAjuda = '';   // tela de onde o aluno veio pelo manual (vai para a Ajuda como contexto)
   let _conversaId = (route && route.params && route.params.conversaId) || null;
-  let _modelo = 'equilibrado';
+  // modelo: o mesmo da gaveta (a engrenagem guarda a escolha neste navegador)
+  let _modelo = (function(){ try { const m = localStorage.getItem('falcon_tutor_modelo'); return (m === 'rapido' || m === 'avancado') ? m : 'equilibrado'; } catch(_){ return 'equilibrado'; } })();
   const _msgs = [];  // conversa atual em memória [{role, content}]
   const _shownQ = {};  // dedup de questões já mostradas nesta conversa (por id)
   const _apelido = (function(){ try{ const u=Auth.getUser()||{}; return u.nickname || ''; }catch(_){ return ''; } })();
@@ -39010,6 +39013,7 @@ Renderers.tutor.mount = function(stageEl, route){
   // enquanto o aluno não desligar na conversa.
   let _lic = TutorFontes.novaLicenca();
   let _quadro = null;   // Quadro do tutor (quadro-tutor.js): o painel à direita e o botão Quadro no campo
+  let _ajustes = null;  // engrenagem do tutor (tutor-imagens.js): imagens, Quadro, modelo e quanto o tutor pensa
 
   const convEl   = stageEl.querySelector('#tutorConv');
   const emptyEl  = stageEl.querySelector('#tutorEmpty');
@@ -39140,7 +39144,8 @@ Renderers.tutor.mount = function(stageEl, route){
     if(subjWrap) subjWrap.style.display = (mode==='materia') ? '' : 'none';
     // No modo Ajuda não há escolha de modelo (é grátis e usa o modelo rápido) nem internet.
     const _mdl = stageEl.querySelector('#tutorModel');
-    if(_mdl) _mdl.style.display = (mode==='materia') ? '' : 'none';
+    if(_mdl) _mdl.style.display = (mode==='materia' && !_ajustes) ? '' : 'none';   // com a engrenagem, o modelo fica nela
+    if(_ajustes) _ajustes.el.style.display = (mode==='materia') ? '' : 'none';
     const _web = stageEl.querySelector('#tutorWebBtn');
     if(_web) _web.style.display = (mode==='materia') ? '' : 'none';
     const _clip = stageEl.querySelector('#tutorClip'), _fichas = stageEl.querySelector('#tutorFichas');
@@ -39302,7 +39307,8 @@ Renderers.tutor.mount = function(stageEl, route){
           subject_id: subjectId, subjects: subjects,
           internet: !!(window.TutorWeb && TutorWeb.ligado()),
           minhas_fontes: { cadernos: _lic.cadernos, relatorios: _lic.relatorios, arquivos: _lic.arquivos },
-          anexos: _arq ? _arq.ids() : []
+          anexos: _arq ? _arq.ids() : [],
+          ...(window.TutorImagens ? window.TutorImagens.campos() : {})
         })
       });
       const ct = resp.headers.get('content-type')||'';
@@ -39314,6 +39320,10 @@ Renderers.tutor.mount = function(stageEl, route){
       const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf='', acc='', sources=[];
       let _live = null, _fontesWeb = [], _resumoWeb = null;   // internet (tutor-chat v4)
       let _mf = null, _pessoais = [], _resumoMf = null, _licenca = null, _pendente = false;   // fontes do aluno (v5)
+      // imagens na conversa (tutor-chat v5.6): a posição vira marca só na cópia da tela; a figura entra no lugar dela
+      const _img = window.TutorImagens ? window.TutorImagens.novo() : null;
+      const _comImg = function(t){ return _img ? window.TutorImagens.comMarcas(t, _img) : t; };
+      const _pintaVivo = function(){ box.innerHTML = _renderResposta(_comImg(acc), false); if(_img) window.TutorImagens.encaixar(box, _img, { largo:true }); };
       while(true){
         const { done, value } = await reader.read(); if(done) break;
         buf += dec.decode(value,{stream:true});
@@ -39321,7 +39331,8 @@ Renderers.tutor.mount = function(stageEl, route){
         for(const p of parts){
           const line = p.trim(); if(line.indexOf('data:')!==0) continue;
           let ev; try{ ev=JSON.parse(line.slice(5).trim()); }catch(_){ continue; }
-          if(ev.type==='delta'){ acc+=ev.text; if(_live) _live.escrevendo(); if(_mf) _mf.escrevendo(); box.innerHTML=_renderResposta(acc, false); _scroll(); }
+          if(ev.type==='delta'){ acc+=ev.text; if(_live) _live.escrevendo(); if(_mf) _mf.escrevendo(); _pintaVivo(); _scroll(); }
+          else if(ev.type==='imagem'){ if(_img){ window.TutorImagens.receber(_img, ev); _pintaVivo(); _scroll(); } }
           else if(ev.type==='web'){ if(!_live) _live = TutorWeb.painel(box); _live.evento(ev); _scroll(); }
           else if(ev.type==='minhas'){ if(!_mf) _mf = TutorFontes.painel(box); _mf.evento(ev); _scroll(); }
           else if(ev.type==='licenca'){ _licenca = ev; }
@@ -39330,6 +39341,7 @@ Renderers.tutor.mount = function(stageEl, route){
             sources=ev.sources||[]; _fontesWeb=ev.fontes_web||[]; _resumoWeb=ev.web||null;
             _pessoais=ev.fontes_pessoais||[]; _resumoMf=ev.minhas||null; _pendente=!!ev.pendente;
             if(!_licenca && ev.licenca) _licenca = ev.licenca;
+            if(_img && Array.isArray(ev.imagens)) ev.imagens.forEach(function(g){ window.TutorImagens.receber(_img, g); });
             if(window.UbtWallet) UbtWallet.load();
           }
         }
@@ -39349,7 +39361,8 @@ Renderers.tutor.mount = function(stageEl, route){
       if(_live) _live.fim(_resumoWeb);
       if(_mf) _mf.fim(_resumoMf);
       const _shown = _filterSources(sources, acc);
-      box.innerHTML = _renderResposta(acc, true, { srcMap: _srcMap(_shown), fontesWeb: _fontesWeb, pessoais: _pessoais });
+      box.innerHTML = _renderResposta(_comImg(acc), true, { srcMap: _srcMap(_shown), fontesWeb: _fontesWeb, pessoais: _pessoais });
+      if(_img) window.TutorImagens.encaixar(box, _img, { largo:true });
       const _fr = _fontesRespostaEl(acc, _pessoais, _shown, _fontesWeb); if(_fr) box.appendChild(_fr);
       _renderFu(box.parentNode, _fu(acc));
       // Card interativo de questões REAIS de prova (igual ao tutor da unidade).
@@ -39422,7 +39435,8 @@ Renderers.tutor.mount = function(stageEl, route){
     convEl.innerHTML = '<div class="loading">Carregando conversa…</div>';
     try{
       const _ler = function(cols){ return window._sb.schema('ia').from('tutor_mensagens').select(cols).eq('conversa_id', id).order('criado_em', { ascending:true }); };
-      let { data, error } = await _ler('role, conteudo, sources, fontes_web, fontes_pessoais, anexos');
+      let { data, error } = await _ler('role, conteudo, sources, fontes_web, fontes_pessoais, anexos, imagens');
+      if(error && /imagens/i.test(String(error.message || ''))) ({ data, error } = await _ler('role, conteudo, sources, fontes_web, fontes_pessoais, anexos'));   // antes do SQL 177
       if(error && /anexos/i.test(String(error.message || ''))) ({ data, error } = await _ler('role, conteudo, sources, fontes_web, fontes_pessoais'));   // antes do SQL 166
       if(error) throw error;
       convEl.innerHTML = '';
@@ -39434,7 +39448,9 @@ Renderers.tutor.mount = function(stageEl, route){
         }
         else {
           const _sh = _filterSources(m.sources||[], m.conteudo||'');
-          const box = _appendAssistant(_renderResposta(m.conteudo||'', true, { srcMap: _srcMap(_sh), fontesWeb: m.fontes_web||[], pessoais: m.fontes_pessoais||[] }));
+          const _stI = (window.TutorImagens && Array.isArray(m.imagens) && m.imagens.length) ? window.TutorImagens.deLista(m.imagens) : null;
+          const box = _appendAssistant(_renderResposta(_stI ? window.TutorImagens.comMarcas(m.conteudo||'', _stI) : (m.conteudo||''), true, { srcMap: _srcMap(_sh), fontesWeb: m.fontes_web||[], pessoais: m.fontes_pessoais||[] }));
+          if(_stI) window.TutorImagens.encaixar(box, _stI, { largo:true });
           const _fr = _fontesRespostaEl(m.conteudo||'', m.fontes_pessoais||[], _sh, m.fontes_web||[]); if(_fr) box.appendChild(_fr);
           _renderFu(box.parentNode, _fu(m.conteudo||''));
           _msgs.push({ role:'assistant', content:_clean(m.conteudo||'') });
@@ -39475,6 +39491,17 @@ Renderers.tutor.mount = function(stageEl, route){
       perguntar: function(t){ if(inputEl){ inputEl.value = t; _autosize(); _send(); } },
       ativo: function(){ return _mode === 'materia'; },
       rolar: _scroll
+    });
+  }
+  // Engrenagem: comanda o seletor de modelo (que fica escondido) e guarda as outras escolhas na conta
+  if(window.TutorImagens){
+    _ajustes = window.TutorImagens.montarAjustes(stageEl.querySelector('#tutorInputBox .tutor-box-row'), {
+      modelo: function(){ return _modelo; },
+      setModelo: function(v){
+        const sel = stageEl.querySelector('#tutorModel');
+        if(sel){ sel.value = v; sel.dispatchEvent(new Event('change')); } else _modelo = v;
+        try { localStorage.setItem('falcon_tutor_modelo', v); } catch(_){}
+      }
     });
   }
 
@@ -39540,7 +39567,7 @@ Renderers.tutor.mount = function(stageEl, route){
   }
   if(subjEl) subjEl.addEventListener('change', function(){ if(hintEl){ hintEl.textContent=''; hintEl.classList.remove('is-err'); } _webHint(); });
   const modelEl = stageEl.querySelector('#tutorModel');
-  if(modelEl) modelEl.addEventListener('change', function(){ _modelo = modelEl.value || 'equilibrado'; });
+  if(modelEl){ modelEl.value = _modelo; modelEl.addEventListener('change', function(){ _modelo = modelEl.value || 'equilibrado'; }); }
   const histSearch = stageEl.querySelector('#tutorHistSearch');
   if(histSearch) histSearch.addEventListener('input', function(){ _renderHistory(histSearch.value); });
   if(histList) histList.addEventListener('click', function(e){
@@ -53650,7 +53677,8 @@ window.TutorIA = (function(){
   let _sending = false, _styled = false;
   let _lic = TutorFontes.novaLicenca();   // licença das fontes do aluno nesta conversa (por unidade)
   let _arqU = null;                        // arquivos anexados nesta conversa (TutorArquivos.montar)
-  let _quadroG = null;                     // Quadro do tutor na gaveta (quadro-tutor.js): abre por cima da página
+  let _quadroG = null;
+  let _ajustesG = null;                    // engrenagem do tutor na gaveta (tutor-imagens.js)                     // Quadro do tutor na gaveta (quadro-tutor.js): abre por cima da página
 
   // Modo do tutor (LOCAL — trocar não envia mensagem nem cobra Falcoins).
   function _setModo(m, announce){
@@ -61180,6 +61208,15 @@ window.TutorIA = (function(){
         rolar: function(){ _scroll(); }
       });
     }
+    // Engrenagem: imagens, Quadro, modelo e quanto o tutor pensa. O menu de modelo da gaveta fica escondido; a engrenagem o comanda.
+    if(window.TutorImagens && !_ajustesG){
+      _ajustesG = window.TutorImagens.montarAjustes(d.querySelector('.tutor-box .tutor-box-row'), {
+        curto: true,
+        modelo: function(){ return _modelo; },
+        setModelo: function(v){ _modelo = v; try { localStorage.setItem('falcon_tutor_modelo', v); } catch(_){} _renderModelSelector(d); _updateCostHint(); }
+      });
+      const _mw = d.querySelector('#tutorModelWrap'); if(_mw && _ajustesG) _mw.style.display = 'none';
+    }
     // Largura salva + alça de redimensionar (igual ao drawer das salas)
     try { const sw = parseInt(localStorage.getItem('falcon_tutor_w'), 10); if(sw >= 320) d.style.width = sw + 'px'; } catch(_){}
     const rz = d.querySelector('#tutorResize');
@@ -61375,8 +61412,10 @@ window.TutorIA = (function(){
           _ctx.msgs.push({ role:'assistant', content: ans });
           const fWeb = Array.isArray(m.fontes_web) ? m.fontes_web : [];
           const fPes = Array.isArray(m.fontes_pessoais) ? m.fontes_pessoais : [];
-          const el = _addMsg('assistant', TutorFontes.marcas(TutorWeb.marcasFinais(TutorFontes.comDiverge(ans, _md), fWeb), fPes, true));
+          const stI = (window.TutorImagens && Array.isArray(m.imagens) && m.imagens.length) ? window.TutorImagens.deLista(m.imagens) : null;
+          const el = _addMsg('assistant', TutorFontes.marcas(TutorWeb.marcasFinais(TutorFontes.comDiverge(stI ? _stripFu(window.TutorImagens.comMarcas(raw, stI), true) : ans, _md), fWeb), fPes, true));
           const body = el && el.querySelector('.tutor-bubble');
+          if(body && stI) window.TutorImagens.encaixar(body, stI, { largo:false });
           const srcs = Array.isArray(m.sources) ? m.sources : [];
           if(body) _linkifyCites(body, srcs);
           _renderFontes(el, srcs);
@@ -61503,7 +61542,9 @@ window.TutorIA = (function(){
           subject_id: _cadT ? (_cadMateria() || '') : ((window.COURSE && window.COURSE._subjectId != null) ? String(window.COURSE._subjectId) : ''), subjects: (window.COURSES || []).map(function(c){ return (c && c._subjectId != null) ? String(c._subjectId) : ''; }).filter(Boolean),
           minhas_fontes: q.extra.gerar_ce ? undefined : { cadernos: _lic.cadernos, relatorios: _lic.relatorios, arquivos: _lic.arquivos },
           anexos: (q.extra.gerar_ce || !_arqU) ? undefined : _arqU.ids(),
-          caderno_aberto: (_cadT && !q.extra.gerar_ce) ? { id: _cadT.key, titulo: _cadT.titulo, texto: _cadTextoParaTutor(_cadT.ed && _cadT.ed.isConnected ? _cadT.ed : _cadEl()) } : undefined })
+          caderno_aberto: (_cadT && !q.extra.gerar_ce) ? { id: _cadT.key, titulo: _cadT.titulo, texto: _cadTextoParaTutor(_cadT.ed && _cadT.ed.isConnected ? _cadT.ed : _cadEl()) } : undefined,
+          imagens: (window.TutorImagens && !_cadT && !q.extra.gerar_ce) ? window.TutorImagens.campos().imagens : undefined,
+          esforco: window.TutorImagens ? window.TutorImagens.esforco() : undefined })
       });
       const ct = resp.headers.get('content-type') || '';
       if(ct.indexOf('application/json') >= 0){
@@ -61520,6 +61561,13 @@ window.TutorIA = (function(){
       let buf = ''; q.botBody.innerHTML = '';
       let live = null, fontesWeb = [], resumoWeb = null;                                   // internet (tutor-chat v4)
       let mf = null, pessoais = [], resumoMf = null, licenca = null, pendente = false;      // fontes do aluno (v5)
+      // imagens na conversa (tutor-chat v5.6): a posição vira marca só na cópia da tela; a figura entra no lugar dela
+      const img = (window.TutorImagens && !_cadT) ? window.TutorImagens.novo() : null;
+      const comImg = function(t){ return img ? window.TutorImagens.comMarcas(t, img) : t; };
+      const pintaVivo = function(){
+        q.botBody.innerHTML = TutorFontes.marcas(TutorWeb.marcasVivas(TutorFontes.comDiverge(_stripFu(comImg(acc), false), _md)), null, false);
+        if(img) window.TutorImagens.encaixar(q.botBody, img, { largo:false });
+      };
       while(true){
         const { done, value } = await reader.read(); if(done) break;
         buf += dec.decode(value, { stream:true });
@@ -61529,8 +61577,9 @@ window.TutorIA = (function(){
           let ev; try { ev = JSON.parse(line.slice(5).trim()); } catch(_){ continue; }
           if(ev.type === 'delta'){
             acc += ev.text; if(live) live.escrevendo(); if(mf) mf.escrevendo();
-            q.botBody.innerHTML = TutorFontes.marcas(TutorWeb.marcasVivas(TutorFontes.comDiverge(_stripFu(acc, false), _md)), null, false); _scroll();
+            pintaVivo(); _scroll();
           }
+          else if(ev.type === 'imagem'){ if(img){ window.TutorImagens.receber(img, ev); pintaVivo(); _scroll(); } }
           else if(ev.type === 'web'){ if(!live) live = TutorWeb.painel(q.botBody); live.evento(ev); _scroll(); }
           else if(ev.type === 'minhas'){ if(!mf) mf = TutorFontes.painel(q.botBody); mf.evento(ev); _scroll(); }
           else if(ev.type === 'licenca'){ licenca = ev; }
@@ -61542,6 +61591,7 @@ window.TutorIA = (function(){
             if(Array.isArray(ev.fontes_pessoais)) pessoais = ev.fontes_pessoais;
             resumoMf = ev.minhas || null; pendente = !!ev.pendente;
             if(!licenca && ev.licenca) licenca = ev.licenca;
+            if(img && Array.isArray(ev.imagens)) ev.imagens.forEach(function(g){ window.TutorImagens.receber(img, g); });
             if(window.UbtWallet) UbtWallet.load();
           }
         }
@@ -61572,7 +61622,8 @@ window.TutorIA = (function(){
           q.botBody.innerHTML = _md(intro || 'Responda Certo ou Errado:');
           _renderCE(q.botEl, ce);
         } else {
-          q.botBody.innerHTML = TutorFontes.marcas(TutorWeb.marcasFinais(TutorFontes.comDiverge(ans, _md), fontesWeb), pessoais, true);
+          q.botBody.innerHTML = TutorFontes.marcas(TutorWeb.marcasFinais(TutorFontes.comDiverge(img ? _stripFu(comImg(acc), true) : ans, _md), fontesWeb), pessoais, true);
+          if(img) window.TutorImagens.encaixar(q.botBody, img, { largo:false });
           _linkifyCites(q.botBody, ragSources);
           _renderFontes(q.botEl, ragSources);
           const fp = TutorFontes.grade(TutorFontes.cartoes(ans, pessoais), 'Suas fontes'); if(fp) q.botEl.appendChild(fp);
