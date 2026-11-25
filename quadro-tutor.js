@@ -61,11 +61,19 @@
       }).catch(e => { _kitP = null; throw e; });
     return _kitP;
   }
-  const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src https: data:; media-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'";
+  // A moldura: sem rede, sem acesso à conta; imagens só do Banco de imagens (o armazenamento da
+  // plataforma e o Drive, como o app usa) e dos acervos abertos que a função tutor-quadro consulta.
+  function csp(){
+    let banco = '';
+    try{ banco = new URL(window._sbUrl || '').origin; }catch(_){}
+    return "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+      + "img-src " + (banco ? banco + ' ' : '') + "https://upload.wikimedia.org https://drive.google.com https://*.googleusercontent.com data:; "
+      + "media-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'";
+  }
   function documento(k, html){
     return '<!doctype html><html lang="pt-BR" data-theme="' + tema() + '"><head><meta charset="utf-8">'
       + '<meta name="viewport" content="width=device-width,initial-scale=1">'
-      + '<meta http-equiv="Content-Security-Policy" content="' + CSP + '">'
+      + '<meta http-equiv="Content-Security-Policy" content="' + csp() + '">'
       + '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@400&display=swap">'
       + '<style>' + k.css + '</style><script>' + k.js + '<\/script></head><body><div class="q-raiz">' + html + '</div></body></html>';
   }
@@ -157,7 +165,7 @@
         + '<div class="qd-palco" data-q-palco></div>'
         + '<div class="qd-fiz" data-q-fiz hidden><span class="qd-fiz-t" data-q-fiz-t></span><button type="button" class="qd-btn" data-q-acao="perguntar-fiz">Perguntar sobre o que fiz</button></div>'
         + '<form class="qd-ajuste" data-q-ajuste><label class="qd-sr" for="qdAjuste' + L.onde + '">Pedir um ajuste no Quadro</label>'
-        + '<input id="qdAjuste' + L.onde + '" type="text" maxlength="600" autocomplete="off" placeholder="Peça um ajuste: ex.: mostre também o bem inferior">'
+        + '<input id="qdAjuste' + L.onde + '" type="text" maxlength="600" autocomplete="off" placeholder="Peça um ajuste: ex.: mais simples, com outro exemplo, só a parte de 1822">'
         + '<button type="submit" class="qd-btn">Ajustar</button></form>'
         + '<div class="qd-rodape" data-q-rodape></div>'
         + '<div class="qd-menu" data-q-menu hidden role="menu">'
