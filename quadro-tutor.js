@@ -70,8 +70,10 @@
       + "img-src " + (banco ? banco + ' ' : '') + "https://upload.wikimedia.org https://drive.google.com https://*.googleusercontent.com data:; "
       + "media-src 'none'; connect-src 'none'; form-action 'none'; frame-src 'none'";
   }
-  function documento(k, html){
-    return '<!doctype html><html lang="pt-BR" data-theme="' + tema() + '"><head><meta charset="utf-8">'
+  // data-quadro-falcon marca o documento como Quadro: promovido a bloco Artefato da unidade, o app troca o tema
+  // (claro/escuro) pelo do aluno na hora de mostrar.
+  function documento(k, html, t){
+    return '<!doctype html><html lang="pt-BR" data-quadro-falcon="1" data-theme="' + (t || tema()) + '"><head><meta charset="utf-8">'
       + '<meta name="viewport" content="width=device-width,initial-scale=1">'
       + '<meta http-equiv="Content-Security-Policy" content="' + csp() + '">'
       + '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Outfit:wght@200;300;400;500&family=JetBrains+Mono:wght@400&display=swap">'
@@ -533,5 +535,9 @@
     return { aposResposta, carregarConversa, novaConversa, modoTutor, desenharUltima, fechar };
   }
 
-  window.QuadroTutor = { montar, modo, setModo, pediuDesenho };
+  // O documento inteiro de um Quadro (kit, regras de segurança da moldura e o desenho), para a equipe
+  // revisar uma sugestão no admin e pôr na unidade como bloco Artefato.
+  async function documentoCompleto(html, o){ return documento(await kit(), String(html || ''), o && o.tema); }
+
+  window.QuadroTutor = { montar, modo, setModo, pediuDesenho, documentoCompleto };
 })();
