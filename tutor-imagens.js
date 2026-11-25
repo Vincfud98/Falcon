@@ -181,11 +181,14 @@
     });
     limparSoltas(raiz);
     if(largo){
-      const grade = document.createElement('div'); grade.className = 'ti-com-sat';
+      // ti-com-sat mede a largura (container); a grade dentro dela se ajusta quando a conversa estreita (Quadro aberto)
+      const caixa = document.createElement('div'); caixa.className = 'ti-com-sat';
+      const grade = document.createElement('div'); grade.className = 'ti-grade';
       const texto = document.createElement('div'); texto.className = 'ti-texto';
       while(raiz.firstChild) texto.appendChild(raiz.firstChild);
       grade.appendChild(texto); grade.appendChild(satelite(st));
-      raiz.appendChild(grade);
+      caixa.appendChild(grade);
+      raiz.appendChild(caixa);
       ligarNomes(texto, st);
     }
   }
