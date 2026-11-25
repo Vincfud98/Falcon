@@ -61,13 +61,15 @@
 
   // ── figuras ──
   const limpaTitulo = s => String(s || '').replace(/\s+/g, ' ').replace(/[\s.;,]+$/, '').trim();
+  // autor que o acervo marca como desconhecido não vai para a legenda ("Unknown author Unknown author")
+  const autorDe = f => (/unknown|anonymous|desconhecid|an[ôo]nimo/i.test(String(f && f.autor || '')) ? '' : limpaTitulo(f && f.autor));
   function nomeDe(g, f, i){
     if(f.termo) return f.termo;
     return (g.termos && g.fotos.length === g.termos.length) ? g.termos[i] : '';
   }
   function legendaZoom(g, f, i){
     const nome = g.tipo === 'pessoa' ? nomeDe(g, f, i) : '';
-    const partes = [nome, limpaTitulo(f.titulo), f.autor].filter(Boolean);
+    const partes = [nome, limpaTitulo(f.titulo), autorDe(f)].filter(Boolean);
     let s = partes.filter((p, k) => partes.indexOf(p) === k).join(' · ');
     if(f.origem === 'acervo') s += (s ? ' · ' : '') + 'acervo aberto' + (f.licenca ? ', ' + f.licenca : '');
     return s;
@@ -75,7 +77,7 @@
   function fotoHtml(g, f, i, cls){
     const nome = g.tipo === 'pessoa' ? nomeDe(g, f, i) : '';
     const t = nome || limpaTitulo(f.titulo);
-    const sub = nome ? (f.autor || limpaTitulo(f.titulo)) : f.autor;
+    const sub = nome ? (autorDe(f) || limpaTitulo(f.titulo)) : autorDe(f);
     return '<button type="button" class="' + cls + '" data-lightbox data-lightbox-src="' + esc(f.url) + '" data-lightbox-cap="' + esc(legendaZoom(g, f, i)) + '" aria-label="Ampliar: ' + esc(t) + '">'
       + '<img src="' + esc(f.url) + '" alt="' + esc(t) + '" decoding="async" referrerpolicy="no-referrer">'
       + '<span class="ti-cap"><b>' + esc(t) + '</b>' + (sub ? '<span>' + esc(sub) + '</span>' : '') + '</span></button>';
@@ -149,7 +151,7 @@
     st.sat.querySelectorAll('.ti-sat-mini').forEach(s => s.classList.toggle('on', Number(s.getAttribute('data-ti-ir')) === k));
     const c = st.sat.querySelector('[data-ti-c]'); if(c) c.textContent = String(k + 1);
     const p = ps[k], cap = st.sat.querySelector('[data-ti-cap]');
-    if(cap){ const nome = nomeDe(p.g, p.f, p.i); cap.innerHTML = (nome ? '<b>' + esc(nome) + '</b> · ' : '') + esc([limpaTitulo(p.f.titulo), p.f.autor].filter(Boolean).join(', ')); }
+    if(cap){ const nome = nomeDe(p.g, p.f, p.i); cap.innerHTML = (nome ? '<b>' + esc(nome) + '</b> · ' : '') + esc([limpaTitulo(p.f.titulo), autorDe(p.f)].filter(Boolean).join(', ')); }
     if(!quieto && st.raiz){ st.raiz.querySelectorAll('.ti-nome').forEach(n => n.classList.toggle('on', Number(n.getAttribute('data-ti-ir')) === k)); }
   }
   // o nome da pessoa no texto (a 1ª vez) leva à foto dela no satélite
