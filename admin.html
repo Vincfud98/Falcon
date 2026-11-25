@@ -62972,6 +62972,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
               ? `<button class="btn btn-ghost btn-sm conta-btn-ok" data-conta-acao="reativar" data-email="${esc(p.email)}">reativar</button>`
               : `<button class="btn btn-ghost btn-sm conta-btn-aviso" data-conta-acao="suspender" data-email="${esc(p.email)}">suspender</button>`) : '',
             p.user_id ? `<button class="btn btn-ghost btn-sm" data-conta-acao="senha" data-email="${esc(p.email)}" title="Enviar e-mail de redefinição de senha">senha</button>` : '',
+            p.user_id && podeSituacao(p) && p.situacao !== 'suspensa' ? `<button class="btn btn-ghost btn-sm" data-conta-acao="provisoria" data-email="${esc(p.email)}" title="Gera uma senha provisória para mandar pelo WhatsApp. No 1º login o aluno cria a senha dele.">senha provisória</button>` : '',
             p.user_id && podeSituacao(p) ? `<button class="btn btn-ghost btn-sm btn-danger" data-conta-acao="excluir" data-email="${esc(p.email)}">excluir</button>` : '',
           ].join('');
           const detalhe = aberta ? `<tr class="conta-detalhe"><td></td><td colspan="4">${_contaMatriculasHtml(p)}</td></tr>` : '';
@@ -63044,6 +63045,61 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
     showMsg('globalMessagePortaria', suspender ? `Conta de ${p.email} suspensa.` : `Conta de ${p.email} reativada.`, 'success');
   }
 
+  // Senha provisória: quando o e-mail de redefinição não chega (UOL e outros jogam no spam).
+  // A senha é sorteada no servidor (conta-senha-provisoria) e mostrada UMA vez aqui, para mandar ao aluno.
+  // No 1º login com ela, a plataforma obriga o aluno a criar a senha dele.
+  async function _contaSenhaProvisoria(p){
+    const quem = p.nome || p.email;
+    if(!confirm(`Gerar uma senha provisória para ${quem}?
+
+• A senha atual dele deixa de funcionar.
+• Mande a senha SÓ pelo WhatsApp/telefone que já está no cadastro do aluno (nunca para um número novo que pediu por mensagem).
+• No primeiro login, ele vai ser obrigado a criar uma senha nova.`)) return;
+    let erro = null, r = null;
+    try{
+      const { data, error } = await supabase.functions.invoke('conta-senha-provisoria', { body: { user_id: p.user_id } });
+      if(error){
+        erro = error.message;
+        try{ if(error.context && typeof error.context.json === 'function'){ const b = await error.context.json(); erro = (b && b.error) || erro; } }catch(_){}
+      }else if(data && data.error) erro = data.error;
+      else r = data;
+    }catch(e){ erro = e && e.message; }
+    const ERROS = Object.assign({}, _CONTA_ERROS, {
+      so_superadmin_admin: 'Só o superadmin gera senha para conta de admin.',
+      nao_pode_a_si_mesmo: 'Para a sua própria conta, use "Esqueci minha senha".',
+      conta_suspensa: 'A conta está suspensa. Reative antes de gerar a senha.',
+    });
+    if(erro || !r || !r.senha){ showMsg('globalMessagePortaria', 'Não deu certo: ' + (ERROS[erro] || erro || 'sem resposta')); return; }
+    const msg = `Olá! Geramos uma senha provisória para você entrar na Falcon.
+
+Acesse: https://falcon.grupoubique.com.br
+E-mail: ${r.email}
+Senha provisória: ${r.senha}
+
+No primeiro acesso, a plataforma vai pedir para você criar a sua senha nova.`;
+    const ov = document.createElement('div');
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px';
+    ov.innerHTML = `<div style="background:var(--surface,#fff);color:var(--text,#111);border-radius:12px;max-width:460px;width:100%;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.35)">
+      <h3 style="margin:0 0 .4rem">Senha provisória de ${esc(quem)}</h3>
+      <p style="margin:0 0 .8rem;opacity:.75;font-size:.9rem">Ela aparece só agora. Copie a mensagem e mande pelo WhatsApp do cadastro.</p>
+      <div style="font:600 1.6rem/1.2 ui-monospace,Consolas,monospace;letter-spacing:.06em;padding:.6rem .8rem;border:1px dashed currentColor;border-radius:8px;text-align:center;user-select:all">${esc(r.senha)}</div>
+      <textarea readonly style="width:100%;margin-top:.8rem;min-height:120px;font:inherit;font-size:.85rem;padding:.5rem;border-radius:8px;box-sizing:border-box">${esc(msg)}</textarea>
+      <div style="display:flex;gap:.5rem;justify-content:flex-end;margin-top:.8rem">
+        <button class="btn btn-ghost btn-sm" data-x="fechar">Fechar</button>
+        <button class="btn btn-primary btn-sm" data-x="copiar">Copiar mensagem</button>
+      </div></div>`;
+    document.body.appendChild(ov);
+    ov.addEventListener('click', async ev => {
+      const x = ev.target.closest('[data-x]');
+      if(ev.target === ov || (x && x.dataset.x === 'fechar')){ ov.remove(); return; }
+      if(x && x.dataset.x === 'copiar'){
+        try{ await navigator.clipboard.writeText(msg); x.textContent = 'Copiada ✓'; }
+        catch(_){ const t = ov.querySelector('textarea'); t.select(); document.execCommand('copy'); x.textContent = 'Copiada ✓'; }
+      }
+    });
+    showMsg('globalMessagePortaria', `Senha provisória gerada para ${p.email}.`, 'success');
+  }
+
   async function portariaResetPassword(email){
     if(!confirm(`Enviar e-mail de redefinição de senha para "${email}"?`)) return;
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
@@ -63073,6 +63129,7 @@ button.sl-chip.is-on{ border-color:var(--accent); color:var(--accent); backgroun
       else if(acao === 'suspender' && p) _contaSituacao(p, true);
       else if(acao === 'reativar' && p) _contaSituacao(p, false);
       else if(acao === 'senha') portariaResetPassword(b.dataset.email);
+      else if(acao === 'provisoria' && p) _contaSenhaProvisoria(p);
       else if(acao === 'excluir' && p) openPortariaDeleteModal(p.user_id, p.email);
     });
     document.getElementById('portaria-search')?.addEventListener('input', e => { contasBusca = e.target.value || ''; renderContas(); });
