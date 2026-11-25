@@ -15,7 +15,7 @@
    ═══════════════════════════════════════════════════════════════════════════════ */
 (function(){
   'use strict';
-  const KIT_V = 1;
+  const KIT_V = 2;
   const MODOS = [
     { v: 'pedir', t: 'Só quando eu pedir', s: 'O tutor nunca desenha por conta própria.' },
     { v: 'perguntar', t: 'Perguntar antes', s: 'Quando um desenho ajudar, o tutor oferece e mostra o custo.' },
