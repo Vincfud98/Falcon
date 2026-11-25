@@ -40,10 +40,10 @@
   const fmtF = n => (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const toast = (m, t) => { try{ if(window.ueToast) window.ueToast(m, t || 'success'); }catch(_){} };
   function modo(){
-    const v = (window.Store && Store.prefsGet) ? Store.prefsGet('quadro_modo') : null;
+    const v = (window.Store && window.Store.prefsGet) ? window.Store.prefsGet('quadro_modo') : null;
     return MODOS.some(m => m.v === v) ? v : 'sozinho';
   }
-  function setModo(v){ if(window.Store && Store.prefsSet) Store.prefsSet('quadro_modo', v); }
+  function setModo(v){ if(window.Store && window.Store.prefsSet) window.Store.prefsSet('quadro_modo', v); }
   function pediuDesenho(texto){ return PEDIDO_RE.test(String(texto || '')); }
   async function token(){
     try{ const { data } = await window._sb.auth.getSession(); return data && data.session && data.session.access_token; }catch(_){ return null; }
@@ -360,8 +360,10 @@
         L.gerando.cartao = card;
         if(opts.rolar) opts.rolar();
       }
-      // na página, o Quadro abre já mostrando o desenho sendo feito; na gaveta, só quando o aluno pede ou ficou pronto
-      if(L.onde === 'pagina' || ajuste) mostrarGerando(info);
+      // na página, o Quadro abre já mostrando o desenho sendo feito. Na gaveta, só quando o aluno pediu o desenho
+      // (escreveu pedindo, aceitou o convite ou usou o botão); se foi o tutor que decidiu, fica o cartão na conversa.
+      const abrir = L.onde === 'pagina' || ajuste || !!pedido.abrir;
+      if(abrir) mostrarGerando(info);
       let fim = null, erro = null, saldo = null;
       try{
         const r = await ef({
@@ -396,11 +398,11 @@
       }
       if(!fim || !fim.quadro || erro){
         if(cartao){ cartao.classList.remove('is-gerando'); cartao.querySelector('.qd-cartao-s').textContent = 'Não deu para desenhar · tocar para tentar de novo'; cartao.onclick = () => { cartao.remove(); gerar(pedido); }; }
-        if(L.onde === 'pagina' || ajuste || (painel && !painel.hidden)) mostrarErro(erro || 'Não consegui desenhar agora.', true);
+        if(abrir || (painel && !painel.hidden)) mostrarErro(erro || 'Não consegui desenhar agora.', true);
         return;
       }
       const q = fim.quadro;
-      if(window.UbtWallet) try{ UbtWallet.load(); }catch(_){}
+      if(window.UbtWallet) try{ window.UbtWallet.load(); }catch(_){}
       L.quadros.push(q);
       if(cartao){
         cartao.classList.remove('is-gerando');
@@ -410,7 +412,7 @@
       } else if(ajuste && base && opts.ultimaBolha){
         const b = opts.ultimaBolha(); if(b){ b.appendChild(cartaoEl(q, subCartao(q))); }
       }
-      if(L.onde === 'pagina' || ajuste || (painel && !painel.hidden)) mostrar(q);
+      if(abrir || (painel && !painel.hidden)) mostrar(q);
       else if(cartao) cartao.classList.add('is-novo');
     }
 
@@ -427,7 +429,7 @@
       let plano;
       try{ plano = await planejar(Object.assign({ pedido: pediu ? info.pergunta : '' }, info), !pediu); }catch(_){ return; }
       if(!plano.desenhar) return;
-      const pedido = { plano, pergunta: info.pergunta, resposta: info.resposta, bolha: info.bolha, ordem: c.ordem };
+      const pedido = { plano, pergunta: info.pergunta, resposta: info.resposta, bolha: info.bolha, ordem: c.ordem, abrir: pediu };
       if(pediu || m === 'sozinho'){ gerar(pedido); return; }
       // perguntar antes: o convite fica embaixo da resposta
       const conv = document.createElement('div');
@@ -436,7 +438,7 @@
         + '<button type="button" class="qd-btn cheio" data-q-sim>Desenhar no Quadro · ' + fmtF(plano.preco) + ' ƒ</button>'
         + '<button type="button" class="qd-btn leve" data-q-nao>Agora não</button>';
       info.bolha.appendChild(conv);
-      conv.querySelector('[data-q-sim]').addEventListener('click', () => { conv.remove(); gerar(pedido); });
+      conv.querySelector('[data-q-sim]').addEventListener('click', () => { conv.remove(); gerar(Object.assign({}, pedido, { abrir: true })); });
       conv.querySelector('[data-q-nao]').addEventListener('click', () => conv.remove());
       if(opts.rolar) opts.rolar();
     }
@@ -449,7 +451,7 @@
       let plano;
       try{ plano = await planejar(Object.assign({ pedido: 'Desenhe isto no Quadro.' }, u), false); }
       catch(_){ toast('Não consegui preparar o desenho agora.', 'error'); return; }
-      gerar({ plano, pergunta: u.pergunta, resposta: u.resposta, bolha: u.bolha, ordem: c.ordem });
+      gerar({ plano, pergunta: u.pergunta, resposta: u.resposta, bolha: u.bolha, ordem: c.ordem, abrir: true });
     }
 
     // ── Guardar, flashcards, sugerir, Meus Quadros ──
@@ -467,9 +469,9 @@
       let j = {};
       try{ const r = await ef({ acao: 'flashcards', quadro_id: q.id }); j = await r.json(); }catch(_){}
       const cs = Array.isArray(j.cartoes) ? j.cartoes : [];
-      if(!cs.length || !window.Store || !Store.deckAdd){ toast('Não consegui fazer os flashcards agora.', 'error'); return; }
+      if(!cs.length || !window.Store || !window.Store.deckAdd){ toast('Não consegui fazer os flashcards agora.', 'error'); return; }
       const c = opts.ctx ? opts.ctx() : {};
-      cs.forEach(x => Store.deckAdd({ kind: 'basic', front: x.frente, back: x.verso, origin: 'ia', sourceQuote: 'Quadro: ' + String(q.titulo || '').slice(0, 200),
+      cs.forEach(x => window.Store.deckAdd({ kind: 'basic', front: x.frente, back: x.verso, origin: 'ia', sourceQuote: 'Quadro: ' + String(q.titulo || '').slice(0, 200),
         genParams: { quadro: String(q.id) }, subjectId: c.subjectId || null, unitId: c.unitId || null, unitTitle: c.unitTitle || '' }));
       toast(cs.length + (cs.length === 1 ? ' flashcard guardado' : ' flashcards guardados') + ' nos seus Flashcards.');
     }
