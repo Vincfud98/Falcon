@@ -17,6 +17,7 @@
    API pública 100% retrocompatível:
      list, get, add, update, remove, replaceAll, subscribe,
      getState, reload (no-op), reset, meta
+   Leitura sem cópia (26/11): peek, peekBy, listBy, versao — ver makeCRUD.
    ════════════════════════════════════════════════════════════════════ */
 (function(global){
   'use strict';
@@ -66,8 +67,46 @@
     return JSON.parse(JSON.stringify(obj));
   }
 
+  // ── Índices por campo e versão de cada tabela (26/11) ──
+  // list() copia a tabela inteira a cada chamada, e a de blocos já passa de 11 MB: achar os blocos de UMA
+  // unidade com list() custava a cópia de todo o conteúdo da plataforma (o navegador travava ao abrir a
+  // plataforma e as unidades). Os índices acham os itens de um valor (ex.: unit_id) sem varrer nem copiar;
+  // são montados na primeira consulta e jogados fora a cada mudança na tabela. A versão sobe a cada mudança,
+  // para quem guarda um cálculo saber quando refazer.
+  const _indices = {};
+  const _versoes = {};
+  let _versaoGeral = 0;
+  function _mudou(type){
+    if(!type || type === 'reset' || type === 'sync'){
+      Object.keys(_indices).forEach(function(k){ delete _indices[k]; });
+      _versaoGeral++;
+      return;
+    }
+    const i = type.indexOf(':');
+    if(i <= 0) return;
+    const entity = type.substring(0, i);
+    delete _indices[entity];
+    _versoes[entity] = (_versoes[entity] || 0) + 1;
+  }
+  function _indicePor(entity, field){
+    const porTabela = _indices[entity] || (_indices[entity] = {});
+    let m = porTabela[field];
+    if(m) return m;
+    m = new Map();
+    (_state[entity] || []).forEach(function(x){
+      if(!x) return;
+      const k = String(x[field]);
+      let arr = m.get(k);
+      if(!arr){ arr = []; m.set(k, arr); }
+      arr.push(x);
+    });
+    porTabela[field] = m;
+    return m;
+  }
+
   // ── Emit local + broadcast cross-tab ──
   function emit(eventName, payload){
+    _mudou(eventName);   // antes dos ouvintes: quem consulta o índice já vê a mudança
     _listeners.forEach(cb => {
       try{ cb({ type: eventName, payload, state: _state }); }
       catch(e){ console.warn('[UbiqueStore] listener error:', e); }
@@ -82,6 +121,7 @@
   // (que não existe mais), reproduzimos a mutação direto no _state.
   function _applyRemoteChange(type, payload){
     if(!type) return;
+    _mudou(type);
     if(type === 'reset'){
       _state = JSON.parse(JSON.stringify(EMPTY_STATE));
       return;
@@ -133,6 +173,27 @@
     return {
       list(){
         return deepClone(_state[entity] || []);
+      },
+      // ── Leitura SEM cópia (26/11) ──
+      // peek/peekBy devolvem os PRÓPRIOS objetos do store, numa lista nova (pode ordenar ou filtrar a lista).
+      // Só para quem apenas LÊ: nunca altere um objeto que veio daqui (nem campos de dentro, como content);
+      // para mudar, use update/add/remove. Quem precisa de objetos para mexer usa list() ou listBy().
+      peek(){
+        return (_state[entity] || []).slice();
+      },
+      // Itens com String(item[field]) === String(valor), sem varrer a tabela (índice).
+      peekBy(field, value){
+        const arr = _indicePor(entity, field).get(String(value));
+        return arr ? arr.slice() : [];
+      },
+      // Igual a peekBy, mas copiados como no list(): copia só os itens achados, não a tabela inteira.
+      listBy(field, value){
+        const arr = _indicePor(entity, field).get(String(value));
+        return arr ? deepClone(arr) : [];
+      },
+      // Muda a cada alteração da tabela (ou reset/sincronização): chave para guardar um cálculo feito sobre ela.
+      versao(){
+        return _versaoGeral + '.' + (_versoes[entity] || 0);
       },
       get(id){
         const arr = _state[entity] || [];

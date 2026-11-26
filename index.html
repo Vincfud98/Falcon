@@ -28,10 +28,10 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
      Line/Bar) e no RotinaTab. Quem usa a biblioteca é o admin.html, que tem a
      própria tag. NÃO reintroduzir aqui sem antes checar se há uso real. -->
 <!-- Ubique Shared Store — espelha CRUD do admin -->
-<script src="ubique-shared.js?v=138"></script>
+<script src="ubique-shared.js?v=139"></script>
 <!-- Renderers de blocos de aprendizagem (compartilhados com admin) -->
 <script src="learning-blocks-render.js?v=85"></script>
-<script src="raiox-render.js?v=4"></script>
+<script src="raiox-render.js?v=5"></script>
 <script src="aula-slides.js?v=8"></script>
 <script src="aula-player.js?v=9"></script>
 <link rel="stylesheet" href="quadro-tutor.css?v=1">
@@ -13941,24 +13941,43 @@ window.TAG_REGISTRY = {
     if(maps.typeById[qid] === 'multiple_choice') return 1;
     return maps.tfByQ[qid] || 1;
   }
+  // Contagem de vídeos, objetivas e discursivas de TODAS as matérias numa passada só (26/11). Antes, cada
+  // matéria copiava o conteúdo inteiro da plataforma (unit_blocks.list(), já com 11 MB) para contar só os
+  // blocos dela: 41 cópias a cada rebuildCourses, que roda várias vezes na abertura — o navegador travava.
+  // Agora lê sem copiar (peek) e guarda o resultado até os blocos, a estrutura ou o banco de questões mudarem.
+  let _contagensCache = null;
+  function _contagensMaterias(){
+    const S = UbiqueStore;
+    const qb = _qbankItemCounts();   // muda de objeto quando o banco completo chega: as objetivas são recontadas
+    const chave = [S.unit_blocks.versao(), S.units.versao(), S.chapters.versao(), S.modules.versao()].join('|');
+    if(_contagensCache && _contagensCache.chave === chave && _contagensCache.qb === qb) return _contagensCache.porMateria;
+    // String() dos dois lados: subjects.id é integer, mas pode chegar string de algumas fontes.
+    const materiaDoModulo = new Map(), materiaDoCapitulo = new Map(), materiaDaUnidade = new Map();
+    S.modules.peek().forEach(m => materiaDoModulo.set(String(m.id), String(m.subject_id)));
+    S.chapters.peek().forEach(c => { const sid = materiaDoModulo.get(String(c.module_id)); if(sid != null) materiaDoCapitulo.set(String(c.id), sid); });
+    S.units.peek().forEach(u => { const sid = materiaDoCapitulo.get(String(u.chapter_id)); if(sid != null) materiaDaUnidade.set(String(u.id), sid); });
+    const porMateria = new Map();
+    S.unit_blocks.peek().forEach(b => {
+      const sid = b && materiaDaUnidade.get(String(b.unit_id));
+      if(sid == null) return;
+      let out = porMateria.get(sid);
+      if(!out){ out = { videos: 0, quiz: 0, essay: 0 }; porMateria.set(sid, out); }
+      _somaBlocoNaContagem(out, b);
+    });
+    _contagensCache = { chave: chave, qb: qb, porMateria: porMateria };
+    return porMateria;
+  }
   function _countSubjectContent(subjectId){
     const out = { videos: 0, quiz: 0, essay: 0 };
     if(!window.UbiqueStore || subjectId == null) return out;
     // Blocos ainda descendo (2º plano do boot): sem número parcial — os
     // cartões escondem o que é nulo e preenchem quando a carga completa.
     if(!window._blocosCompletos) return { videos: null, quiz: null, essay: null };
-    // Normalize String() — subjects.id é integer, mas pode chegar string
-    // de algumas fontes (cache, query string). Mesmo padrão aplicado no admin.
-    const sidStr = String(subjectId);
-    const modules = (UbiqueStore.modules.list() || []).filter(m => String(m.subject_id) === sidStr);
-    if(!modules.length) return out;
-    const moduleIds = new Set(modules.map(m => String(m.id)));
-    const chapters = (UbiqueStore.chapters.list() || []).filter(c => moduleIds.has(String(c.module_id)));
-    const chapterIds = new Set(chapters.map(c => String(c.id)));
-    const units = (UbiqueStore.units.list() || []).filter(u => chapterIds.has(String(u.chapter_id)));
-    const unitIds = new Set(units.map(u => String(u.id)));
-    const blocks = (UbiqueStore.unit_blocks.list() || []).filter(b => unitIds.has(String(b.unit_id)));
-    blocks.forEach(b => {
+    const c = _contagensMaterias().get(String(subjectId));
+    return c ? { videos: c.videos, quiz: c.quiz, essay: c.essay } : out;
+  }
+  // Soma um bloco na contagem da matéria (só lê o bloco).
+  function _somaBlocoNaContagem(out, b){
       if(b.type === 'video'){ out.videos++; return; }
       const content = b.content || {};
       if(b.type === 'objective_questions' || b.type === 'quiz'){
@@ -13982,8 +14001,6 @@ window.TAG_REGISTRY = {
         out.essay += Array.isArray(content.items) ? content.items.length : 0;
         return;
       }
-    });
-    return out;
   }
 
   /**
@@ -14050,9 +14067,10 @@ window.TAG_REGISTRY = {
   function _expandTopicUnitLinks(){
     const out = {};
     if(!window.UbiqueStore || !UbiqueStore.edital_topic_units) return out;
-    const links = UbiqueStore.edital_topic_units.list() || [];
-    const units = (UbiqueStore.units && UbiqueStore.units.list()) || [];
-    const chapters = (UbiqueStore.chapters && UbiqueStore.chapters.list()) || [];
+    // Só lê (devolve conjuntos novos): sem cópia das tabelas (26/11).
+    const links = UbiqueStore.edital_topic_units.peek();
+    const units = (UbiqueStore.units && UbiqueStore.units.peek()) || [];
+    const chapters = (UbiqueStore.chapters && UbiqueStore.chapters.peek()) || [];
     links.forEach(function(l){
       if(!l || l.topic_id == null) return;
       const ttype = l.target_type || (l.unit_id != null ? 'unit' : null);
@@ -14072,6 +14090,25 @@ window.TAG_REGISTRY = {
     return out;
   }
   window._expandTopicUnitLinks = _expandTopicUnitLinks;
+  // Tópicos do edital por unidade (26/11): é o mesmo índice para todas as matérias, e era refeito para cada
+  // uma a cada rebuildCourses. Montado uma vez e guardado até os vínculos ou a estrutura mudarem. Quem usa
+  // copia a lista da unidade (unit.topics é do curso, não do índice).
+  let _topicosPorUnidadeCache = null;
+  function _topicosPorUnidade(){
+    const S = UbiqueStore;
+    const chave = [S.edital_topic_units ? S.edital_topic_units.versao() : '', S.units.versao(), S.chapters.versao()].join('|');
+    if(_topicosPorUnidadeCache && _topicosPorUnidadeCache.chave === chave) return _topicosPorUnidadeCache.mapa;
+    const mapa = {};
+    const _tu = _expandTopicUnitLinks();
+    Object.keys(_tu).forEach(function(topicId){
+      _tu[topicId].forEach(function(storeUnitId){
+        if(!mapa[storeUnitId]) mapa[storeUnitId] = [];
+        mapa[storeUnitId].push(topicId);
+      });
+    });
+    _topicosPorUnidadeCache = { chave: chave, mapa: mapa };
+    return mapa;
+  }
 
   /**
    * Reconstrói modules/chapters/units de um course a partir do UbiqueStore
@@ -14086,25 +14123,19 @@ window.TAG_REGISTRY = {
    */
   function rebuildCourseHierarchyFromStore(course, subjectId, _originalCourse){
     if(!window.UbiqueStore || !subjectId) return course;
-    const storeModules = UbiqueStore.modules.list()
+    // Leitura sem cópia (26/11): esta função roda para cada matéria a cada rebuildCourses e só LÊ os campos
+    // (o curso montado é feito de objetos novos). list() copiava as tabelas inteiras 41 vezes por rebuild.
+    const storeModules = UbiqueStore.modules.peek()
       .filter(function(m){ return m.subject_id === subjectId; })
       .sort(function(a,b){ return (a.position||0) - (b.position||0); });
 
-    const allChapters = UbiqueStore.chapters.list() || [];
-    const allUnits    = UbiqueStore.units.list() || [];
-    const topicLinks  = (UbiqueStore.edital_topic_units && UbiqueStore.edital_topic_units.list()) || [];
+    const allChapters = UbiqueStore.chapters.peek();
+    const allUnits    = UbiqueStore.units.peek();
 
     // Index: topics por unit_id. Usa o helper que EXPANDE vínculos de
     // capítulo/módulo (target_type) para as unidades — antes só pegava
     // vínculos direto na unidade (l.unit_id), ignorando os de capítulo/módulo.
-    const topicsByUnit = {};
-    const _tu = (typeof _expandTopicUnitLinks === 'function') ? _expandTopicUnitLinks() : {};
-    Object.keys(_tu).forEach(function(topicId){
-      _tu[topicId].forEach(function(storeUnitId){
-        if(!topicsByUnit[storeUnitId]) topicsByUnit[storeUnitId] = [];
-        topicsByUnit[storeUnitId].push(topicId);
-      });
-    });
+    const topicsByUnit = _topicosPorUnidade();
 
     course.modules = storeModules.map(function(sm){
       const mid = sm._origMockId || ('m' + sm.id);
@@ -14158,7 +14189,7 @@ window.TAG_REGISTRY = {
                 published_at: su.published_at || null,
                 coverPos: (su.cover_pos_x != null || su.cover_pos_y != null) ? { x: su.cover_pos_x != null ? Number(su.cover_pos_x) : 50, y: su.cover_pos_y != null ? Number(su.cover_pos_y) : 35 } : null,
                 label:  'Unidade',
-                topics: topicsByUnit[su.id] || [],
+                topics: (topicsByUnit[su.id] || []).slice(),
                 tags: []
               };
             })
@@ -14927,7 +14958,7 @@ window.TAG_REGISTRY = {
     const atual = window.__hydrating ? null : _unidadeAtualStoreId();   // no boot ninguém está lendo ainda
     let mudouAtual = false;
     if(atual != null){
-      try{ mudouAtual = _assinaturaBlocosDaUnidade(UbiqueStore.unit_blocks.list(), atual) !== _assinaturaBlocosDaUnidade(rows, atual); }catch(_){ }
+      try{ mudouAtual = _assinaturaBlocosDaUnidade(UbiqueStore.unit_blocks.peekBy('unit_id', atual), atual) !== _assinaturaBlocosDaUnidade(rows, atual); }catch(_){ }
     }
     window.__blocosSilencioso = true; window.__blocosMudouUnidadeAtual = mudouAtual;
     try{ UbiqueStore.unit_blocks.replaceAll(rows); } finally { window.__blocosSilencioso = false; window.__blocosMudouUnidadeAtual = false; }
@@ -15757,7 +15788,7 @@ window.TAG_REGISTRY = {
         // discursivas (content.items[]). Blocos vivem no UbiqueStore, não na
         // unidade (o `unit.blocks` é campo fantasma).
         const ids = new Set();
-        const blocos = (window.UbiqueStore && UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.list()) || [];
+        const blocos = (window.UbiqueStore && UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.peekBy('unit_id', chave)) || [];   // só lê; sem cópia (26/11)
         blocos.forEach(function(b){
           if(!b || String(b.unit_id) !== chave || !b.content) return;
           (Array.isArray(b.content.groups) ? b.content.groups : []).forEach(function(g){
@@ -16709,10 +16740,9 @@ const Util = {
   unitBlockIds(unit){
     if(!unit) return [];
     if(unit._storeId != null && window.UbiqueStore && UbiqueStore.unit_blocks){
-      const sid = String(unit._storeId);
-      return (UbiqueStore.unit_blocks.list() || [])
-        .filter(b => String(b.unit_id) === sid)
-        .map(b => b.id);
+      // Pelo índice, sem copiar o conteúdo (26/11): o progresso de cada módulo e matéria chama isto uma vez
+      // por unidade, e o list() copiava todos os blocos da plataforma a cada chamada.
+      return UbiqueStore.unit_blocks.peekBy('unit_id', unit._storeId).map(b => b.id);
     }
     const ids = [];
     (unit.groups||[]).forEach(g => (g.blocks||[]).forEach(b => ids.push(b.id)));
@@ -17530,7 +17560,7 @@ const Auth = (function(){
           // se faltar bloco, re-busca o conteúdo (idempotente; só quando vazio).
           try{
             if(window._hydrateContent && window.UbiqueStore && UbiqueStore.unit_blocks
-               && (UbiqueStore.unit_blocks.list() || []).length === 0){
+               && UbiqueStore.unit_blocks.peek().length === 0){
               window._hydrateContent().then(function(){ _finishIni(); }).catch(function(){ _finishIni(); });
             } else {
               _finishIni();
@@ -21787,7 +21817,7 @@ const Store = (function(){
         try{
           const _mv = /^v(\d+)$/.exec(String(blockId || ''));
           if(_mv && window.UbiqueStore && UbiqueStore.unit_blocks){
-            const blk = (UbiqueStore.unit_blocks.list() || []).find(b => b && String(b.id) === _mv[1]);
+            const blk = UbiqueStore.unit_blocks.peekBy('id', _mv[1])[0];   // só lê; sem cópia (26/11)
             const pres = blk ? (blk.presenters || (blk.content && blk.content.presenters) || []) : [];
             const ids = new Set((Array.isArray(pres) ? pres : []).map(p => String(p && p.id)));
             (window.__CONTAS_PROFS || []).forEach(cp => {
@@ -22771,7 +22801,8 @@ const TextMarks = (function(){
       const S = window.UbiqueStore;
       if(S && S.unit_blocks && S.glossary_terms){
         const vistos = {};
-        (S.unit_blocks.list() || []).forEach(function(b){
+        // Só lê os blocos (monta objetos novos): sem copiar o conteúdo inteiro (26/11).
+        S.unit_blocks.peek().forEach(function(b){
           if(!b || b.type !== 'glossary' || b.unit_id == null) return;
           const k = String(b.unit_id);
           const lista = _gloss[k] || (_gloss[k] = []);
@@ -36821,7 +36852,7 @@ function _resolveNotifTargetHash(p){
   // 3) descobre a unidade pelo block_id (notificações ainda mais antigas)
   if(p.block_id && window.UbiqueStore && UbiqueStore.unit_blocks){
     try{
-      const blk = (UbiqueStore.unit_blocks.list() || []).find(b => b && String(b.id) === String(p.block_id));
+      const blk = UbiqueStore.unit_blocks.peekBy('id', p.block_id)[0];   // só lê; sem cópia (26/11)
       if(blk && blk.unit_id){ const h = hashFor(blk.unit_id); if(h) return h; }
     }catch(_){}
   }
@@ -51313,7 +51344,7 @@ function _iniMentoriaPartes(t, d, me){
       + '<div class="meta"><span>' + E(sigla(alvo.c)) + '</span></div></a>' });
   });
   if((d.videos || []).length){
-    const blocos = new Map(((window.UbiqueStore && UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.list()) || []).map(b => [String(b.id), b]));
+    const blocos = new Map(((window.UbiqueStore && UbiqueStore.unit_blocks && UbiqueStore.unit_blocks.peek()) || []).map(b => [String(b.id), b]));   // só lê; sem cópia (26/11)
     const grupos = {};
     d.videos.forEach(v => {
       const b = blocos.get(String(v.block_id)); if(!b) return;          // vídeo ainda não chegou ao aparelho
@@ -53482,11 +53513,11 @@ function _hydrateStoreBlock(sb, verbeteIndex){
  * dados para a unidade — chamadores caem no mock legacy. */
 function _groupsFromStore(storeUnitId){
   if(!window.UbiqueStore) return null;
-  const sections = (UbiqueStore.unit_sections.list() || [])
-    .filter(function(s){ return s.unit_id === storeUnitId; })
+  // listBy (26/11): copia só as seções e os blocos DESTA unidade (os renderizadores recebem cópias, como antes),
+  // em vez de copiar o conteúdo inteiro da plataforma para depois filtrar — eram 6 cópias de 11 MB por abertura.
+  const sections = UbiqueStore.unit_sections.listBy('unit_id', storeUnitId)
     .sort(function(a,b){ return (a.position||0) - (b.position||0); });
-  const allBlocks = (UbiqueStore.unit_blocks.list() || [])
-    .filter(function(b){ return b.unit_id === storeUnitId; });
+  const allBlocks = UbiqueStore.unit_blocks.listBy('unit_id', storeUnitId);
   if(!sections.length && !allBlocks.length) return null;
 
   // Pré-indexa verbetes uma vez (por id E por slug do term) para enriquecer
@@ -53545,11 +53576,10 @@ function _unitWithStoreOverride(unit){
 
 /* Render a unit entirely from UbiqueStore (sections + blocks). */
 Renderers.unitFromStore = function(storeUnitId, mockUnit, m, chapter){
-  const sections = (UbiqueStore.unit_sections.list() || [])
-    .filter(function(s){ return s.unit_id === storeUnitId; })
+  // Só as seções e os blocos desta unidade, copiados (26/11; ver _groupsFromStore).
+  const sections = UbiqueStore.unit_sections.listBy('unit_id', storeUnitId)
     .sort(function(a,b){ return (a.position||0) - (b.position||0); });
-  const allBlocks = (UbiqueStore.unit_blocks.list() || [])
-    .filter(function(b){ return b.unit_id === storeUnitId; });
+  const allBlocks = UbiqueStore.unit_blocks.listBy('unit_id', storeUnitId);
 
   const sectionsHtml = sections.map(function(sec){
     const blocks = allBlocks
@@ -67507,7 +67537,7 @@ function _unitRecuperarBlocos(blockStage, unit, groups){
   if(temBloco || !blockStage || !window.UbiqueStore || !window._hydrateBlocksForUnit) return;
   const storeId = (unit._storeId != null) ? unit._storeId : String(unit.id || '').replace(/^u/, '');
   if(storeId === '' || storeId == null) return;
-  const jaTem = (UbiqueStore.unit_blocks.list() || []).some(b => String(b.unit_id) === String(storeId));
+  const jaTem = UbiqueStore.unit_blocks.peekBy('unit_id', storeId).length > 0;   // sem cópia (26/11)
   if(jaTem) return;   // a unidade está no Store e não tem blocos mesmo
   const aviso = document.createElement('p');
   aviso.className = 'unit-carregando';
@@ -67547,9 +67577,8 @@ function _dataCurta(iso){
 function _unitAtualizadaEm(unit){
   let max = unit.updated_at ? Date.parse(unit.updated_at) : 0;
   if(unit._storeId != null && window.UbiqueStore && UbiqueStore.unit_blocks){
-    const sid = String(unit._storeId);
-    (UbiqueStore.unit_blocks.list() || []).forEach(function(b){
-      if(String(b.unit_id) !== sid) return;
+    // Só lê a data: pelo índice, sem copiar o conteúdo (26/11).
+    UbiqueStore.unit_blocks.peekBy('unit_id', unit._storeId).forEach(function(b){
       const tb = b.updated_at ? Date.parse(b.updated_at) : 0;
       if(tb > max) max = tb;
     });

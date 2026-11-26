@@ -89,6 +89,7 @@
       lingH: 'Seu acerto com × sem cada traço de escrita (calculado sobre as suas respostas)',
       prioH: 'Seu acerto × média da plataforma (±desvio: quanto as notas se espalham — desvio alto = subir ali desloca mais sua posição)',
       discTitulo: 'Discursivas — seu perfil de escrita',
+      discFalhou: 'A parte das discursivas não saiu desta vez. Você pagou só a parte das objetivas. Tente de novo para ter as duas.',
       provaH: 'O que cai na prova × você',
       provaCols: ['Tema', 'Na prova (5 últimas)', 'Tendência', 'Seu acerto', 'Você perderia (itens)', 'Seu treino', 'Leitura'],
       esqH: 'Temas que você está esquecendo',
@@ -105,6 +106,7 @@
       lingH: 'Acerto com × sem cada traço de escrita (calculado sobre as respostas do aluno)',
       prioH: 'Acerto do aluno × média da plataforma (±desvio: quanto as notas se espalham — desvio alto = subir ali desloca mais a posição)',
       discTitulo: 'Discursivas — perfil de escrita',
+      discFalhou: 'A parte das discursivas não saiu desta vez. Gere de novo para tê-la.',
       provaH: 'O que cai na prova × o aluno',
       provaCols: ['Tema', 'Na prova (5 últimas)', 'Tendência', 'Acerto', 'Perderia (itens)', 'Treino', 'Leitura'],
       esqH: 'Temas que está esquecendo',
@@ -122,6 +124,7 @@
     lingH: 'Acerto da turma com × sem cada traço de escrita (calculado sobre as respostas de todos)',
     prioH: 'Acerto da turma × média da plataforma (±desvio: quanto as notas se espalham — desvio alto = subir ali desloca mais a posição)',
     discTitulo: 'Discursivas — a escrita da turma',
+    discFalhou: 'A parte das discursivas não saiu desta vez. Gere de novo para tê-la.',
     provaH: 'O que cai na prova × a turma',
     provaCols: ['Tema', 'Na prova (5 últimas)', 'Tendência', 'Acerto da turma', 'Perderia (itens, média)', 'Treino da turma', 'Leitura'],
     esqH: 'Temas que a turma está esquecendo',
@@ -360,8 +363,15 @@
   // Seção separada (decisão do dono), com o brainstorm como subseção. Mesmos
   // princípios da Parte 1: padrões que se repetem ENTRE as correções, com
   // trechos verbatim e dica acionável — nunca uma nova correção.
-  function _discHtml(d, ch, V){
-    if(!d || !d.resumo) return '';
+  // Quando só a Parte 2 falhou no servidor (aggregates.discursivas_nao_saiu), o relatório sai com a Parte 1 e o aviso.
+  function _discHtml(d, ch, V, ag){
+    if(!d || !d.resumo){
+      if(!(ag && ag.discursivas_nao_saiu)) return '';
+      return '<div data-rx-sec="discursivas" style="margin-top:2.2rem;border-top:1px solid var(--border);padding-top:1.4rem">' +
+        '<span class="s-label">Parte 2</span>' +
+        '<h2 class="rx-title" style="font-size:1.25rem">' + V.discTitulo + '</h2>' +
+        '<p class="rx-sub">' + _esc(V.discFalhou) + '</p></div>';
+    }
     const padroes = (Array.isArray(d.padroes) ? d.padroes : []).map(function(p){
       return '<div class="rx-mat"><div class="rx-mat-h"><span>' + _esc(p.padrao) + '</span></div>' + _evHtml(p.evidencias) +
         (p.dica ? '<div class="rx-dica">Para a próxima: ' + _esc(p.dica) + '</div>' : '') + '</div>';
@@ -461,7 +471,7 @@
       _secList(V.prioridadesH, f.prioridades, opts.prioItem || _prioPadrao, 'prioridades', ch.prio) +
       _secList('Macetes de banca', f.macetes, function(m){ return '<li>' + _esc(m) + '</li>'; }) +
       _secList('Próximos passos', f.proximos_passos, function(p){ return '<li>' + _esc(p) + '</li>'; }) +
-      _discHtml(f.discursivas, ch, V) +
+      _discHtml(f.discursivas, ch, V, ag) +
       (opts.acoesHtml || '') +
       '<div class="rx-meta">' + V.meta + _esc((ag && ag.escopo) || 'Questões anuladas e simulados não entram na conta.') + '</div>';
   }
@@ -604,7 +614,7 @@
           ((d.brainstorm && d.brainstorm.diagnostico) ? '<h2>Brainstorm (fase de ideias)</h2><p>' + _esc(d.brainstorm.diagnostico) + '</p>' + evDoc(d.brainstorm.evidencias) : '') +
           list('Próximos passos', d.proximos_passos, function(x){ return '<li>' + _esc(x) + '</li>'; }) +
           '</div>';
-      })() : '') +
+      })() : ((report.aggregates && report.aggregates.discursivas_nao_saiu) ? '<h2>' + V.discTitulo + '</h2><p>' + _esc(V.discFalhou) + '</p>' : '')) +
       '<div class="meta">' + V.docMeta + _esc((report.aggregates && report.aggregates.escopo) || 'Questões anuladas e simulados não entram na conta.') + '</div>' });
   }
 
