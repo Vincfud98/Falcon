@@ -43763,19 +43763,20 @@ async function _salasSaveMeta(drawer){
 
 /* ═══════════ Ranking / Gamificação (Fase 5.3 — Parte G) ═══════════
    XP = acerto×50 + erro×10, somado por período a partir de aluno.daily_xp.
-   Sem data: abas Hoje/Semana/Mês/Ano/Total + vitórias (vencedor do dia). */
-async function _fetchRoomDailyXp(memberIds){
-  const ids = [...new Set((memberIds || []).map(String))].filter(Boolean);
-  if(!ids.length || !window._sb) return [];
+   Sem data: abas Hoje/Semana/Mês/Ano/Total + vitórias (vencedor do dia).
+   SQL 179: o aluno só lê o próprio daily_xp; o ranking vem pronto do servidor
+   (aluno.sala_ranking), só para quem é da sala. Vitórias = dias do último ano
+   em que o participante fez mais XP (empate: todos vencem). */
+async function _fetchRoomRanking(roomId, inicio, fim){
+  if(!roomId || !window._sb) return [];
   const since = new Date(); since.setDate(since.getDate() - 366);
-  const sinceStr = (typeof _dayFmt === 'function') ? _dayFmt(since) : null;
   try{
-    let q = window._sb.schema('aluno').from('daily_xp').select('user_id, day, xp, correct_count, total_count').in('user_id', ids);
-    if(sinceStr) q = q.gte('day', sinceStr);
-    const { data, error } = await q;
-    if(error){ console.warn('[daily_xp fetch]', error.message); return []; }
+    const { data, error } = await window._sb.schema('aluno').rpc('sala_ranking', {
+      p_sala: roomId, p_inicio: inicio, p_fim: fim || null, p_desde: _dayFmt(since)
+    });
+    if(error){ console.warn('[sala_ranking]', error.message); return []; }
     return data || [];
-  }catch(e){ console.warn('[daily_xp fetch ex]', e); return []; }
+  }catch(e){ console.warn('[sala_ranking ex]', e); return []; }
 }
 function _rankPeriodStart(period){
   const n = new Date(); n.setHours(0,0,0,0);
@@ -43826,23 +43827,17 @@ async function _salasRenderRanking(drawer){
   const meId = _salasMyUid();
   const members = (await _salasFetchMembers(roomId)).filter(m => m.status === 'member');
   if(typeof _ensureProfilesLoaded === 'function') await _ensureProfilesLoaded(members.map(m => m.user_id));
-  const rows = await _fetchRoomDailyXp(members.map(m => m.user_id));
-  // vitórias (todos os tempos): vencedor de cada dia ganha 1
-  const byDay = {}; rows.forEach(r => { (byDay[r.day] = byDay[r.day] || []).push(r); });
-  const wins = {};
-  Object.keys(byDay).forEach(day => {
-    const list = byDay[day].filter(r => (r.xp || 0) > 0); if(!list.length) return;
-    const mx = Math.max.apply(null, list.map(r => r.xp || 0));
-    list.filter(r => (r.xp || 0) === mx).forEach(r => { wins[r.user_id] = (wins[r.user_id] || 0) + 1; });
-  });
   // período
   const period = dated ? 'total' : (window._salasRankPeriod || 'today');
   const startStr = _dayFmt(_rankPeriodStart(period));
   const endStr = dated ? room.end_date : null;
-  const xpBy = {}, corBy = {}, totBy = {};
-  rows.forEach(r => { if(r.day >= startStr && (!endStr || r.day <= endStr)){ xpBy[r.user_id] = (xpBy[r.user_id] || 0) + (r.xp || 0); corBy[r.user_id] = (corBy[r.user_id] || 0) + (r.correct_count || 0); totBy[r.user_id] = (totBy[r.user_id] || 0) + (r.total_count || 0); } });
-  const ranking = members.map(m => { const c = corBy[m.user_id] || 0; const tt = totBy[m.user_id] || 0; return { uid: m.user_id, xp: xpBy[m.user_id] || 0, correct: c, incorrect: Math.max(0, tt - c), wins: wins[m.user_id] || 0 }; })
-    .sort((a, b) => b.xp - a.xp || b.correct - a.correct || b.wins - a.wins);
+  const porUid = {};
+  (await _fetchRoomRanking(roomId, startStr, endStr)).forEach(r => { porUid[String(r.user_id)] = r; });
+  const ranking = members.map(m => {
+    const r = porUid[String(m.user_id)] || {};
+    const c = r.acertos || 0, tt = r.total || 0;
+    return { uid: m.user_id, xp: r.xp || 0, correct: c, incorrect: Math.max(0, tt - c), wins: r.vitorias || 0 };
+  }).sort((a, b) => b.xp - a.xp || b.correct - a.correct || b.wins - a.wins);
   // cabeçalho / abas
   let html = '';
   if(dated){
