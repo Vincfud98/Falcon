@@ -44668,10 +44668,15 @@ Renderers.edital = function(route){
   // Banco.scopeCourses (só as matérias que o aluno tem), então o DESEMPENHO só
   // existe onde há dado; nas demais a pílula mostra "—".
   const _unitAgg = {};
-  try {
-    const _perf = buildPerformanceReport({ concursoInteiro: true });   // o Edital é do concurso, não da matéria aberta
-    Object.values(_perf.perUnit || {}).forEach(pu => { if(pu && pu.storeUnitId != null && pu.agg) _unitAgg[String(pu.storeUnitId)] = pu.agg; });
-  } catch(_){}
+  let _perfEd = null;
+  try { _perfEd = buildPerformanceReport({ concursoInteiro: true }); } catch(_){}   // o Edital é do concurso, não da matéria aberta
+  // Resposta do Banco esperando o banco completo: o edital pinta uma vez só, com ela (ver _perfEsperaBanco).
+  const _esperaEd = _perfEsperaBanco(_perfEd, 'Carregando o edital…');
+  if(_esperaEd) return _esperaEd;
+  if(_perfEd) Object.values(_perfEd.perUnit || {}).forEach(pu => { if(pu && pu.storeUnitId != null && pu.agg) _unitAgg[String(pu.storeUnitId)] = pu.agg; });
+  // Questões do Banco fora das unidades: entram no tópico pelo tema do edital de cada uma, cada questão uma vez.
+  const _bancoEd = _perfEd ? _perfEd.banco : null;
+  const _bancoEdMemo = new Map();
   // Unidades do tópico + descendentes, como Set DISTINTO (memoizado). O conjunto
   // distinto evita a dupla-contagem quando a mesma unidade está ligada ao pai E
   // a um filho — vale pra contagem E pro desempenho.
@@ -44690,12 +44695,13 @@ Renderers.edital = function(route){
   }
   // % de acerto do tópico = corretas/respondidas das unidades distintas (só quiz;
   // simulado já é excluído no motor de desempenho). null = sem resposta ainda.
-  function _perfOfSet(set){
+  function _perfOfSet(set, doBanco){
     let answered = 0, correct = 0;
     set.forEach(uid => { const a = _unitAgg[uid]; if(a && a.quiz){ answered += a.quiz.answered; correct += a.quiz.correct; } });
+    if(doBanco) doBanco.forEach(e => { if(e.tipo === 'quiz' && e.answered){ answered++; if(e.correct) correct++; } });
     return { answered: answered, pct: answered > 0 ? Math.round(correct / answered * 100) : null };
   }
-  function _perfOfTopic(tid){ return _perfOfSet(_unitsOfTopic(tid)); }
+  function _perfOfTopic(tid){ return _perfOfSet(_unitsOfTopic(tid), _perfBancoDoTopico(_bancoEd, tid, _childrenOf, null, _bancoEdMemo)); }
   // Unidades do store por id (pra listar número + título e linkar).
   const _unitsById = {};
   ((window.UbiqueStore && window.UbiqueStore.units.list()) || []).forEach(u => { if(u) _unitsById[String(u.id)] = u; });
@@ -51498,6 +51504,14 @@ Renderers.inicio = function(){
   if(window.__hydrating){
     return '<div class="ini-loading"><span class="ini-spinner"></span><span class="ini-loading-t">Carregando sua página inicial…</span></div>';
   }
+  // Os números do Início contam as respostas dadas no Banco fora das unidades, que só se atribuem à matéria com o
+  // banco completo: quem tem alguma espera por ele no mesmo carregando, e a página pinta uma vez só.
+  if(!(window._QBank && window._QBank.completo) && typeof buildPerformanceReport === 'function'){
+    let _p0 = null;
+    try{ _p0 = buildPerformanceReport(); }catch(_){}
+    const _espera = _perfEsperaBanco(_p0, 'Carregando sua página inicial…');
+    if(_espera) return _espera;
+  }
   if(window.Rede && Rede.offline() && !((window.COURSES || []).length)){
     return '<div class="ini-loading ini-semservidor"><span class="ini-loading-t">Sem conexão com o servidor e sem cópia local neste aparelho.</span>'
       + '<span class="ini-loading-s">Assim que a conexão voltar, a página carrega sozinha.</span>'
@@ -51704,6 +51718,21 @@ Renderers.inicio = function(){
           })
           .filter(function(t){ return t.pct != null; });
       }
+      // Questões do Banco fora das unidades (ver _perfBancoForaDasUnidades): o tema do edital de cada uma entra
+      // na mesma lista dos pontos fracos, com a sigla da matéria.
+      const _bancoTemas = (perf.banco && perf.banco.porTema) || {};
+      const _temaPorId = {};
+      if(Object.keys(_bancoTemas).length && window.UbiqueStore && window.UbiqueStore.edital_topics){
+        (window.UbiqueStore.edital_topics.peek() || []).forEach(function(t){ if(t) _temaPorId[String(t.id)] = t; });
+      }
+      Object.keys(_bancoTemas).forEach(function(tid){
+        const t = _temaPorId[tid]; if(!t) return;
+        let a = 0, c = 0, sid = null;
+        _bancoTemas[tid].forEach(function(e){ if(e.tipo === 'quiz' && e.answered){ a++; if(e.correct) c++; if(sid == null) sid = e.sids[0]; } });
+        if(!a) return;
+        const sg = sigOf[String(sid)] || '';
+        cand.push({ name: (sg ? sg + ' · ' : '') + String(t.title || ''), a: a, pct: Math.round(c / a * 100) });
+      });
       // Limiar ADAPTATIVO: prefere amostra decente (3+ respostas); se o aluno
       // ainda espalhou pouco, mostra com o que há (1+).
       let tps = cand.filter(function(t){ return t.a >= 3; });
@@ -80048,7 +80077,7 @@ Renderers.performance = function(route){
     _subjAccordion(course, _perfSubjectTree(course, perf.perUnit), 'Unidade', 'Sem unidades com conteúdo nesta matéria.')
   ).join('') || '<div class="perf-empty-note">Nenhuma matéria disponível.</div>';
   const byTopicHtml = _courses.map(course =>
-    _subjAccordion(course, _perfSubjectTopicTree(course, perf.perUnit), 'Tópico do edital', 'Esta matéria ainda não tem tópicos do edital vinculados às unidades.')
+    _subjAccordion(course, _perfSubjectTopicTree(course, perf.perUnit, perf.banco), 'Tópico do edital', 'Esta matéria ainda não tem tópicos do edital vinculados às unidades.')
   ).join('') || '<div class="perf-empty-note">Nenhuma matéria disponível.</div>';
 
   // ── Seção de gráficos (entre os cards de resumo e as abas) ──────────────
@@ -80448,6 +80477,10 @@ function _perfSubjectTree(course, perUnit){
       (ch.units||[]).forEach((u, ui) => {
         const pu = perUnit && perUnit[u.id];
         if(!pu || !pu.agg) return;
+        // Unidade sem nada para medir (sem blocos que a pessoa abre: matéria só do banco, unidade ainda vazia)
+        // fica fora, como no unitRows; senão a lista de quem tem só o banco era uma parede de zeros.
+        const ua = pu.agg;
+        if(!(ua.quiz.total || ua.essay.maxTotal || ua.completion.denom || ua.flashcards.total)) return;
         _perfAddAgg(modA, pu.agg); _perfAddAgg(chA, pu.agg);
         uRows.push(Object.assign({ level:'unit', depth:2, hasChildren:false, badge:_perfBadge('unit', kind.unit + (u.number?(' '+Util.esc(u.number)):'')), name:u.title||'', path:`m${mi}/c${ci}/u${ui}` }, pu.agg));
       });
@@ -80459,20 +80492,27 @@ function _perfSubjectTree(course, perUnit){
     rows.push(Object.assign({ level:'module', depth:0, hasChildren:true, badge:_perfBadge('module', kind.module + (m.number?(' '+Util.esc(m.number)):'')), name:m.title||'', path:`m${mi}` }, modA));
     chBlocks.forEach(r => rows.push(r));
   });
+  // As questões do Banco desta matéria que não estão em unidade nenhuma (ver _perfBancoForaDasUnidades).
+  const pb = perUnit && perUnit['__banco:' + course._subjectId];
+  if(pb && pb.agg && (pb.agg.quiz.total || pb.agg.essay.maxTotal)){
+    rows.push(Object.assign({ level:'module', depth:0, hasChildren:false, badge:_perfBadge('module', 'Banco'), name:'Questões fora das unidades', path:'banco' }, pb.agg));
+  }
   return rows;
 }
 
 /* Árvore de TÓPICOS DO EDITAL de UMA matéria: hierarquia parent_id; cada tópico
  * agrega as unidades vinculadas (edital_topic_units) que pertencem à matéria,
  * mais o roll-up dos subtópicos. Só inclui tópicos que tocam a matéria. */
-function _perfSubjectTopicTree(course, perUnit){
+function _perfSubjectTopicTree(course, perUnit, banco){
   if(!window.UbiqueStore || !UbiqueStore.edital_topics || !UbiqueStore.edital_topic_units) return [];
   const sid = course._subjectId;
   // store unit id → agg (só unidades desta matéria)
   const subjUnitAgg = {};
   Object.values(perUnit||{}).forEach(pu => { if(pu.subjectId === sid && pu.storeUnitId != null) subjUnitAgg[String(pu.storeUnitId)] = pu.agg; });
   const subjUnitIds = new Set(Object.keys(subjUnitAgg));
-  if(!subjUnitIds.size) return [];
+  // Questões do Banco fora das unidades: entram pelo tema do edital de cada uma (ver _perfBancoForaDasUnidades).
+  const temBanco = !!(banco && banco.entradas && banco.entradas.some(e => e.temas.length && e.sids.some(s => String(s) === String(sid))));
+  if(!subjUnitIds.size && !temBanco) return [];
   // topic_id → store unit ids vinculados (expande vínculos de capítulo/módulo).
   const topicUnits = (typeof window._expandTopicUnitLinks === 'function') ? window._expandTopicUnitLinks() : {};
   // hierarquia
@@ -80486,12 +80526,15 @@ function _perfSubjectTopicTree(course, perUnit){
     (childrenOf[tid]||[]).forEach(ch => unidadesDe(ch.id, set));
     return set;
   }
+  const bancoMemo = new Map();
   function agg(tid){
     if(cache[tid]) return cache[tid];
     const a = _perfEmptyAgg();
     const set = unidadesDe(tid, new Set());
     set.forEach(uid => _perfAddAgg(a, subjUnitAgg[uid]));
-    return (cache[tid] = { agg:a, touched: set.size > 0 });
+    const doBanco = temBanco ? _perfBancoDoTopico(banco, tid, childrenOf, sid, bancoMemo) : new Set();
+    doBanco.forEach(e => _perfBancoSoma(a, e));
+    return (cache[tid] = { agg:a, touched: set.size > 0 || doBanco.size > 0 });
   }
   const rows = [];
   function walk(t, depth, path){
@@ -80691,6 +80734,140 @@ function renderPerfBreakdown(rows, parentKind){
   </table>`;
 }
 
+/* ═══ QUESTÕES DO BANCO FORA DAS UNIDADES (26/11/2026) ═══════════════════════════════════════════════════
+   O motor de desempenho percorre unidade → bloco → questão. Por isso a questão do Banco que não está em
+   nenhum bloco que a pessoa abre nunca era contada: a prova inteira que entra no banco antes dos fascículos
+   (46% das respostas dadas no Banco) e, para quem tem só o banco, todas, porque os blocos das unidades não
+   chegam a essa conta. Início, Desempenho e Edital mostravam zero (relato do aluno Marcio, 26/11), enquanto o
+   Raio-X, que lê as respostas no servidor, via tudo.
+   Aqui essas questões entram pela matéria da própria questão (a principal e as de question_subjects), com as
+   regras do motor: só a verificada conta, a anulada sai, a mesma questão conta uma vez (a de duas matérias
+   aparece nas duas, mas uma vez no total geral). O total ("X de Y") inclui as questões do banco das matérias
+   que a pessoa tem (curso, turma da mentoria ou só o banco: Commerce.temMateria); nas outras matérias do
+   escopo entram só as respondidas (decisão do dono, 26/11). Discursiva do banco entra só corrigida, com a
+   nota e o máximo dela. A matéria e o tema de cada questão vêm do banco COMPLETO; enquanto ele não chegou,
+   nada entra e `pendente` diz se há resposta esperando (a tela espera o banco: _perfEsperaBanco). */
+function _perfAcessoAssinatura(){
+  try{
+    const a = (window.Auth && Auth.loadAccessData) ? Auth.loadAccessData() : null;
+    if(!a) return '';
+    return [a.allowed ? 1 : 0, a.access_type || '', (a.subject_ids || []).join('.'), (a.banco_ids || []).join('.'),
+      ((a.mentoria && a.mentoria.materias) || []).join('.')].join(':');
+  }catch(_){ return ''; }
+}
+function _perfBancoForaDasUnidades(scopeCourses, state, itensGerais, discGerais){
+  const out = { entradas: [], porTema: {}, pendente: false };
+  const porBancoQ = (state && state.quizAnswersByBankId) || {};
+  const porBancoE = (state && state.essaysByBankId) || {};
+  const respondida = a => !!a && !!a.verified && a.selected != null;      // a mesma régua do motor
+  const corrigida = a => !!a && typeof a.score === 'number';
+  const qb = window._QBank;
+  if(!(qb && qb.completo)){
+    if(window._perfSemBanco || window._freqSemBanco) return out;           // a carga do banco falhou: abre sem elas
+    out.pendente = Object.keys(porBancoQ).some(k => respondida(porBancoQ[k]) && !itensGerais.has(k))
+                || Object.keys(porBancoE).some(k => corrigida(porBancoE[k]) && !discGerais.has(k));
+    return out;
+  }
+  const idx = (typeof _qbankIndex === 'function') ? _qbankIndex() : null;
+  if(!idx) return out;
+  // Matérias do escopo: id em texto → o id do curso (é com ele que o resto do motor compara, com ===).
+  const sidCurso = {}, tem = new Set();
+  (scopeCourses || []).forEach(c => {
+    if(!c || c._subjectId == null) return;
+    const k = String(c._subjectId);
+    sidCurso[k] = c._subjectId;
+    if(!(window.Commerce && Commerce.temMateria) || Commerce.temMateria(c.id)) tem.add(k);
+  });
+  // Tema do edital da questão: a marca do próprio item; sem ela, a manual do grupo; sem ela, a do grupo
+  // (a mesma ordem do filtro do Banco e de _qsTemasDoItem).
+  const tbi = qb.topicsByItem || {}, tbqM = qb.manualTopicsByQuestion || {}, tbq = qb.topicsByQuestion || {};
+  const temasDe = (itemId, qid) => {
+    const a = tbi[itemId]; if(a && a.length) return a.map(String);
+    const b = tbqM[qid]; if(b && b.length) return b.map(String);
+    return (tbq[qid] || []).map(String);
+  };
+  const anulada = id => !!(window._isAnnulledItem && window._isAnnulledItem(id));
+  const add = e => {
+    out.entradas.push(e);
+    e.temas.forEach(t => { (out.porTema[t] = out.porTema[t] || []).push(e); });
+  };
+  (qb.questions || []).forEach(q => {
+    if(!q || q.id == null || q.ativo === false) return;
+    const ehDisc = q.type === 'essay';
+    if(!ehDisc && q.type !== 'true_false' && q.type !== 'multiple_choice') return;
+    const sids = _bankSubjectIdsDe(q, qb).filter(s => Object.prototype.hasOwnProperty.call(sidCurso, s));
+    if(!sids.length) return;
+    const qid = String(q.id);
+    if(ehDisc){
+      if(discGerais.has(qid)) return;
+      const a = porBancoE[qid];
+      if(!corrigida(a)) return;
+      let max = Number(a.maxScore) || 0;
+      if(!max){
+        const r = (typeof _resolveEssayItem === 'function') ? _resolveEssayItem({ bank_question_id: qid }) : null;
+        max = ((r && r.criteria) || []).reduce((s, c) => s + (Number(c.maxScore) || 0), 0);
+      }
+      add({ chave: qid, tipo: 'essay', sids: sids.map(s => sidCurso[s]), temas: temasDe(qid, qid), score: Number(a.score) || 0, max: max, at: a.submittedAt || 0 });
+      return;
+    }
+    const daPessoa = sids.filter(s => tem.has(s));
+    const itens = q.type === 'multiple_choice' ? [q] : (idx.tfByQuestion.get(qid) || []);
+    itens.forEach(t => {
+      if(!t || t.id == null) return;
+      const k = String(t.id);
+      if(itensGerais.has(k)) return;                                   // já contada pela unidade
+      if(t.anulada || q.anulada || anulada(k)) return;
+      const a = porBancoQ[k];
+      const resp = respondida(a);
+      const conta = resp ? sids : daPessoa;                            // pendente só nas matérias que a pessoa tem
+      if(!conta.length) return;
+      add({ chave: k, tipo: 'quiz', sids: conta.map(s => sidCurso[s]), temas: temasDe(k, qid),
+            answered: resp, correct: resp && !!a.correct, doubt: resp && !!a.doubt, at: resp ? (a.answeredAt || 0) : 0 });
+    });
+  });
+  return out;
+}
+// Soma uma entrada do banco num agregado do motor (resumo, linha da matéria ou tópico): as mesmas faixas do qBump.
+function _perfBancoSoma(a, e){
+  if(e.tipo === 'essay'){
+    a.essay.scoreTotal += e.score; a.essay.maxTotal += e.max;
+    a.essay.submitted = (a.essay.submitted || 0) + 1; a.essay.maxEnviadas = (a.essay.maxEnviadas || 0) + e.max;
+    return;
+  }
+  const q = a.quiz;
+  q.total++;
+  if(!e.answered){ q.pending++; return; }
+  q.answered++;
+  if(e.correct){ q.correct++; if(e.doubt) q.correctDoubt++; }
+  else { q.wrong++; if(e.doubt) q.wrongDoubt++; }
+}
+// Entradas do banco num tópico do edital e nos subtópicos dele, cada questão uma vez. filhosDe: tópico → filhos
+// (cada tela tem o seu mapa); sid: só as desta matéria (null = todas); memo: Map por tópico.
+function _perfBancoDoTopico(banco, tid, filhosDe, sid, memo){
+  const k = String(tid);
+  if(memo && memo.has(k)) return memo.get(k);
+  const set = new Set();
+  if(memo) memo.set(k, set);            // antes de descer: um ciclo em parent_id não estoura a pilha
+  ((banco && banco.porTema && banco.porTema[k]) || []).forEach(e => {
+    if(sid == null || e.sids.some(s => String(s) === String(sid))) set.add(e);
+  });
+  ((filhosDe && filhosDe[k]) || []).forEach(ch => { _perfBancoDoTopico(banco, ch.id, filhosDe, sid, memo).forEach(e => set.add(e)); });
+  return set;
+}
+// Tela que mostra números: com resposta do Banco esperando o banco completo, mostra o carregando e pinta uma
+// vez só quando ele chega (já vem em 2º plano desde a abertura). Sem nada esperando, devolve null.
+function _perfEsperaBanco(perf, texto){
+  if(!(perf && perf.banco && perf.banco.pendente)) return null;
+  if(!window._perfEsperandoBanco && typeof window._ensureQBank === 'function'){
+    window._perfEsperandoBanco = true;
+    window._ensureQBank().then(function(ok){
+      window._perfEsperandoBanco = false;
+      if(!ok) window._perfSemBanco = true;
+      if(window.App && App.render) App.render();
+    });
+  }
+  return '<div class="ini-loading"><span class="ini-spinner"></span><span class="ini-loading-t">' + Util.esc(texto) + '</span></div>';
+}
 window.buildPerformanceReport = buildPerformanceReport;   // exposto para medir no console (16/10/2026)
 function buildPerformanceReport(opts){
   // Walk course → aggregate stats per topic id and per tag id, also per module/chapter/unit.
@@ -80709,7 +80886,9 @@ function buildPerformanceReport(opts){
     (typeof _bankBlocksRev !== 'undefined') ? _bankBlocksRev : 0,
     (typeof _unitCtxRev !== 'undefined') ? _unitCtxRev : 0,
     scopeCourses.map(c => c && c.id).join(','),
-    ((window.Auth && Auth.getUser && Auth.getUser()) || {}).id || ''
+    ((window.Auth && Auth.getUser && Auth.getUser()) || {}).id || '',
+    _perfAcessoAssinatura(),                       // matérias que a pessoa tem: mudam o total das questões do banco
+    (window._perfSemBanco || window._freqSemBanco) ? 'sem-banco' : ''
   ].join('|');
   const _memo = window.__perfMemo;
   if(_memo && _memo.chave === _chave && _memo.qb === window._QBank && _memo.courses === window.COURSES && _memo.state === state) return _memo.out;
@@ -80739,6 +80918,7 @@ function buildPerformanceReport(opts){
   }
 
   const _itensGerais = new Set();   // questão do banco em duas unidades: uma vez nos totais gerais e por tópico
+  const _discGerais = new Set();    // discursivas do banco achadas nas unidades (as outras entram pelo banco, abaixo)
   scopeMods.forEach(m => {
     (Util.unitsOfModule(m)||[]).forEach(entry => {
       const unit = entry.unit;
@@ -80836,6 +81016,8 @@ function buildPerformanceReport(opts){
             const itTopics = Array.from(new Set([...(rico.topics||[]), ...inheritTopics]));
             const itTags = Array.from(new Set([...(rico.tags||[]), ...inheritTags]));
             const prior = Store.getEssayAnswer(unit.id, b.id, rico._bank_id || rico.id);
+            const _chaveE = _quizChaveBanco(unit.id, rico._bank_id || rico.id);
+            if(_chaveE) _discGerais.add(_chaveE);
             const submitted = !!prior && typeof prior.score === 'number';
             const score = submitted ? prior.score : 0;
             const maxEnviada = submitted ? (prior.maxScore || maxTotal) : 0;
@@ -80864,6 +81046,22 @@ function buildPerformanceReport(opts){
       // Atividades de idioma criadas pelo aluno (etapa 4A): contam como questões, com os tópicos
       // e as tags da unidade; não entram na conclusão de blocos (são extras dele).
       _blocosAlunoDaUnidade(unit).forEach(b => contarIdioma(b, Array.from(new Set(unit.topics || [])), Array.from(new Set(unit.tags || []))));
+    });
+  });
+
+  // Questões do Banco que a passada acima não achou em unidade nenhuma (ver _perfBancoForaDasUnidades):
+  // entram no resumo uma vez e, em cada matéria delas, numa linha própria do perUnit ("__banco:<matéria>"),
+  // que o radar, o comparativo e a lista por matéria somam como somam as unidades. A linha não é unidade:
+  // fica fora do unitRows e do ranking de unidades, e não tem storeUnitId (Edital e Caderno não a leem).
+  const banco = _perfBancoForaDasUnidades(scopeCourses, state, _itensGerais, _discGerais);
+  const perBanco = {};
+  banco.entradas.forEach(e => {
+    _perfBancoSoma(summary, e);
+    e.sids.forEach(sid => {
+      const k = '__banco:' + sid;
+      const pu = perBanco[k] || (perBanco[k] = { agg:emptyAgg(), itemIds:[], answers:[], subjectId:sid, storeUnitId:null, moduleId:null, chapterId:null, unitId:k, unitTitle:'Questões do Banco fora das unidades', soBanco:true });
+      _perfBancoSoma(pu.agg, e);
+      if(e.tipo === 'quiz' && e.answered){ pu.itemIds.push(e.chave); pu.answers.push({ at: e.at, correct: e.correct }); }
     });
   });
 
@@ -80924,7 +81122,8 @@ function buildPerformanceReport(opts){
     }, pu.agg);
   }).filter(u => u.flashcards.total||u.quiz.total||u.essay.maxTotal||u.completion.denom);
 
-  const _out = { topics, tags, summary, unitRows, perUnit };
+  Object.assign(perUnit, perBanco);   // depois do unitRows: a linha do banco não é unidade
+  const _out = { topics, tags, summary, unitRows, perUnit, banco };
   window.__perfMemo = { chave: _chave, qb: window._QBank, courses: window.COURSES, state: state, out: _out };
   return _out;
 }
