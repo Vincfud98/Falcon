@@ -141,8 +141,12 @@
 
   // ── Raio-X da turma (mentoria): erros que se repetem entre alunos, alunos que pedem atenção e a tabela de
   // cada aluno (números do sistema). Nos relatórios de um aluno estes campos não existem e nada aparece. ──
+  // v7 do servidor: a parte da turma vem num pedido à IA próprio; se só ela falhou, o relatório traz o aviso
+  // (aggregates.turma_nao_saiu) e a tabela de cada aluno, que é do sistema, continua aparecendo.
+  const _TURMA_FALHOU = 'A parte da turma (erros comuns e alunos que pedem atenção) não saiu desta vez. Gere de novo para tê-la.';
   function _turmaHtml(f, ag){
     let h = '';
+    if(ag && ag.turma_nao_saiu) h += '<div class="rx-sec" data-rx-sec="comuns"><div class="rx-sec-h">Erros comuns da turma</div><p class="rx-sub">' + _esc(_TURMA_FALHOU) + '</p></div>';
     const comuns = Array.isArray(f.erros_comuns) ? f.erros_comuns : [];
     if(comuns.length){
       h += '<div class="rx-sec" data-rx-sec="comuns"><div class="rx-sec-h">Erros comuns da turma</div>' + comuns.map(function(c){
@@ -168,6 +172,7 @@
   }
   function _turmaDoc(f, ag, evDoc){
     let h = '';
+    if(ag && ag.turma_nao_saiu) h += '<h2>Erros comuns da turma</h2><p>' + _esc(_TURMA_FALHOU) + '</p>';
     const comuns = Array.isArray(f.erros_comuns) ? f.erros_comuns : [];
     if(comuns.length) h += '<h2>Erros comuns da turma</h2>' + comuns.map(function(c){
       return '<div class="mat"><b>' + _esc(c.padrao) + '</b>' + ((c.alunos || []).length ? ' <span class="ev-m">— ' + _esc(c.alunos.join(', ')) + '</span>' : '') + evDoc(c.evidencias) +
